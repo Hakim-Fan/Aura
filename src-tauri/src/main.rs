@@ -1,0 +1,418 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use serde::Serialize;
+use tauri::{Manager, Runtime, State};
+
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Serialize, Default)]
+struct AgentTaskSnapshot {
+    id: String,
+    status: String,
+    message: Option<String>,
+    #[serde(rename = "toolEvents")]
+    tool_events: Vec<serde_json::Value>,
+    #[serde(rename = "taskTree")]
+    task_tree: Vec<serde_json::Value>,
+    #[serde(rename = "pendingApproval")]
+    pending_approval: Option<serde_json::Value>,
+    error: Option<String>,
+}
+
+#[derive(Clone)]
+struct AgentTaskHandle {
+    stdin: Arc<Mutex<ChildStdin>>,
+    snapshot: Arc<Mutex<AgentTaskSnapshot>>,
+}
+
+#[derive(Default)]
+struct AgentTaskStore {
+    tasks: Mutex<HashMap<String, AgentTaskHandle>>,
+}
+
+#[derive(Clone, Serialize)]
+struct WorkspaceNode {
+    name: String,
+    path: String,
+    kind: String,
+    children: Vec<WorkspaceNode>,
+}
+
+fn ignored_name(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "node_modules" | "target" | "dist" | "build" | ".next" | ".turbo"
+    )
+}
+
+fn read_workspace_node(path: &PathBuf, depth: usize) -> Result<WorkspaceNode, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Failed to read metadata for {}: {error}", path.display()))?;
+    let canonical = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.clone())
+        .display()
+        .to_string();
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| canonical.clone());
+
+    if metadata.is_file() {
+        return Ok(WorkspaceNode {
+            name,
+            path: canonical,
+            kind: "file".into(),
+            children: Vec::new(),
+        });
+    }
+
+    let mut children = Vec::new();
+    if depth < 3 {
+        let entries = fs::read_dir(path)
+            .map_err(|error| format!("Failed to read directory {}: {error}", path.display()))?;
+        for entry in entries.flatten().take(80) {
+            let child_path = entry.path();
+            let child_name = child_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if child_name.starts_with('.') || ignored_name(&child_name) {
+                continue;
+            }
+            if let Ok(child_node) = read_workspace_node(&child_path, depth + 1) {
+                children.push(child_node);
+            }
+        }
+        children.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .reverse()
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+    }
+
+    Ok(WorkspaceNode {
+        name,
+        path: canonical,
+        kind: "directory".into(),
+        children,
+    })
+}
+
+fn resolve_bridge_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    let dev_bridge = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bridge/ipc.mjs");
+    if dev_bridge.exists() {
+        return dev_bridge
+            .canonicalize()
+            .map_err(|error| format!("Failed to canonicalize bridge path: {error}"));
+    }
+
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Failed to resolve resource directory: {error}"))?;
+    let bundled_bridge = resource_dir.join("bridge/ipc.mjs");
+    if bundled_bridge.exists() {
+        return Ok(bundled_bridge);
+    }
+
+    Err("Unable to locate the Node bridge script.".into())
+}
+
+fn resolve_bridge_cwd() -> Result<PathBuf, String> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve desktop app root: {error}"))
+}
+
+fn with_snapshot<F>(snapshot: &Arc<Mutex<AgentTaskSnapshot>>, mutator: F)
+where
+    F: FnOnce(&mut AgentTaskSnapshot),
+{
+    if let Ok(mut guard) = snapshot.lock() {
+        mutator(&mut guard);
+    }
+}
+
+fn extract_array(value: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+    value.and_then(|entry| entry.as_array().cloned()).unwrap_or_default()
+}
+
+fn spawn_agent_task<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    store: &AgentTaskStore,
+    payload: serde_json::Value,
+) -> Result<String, String> {
+    let bridge_path = resolve_bridge_path(&app)?;
+    let bridge_cwd = resolve_bridge_cwd()?;
+
+    let mut child = Command::new("node")
+        .arg(bridge_path)
+        .current_dir(bridge_cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!("Failed to spawn Node bridge. Is node installed and on PATH?\n\n{error}")
+        })?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Failed to capture Node bridge stdin.".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture Node bridge stdout.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture Node bridge stderr.".to_string())?;
+
+    let task_id = format!("task-{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
+    let snapshot = Arc::new(Mutex::new(AgentTaskSnapshot {
+        id: task_id.clone(),
+        status: "queued".into(),
+        message: None,
+        tool_events: Vec::new(),
+        task_tree: Vec::new(),
+        pending_approval: None,
+        error: None,
+    }));
+
+    let handle = AgentTaskHandle {
+        stdin: Arc::new(Mutex::new(stdin)),
+        snapshot: snapshot.clone(),
+    };
+
+    {
+        let mut tasks = store
+            .tasks
+            .lock()
+            .map_err(|_| "Failed to lock task store.".to_string())?;
+        tasks.insert(task_id.clone(), handle.clone());
+    }
+
+    let stdout_snapshot = snapshot.clone();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                with_snapshot(&stdout_snapshot, |current| {
+                    current.status = "failed".into();
+                    current.error = Some(format!("Failed to parse bridge event: {line}"));
+                });
+                break;
+            };
+
+            match event.get("type").and_then(|value| value.as_str()) {
+                Some("started") => with_snapshot(&stdout_snapshot, |current| {
+                    current.status = "running".into();
+                    current.error = None;
+                }),
+                Some("tool_event") => with_snapshot(&stdout_snapshot, |current| {
+                    if let Some(tool_event) = event.get("event") {
+                        current.tool_events.push(tool_event.clone());
+                    }
+                }),
+                Some("task_tree") => with_snapshot(&stdout_snapshot, |current| {
+                    current.task_tree = extract_array(event.get("tree"));
+                }),
+                Some("approval_required") => with_snapshot(&stdout_snapshot, |current| {
+                    current.status = "awaiting_approval".into();
+                    current.pending_approval = event.get("request").cloned();
+                }),
+                Some("completed") => with_snapshot(&stdout_snapshot, |current| {
+                    current.status = "completed".into();
+                    current.pending_approval = None;
+                    if let Some(result) = event.get("result") {
+                        current.message = result
+                            .get("message")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string());
+                        current.tool_events = extract_array(result.get("toolEvents"));
+                        current.task_tree = extract_array(result.get("taskTree"));
+                    }
+                }),
+                Some("failed") => with_snapshot(&stdout_snapshot, |current| {
+                    current.status = "failed".into();
+                    current.pending_approval = None;
+                    current.error = event
+                        .get("message")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                }),
+                _ => {}
+            }
+        }
+    });
+
+    let stderr_snapshot = snapshot.clone();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            with_snapshot(&stderr_snapshot, |current| {
+                if current.status == "failed" && current.error.is_none() {
+                    current.error = Some(line.clone());
+                }
+            });
+        }
+    });
+
+    let start_message = serde_json::json!({
+        "type": "start",
+        "payload": payload,
+    });
+
+    {
+        let mut stdin = handle
+            .stdin
+            .lock()
+            .map_err(|_| "Failed to lock Node bridge stdin.".to_string())?;
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::to_string(&start_message)
+                .map_err(|error| format!("Failed to serialize start payload: {error}"))?
+        )
+        .map_err(|error| format!("Failed to write start payload to Node bridge: {error}"))?;
+    }
+
+    Ok(task_id)
+}
+
+#[tauri::command]
+fn start_agent_task<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AgentTaskStore>,
+    payload: serde_json::Value,
+) -> Result<String, String> {
+    spawn_agent_task(app, state.inner(), payload)
+}
+
+#[tauri::command]
+fn get_agent_task(
+    state: State<'_, AgentTaskStore>,
+    task_id: String,
+) -> Result<AgentTaskSnapshot, String> {
+    let tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| "Failed to lock task store.".to_string())?;
+    let Some(handle) = tasks.get(&task_id) else {
+        return Err(format!("Agent task not found: {task_id}"));
+    };
+    let snapshot = handle
+        .snapshot
+        .lock()
+        .map_err(|_| "Failed to lock task snapshot.".to_string())?;
+    Ok(snapshot.clone())
+}
+
+#[tauri::command]
+fn respond_to_agent_approval(
+    state: State<'_, AgentTaskStore>,
+    task_id: String,
+    decision: String,
+) -> Result<(), String> {
+    let tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| "Failed to lock task store.".to_string())?;
+    let Some(handle) = tasks.get(&task_id) else {
+        return Err(format!("Agent task not found: {task_id}"));
+    };
+
+    {
+        let mut snapshot = handle
+            .snapshot
+            .lock()
+            .map_err(|_| "Failed to lock task snapshot.".to_string())?;
+        snapshot.status = "running".into();
+        snapshot.pending_approval = None;
+    }
+
+    let approval_message = serde_json::json!({
+        "type": "approval",
+        "decision": decision,
+    });
+
+    let mut stdin = handle
+        .stdin
+        .lock()
+        .map_err(|_| "Failed to lock Node bridge stdin.".to_string())?;
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::to_string(&approval_message)
+            .map_err(|error| format!("Failed to serialize approval payload: {error}"))?
+    )
+    .map_err(|error| format!("Failed to write approval payload to Node bridge: {error}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn read_workspace_tree(root_path: String) -> Result<WorkspaceNode, String> {
+    let root = PathBuf::from(root_path);
+    if !root.exists() {
+        return Err(format!("Workspace path does not exist: {}", root.display()));
+    }
+    read_workspace_node(&root, 0)
+}
+
+#[tauri::command]
+fn read_text_file(file_path: String) -> Result<String, String> {
+    let path = PathBuf::from(file_path);
+    if !path.exists() {
+        return Err(format!("File does not exist: {}", path.display()));
+    }
+    let bytes =
+        fs::read(&path).map_err(|error| format!("Failed to read file {}: {error}", path.display()))?;
+    let truncated = if bytes.len() > 256 * 1024 {
+        &bytes[..256 * 1024]
+    } else {
+        &bytes[..]
+    };
+    Ok(String::from_utf8_lossy(truncated).to_string())
+}
+
+fn main() {
+    tauri::Builder::default()
+        .manage(AgentTaskStore::default())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            start_agent_task,
+            get_agent_task,
+            respond_to_agent_approval,
+            read_workspace_tree,
+            read_text_file
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Desk Agent desktop app")
+}

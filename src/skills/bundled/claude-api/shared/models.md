@@ -1,3 +1,0 @@
-# Models
-
-Restored placeholder content.
