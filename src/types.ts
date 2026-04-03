@@ -1,17 +1,4 @@
-export type ProviderMode = 'anthropic' | 'openai-compatible'
-
-export type ProviderPresetDot = 'active' | 'ready' | 'idle'
-
-export type ProviderPreset = {
-  id: string
-  name: string
-  subtitle: string
-  badge?: string
-  dot: ProviderPresetDot
-  provider: ProviderMode
-  baseUrl: string
-  modelHint: string
-}
+export type ProviderMode = 'openai' | 'google' | 'custom'
 
 export type ChatRole = 'user' | 'assistant'
 
@@ -94,6 +81,11 @@ export type AgentSettings = {
 export type Session = {
   id: string
   title: string
+  provider: ProviderMode
+  model: string
+  workspacePath: string
+  workspaceRoot: string
+  workspaceMode: 'explicit' | 'default'
   messages: ChatMessage[]
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]

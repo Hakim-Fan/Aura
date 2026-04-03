@@ -1,91 +1,82 @@
-import type { AgentSettings, ProviderPreset } from '../types'
+import type { AgentSettings } from '../types'
 
-function ProviderStatus({ dot }: { dot: ProviderPreset['dot'] }) {
-  return <span className={`provider-dot ${dot}`} />
-}
+const providerOptions: Array<{
+  id: AgentSettings['provider']
+  label: string
+  description: string
+}> = [
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    description: '适合 GPT 系列模型和 OpenAI 原生 API。',
+  },
+  {
+    id: 'google',
+    label: 'Google',
+    description: '适合 Gemini 原生 API。',
+  },
+  {
+    id: 'custom',
+    label: 'Custom',
+    description: '适合兼容 OpenAI API 的自定义服务。',
+  },
+]
 
 type Props = {
-  providerSearch: string
-  visibleProviders: ProviderPreset[]
-  selectedProviderId: string
-  selectedProvider: ProviderPreset
-  customProviderPreset: ProviderPreset
   settings: AgentSettings
-  onProviderSearchChange: (value: string) => void
-  onApplyPreset: (preset: ProviderPreset) => void
+  availableModels: string[]
+  providerStatus: string
+  isTesting: boolean
+  isFetchingModels: boolean
+  onProviderChange: (provider: AgentSettings['provider']) => void
   onSettingsChange: <K extends keyof AgentSettings>(
     key: K,
     value: AgentSettings[K],
   ) => void
-  onCopyApiKey: () => void
-  onClose: () => void
-  onStartChat: () => void
+  onTestConnection: () => void
+  onFetchModels: () => void
 }
 
 export function ProvidersView({
-  providerSearch,
-  visibleProviders,
-  selectedProviderId,
-  selectedProvider,
-  customProviderPreset,
   settings,
-  onProviderSearchChange,
-  onApplyPreset,
+  availableModels,
+  providerStatus,
+  isTesting,
+  isFetchingModels,
+  onProviderChange,
   onSettingsChange,
-  onCopyApiKey,
-  onClose,
-  onStartChat,
+  onTestConnection,
+  onFetchModels,
 }: Props) {
-  return (
-    <section className="section-shell">
-      <header className="section-header">
-        <div>
-          <div className="eyebrow">Providers</div>
-          <h2>提供商</h2>
-        </div>
-        <div className="header-actions">
-          <button
-            className="secondary-button"
-            onClick={() => onApplyPreset(customProviderPreset)}
-          >
-            Add Custom Provider
-          </button>
-          <button className="primary-button">Add Custom ACP Provider</button>
-        </div>
-      </header>
+  const baseUrlPlaceholder =
+    settings.provider === 'google'
+      ? 'https://generativelanguage.googleapis.com/v1beta'
+      : 'https://api.openai.com/v1'
 
-      <div className="providers-layout">
+  const modelPlaceholder =
+    settings.provider === 'google' ? 'gemini-2.5-pro-exp-03-25' : 'gpt-5.1'
+
+  return (
+    <section className="section-shell settings-panel">
+      <div className="providers-layout simple">
         <section className="providers-list-card">
-          <div className="search-field">
-            <span className="search-glyph">/</span>
-            <input
-              value={providerSearch}
-              onChange={event => onProviderSearchChange(event.target.value)}
-              placeholder="搜索提供商..."
-            />
-          </div>
+          <div className="section-title">预设提供商</div>
           <div className="providers-list">
-            {visibleProviders.map(provider => (
+            {providerOptions.map(provider => (
               <button
                 key={provider.id}
                 className={
-                  provider.id === selectedProviderId ? 'provider-card active' : 'provider-card'
+                  provider.id === settings.provider ? 'provider-card active' : 'provider-card'
                 }
-                onClick={() => onApplyPreset(provider)}
+                onClick={() => onProviderChange(provider.id)}
               >
                 <div className="provider-card-head">
-                  <div className="provider-ident">
-                    <span className="provider-glyph">{provider.name.slice(0, 1)}</span>
-                    <div>
-                      <strong>{provider.name}</strong>
-                      <p>{provider.subtitle}</p>
-                    </div>
-                  </div>
-                  <div className="provider-meta">
-                    {provider.badge ? <span className="badge-chip">{provider.badge}</span> : null}
-                    <ProviderStatus dot={provider.dot} />
-                  </div>
+                  <strong>{provider.label}</strong>
+                  <span className="micro-pill">
+                    {provider.id === settings.provider ? '当前使用' : '可选'}
+                  </span>
                 </div>
+                <p>{provider.description}</p>
               </button>
             ))}
           </div>
@@ -94,39 +85,37 @@ export function ProvidersView({
         <section className="provider-detail-card">
           <div className="provider-detail-head">
             <div>
-              <div className="inline-row">
-                <h3>{selectedProvider.name}</h3>
-                <span className="status-pill">{settings.apiKey ? 'Active' : 'Inactive'}</span>
-              </div>
-              <p>{selectedProvider.subtitle}</p>
+              <div className="eyebrow">Provider</div>
+              <h2>{providerOptions.find(item => item.id === settings.provider)?.label}</h2>
             </div>
-            <button className="toggle-shell" type="button">
-              <span className={settings.apiKey ? 'toggle-knob on' : 'toggle-knob'} />
-            </button>
           </div>
 
           <div className="provider-detail-grid">
-            <div className="provider-banner">
-              <div className="inline-between">
-                <strong>API 代理端点</strong>
-                <span className="micro-pill">高级</span>
-              </div>
-              <p>可留空走默认端点，也可以替换成自己的网关、代理或兼容服务。</p>
+            <div className="header-actions">
+              <button
+                className="secondary-button"
+                disabled={isTesting}
+                onClick={onTestConnection}
+              >
+                {isTesting ? '测试中...' : '测试连通性'}
+              </button>
+              <button
+                className="secondary-button"
+                disabled={isFetchingModels}
+                onClick={onFetchModels}
+              >
+                {isFetchingModels ? '拉取中...' : 'Fetch Models'}
+              </button>
             </div>
 
             <label>
               API Key
-              <div className="inline-field">
-                <input
-                  value={settings.apiKey}
-                  onChange={event => onSettingsChange('apiKey', event.target.value)}
-                  placeholder="Enter your API key"
-                  type="password"
-                />
-                <button className="mini-button" onClick={onCopyApiKey}>
-                  复制
-                </button>
-              </div>
+              <input
+                value={settings.apiKey}
+                onChange={event => onSettingsChange('apiKey', event.target.value)}
+                placeholder="输入真实 API Key"
+                type="password"
+              />
             </label>
 
             <label>
@@ -134,30 +123,39 @@ export function ProvidersView({
               <input
                 value={settings.baseUrl}
                 onChange={event => onSettingsChange('baseUrl', event.target.value)}
-                placeholder={selectedProvider.baseUrl || 'https://api.example.com/v1'}
+                placeholder={baseUrlPlaceholder}
               />
             </label>
 
             <label>
-              Model
+              默认模型
               <input
                 value={settings.model}
                 onChange={event => onSettingsChange('model', event.target.value)}
-                placeholder={selectedProvider.modelHint}
+                placeholder={modelPlaceholder}
               />
             </label>
 
-            <div className="provider-footnote">
-              <span>所有更改已自动保存。</span>
-              <div className="header-actions">
-                <button className="secondary-button" onClick={onClose}>
-                  关闭
-                </button>
-                <button className="primary-button" onClick={onStartChat}>
-                  保存并开始聊天
-                </button>
-              </div>
-            </div>
+            {providerStatus ? <div className="provider-note"><p className="muted">{providerStatus}</p></div> : null}
+
+            {availableModels.length > 0 ? (
+              <section className="provider-note">
+                <div className="section-title">已获取模型</div>
+                <div className="asset-card-meta">
+                  {availableModels.map(model => (
+                    <button
+                      key={model}
+                      className={
+                        model === settings.model ? 'settings-tab active' : 'settings-tab'
+                      }
+                      onClick={() => onSettingsChange('model', model)}
+                    >
+                      {model}
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
           </div>
         </section>
       </div>

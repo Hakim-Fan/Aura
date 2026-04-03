@@ -110,8 +110,11 @@ fn read_workspace_node(path: &PathBuf, depth: usize) -> Result<WorkspaceNode, St
     })
 }
 
-fn resolve_bridge_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
-    let dev_bridge = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bridge/ipc.mjs");
+fn resolve_bridge_script_path<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    script_name: &str,
+) -> Result<PathBuf, String> {
+    let dev_bridge = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../bridge/{script_name}"));
     if dev_bridge.exists() {
         return dev_bridge
             .canonicalize()
@@ -122,7 +125,7 @@ fn resolve_bridge_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf,
         .path()
         .resource_dir()
         .map_err(|error| format!("Failed to resolve resource directory: {error}"))?;
-    let bundled_bridge = resource_dir.join("bridge/ipc.mjs");
+    let bundled_bridge = resource_dir.join(format!("bridge/{script_name}"));
     if bundled_bridge.exists() {
         return Ok(bundled_bridge);
     }
@@ -155,7 +158,7 @@ fn spawn_agent_task<R: Runtime>(
     store: &AgentTaskStore,
     payload: serde_json::Value,
 ) -> Result<String, String> {
-    let bridge_path = resolve_bridge_path(&app)?;
+    let bridge_path = resolve_bridge_script_path(&app, "ipc.mjs")?;
     let bridge_cwd = resolve_bridge_cwd()?;
 
     let mut child = Command::new("node")
@@ -307,6 +310,36 @@ fn spawn_agent_task<R: Runtime>(
 }
 
 #[tauri::command]
+fn run_provider_action<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let script_path = resolve_bridge_script_path(&app, "providerActions.mjs")?;
+    let bridge_cwd = resolve_bridge_cwd()?;
+    let output = Command::new("node")
+        .arg(script_path)
+        .arg(
+            serde_json::to_string(&payload)
+                .map_err(|error| format!("Failed to serialize provider action payload: {error}"))?,
+        )
+        .current_dir(bridge_cwd)
+        .output()
+        .map_err(|error| format!("Failed to run provider action bridge: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Provider action failed.".into()
+        } else {
+            stderr
+        });
+    }
+
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|error| format!("Failed to parse provider action response: {error}"))
+}
+
+#[tauri::command]
 fn start_agent_task<R: Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AgentTaskStore>,
@@ -402,6 +435,66 @@ fn read_text_file(file_path: String) -> Result<String, String> {
     Ok(String::from_utf8_lossy(truncated).to_string())
 }
 
+fn slugify(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !previous_dash {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+
+    let trimmed = slug.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "session".into()
+    } else {
+        trimmed
+    }
+}
+
+#[tauri::command]
+fn create_session_workspace(root_path: String, hint: String) -> Result<String, String> {
+    let root = PathBuf::from(root_path);
+    if !root.exists() {
+        return Err(format!(
+            "Default workspace path does not exist: {}",
+            root.display()
+        ));
+    }
+
+    let slug = slugify(&hint);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("Failed to resolve current time: {error}"))?
+        .as_secs();
+
+    for attempt in 0..100_u32 {
+        let suffix = if attempt == 0 {
+            format!("{timestamp}")
+        } else {
+            format!("{timestamp}-{attempt}")
+        };
+        let candidate = root.join(format!("{slug}-{suffix}"));
+        if candidate.exists() {
+            continue;
+        }
+        fs::create_dir_all(&candidate).map_err(|error| {
+            format!(
+                "Failed to create session workspace {}: {error}",
+                candidate.display()
+            )
+        })?;
+        return Ok(candidate.display().to_string());
+    }
+
+    Err("Unable to allocate a unique session workspace directory.".into())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AgentTaskStore::default())
@@ -410,8 +503,10 @@ fn main() {
             start_agent_task,
             get_agent_task,
             respond_to_agent_approval,
+            run_provider_action,
             read_workspace_tree,
-            read_text_file
+            read_text_file,
+            create_session_workspace
         ])
         .run(tauri::generate_context!())
         .expect("error while running Desk Agent desktop app")

@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { createAdvancedTools } from './advancedTools.mjs'
 import { loadPluginTools, loadSkillPrompt } from './extensions.mjs'
 import { connectMcpTools } from './mcp.mjs'
-import { runAnthropicAgent, runOpenAiCompatibleAgent } from './providers.mjs'
+import { runGoogleAgent, runOpenAiCompatibleAgent } from './providers.mjs'
 import { createBuiltinTools } from './tools.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -184,8 +184,8 @@ export async function runAgent(request) {
       ...mcp.tools,
     ]
     const systemPrompt = buildSystemPrompt(settings, skillPrompt)
-    if (settings.provider === 'openai-compatible') {
-      const result = await runOpenAiCompatibleAgent({
+    if (settings.provider === 'google') {
+      const result = await runGoogleAgent({
         settings,
         systemPrompt,
         messages,
@@ -206,25 +206,28 @@ export async function runAgent(request) {
       }
     }
 
-    const result = await runAnthropicAgent({
-      settings,
-      systemPrompt,
-      messages,
-      tools: allTools,
-      toolEvents,
-      hooks: {
-        ...hooks,
+    if (settings.provider === 'openai' || settings.provider === 'custom') {
+      const result = await runOpenAiCompatibleAgent({
         settings,
-        taskTracker,
-        currentTaskId,
-      },
-    })
-    taskTracker.completeTask(currentTaskId, result.message || 'Task completed')
-    return {
-      ...result,
-      status: 'completed',
-      taskTree: taskTracker.getTree(),
+        systemPrompt,
+        messages,
+        tools: allTools,
+        toolEvents,
+        hooks: {
+          ...hooks,
+          settings,
+          taskTracker,
+          currentTaskId,
+        },
+      })
+      taskTracker.completeTask(currentTaskId, result.message || 'Task completed')
+      return {
+        ...result,
+        status: 'completed',
+        taskTree: taskTracker.getTree(),
+      }
     }
+    throw new Error(`Unsupported provider: ${settings.provider}`)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     taskTracker.setStatus(currentTaskId, 'failed', message)

@@ -1,54 +1,37 @@
 import type { Session } from '../types'
 
-type NavItem = {
-  id: string
-  label: string
-  glyph: string
-}
-
 type Props = {
-  navItems: NavItem[]
-  activeView: string
-  onSelectView: (viewId: string) => void
   sessionFilter: string
   onSessionFilterChange: (value: string) => void
   sessions: Session[]
-  activeSessionId: string
+  activeSessionId: string | null
   onOpenSession: (sessionId: string) => void
-  onOpenHome: () => void
+  onCreateSession: () => void
+  onOpenSettings: () => void
+  settingsOpen: boolean
 }
 
 export function AppSidebar({
-  navItems,
-  activeView,
-  onSelectView,
   sessionFilter,
   onSessionFilterChange,
   sessions,
   activeSessionId,
   onOpenSession,
-  onOpenHome,
+  onCreateSession,
+  onOpenSettings,
+  settingsOpen,
 }: Props) {
   return (
     <aside className="nav-shell">
-      <div className="sidebar-topbar">
-        <button className="top-icon">[]</button>
-        <button className="top-icon">/</button>
-        <button className="top-icon">+</button>
+      <div className="sidebar-header">
+        <div>
+          <div className="eyebrow">Sessions</div>
+          <h2 className="sidebar-title">会话</h2>
+        </div>
+        <button className="top-icon" onClick={onCreateSession}>
+          +
+        </button>
       </div>
-
-      <nav className="nav-list">
-        {navItems.map(item => (
-          <button
-            key={item.id}
-            className={item.id === activeView ? 'nav-item active' : 'nav-item'}
-            onClick={() => onSelectView(item.id)}
-          >
-            <span className="nav-glyph">{item.glyph}</span>
-            <span>{item.label}</span>
-          </button>
-        ))}
-      </nav>
 
       <div className="session-search">
         <input
@@ -72,10 +55,12 @@ export function AppSidebar({
       </div>
 
       <div className="sidebar-footer">
-        <button className="mini-ghost" onClick={onOpenHome}>
-          ...
+        <button
+          className={settingsOpen ? 'mini-ghost active-settings' : 'mini-ghost'}
+          onClick={onOpenSettings}
+        >
+          设置
         </button>
-        <span className="update-pill">更新</span>
       </div>
     </aside>
   )

@@ -1,14 +1,6 @@
 import { invokeTool } from './tools.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
 
-function anthropicToolDefs(tools) {
-  return tools.map(tool => ({
-    name: tool.name,
-    description: tool.description,
-    input_schema: tool.inputSchema,
-  }))
-}
-
 function openAiToolDefs(tools) {
   return tools.map(tool => ({
     type: 'function',
@@ -20,6 +12,25 @@ function openAiToolDefs(tools) {
   }))
 }
 
+function geminiToolDefs(tools) {
+  return tools.map(tool => ({
+    functionDeclarations: [
+      {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      },
+    ],
+  }))
+}
+
+function toGeminiContents(messages) {
+  return messages.map(message => ({
+    role: message.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: message.content }],
+  }))
+}
+
 async function parseJsonResponse(response) {
   const text = await response.text()
   try {
@@ -27,95 +38,6 @@ async function parseJsonResponse(response) {
   } catch {
     throw new Error(`Provider returned invalid JSON\n\n${text}`)
   }
-}
-
-export async function runAnthropicAgent({
-  settings,
-  systemPrompt,
-  messages,
-  tools,
-  toolEvents,
-  hooks,
-}) {
-  const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.anthropic.com')
-  const registry = new Map(tools.map(tool => [tool.name, tool]))
-  const transcript = messages.map(message => ({
-    role: message.role,
-    content: message.content,
-  }))
-
-  for (let step = 0; step < settings.maxSteps; step += 1) {
-    const response = await fetch(`${apiBase}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': settings.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: settings.model,
-        max_tokens: 4096,
-        system: systemPrompt,
-        messages: transcript,
-        tools: anthropicToolDefs(tools),
-      }),
-    })
-
-    const data = await parseJsonResponse(response)
-    if (!response.ok) {
-      throw new Error(data.error?.message || 'Anthropic request failed')
-    }
-
-    const assistantBlocks = data.content || []
-    const textParts = assistantBlocks
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
-      .filter(Boolean)
-    const toolUses = assistantBlocks.filter(block => block.type === 'tool_use')
-
-    if (toolUses.length === 0) {
-      return {
-        message: textParts.join('\n\n') || '模型没有返回文本内容。',
-        toolEvents,
-        usage: {
-          inputTokens: data.usage?.input_tokens,
-          outputTokens: data.usage?.output_tokens,
-        },
-      }
-    }
-
-    transcript.push({
-      role: 'assistant',
-      content: assistantBlocks,
-    })
-
-    const toolResults = []
-    for (const toolUse of toolUses) {
-      const tool = registry.get(toolUse.name)
-      if (!tool) {
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: `Tool not found: ${toolUse.name}`,
-          is_error: true,
-        })
-        continue
-      }
-      const result = await invokeTool(tool, toolUse.input || {}, toolEvents, hooks)
-      toolResults.push({
-        type: 'tool_result',
-        tool_use_id: toolUse.id,
-        content: result,
-      })
-    }
-
-    transcript.push({
-      role: 'user',
-      content: toolResults,
-    })
-  }
-
-  throw new Error('Agent reached the max step limit without a final answer.')
 }
 
 export async function runOpenAiCompatibleAgent({
@@ -191,6 +113,94 @@ export async function runOpenAiCompatibleAgent({
         content: result,
       })
     }
+  }
+
+  throw new Error('Agent reached the max step limit without a final answer.')
+}
+
+export async function runGoogleAgent({
+  settings,
+  systemPrompt,
+  messages,
+  tools,
+  toolEvents,
+  hooks,
+}) {
+  const apiBase = normalizeBaseUrl(
+    settings.baseUrl,
+    'https://generativelanguage.googleapis.com/v1beta',
+  )
+  const registry = new Map(tools.map(tool => [tool.name, tool]))
+  const transcript = toGeminiContents(messages)
+
+  for (let step = 0; step < settings.maxSteps; step += 1) {
+    const response = await fetch(
+      `${apiBase}/models/${settings.model}:generateContent?key=${encodeURIComponent(settings.apiKey)}`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          system_instruction: {
+            parts: [{ text: systemPrompt }],
+          },
+          contents: transcript,
+          tools: geminiToolDefs(tools),
+        }),
+      },
+    )
+
+    const data = await parseJsonResponse(response)
+    if (!response.ok) {
+      throw new Error(data.error?.message || 'Google request failed')
+    }
+
+    const candidate = data.candidates?.[0]
+    const parts = candidate?.content?.parts || []
+    const textParts = parts
+      .filter(part => typeof part.text === 'string' && part.text.trim())
+      .map(part => part.text)
+    const functionCalls = parts.filter(part => part.functionCall)
+
+    if (!functionCalls.length) {
+      return {
+        message: textParts.join('\n\n') || '模型没有返回文本内容。',
+        toolEvents,
+        usage: {
+          inputTokens: data.usageMetadata?.promptTokenCount,
+          outputTokens: data.usageMetadata?.candidatesTokenCount,
+        },
+      }
+    }
+
+    transcript.push({
+      role: 'model',
+      parts,
+    })
+
+    const toolResponses = []
+    for (const entry of functionCalls) {
+      const toolCall = entry.functionCall
+      const tool = registry.get(toolCall.name)
+      const result = tool
+        ? await invokeTool(tool, toolCall.args || {}, toolEvents, hooks)
+        : `Tool not found: ${toolCall.name}`
+
+      toolResponses.push({
+        functionResponse: {
+          name: toolCall.name,
+          response: {
+            output: result,
+          },
+        },
+      })
+    }
+
+    transcript.push({
+      role: 'user',
+      parts: toolResponses,
+    })
   }
 
   throw new Error('Agent reached the max step limit without a final answer.')

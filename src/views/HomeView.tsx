@@ -1,27 +1,23 @@
 import type { Session } from '../types'
 
-type Capability = {
-  title: string
-  status: string
-  detail: string
-}
-
 type Props = {
   sessions: Session[]
-  capabilities: Capability[]
+  providerConfigured: boolean
+  workspaceConfigured: boolean
   onOpenSession: (sessionId: string) => void
   onNewSession: () => void
   onOpenProviders: () => void
-  onOpenChat: () => void
+  onOpenSettings: () => void
 }
 
 export function HomeView({
   sessions,
-  capabilities,
+  providerConfigured,
+  workspaceConfigured,
   onOpenSession,
   onNewSession,
   onOpenProviders,
-  onOpenChat,
+  onOpenSettings,
 }: Props) {
   return (
     <section className="hero-shell">
@@ -29,7 +25,7 @@ export function HomeView({
         <div className="hero-mark">DA</div>
         <h2>Desk Agent</h2>
         <p className="hero-copy">
-          本地优先的 AI Agent 桌面应用，支持 Provider、MCP、Skills、Plugins、多 Agent 和桌面自动化。
+          本地优先的桌面 Agent。先配置模型提供商和工作目录，再开始真实会话。
         </p>
         <div className="hero-actions">
           <button className="primary-button wide" onClick={onNewSession}>
@@ -38,42 +34,49 @@ export function HomeView({
           <button className="secondary-button" onClick={onOpenProviders}>
             配置提供商
           </button>
-          <button className="secondary-button" onClick={onOpenChat}>
-            打开工作台
+          <button className="secondary-button" onClick={onOpenSettings}>
+            设置
           </button>
         </div>
-        <p className="muted">请至少配置一个 AI 提供商以开始聊天。</p>
+        <p className="muted">
+          {providerConfigured && workspaceConfigured
+            ? '基础配置已完成，可以直接开始会话。'
+            : '请先完成基础配置。'}
+        </p>
       </div>
 
       <div className="hero-grid">
         <section className="dashboard-card">
-          <div className="section-title">最近会话</div>
+          <div className="section-title">准备状态</div>
           <div className="dashboard-list">
-            {sessions.slice(0, 5).map(session => (
-              <button
-                key={session.id}
-                className="dashboard-row"
-                onClick={() => onOpenSession(session.id)}
-              >
-                <strong>{session.title}</strong>
-                <span>{new Date(session.updatedAt).toLocaleString()}</span>
-              </button>
-            ))}
+            <div className="dashboard-row">
+              <strong>提供商</strong>
+              <span>{providerConfigured ? '已配置' : '未配置'}</span>
+            </div>
+            <div className="dashboard-row">
+              <strong>工作目录</strong>
+              <span>{workspaceConfigured ? '已选择' : '未选择'}</span>
+            </div>
           </div>
         </section>
 
         <section className="dashboard-card">
-          <div className="section-title">能力地图</div>
+          <div className="section-title">最近会话</div>
           <div className="dashboard-list">
-            {capabilities.slice(0, 4).map(capability => (
-              <article key={capability.title} className="capability-mini">
-                <div className="inline-between">
-                  <strong>{capability.title}</strong>
-                  <span className="micro-pill">{capability.status}</span>
-                </div>
-                <p>{capability.detail}</p>
-              </article>
-            ))}
+            {sessions.length > 0 ? (
+              sessions.slice(0, 5).map(session => (
+                <button
+                  key={session.id}
+                  className="dashboard-row"
+                  onClick={() => onOpenSession(session.id)}
+                >
+                  <strong>{session.title}</strong>
+                  <span>{new Date(session.updatedAt).toLocaleString()}</span>
+                </button>
+              ))
+            ) : (
+              <p className="muted">还没有真实会话记录。</p>
+            )}
           </div>
         </section>
       </div>
