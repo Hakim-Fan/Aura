@@ -2,10 +2,44 @@ export type ProviderMode = 'openai' | 'google' | 'custom'
 
 export type ChatRole = 'user' | 'assistant'
 
+export type MessageStatus = 'pending' | 'streaming' | 'completed' | 'failed'
+
+export type MessageEventKind = 'tool' | 'shell' | 'skill' | 'approval' | 'subagent'
+
+export type MessageEventStatus = 'running' | 'success' | 'error' | 'awaiting_approval'
+
+export type MessageEvent = {
+  id: string
+  kind: MessageEventKind
+  title: string
+  summary: string
+  source?: 'builtin' | 'mcp' | 'plugin' | 'subagent'
+  status: MessageEventStatus
+  input?: string
+  output?: string
+  error?: string
+}
+
+export type MessageActivity = {
+  status: TaskStatus
+  startedAt: number
+  finishedAt?: number
+  toolCount: number
+  skillCount: number
+  stepCount: number
+  expanded?: boolean
+}
+
 export type ChatMessage = {
   id: string
   role: ChatRole
   content: string
+  status?: MessageStatus
+  createdAt?: number
+  activity?: MessageActivity
+  events?: MessageEvent[]
+  steps?: TaskNode[]
+  error?: string
 }
 
 export type ToolEvent = {

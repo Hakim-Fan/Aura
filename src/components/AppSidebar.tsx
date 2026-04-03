@@ -1,3 +1,4 @@
+import { Plus, Search, Settings2, Trash2 } from 'lucide-react'
 import type { Session } from '../types'
 
 type Props = {
@@ -7,6 +8,7 @@ type Props = {
   activeSessionId: string | null
   onOpenSession: (sessionId: string) => void
   onCreateSession: () => void
+  onDeleteSession: (sessionId: string) => void
   onOpenSettings: () => void
   settingsOpen: boolean
 }
@@ -18,6 +20,7 @@ export function AppSidebar({
   activeSessionId,
   onOpenSession,
   onCreateSession,
+  onDeleteSession,
   onOpenSettings,
   settingsOpen,
 }: Props) {
@@ -25,15 +28,16 @@ export function AppSidebar({
     <aside className="nav-shell">
       <div className="sidebar-header">
         <div>
-          <div className="eyebrow">Sessions</div>
+          <div className="eyebrow">Desk Agent</div>
           <h2 className="sidebar-title">会话</h2>
         </div>
-        <button className="top-icon" onClick={onCreateSession}>
-          +
+        <button className="sidebar-action-button" onClick={onCreateSession}>
+          <Plus size={16} />
         </button>
       </div>
 
-      <div className="session-search">
+      <div className="session-search modern">
+        <Search size={15} />
         <input
           value={sessionFilter}
           onChange={event => onSessionFilterChange(event.target.value)}
@@ -43,23 +47,35 @@ export function AppSidebar({
 
       <div className="session-pane">
         {sessions.map(session => (
-          <button
+          <article
             key={session.id}
-            className={session.id === activeSessionId ? 'session-card active' : 'session-card'}
-            onClick={() => onOpenSession(session.id)}
+            className={session.id === activeSessionId ? 'session-row active' : 'session-row'}
           >
-            <span>{session.title}</span>
-            <small>{new Date(session.updatedAt).toLocaleDateString()}</small>
-          </button>
+            <button className="session-row-button" onClick={() => onOpenSession(session.id)}>
+              <div className="session-row-title">{session.title}</div>
+              <div className="session-row-meta">
+                <span>{new Date(session.updatedAt).toLocaleDateString()}</span>
+                <span>{session.model.split('/').filter(Boolean).at(-1) || 'Model'}</span>
+              </div>
+            </button>
+            <button
+              className="session-row-delete"
+              aria-label={`删除会话 ${session.title}`}
+              onClick={() => onDeleteSession(session.id)}
+            >
+              <Trash2 size={14} />
+            </button>
+          </article>
         ))}
       </div>
 
       <div className="sidebar-footer">
         <button
-          className={settingsOpen ? 'mini-ghost active-settings' : 'mini-ghost'}
+          className={settingsOpen ? 'sidebar-utility-button active-settings' : 'sidebar-utility-button'}
           onClick={onOpenSettings}
         >
-          设置
+          <Settings2 size={15} />
+          <span>设置</span>
         </button>
       </div>
     </aside>

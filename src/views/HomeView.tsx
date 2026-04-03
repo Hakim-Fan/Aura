@@ -1,3 +1,4 @@
+import { FolderOpen, Plus, Settings2, Sparkles } from 'lucide-react'
 import type { Session } from '../types'
 
 type Props = {
@@ -10,6 +11,13 @@ type Props = {
   onOpenSettings: () => void
 }
 
+const suggestedPrompts = [
+  '分析这个项目的目录结构和关键模块',
+  '帮我定位一个报错并给出修复建议',
+  '生成一个新功能的实施计划',
+  '解释当前仓库的启动流程',
+]
+
 export function HomeView({
   sessions,
   providerConfigured,
@@ -21,42 +29,46 @@ export function HomeView({
 }: Props) {
   return (
     <section className="hero-shell">
-      <div className="hero-card">
-        <div className="hero-mark">DA</div>
-        <h2>Desk Agent</h2>
+      <div className="hero-card modern">
+        <div className="hero-badge">Desk Agent</div>
+        <h2>开发者桌面 Agent</h2>
         <p className="hero-copy">
-          本地优先的桌面 Agent。先配置模型提供商和工作目录，再开始真实会话。
+          本地工作区、模型配置和工具执行全部收纳在一个桌面工作台里。你可以直接开始对话，也可以先检查环境状态。
         </p>
         <div className="hero-actions">
           <button className="primary-button wide" onClick={onNewSession}>
+            <Plus size={16} />
             新建聊天
           </button>
           <button className="secondary-button" onClick={onOpenProviders}>
+            <Sparkles size={16} />
             配置提供商
           </button>
           <button className="secondary-button" onClick={onOpenSettings}>
+            <Settings2 size={16} />
             设置
           </button>
         </div>
-        <p className="muted">
-          {providerConfigured && workspaceConfigured
-            ? '基础配置已完成，可以直接开始会话。'
-            : '请先完成基础配置。'}
-        </p>
+        <div className="hero-status-row">
+          <span className={providerConfigured ? 'status-chip success' : 'status-chip'}>
+            Provider {providerConfigured ? '已配置' : '未配置'}
+          </span>
+          <span className={workspaceConfigured ? 'status-chip success' : 'status-chip'}>
+            Workspace {workspaceConfigured ? '已连接' : '未连接'}
+          </span>
+        </div>
       </div>
 
       <div className="hero-grid">
         <section className="dashboard-card">
-          <div className="section-title">准备状态</div>
-          <div className="dashboard-list">
-            <div className="dashboard-row">
-              <strong>提供商</strong>
-              <span>{providerConfigured ? '已配置' : '未配置'}</span>
-            </div>
-            <div className="dashboard-row">
-              <strong>工作目录</strong>
-              <span>{workspaceConfigured ? '已选择' : '未选择'}</span>
-            </div>
+          <div className="section-title">快速开始</div>
+          <div className="suggestion-prompt-grid home">
+            {suggestedPrompts.map(prompt => (
+              <button key={prompt} className="suggestion-card static" onClick={onNewSession}>
+                <Sparkles size={15} />
+                <span>{prompt}</span>
+              </button>
+            ))}
           </div>
         </section>
 
@@ -67,11 +79,14 @@ export function HomeView({
               sessions.slice(0, 5).map(session => (
                 <button
                   key={session.id}
-                  className="dashboard-row"
+                  className="dashboard-row modern"
                   onClick={() => onOpenSession(session.id)}
                 >
-                  <strong>{session.title}</strong>
-                  <span>{new Date(session.updatedAt).toLocaleString()}</span>
+                  <div>
+                    <strong>{session.title}</strong>
+                    <span>{new Date(session.updatedAt).toLocaleString()}</span>
+                  </div>
+                  <FolderOpen size={14} />
                 </button>
               ))
             ) : (
