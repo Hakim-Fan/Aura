@@ -1,21 +1,34 @@
-import { useEffect, useState, type KeyboardEvent } from 'react'
+import {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   ArrowUpRight,
   Bot,
   BrainCircuit,
-  Copy,
+  Check,
   ChevronDown,
   ChevronUp,
+  Copy,
   Eye,
   FolderOpen,
+  LayoutGrid,
   Paperclip,
   Pencil,
   RefreshCw,
+  Search,
   SendHorizontal,
   Settings2,
   Sparkles,
+  Wrench,
   X,
 } from 'lucide-react'
 import { TaskTreeView } from '../components/TaskTreeView'
@@ -256,10 +269,10 @@ function MessageEventCard({
         <div className="min-w-0 flex items-center gap-2">
           <span
             className={`text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded ${event.status === 'error'
-                ? 'bg-red-50 text-red-500'
-                : event.status === 'awaiting_approval'
-                  ? 'bg-amber-50 text-amber-600'
-                  : 'bg-gray-100 text-gray-500'
+              ? 'bg-red-50 text-red-500'
+              : event.status === 'awaiting_approval'
+                ? 'bg-amber-50 text-amber-600'
+                : 'bg-gray-100 text-gray-500'
               }`}
           >
             {eventKindLabel(event)}
@@ -268,10 +281,10 @@ function MessageEventCard({
         </div>
         <span
           className={`shrink-0 text-10px font-500 ${event.status === 'error'
-              ? 'text-red-500'
-              : event.status === 'awaiting_approval'
-                ? 'text-amber-600'
-                : 'text-green-600'
+            ? 'text-red-500'
+            : event.status === 'awaiting_approval'
+              ? 'text-amber-600'
+              : 'text-green-600'
             }`}
         >
           {eventStatusLabel(event.status)}
@@ -498,7 +511,22 @@ export function ChatView({
 }: Props) {
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [modelSearchTerm, setModelSearchTerm] = useState('')
+  const [collapsedModelGroups, setCollapsedModelGroups] = useState<Set<string>>(new Set())
   const [attachmentLightboxOpen, setAttachmentLightboxOpen] = useState(false)
+
+  const modelMenuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!modelMenuOpen) return
+    function handleClickOutside(event: MouseEvent) {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(event.target as Node)) {
+        setModelMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [modelMenuOpen])
 
   const modelLabel =
     settings.model.split('/').filter(Boolean).at(-1) || settings.model || '选择模型'
@@ -521,6 +549,16 @@ export function ChatView({
       setInspectorOpen(true)
     }
   }, [agentTask?.pendingApproval, previewError, workspaceError])
+
+  const filteredModelGroups = modelGroups
+    .map(group => ({
+      ...group,
+      models: group.models.filter(m =>
+        m.id.toLowerCase().includes(modelSearchTerm.toLowerCase()) ||
+        group.profileName.toLowerCase().includes(modelSearchTerm.toLowerCase())
+      )
+    }))
+    .filter(group => group.models.length > 0)
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isMetaEnter) {
@@ -625,7 +663,7 @@ export function ChatView({
           {/* Docked Composer */}
           <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[var(--bg-app)] via-[var(--bg-app)] to-transparent pointer-events-none">
             <div className="max-w-1000px mx-auto pointer-events-auto">
-              <div className="bg-white border border-[rgba(79,123,116,0.18)] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] overflow-hidden transition-all focus-within:border-[rgba(79,123,116,0.32)] focus-within:ring-4 focus-within:ring-[rgba(79,123,116,0.08)]">
+              <div className="bg-white border border-[rgba(79,123,116,0.18)] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all focus-within:border-[rgba(79,123,116,0.32)] focus-within:ring-4 focus-within:ring-[rgba(79,123,116,0.08)] relative">
                 <textarea
                   className="w-full h-120px p-4 text-15px leading-relaxed resize-none border-none bg-transparent outline-none"
                   value={draft}
@@ -684,7 +722,7 @@ export function ChatView({
                   </div>
                 ) : null}
 
-                <div className="h-10 px-3 border-t border-[var(--border-subtle)] bg-[rgba(0,0,0,0.01)] flex items-center justify-between">
+                <div className="h-10 px-3 border-t border-[var(--border-subtle)] bg-[rgba(0,0,0,0.01)] rounded-b-2xl flex items-center justify-between">
                   <div className="flex items-center gap-1">
                     <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" onClick={onPickAttachment} title="上传附件">
                       <Paperclip size={16} />
@@ -695,77 +733,118 @@ export function ChatView({
                     <div className="h-4 w-1px bg-[var(--border-subtle)] mx-1" />
                     <div className="relative">
                       <button
-                        className="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-12px text-[var(--text-secondary)] transition-colors"
-                        onClick={() => setModelMenuOpen(current => !current)}
+                        className="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-12px text-[var(--text-secondary)] transition-colors group"
+                        onClick={() => {
+                          setModelMenuOpen(current => !current)
+                          setModelSearchTerm('')
+                        }}
                         title="切换模型"
                       >
-                        <Bot size={14} className="opacity-70" />
-                        <span className="max-w-120px truncate">{modelLabel}</span>
-                        <ChevronDown size={12} className="opacity-40" />
+                        <LayoutGrid size={14} className="opacity-60" />
+                        <span className="max-w-120px truncate font-600 text-[var(--text-primary)] opacity-70 group-hover:opacity-100">{modelLabel}</span>
+                        <ChevronDown size={12} className="opacity-30" />
+                        <div className="ml-1 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[rgba(15,23,42,0.04)] text-9px font-700 opacity-60">
+                          <RefreshCw size={8} />
+                          <span>1%</span>
+                        </div>
                       </button>
 
                       {modelMenuOpen ? (
-                        <div className="absolute bottom-[calc(100%+10px)] left-0 z-20 min-w-300px max-w-360px rounded-2xl border border-[rgba(15,23,42,0.08)] bg-white/96 p-2 shadow-xl shadow-[rgba(15,23,42,0.12)] backdrop-blur-xl">
-                          <div className="mb-1 flex items-center justify-between px-2 py-1">
-                            <span className="text-11px font-700 tracking-wider uppercase text-[var(--text-secondary)] opacity-55">
-                              可用模型
-                            </span>
-                            <button
-                              className="text-11px text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                              onClick={onOpenProviders}
-                            >
-                              管理
-                            </button>
+                        <div
+                          ref={modelMenuRef}
+                          className="absolute bottom-[calc(100%+10px)] left-0 z-20 w-320px flex flex-col rounded-xl border border-[rgba(15,23,42,0.08)] bg-white/98 shadow-2xl shadow-[rgba(15,23,42,0.15)] backdrop-blur-xl overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-200"
+                        >
+                          <div className="p-3 border-b border-[rgba(15,23,42,0.04)] bg-[rgba(15,23,42,0.01)]">
+                            <div className="flex items-center gap-2.5 px-3 h-10 rounded-xl bg-white border border-[rgba(15,23,42,0.08)] shadow-sm focus-within:border-[var(--bg-user-bubble)]/60 focus-within:ring-4 focus-within:ring-[var(--bg-user-bubble)]/5 transition-all">
+                              <Search size={14} className="text-[var(--text-secondary)] opacity-30" />
+                              <input
+                                autoFocus
+                                className="flex-1 h-full !border-none !outline-none !ring-0 !shadow-none !bg-transparent appearance-none p-0 text-13px font-medium placeholder:opacity-30 placeholder:text-[var(--text-secondary)]"
+                                placeholder="Search models..."
+                                value={modelSearchTerm}
+                                onChange={e => setModelSearchTerm(e.target.value)}
+                              />
+                            </div>
                           </div>
 
-                          {modelGroups.length > 0 ? (
-                            <div className="flex max-h-320px flex-col gap-2 overflow-y-auto custom-scrollbar pr-1">
-                              {modelGroups.map(group => (
-                                <div key={group.profileId} className="rounded-xl bg-[rgba(15,23,42,0.025)] p-2">
-                                  <div className="mb-1 px-2 text-11px font-600 text-[var(--text-secondary)] opacity-65">
-                                    {group.profileName}
-                                  </div>
-                                  <div className="flex flex-col gap-1">
-                                    {group.models.map(model => {
-                                      const isActive =
-                                        group.profileId === activeModelProfileId &&
-                                        model.id === settings.model
-                                      return (
-                                        <button
-                                          key={model.id}
-                                          className={`flex items-center justify-between rounded-lg px-2 py-2 text-left transition-colors ${
-                                            isActive
-                                              ? 'bg-[rgba(79,123,116,0.12)] text-[var(--text-primary)]'
-                                              : 'hover:bg-[rgba(15,23,42,0.05)] text-[var(--text-secondary)]'
-                                          }`}
-                                          onClick={() => {
-                                            onSelectModel(group.profileId, model.id)
-                                            setModelMenuOpen(false)
-                                          }}
-                                        >
-                                          <div className="min-w-0">
-                                            <div className="truncate text-13px font-600">
-                                              {model.id.split('/').filter(Boolean).at(-1) || model.id}
-                                            </div>
-                                            <div className="truncate text-11px opacity-55">{model.id}</div>
-                                          </div>
-                                          {isActive ? (
-                                            <span className="ml-3 shrink-0 rounded-full bg-[rgba(79,123,116,0.16)] px-2 py-0.5 text-10px font-700 text-[var(--accent-soft-strong)]">
-                                              当前
-                                            </span>
-                                          ) : null}
-                                        </button>
-                                      )
-                                    })}
-                                  </div>
+                          <div className="flex-1 overflow-y-auto custom-scrollbar min-h-260px max-h-360px px-1.5 pb-1.5 pt-1">
+                            {filteredModelGroups.length > 0 ? (
+                              <div className="flex flex-col">
+                                {filteredModelGroups.map(group => {
+                                  const isCollapsed = collapsedModelGroups.has(group.profileId)
+                                  return (
+                                    <div key={group.profileId} className="flex flex-col mb-1 last:mb-0">
+                                      <button
+                                        className="sticky top-0 z-10 px-3 py-2 flex items-center justify-between bg-white text-9px font-800 text-[rgba(15,23,42,0.4)] uppercase tracking-widest hover:bg-[rgba(15,23,42,0.02)] transition-colors rounded-lg group/head"
+                                        onClick={() => {
+                                          setCollapsedModelGroups(prev => {
+                                            const next = new Set(prev)
+                                            if (next.has(group.profileId)) next.delete(group.profileId)
+                                            else next.add(group.profileId)
+                                            return next
+                                          })
+                                        }}
+                                      >
+                                        <div className="flex items-center gap-2">
+                                          {group.profileName}
+                                          <span className="normal-case opacity-40 font-500 tracking-normal">{group.models.length} items</span>
+                                        </div>
+                                        <ChevronDown
+                                          size={12}
+                                          className={`transition-transform duration-200 opacity-40 group-hover/head:opacity-80 ${isCollapsed ? '-rotate-90' : ''}`}
+                                        />
+                                      </button>
+
+                                      {!isCollapsed && (
+                                        <div className="flex flex-col gap-0.5 mt-0.5">
+                                          {group.models.map(model => {
+                                            const isActive =
+                                              group.profileId === activeModelProfileId &&
+                                              model.id === settings.model
+                                            const shortName = model.id.split('/').filter(Boolean).at(-1) || model.id
+
+                                            return (
+                                              <button
+                                                key={model.id}
+                                                className={`group/item flex items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition-all ${isActive
+                                                  ? 'bg-[rgba(15,23,42,0.04)] ring-1 ring-[rgba(15,23,42,0.02)]'
+                                                  : 'hover:bg-[rgba(15,23,42,0.04)]'
+                                                  }`}
+                                                onClick={() => {
+                                                  onSelectModel(group.profileId, model.id)
+                                                  setModelMenuOpen(false)
+                                                }}
+                                              >
+                                                <div className="flex-shrink-0 w-4 flex flex-center">
+                                                  {isActive ? <Check size={14} className="text-[var(--accent-soft-strong)]" strokeWidth={3} /> : null}
+                                                </div>
+
+                                                <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                                                  <div className={`truncate text-13px font-700 tracking-tight leading-tight ${isActive ? 'text-[var(--text-primary)]' : 'text-[var(--text-primary)]'}`}>
+                                                    {shortName}
+                                                  </div>
+                                                  <div className={`truncate text-11px tracking-tighter opacity-35 transition-opacity ${isActive ? 'text-[var(--text-secondary)] opacity-50' : 'text-[var(--text-secondary)]'}`}>
+                                                    {model.id}
+                                                  </div>
+                                                </div>
+                                              </button>
+                                            )
+                                          })}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            ) : (
+                              <div className="px-4 py-12 text-center flex flex-col items-center gap-3">
+                                <Search size={28} className="opacity-5" />
+                                <div className="text-12px text-[var(--text-secondary)] opacity-30">
+                                  No models matching "{modelSearchTerm}"
                                 </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="px-3 py-4 text-12px text-[var(--text-secondary)]">
-                              还没有可直接切换的模型，先到提供商设置里拉取并启用模型。
-                            </div>
-                          )}
+                              </div>
+                            )}
+                          </div>
                         </div>
                       ) : null}
                     </div>

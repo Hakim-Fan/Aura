@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { open } from '@tauri-apps/plugin-dialog'
+import { ask, open } from '@tauri-apps/plugin-dialog'
 import { builtinPlugins, builtinSkills } from './catalog'
 import { fetchProviderModels, testProviderConnection } from './lib/provider'
 import { loadSettings, saveSettings } from './lib/storage'
@@ -150,22 +150,52 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setSaveState('idle')
   }
 
-  function deleteProfile(profileId: string) {
-    if (draftSettings.providerProfiles.length <= 1) {
+  async function deleteProfile(profileId: string) {
+    const target = draftSettings.providerProfiles.find(profile => profile.id === profileId)
+    if (!target) {
+      return
+    }
+
+    const confirmed = await ask(`确认删除提供商 “${target.name}”？此操作不可撤销。`, {
+      title: '删除确认',
+      kind: 'warning',
+    })
+
+    if (!confirmed) {
       return
     }
 
     const remaining = draftSettings.providerProfiles.filter(profile => profile.id !== profileId)
-    const nextActive =
-      draftSettings.activeProviderProfileId === profileId
-        ? remaining[0]?.id || ''
-        : draftSettings.activeProviderProfileId
+    const isDeletingActive = draftSettings.activeProviderProfileId === profileId
+    const nextActiveProfile = isDeletingActive ? remaining[0] : null
+    const nextActiveId = isDeletingActive ? nextActiveProfile?.id || '' : draftSettings.activeProviderProfileId
 
-    setDraftSettings(current => ({
-      ...current,
-      activeProviderProfileId: nextActive,
-      providerProfiles: remaining,
-    }))
+    setDraftSettings(current => {
+      const next = {
+        ...current,
+        activeProviderProfileId: nextActiveId,
+        providerProfiles: remaining,
+      }
+
+      // 如果删除的是当前激活项，同步更新根级字段
+      if (isDeletingActive) {
+        if (nextActiveProfile) {
+          next.provider = nextActiveProfile.provider
+          next.apiKey = nextActiveProfile.apiKey
+          next.baseUrl = nextActiveProfile.baseUrl
+          const primaryModel = getPrimaryModelId(nextActiveProfile)
+          next.model = primaryModel
+        } else {
+          // 彻底没有 Profile 了
+          next.apiKey = ''
+          next.baseUrl = ''
+          next.model = ''
+        }
+      }
+
+      return next
+    })
+
     setSelectedProviderProfileId(remaining[0]?.id || '')
     setSaveState('idle')
     setProviderStatus(null)
@@ -177,11 +207,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
       providerProfiles: current.providerProfiles.map(profile =>
         profile.id === profileId
           ? {
-              ...profile,
-              models: profile.models.map(model =>
-                model.id === modelId ? { ...model, enabled: !model.enabled } : model,
-              ),
-            }
+            ...profile,
+            models: profile.models.map(model =>
+              model.id === modelId ? { ...model, enabled: !model.enabled } : model,
+            ),
+          }
           : profile,
       ),
     }))
@@ -527,19 +557,19 @@ export function SettingsWindowApp({ initialTab }: Props) {
         {activeTab === 'mcp' ? renderMcp() : null}
         {activeTab === 'skills'
           ? renderAssets(
-              'skills',
-              builtinSkills,
-              draftSettings.enabledSkillIds,
-              toggleSkill,
-            )
+            'skills',
+            builtinSkills,
+            draftSettings.enabledSkillIds,
+            toggleSkill,
+          )
           : null}
         {activeTab === 'plugins'
           ? renderAssets(
-              'plugins',
-              builtinPlugins,
-              draftSettings.enabledPluginIds,
-              togglePlugin,
-            )
+            'plugins',
+            builtinPlugins,
+            draftSettings.enabledPluginIds,
+            togglePlugin,
+          )
           : null}
       </SettingsView>
 

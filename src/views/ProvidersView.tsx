@@ -92,40 +92,47 @@ export function ProvidersView({
   return (
     <section className="section-shell settings-panel providers-panel">
       <div className="providers-layout">
-        <section className="providers-list-card">
-          <div className="flex items-center justify-between mb-4">
-            <div>
+        <section className="providers-list-card custom-scrollbar">
+          <header className="providers-list-header">
+            <div className="providers-list-title">
               <div className="section-title">提供商实例</div>
-              <p className="muted">把不同 API 服务保存成独立 profile，聊天页就能直接切换模型。</p>
+              <p className="muted">管理 API 实例配置</p>
             </div>
-            <button className="secondary-button" onClick={onCreateProfile}>
-              <Plus size={14} />
-              新增
+            <button className="create-provider-btn" onClick={onCreateProfile} title="新增提供商">
+              <Plus size={16} />
             </button>
-          </div>
+          </header>
 
-          <div className="flex flex-col gap-3">
+          <div className="provider-cards-stack">
             {profiles.map(profile => {
               const isActive = profile.id === activeProfileId
               const profileEnabledModels = profile.models.filter(model => model.enabled).length
+              const baseUrl = profile.baseUrl || baseUrlPlaceholder(profile.provider)
+              
               return (
                 <button
                   key={profile.id}
-                  className={isActive ? 'provider-card active' : 'provider-card'}
+                  className={`modern-provider-card ${isActive ? 'active' : ''} ${profile.enabled ? '' : 'disabled'}`}
                   onClick={() => onSelectProfile(profile.id)}
                 >
-                  <div className="provider-card-head">
-                    <strong>{profile.name}</strong>
-                    <span className="micro-pill">{providerOptions.find(item => item.id === profile.provider)?.label || profile.provider}</span>
+                  <div className="card-top">
+                    <span className="profile-name">{profile.name}</span>
+                    <span className="provider-type-tag">{providerOptions.find(item => item.id === profile.provider)?.label || profile.provider}</span>
                   </div>
-                  <p>{profile.baseUrl || baseUrlPlaceholder(profile.provider)}</p>
-                  <div className="asset-card-meta mt-3">
-                    <span className={`micro-pill ${profile.enabled ? '' : 'opacity-50'}`}>{profile.enabled ? '启用中' : '停用'}</span>
-                    <span className={`micro-pill ${profileEnabledModels > 0 ? '' : 'opacity-50'}`}>
-                      {profileEnabledModels > 0 ? `${profileEnabledModels} 个模型已启用` : '未启用模型'}
+                  
+                  <div className="card-url" title={baseUrl}>{baseUrl}</div>
+                  
+                  <div className="card-footer">
+                    <div className="status-indicator">
+                      <span className={`status-dot ${profile.enabled ? 'online' : 'offline'}`} />
+                      <span>{profile.enabled ? '启用中' : '已停用'}</span>
+                    </div>
+                    <span className="models-count">
+                      {profileEnabledModels > 0 ? `${profileEnabledModels} Models` : '未选模型'}
                     </span>
-                    {profile.id === activeProfileId ? <span className="micro-pill">查看中</span> : null}
                   </div>
+                  
+                  {isActive && <div className="active-glow" />}
                 </button>
               )
             })}
@@ -155,110 +162,114 @@ export function ProvidersView({
             </div>
           </div>
 
-          <div className="provider-detail-grid">
-            <div className="grid grid-cols-2 gap-4">
-              <label>
-                显示名称
-                <input
-                  value={activeProfile.name}
-                  onChange={event => onProfileChange(activeProfile.id, 'name', event.target.value)}
-                  placeholder="例如 OpenRouter / Nvidia / Moonshot"
-                />
-              </label>
-
-              <label>
-                Provider 类型
-                <div className="asset-card-meta">
-                  {providerOptions.map(option => (
-                    <button
-                      key={option.id}
-                      className={option.id === activeProfile.provider ? 'settings-tab active' : 'settings-tab'}
-                      onClick={() => onProfileChange(activeProfile.id, 'provider', option.id)}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              </label>
-            </div>
-
-            <div className="header-actions">
-              <button className="secondary-button" disabled={isTesting} onClick={onTestConnection}>
-                <RefreshCw className={isTesting ? 'spin-icon' : ''} size={14} />
-                {isTesting ? '测试中...' : '测试连通性'}
-              </button>
-              <button className="secondary-button" disabled={isFetchingModels} onClick={onFetchModels}>
-                <RefreshCw className={isFetchingModels ? 'spin-icon' : ''} size={14} />
-                {isFetchingModels ? '拉取中...' : '获取模型'}
-              </button>
-            </div>
-
-            <label>
-              API Key
+          <div className="form-container">
+            <div className="form-row">
+              <label>显示名称</label>
               <input
+                value={activeProfile.name}
+                onChange={event => onProfileChange(activeProfile.id, 'name', event.target.value)}
+                placeholder="例如 OpenRouter / Nvidia / Moonshot"
+              />
+            </div>
+
+            <div className="form-row">
+              <label>Provider 类型</label>
+              <div className="settings-tabs !mb-0">
+                {providerOptions.map(option => (
+                  <button
+                    key={option.id}
+                    className={option.id === activeProfile.provider ? 'settings-tab active' : 'settings-tab'}
+                    onClick={() => onProfileChange(activeProfile.id, 'provider', option.id)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="form-row">
+              <label>API Key</label>
+              <input
+                className="monospace"
                 value={activeProfile.apiKey}
                 onChange={event => onProfileChange(activeProfile.id, 'apiKey', event.target.value)}
                 placeholder="输入真实 API Key"
                 type="password"
               />
-            </label>
+            </div>
 
-            <label>
-              Base URL
+            <div className="form-row">
+              <label>Base URL</label>
               <input
+                className="monospace"
                 value={activeProfile.baseUrl}
                 onChange={event => onProfileChange(activeProfile.id, 'baseUrl', event.target.value)}
                 placeholder={baseUrlPlaceholder(activeProfile.provider)}
               />
-            </label>
+            </div>
+
+            <div className="form-row">
+              <label></label>
+              <div className="header-actions">
+                <button className="secondary-button" disabled={isTesting} onClick={onTestConnection}>
+                  <RefreshCw className={isTesting ? 'spin-icon' : ''} size={14} />
+                  {isTesting ? '正在测试...' : '测试连通性'}
+                </button>
+                <button className="secondary-button" disabled={isFetchingModels} onClick={onFetchModels}>
+                  <RefreshCw className={isFetchingModels ? 'spin-icon' : ''} size={14} />
+                  {isFetchingModels ? '正在获取...' : '获取模型列表'}
+                </button>
+              </div>
+            </div>
 
             {providerStatus ? (
-              <div className={`provider-note provider-feedback ${providerStatus.tone}`}>
-                <p className="muted">{providerStatus.message}</p>
+              <div className="form-row">
+                <label></label>
+                <div className={`provider-feedback ${providerStatus.tone}`}>
+                  <p className="muted">{providerStatus.message}</p>
+                </div>
               </div>
             ) : null}
 
-            <section className="provider-note provider-models-panel">
+            <section className="provider-note provider-models-panel mt-4">
               <div className="flex items-center justify-between mb-3">
                 <div>
-                  <div className="section-title mb-1">模型列表</div>
-                  <p className="muted">只展示已经拉取到的模型。启用后，聊天页输入框下方才能直接切换。</p>
+                  <div className="section-title mb-1">模型管理</div>
+                  <p className="muted">启用后的模型将出现在聊天页的快速切换列表中。</p>
                 </div>
-                <span className="micro-pill">{enabledModelCount} / {activeProfile.models.length} 个已启用</span>
+                <span className="micro-pill">{enabledModelCount} / {activeProfile.models.length} 已启用</span>
               </div>
 
               {activeProfile.models.length > 0 ? (
                 <div className="provider-models-body">
-                  <label className="provider-model-search">
+                  <div className="provider-model-search">
                     <Search size={14} />
                     <input
                       value={modelQuery}
                       onChange={event => setModelQuery(event.target.value)}
-                      placeholder="搜索当前 provider 的模型"
+                      placeholder="搜索模型名称..."
                       type="text"
                     />
-                  </label>
+                  </div>
 
                   <div className="provider-models-scroll custom-scrollbar">
                     {filteredModels.length > 0 ? (
-                      <div className="flex flex-col gap-2">
+                      <div className="flex flex-col">
                         {filteredModels.map(model => (
                           <div key={model.id} className="dashboard-row modern !items-center">
-                            <div>
-                              <strong>{model.id.split('/').filter(Boolean).at(-1) || model.id}</strong>
-                              <span>{model.id}</span>
+                            <div className="flex-1 min-w-0 pr-4">
+                              <strong className="truncate">{model.id.split('/').filter(Boolean).at(-1) || model.id}</strong>
+                              <span className="truncate block opacity-60 text-[11px]">{model.id}</span>
                             </div>
-                            <div className="flex items-center gap-2">
-                              <span className={model.enabled ? 'model-state-pill enabled' : 'model-state-pill'}>
-                                {model.enabled ? '已启用' : '已关闭'}
-                              </span>
-                              <button
-                                className={model.enabled ? 'secondary-button' : 'primary-button'}
-                                onClick={() => onToggleModel(activeProfile.id, model.id)}
-                              >
-                                {model.enabled ? <Power size={12} /> : <Check size={12} />}
-                                {model.enabled ? '关闭' : '启用'}
-                              </button>
+                            <div className="flex items-center">
+                              <label className="ios-switch">
+                                <input
+                                  type="checkbox"
+                                  checked={model.enabled}
+                                  onChange={() => onToggleModel(activeProfile.id, model.id)}
+                                />
+                                <span className="switch-slider"></span>
+                              </label>
                             </div>
                           </div>
                         ))}
@@ -266,15 +277,15 @@ export function ProvidersView({
                     ) : (
                       <article className="asset-card empty">
                         <strong>没有匹配的模型</strong>
-                        <p>换个关键词试试，或者清空搜索后再继续启用模型。</p>
+                        <p>请尝试其他关键词。</p>
                       </article>
                     )}
                   </div>
                 </div>
               ) : (
                 <article className="asset-card empty">
-                  <strong>还没有模型列表</strong>
-                  <p>先测试连通性并获取模型，再手动启用需要出现在聊天页的模型。</p>
+                  <strong>暂无模型数据</strong>
+                  <p>请先测试连通性并点击“获取模型列表”。</p>
                 </article>
               )}
             </section>
