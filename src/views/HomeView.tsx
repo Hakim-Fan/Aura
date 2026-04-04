@@ -29,6 +29,8 @@ export function HomeView({
 }: Props) {
   return (
     <section className="hero-shell">
+      {/* Top drag region spacer */}
+      <div className="h-10 w-full shrink-0" data-tauri-drag-region />
       <div className="hero-card modern">
         <div className="hero-badge">Desk Agent</div>
         <h2>开发者桌面 Agent</h2>

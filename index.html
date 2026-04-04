@@ -7,6 +7,16 @@
       content="width=device-width, initial-scale=1.0"
     />
     <title>Desk Agent</title>
+    <style>
+      /* Anti-FOUC: hide until styles are ready */
+      #root {
+        opacity: 0;
+        transition: opacity 0.15s ease-in;
+      }
+      #root.ready {
+        opacity: 1;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

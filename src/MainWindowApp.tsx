@@ -786,7 +786,7 @@ export function MainWindowApp() {
 
   return (
     <>
-      <div className="app-shell">
+      <div className="flex h-screen overflow-hidden bg-[var(--bg-app)]">
         <AppSidebar
           sessionFilter={sessionFilter}
           onSessionFilterChange={setSessionFilter}
@@ -803,7 +803,7 @@ export function MainWindowApp() {
           settingsOpen={false}
         />
 
-        <main className="content-shell">
+        <main className="flex-1 flex flex-col min-w-0">
           {activeSession ? (
             <ChatView
               messages={activeSession.messages}

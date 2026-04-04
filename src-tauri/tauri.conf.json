@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "Desk Agent",
-        "width": 1480,
-        "height": 960,
-        "minWidth": 1180,
-        "minHeight": 780,
+        "width": 1280,
+        "height": 850,
+        "minWidth": 1024,
+        "minHeight": 720,
         "resizable": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
