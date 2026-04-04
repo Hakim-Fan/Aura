@@ -200,6 +200,36 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
+            <div className="section-title">交互设置</div>
+            <div className="toggle-stack">
+              <label className="toggle-inline">
+                <input
+                  name="shortcut"
+                  type="radio"
+                  checked={draftSettings.sendShortcut === 'meta-enter'}
+                  onChange={() => handleSettingsChange('sendShortcut', 'meta-enter')}
+                />
+                <div className="flex flex-col">
+                  <strong>⌘/Ctrl + Enter 发送</strong>
+                  <span className="muted">Enter 键用于换行</span>
+                </div>
+              </label>
+              <label className="toggle-inline mt-2">
+                <input
+                  name="shortcut"
+                  type="radio"
+                  checked={draftSettings.sendShortcut === 'enter'}
+                  onChange={() => handleSettingsChange('sendShortcut', 'enter')}
+                />
+                <div className="flex flex-col">
+                  <strong>Enter 发送</strong>
+                  <span className="muted">Shift + Enter 用于换行</span>
+                </div>
+              </label>
+            </div>
+          </section>
+
+          <section className="dashboard-card">
             <div className="section-title">审批策略</div>
             <div className="toggle-stack">
               <label className="toggle-inline">

@@ -51,10 +51,10 @@ export async function openSettingsWindow(tab: SettingsTab = 'general') {
 
   const next = new WebviewWindow(SETTINGS_WINDOW_LABEL, {
     title: '设置',
-    width: 1320,
-    height: 920,
-    minWidth: 1080,
-    minHeight: 760,
+    width: 900,
+    height: 720,
+    minWidth: 800,
+    minHeight: 600,
     resizable: true,
     url: createWindowUrl(`?window=settings&tab=${tab}`),
   })
@@ -79,10 +79,10 @@ export async function openMcpEditorWindow(serverId?: string) {
 
   const next = new WebviewWindow(MCP_EDITOR_WINDOW_LABEL, {
     title: serverId ? '编辑 MCP Server' : '新增 MCP Server',
-    width: 760,
-    height: 760,
-    minWidth: 680,
-    minHeight: 620,
+    width: 680,
+    height: 740,
+    minWidth: 600,
+    minHeight: 580,
     resizable: true,
     url: createWindowUrl(`?window=mcp-editor${query}`),
   })

@@ -197,22 +197,39 @@ function MessageEventCard({
   onCopyText: (value: string) => void
 }) {
   return (
-    <article className="p-3 rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,0.01)] last:mb-0">
-      <div className="flex-between mb-1.5 px-0.5">
-        <div className="flex items-center gap-2">
-          <span className={`text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded ${event.status === 'error' ? 'bg-red-50 text-red-500' : 'bg-gray-100 text-gray-500'
-            }`}>{eventKindLabel(event)}</span>
-          <strong className="text-13px text-[var(--text-primary)] opacity-80">{event.title}</strong>
+    <article className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.025)] px-3 py-2.5">
+      <div className="mb-1 flex items-start justify-between gap-3">
+        <div className="min-w-0 flex items-center gap-2">
+          <span
+            className={`text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded ${
+              event.status === 'error'
+                ? 'bg-red-50 text-red-500'
+                : event.status === 'awaiting_approval'
+                  ? 'bg-amber-50 text-amber-600'
+                  : 'bg-gray-100 text-gray-500'
+            }`}
+          >
+            {eventKindLabel(event)}
+          </span>
+          <strong className="text-12px text-[var(--text-primary)] opacity-80 leading-tight">{event.title}</strong>
         </div>
-        <span className={`text-10px font-500 ${event.status === 'error' ? 'text-red-500' : 'text-green-600'}`}>
-          {eventStatusLabel(event.status)}
-        </span>
+        <span
+          className={`shrink-0 text-10px font-500 ${
+              event.status === 'error'
+                ? 'text-red-500'
+                : event.status === 'awaiting_approval'
+                  ? 'text-amber-600'
+                  : 'text-green-600'
+            }`}
+          >
+            {eventStatusLabel(event.status)}
+          </span>
       </div>
-      <p className="text-12px text-[var(--text-secondary)] mb-2 px-0.5 opacity-80">{event.summary}</p>
+      <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
       {(event.input || event.output || event.error) && (
         <details className="mt-2 group">
-          <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-60">显示详细信息</summary>
-          <div className="mt-2 p-3 bg-gray-50 rounded-lg border border-gray-100 flex flex-col gap-3">
+          <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-55">显示详细信息</summary>
+          <div className="mt-2 flex flex-col gap-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3">
             {event.input && (
               <div className="flex flex-col gap-1">
                 <span className="text-10px font-600 text-gray-400 uppercase">Input</span>
@@ -234,6 +251,15 @@ function MessageEventCard({
           </div>
         </details>
       )}
+      <div className="mt-2 flex justify-end">
+        <button
+          className="p-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] opacity-50 hover:opacity-100 transition-all"
+          title="复制摘要"
+          onClick={() => onCopyText(event.summary)}
+        >
+          <Copy size={12} />
+        </button>
+      </div>
     </article>
   )
 }
@@ -255,87 +281,104 @@ function AssistantMessageCard({
   const duration = activity ? (activity.finishedAt || Date.now()) - activity.startedAt : undefined
   const hasExecution = Boolean(activity) || (message.events?.length || 0) > 0 || (message.steps?.length || 0) > 0
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
+  const activitySummary = activity
+    ? [
+        activityStatusLabel(activity.status),
+        duration ? formatDuration(duration) : null,
+        activity.toolCount > 0 ? `${activity.toolCount} 个工具` : null,
+        activity.skillCount > 0 ? `${activity.skillCount} 个技能` : null,
+        activity.stepCount > 0 ? `${activity.stepCount} 个步骤` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : null
 
   return (
-    <article className="group flex flex-col gap-4">
-      {/* Assistant Header */}
-      <div className="flex-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-[rgba(0,122,255,0.05)] border border-[rgba(0,122,255,0.1)] flex-center text-[var(--bg-user-bubble)]">
-            <Bot size={18} />
-          </div>
-          <div className="flex flex-col">
-            <div className="text-14px font-600">Desk Agent</div>
-            <div className="text-11px text-[var(--text-secondary)] opacity-50">
-              {message.status === 'failed' ? '执行中途中断' : isStreaming ? '正在思考并撰写回答...' : '最终回答'}
-            </div>
-          </div>
+    <article className="group relative flex flex-col gap-3">
+      <div className="flex items-start gap-4">
+        <div className="mt-0.5 h-8 w-8 shrink-0 flex items-center justify-center rounded-lg bg-[rgba(69,119,108,0.05)] border border-[rgba(69,119,108,0.08)] text-[var(--accent-soft-strong)]">
+          <Bot size={16} />
         </div>
 
-        {activity && (
-          <button
-            className="flex items-center gap-1.5 py-1.5 px-3 rounded-full bg-[rgba(0,0,0,0.03)] hover:bg-[rgba(0,0,0,0.06)] text-11px text-[var(--text-secondary)] transition-all"
-            onClick={() => onToggleActivity(message.id)}
-          >
-            <BrainCircuit size={13} className="opacity-70" />
-            <span>{activityStatusLabel(activity.status)}</span>
-            {duration && <span className="opacity-40">· {formatDuration(duration)}</span>}
-            {activity.expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-          </button>
-        )}
-      </div>
+        <div className="min-w-0 flex-1 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-12px text-[var(--text-secondary)] opacity-60">
+            <span className="font-600 text-[var(--text-primary)] opacity-70">Desk Agent</span>
+            {activitySummary ? (
+              <button
+                className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 hover:bg-[rgba(15,23,42,0.04)] transition-colors"
+                onClick={() => onToggleActivity(message.id)}
+                title={activity?.expanded ? '折叠执行详情' : '展开执行详情'}
+              >
+                <BrainCircuit size={12} className="opacity-70" />
+                <span>{activitySummary}</span>
+                {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              </button>
+            ) : null}
+          </div>
 
-      {hasExecution && activity?.expanded && (
-        <section className="ml-11 flex flex-col gap-4">
-          <div className="flex flex-col gap-2 p-4 rounded-xl bg-[rgba(0,0,0,0.02)] border border-[rgba(0,0,0,0.04)]">
-            <div className="text-10px font-600 text-[var(--text-secondary)] opacity-40 uppercase tracking-wider mb-1">执行链路总结</div>
-            <div className="flex gap-4 text-11px text-[var(--text-secondary)] opacity-70">
-              <span>{activity.stepCount} 个步骤</span>
-              <span>{activity.toolCount} 个操作工具</span>
-              {activity.skillCount > 0 && <span>{activity.skillCount} 个专用技能</span>}
+          {hasExecution && activity?.expanded ? (
+            <section className="flex flex-col gap-3 border-l border-[rgba(15,23,42,0.08)] pl-4">
+              <div className="text-11px text-[var(--text-secondary)] opacity-50">
+                {activitySummary || '执行过程'}
+              </div>
+              <div className="flex flex-col gap-2.5">
+                {message.events?.map(event => (
+                  <MessageEventCard key={event.id} event={event} onCopyText={onCopyText} />
+                ))}
+                {message.steps && message.steps.length > 0 ? (
+                  <div className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2.5">
+                    <TaskTreeView nodes={message.steps} />
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+
+          {message.error ? (
+            <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-2 text-13px text-red-500">
+              {message.error}
             </div>
-            <div className="mt-2 flex flex-col gap-3">
-              {message.events?.map(event => (
-                <MessageEventCard key={event.id} event={event} onCopyText={onCopyText} />
-              ))}
-              {message.steps && message.steps.length > 0 && (
-                <div className="mt-1">
-                  <TaskTreeView nodes={message.steps} />
-                </div>
-              )}
+          ) : null}
+
+          {message.content ? (
+            <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
+          ) : !isStreaming ? (
+            <div className="rounded-xl border border-dashed border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-4 py-3 text-13px text-[var(--text-secondary)]">
+              模型执行了操作，但没有生成最终总结回答。
             </div>
-          </div>
-        </section>
-      )}
+          ) : (
+            <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
+              <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
+              正在整理信息并生成最终回答...
+            </div>
+          )}
 
-      {message.error && <div className="ml-11 px-4 py-2 bg-red-50 text-red-500 rounded-lg text-13px border border-red-100">{message.error}</div>}
-
-      <div className="ml-11">
-        {message.content ? (
-          <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
-        ) : !isStreaming ? (
-          <div className="p-4 rounded-xl bg-gray-50 border border-dashed border-gray-200 text-center">
-            <p className="text-13px text-[var(--text-secondary)]">模型执行了操作但未生成总结回答。</p>
+          <div className="pointer-events-none absolute right-0 top-0 flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:pointer-events-auto group-hover:opacity-100">
+            <button
+              className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+              title="复制"
+              onClick={() => onCopyText(message.content)}
+            >
+              <Copy size={14} />
+            </button>
+            <button
+              className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+              title="编辑为新提示"
+              disabled={isStreaming}
+              onClick={() => onEditMessage(message.id)}
+            >
+              <Pencil size={14} />
+            </button>
+            <button
+              className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+              title="重新生成"
+              disabled={isStreaming}
+              onClick={() => onRegenerateMessage(message.id)}
+            >
+              <RefreshCw size={14} />
+            </button>
           </div>
-        ) : (
-          <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-40 italic">
-            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-            正在整理信息并生成最终回答...
-          </div>
-        )}
-      </div>
-
-      {/* Actions */}
-      <div className="ml-11 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制" onClick={() => onCopyText(message.content)}>
-          <Copy size={14} />
-        </button>
-        <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="编辑" onClick={() => onEditMessage(message.id)}>
-          <Pencil size={14} />
-        </button>
-        <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="重新生成" disabled={isStreaming} onClick={() => onRegenerateMessage(message.id)}>
-          <RefreshCw size={14} />
-        </button>
+        </div>
       </div>
     </article>
   )
@@ -354,10 +397,10 @@ function UserMessageCard({
 }) {
   return (
     <article className="group flex flex-col items-end gap-2">
-      <div className="max-w-85% bg-[var(--bg-user-bubble)] text-[var(--text-user-bubble)] px-4 py-2.5 rounded-2xl rounded-tr-4px shadow-md shadow-[rgba(0,122,255,0.15)] text-15px leading-relaxed">
+      <div className="max-w-[78%] bg-[var(--bg-user-bubble)] text-[var(--text-user-bubble)] px-5 py-3 rounded-2xl rounded-tr-8px shadow-[0_10px_30px_rgba(60,87,78,0.10)] text-15px leading-relaxed">
         {message.content}
       </div>
-      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/90 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
         <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制" onClick={() => onCopyText(message.content)}>
           <Copy size={14} />
         </button>
@@ -407,7 +450,12 @@ export function ChatView({
   const modelLabel =
     settings.model.split('/').filter(Boolean).at(-1) || settings.model || '选择模型'
   const providerLabel = providerLabelMap[settings.provider]
-  const composerMetaHint = settings.cwd ? '⌘/Ctrl + Enter 发送' : '请设置工作区'
+  const isMetaEnter = settings.sendShortcut === 'meta-enter'
+  const composerMetaHint = settings.cwd
+    ? isMetaEnter
+      ? '⌘/Ctrl + Enter 发送'
+      : 'Enter 发送，Shift + Enter 换行'
+    : '请设置工作区'
 
   const hasInspectorContent =
     isRunning ||
@@ -423,9 +471,16 @@ export function ChatView({
   }, [agentTask?.pendingApproval, previewError, workspaceError])
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-      event.preventDefault()
-      onSubmit()
+    if (isMetaEnter) {
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+        event.preventDefault()
+        onSubmit()
+      }
+    } else {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault()
+        onSubmit()
+      }
     }
   }
 
@@ -464,7 +519,7 @@ export function ChatView({
       <div className="flex-1 flex overflow-hidden">
         {/* Messages Stage */}
         <div className="flex-1 flex flex-col min-w-0 relative">
-          <div className="flex-1 overflow-y-auto custom-scrollbar pt-6 pb-72 scroll-smooth">
+          <div className="flex-1 overflow-y-auto custom-scrollbar pt-8 pb-72 scroll-smooth">
             {messages.length === 0 ? (
               <div className="max-w-1000px mx-auto px-6 py-20 flex flex-col items-center text-center">
                 <div className="text-11px font-700 text-[var(--text-secondary)] tracking-0.2em uppercase mb-4 opacity-50">
@@ -490,27 +545,25 @@ export function ChatView({
                 </div>
               </div>
             ) : (
-              <div className="max-w-1000px mx-auto px-6 flex flex-col gap-10">
+              <div className="max-w-980px mx-auto px-8 flex flex-col gap-14">
                 {messages.map(message =>
                   message.role === 'user' ? (
-                    <div key={message.id} className="flex flex-col items-end gap-2">
-                      <article className="max-w-85% bg-[var(--bg-user-bubble)] text-[var(--text-user-bubble)] px-4 py-2.5 rounded-2xl rounded-tr-4px shadow-md shadow-[rgba(0,122,255,0.15)] text-15px leading-relaxed">
-                        {message.content}
-                      </article>
-                      <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        {/* Optional actions for user message */}
-                      </div>
-                    </div>
+                    <UserMessageCard
+                      key={message.id}
+                      message={message}
+                      onCopyText={onCopyText}
+                      onEditMessage={onEditMessage}
+                      onResend={onResendMessage}
+                    />
                   ) : (
-                    <div key={message.id} className="flex flex-col gap-4">
-                      <AssistantMessageCard
-                        message={message}
-                        onCopyText={onCopyText}
-                        onEditMessage={onEditMessage}
-                        onRegenerateMessage={onRegenerateMessage}
-                        onToggleActivity={onToggleMessageActivity}
-                      />
-                    </div>
+                    <AssistantMessageCard
+                      key={message.id}
+                      message={message}
+                      onCopyText={onCopyText}
+                      onEditMessage={onEditMessage}
+                      onRegenerateMessage={onRegenerateMessage}
+                      onToggleActivity={onToggleMessageActivity}
+                    />
                   ),
                 )}
               </div>
@@ -520,9 +573,9 @@ export function ChatView({
           {/* Docked Composer */}
           <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[var(--bg-app)] via-[var(--bg-app)] to-transparent pointer-events-none">
             <div className="max-w-1000px mx-auto pointer-events-auto">
-              <div className="bg-white border-1 border-solid border-[#cbd5e1] rounded-2xl shadow-lg shadow-[rgba(0,0,0,0.04)] overflow-hidden transition-all focus-within:border-[#007aff]/50 focus-within:ring-4 focus-within:ring-[#007aff]/10 focus-within:shadow-2xl">
+              <div className="bg-white border border-[var(--border-subtle)] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] overflow-hidden transition-all focus-within:border-[var(--accent-soft-strong)]/30 focus-within:ring-4 focus-within:ring-[var(--accent-soft-strong)]/6">
                 <textarea
-                  className="w-full min-h-120px max-h-400px p-4 text-15px leading-relaxed resize-none border-none bg-transparent outline-none"
+                  className="w-full h-120px p-4 text-15px leading-relaxed resize-none border-none bg-transparent outline-none"
                   value={draft}
                   onChange={event => onDraftChange(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
@@ -552,7 +605,8 @@ export function ChatView({
                     {error && <span className="text-11px text-red-500 font-500">{error}</span>}
                     <span className="text-11px text-[var(--text-secondary)] opacity-40 hidden sm:inline">{composerMetaHint}</span>
                     <button
-                      className="flex items-center justify-center p-1.5 rounded-lg bg-[var(--bg-user-bubble)] text-white hover:brightness-110 disabled:opacity-40 disabled:grayscale transition-all"
+                      className="flex items-center justify-center p-1.5 rounded-lg bg-[var(--accent-soft-strong)] text-white hover:brightness-110 disabled:opacity-40 disabled:grayscale transition-all"
+                      title="发送"
                       disabled={isRunning || !draft.trim()}
                       onClick={onSubmit}
                     >
@@ -581,7 +635,7 @@ export function ChatView({
                 )}
                 <div className="grid grid-cols-2 gap-3">
                   <button className="py-2 px-3 text-13px font-500 rounded-lg bg-gray-100 hover:bg-gray-200 transition-colors" onClick={() => onHandleApproval('deny')}>拒绝</button>
-                  <button className="py-2 px-3 text-13px font-500 rounded-lg bg-[var(--bg-user-bubble)] text-white hover:brightness-110 transition-all" onClick={() => onHandleApproval('approve')}>允许</button>
+                  <button className="py-2 px-3 text-13px font-500 rounded-lg bg-[var(--accent-soft-strong)] text-white hover:brightness-110 transition-all" onClick={() => onHandleApproval('approve')}>允许</button>
                 </div>
               </div>
             ) : null}

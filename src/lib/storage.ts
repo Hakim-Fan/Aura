@@ -20,6 +20,7 @@ export const defaultSettings: AgentSettings = {
   enabledSkillIds: ['repair-planner', 'desktop-operator'],
   enabledPluginIds: ['workspace-inspector'],
   mcpServers: [],
+  sendShortcut: 'meta-enter',
 }
 
 function normalizeProvider(

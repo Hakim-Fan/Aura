@@ -110,6 +110,7 @@ export type AgentSettings = {
   enabledSkillIds: string[]
   enabledPluginIds: string[]
   mcpServers: McpServerConfig[]
+  sendShortcut: 'enter' | 'meta-enter'
 }
 
 export type Session = {

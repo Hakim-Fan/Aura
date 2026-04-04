@@ -40,25 +40,29 @@ export const TaskTreeView = memo(function TaskTreeView({
   nodes: TaskNode[]
 }) {
   if (nodes.length === 0) {
-    return <p className="muted">还没有执行步骤。</p>
+    return <p className="text-12px text-[var(--text-secondary)] opacity-60 leading-relaxed">还没有执行步骤。</p>
   }
 
   return (
-    <div className="task-tree">
+    <div className="flex flex-col gap-3">
       {nodes.map(node => (
-        <article key={node.id} className={`task-node ${node.status || 'idle'}`}>
-          <div className="task-node-rail" />
-          <div className="task-node-dot">
-            <StatusIcon status={node.status} />
-          </div>
-          <div className="task-node-body">
-            <div className="task-node-head">
-              <strong>{node.title}</strong>
-              <span className={`micro-pill ${node.status || 'idle'}`}>{statusLabel(node.status)}</span>
+        <article key={node.id} className="grid grid-cols-[18px_1fr] gap-3">
+          <div className="relative flex flex-col items-center">
+            <div className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-white text-[var(--text-secondary)] opacity-70">
+              <StatusIcon status={node.status} />
             </div>
-            <p>{node.summary}</p>
+            <div className="mt-1 w-px flex-1 bg-[rgba(15,23,42,0.08)]" />
+          </div>
+          <div className="min-w-0 pb-1">
+            <div className="mb-1 flex min-w-0 items-start justify-between gap-3">
+              <strong className="min-w-0 text-13px font-600 leading-relaxed text-[var(--text-primary)]">{node.title}</strong>
+              <span className="shrink-0 rounded-full bg-[rgba(15,23,42,0.05)] px-2 py-0.5 text-10px font-600 text-[var(--text-secondary)] opacity-70">
+                {statusLabel(node.status)}
+              </span>
+            </div>
+            <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{node.summary}</p>
             {node.children.length > 0 ? (
-              <div className="task-children">
+              <div className="mt-3 pl-1">
                 <TaskTreeView nodes={node.children} />
               </div>
             ) : null}
