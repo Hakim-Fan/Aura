@@ -806,7 +806,6 @@ export function MainWindowApp() {
         <main className="content-shell">
           {activeSession ? (
             <ChatView
-              activeSessionTitle={activeSession.title}
               messages={activeSession.messages}
               displayedToolEvents={displayedToolEvents}
               displayedTaskTree={displayedTaskTree}

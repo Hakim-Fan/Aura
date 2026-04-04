@@ -27,11 +27,10 @@ export function AppSidebar({
   return (
     <aside className="nav-shell">
       <div className="sidebar-header">
-        <div>
+        <div className="sidebar-brand">
           <div className="eyebrow">Desk Agent</div>
-          <h2 className="sidebar-title">会话</h2>
         </div>
-        <button className="sidebar-action-button" onClick={onCreateSession}>
+        <button className="sidebar-action-button" onClick={onCreateSession} title="新建会话">
           <Plus size={16} />
         </button>
       </div>
@@ -51,16 +50,20 @@ export function AppSidebar({
             key={session.id}
             className={session.id === activeSessionId ? 'session-row active' : 'session-row'}
           >
-            <button className="session-row-button" onClick={() => onOpenSession(session.id)}>
+            <button
+              className="session-row-button"
+              onClick={() => onOpenSession(session.id)}
+              title={session.title}
+            >
               <div className="session-row-title">{session.title}</div>
               <div className="session-row-meta">
                 <span>{new Date(session.updatedAt).toLocaleDateString()}</span>
-                <span>{session.model.split('/').filter(Boolean).at(-1) || 'Model'}</span>
               </div>
             </button>
             <button
               className="session-row-delete"
               aria-label={`删除会话 ${session.title}`}
+              title="删除会话"
               onClick={() => onDeleteSession(session.id)}
             >
               <Trash2 size={14} />
@@ -73,9 +76,9 @@ export function AppSidebar({
         <button
           className={settingsOpen ? 'sidebar-utility-button active-settings' : 'sidebar-utility-button'}
           onClick={onOpenSettings}
+          title="设置"
         >
           <Settings2 size={15} />
-          <span>设置</span>
         </button>
       </div>
     </aside>

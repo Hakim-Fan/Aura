@@ -4,9 +4,9 @@ import remarkGfm from 'remark-gfm'
 import {
   Bot,
   BrainCircuit,
+  Copy,
   ChevronDown,
   ChevronUp,
-  Clipboard,
   Eye,
   FolderOpen,
   Pencil,
@@ -28,7 +28,6 @@ import type {
 } from '../types'
 
 type Props = {
-  activeSessionTitle: string
   messages: ChatMessage[]
   displayedToolEvents: ToolEvent[]
   displayedTaskTree: TaskNode[]
@@ -172,9 +171,8 @@ function MarkdownAnswer({
               <div className="markdown-codeblock">
                 <div className="markdown-codeblock-head">
                   <span>{language}</span>
-                  <button className="ghost-inline-button" onClick={() => onCopyText(raw)}>
-                    <Clipboard size={14} />
-                    复制
+                  <button className="ghost-inline-button icon-only" title="复制代码" onClick={() => onCopyText(raw)}>
+                    <Copy size={14} />
                   </button>
                 </div>
                 <pre>
@@ -237,9 +235,8 @@ function MessageEventCard({
         </details>
       ) : null}
       <div className="message-event-actions">
-        <button className="ghost-inline-button" onClick={() => onCopyText(event.summary)}>
-          <Clipboard size={14} />
-          复制摘要
+        <button className="ghost-inline-button icon-only" title="复制摘要" onClick={() => onCopyText(event.summary)}>
+          <Copy size={14} />
         </button>
       </div>
     </article>
@@ -336,25 +333,24 @@ function AssistantMessageCard({
       )}
 
       <div className="message-actions">
-        <button className="ghost-inline-button" onClick={() => onCopyText(message.content)}>
-          <Clipboard size={14} />
-          复制
+        <button className="ghost-inline-button icon-only" title="复制" onClick={() => onCopyText(message.content)}>
+          <Copy size={14} />
         </button>
         <button
-          className="ghost-inline-button"
+          className="ghost-inline-button icon-only"
+          title="重新生成"
           disabled={isStreaming}
           onClick={() => onRegenerateMessage(message.id)}
         >
           <RefreshCw size={14} />
-          重新生成
         </button>
         <button
-          className="ghost-inline-button"
+          className="ghost-inline-button icon-only"
+          title="编辑为新提示"
           disabled={isStreaming}
           onClick={() => onEditMessage(message.id)}
         >
           <Pencil size={14} />
-          编辑为新提示
         </button>
       </div>
     </article>
@@ -376,17 +372,14 @@ function UserMessageCard({
     <article className="message-card user">
       <div className="user-bubble">{message.content}</div>
       <div className="message-actions user">
-        <button className="ghost-inline-button" onClick={() => onCopyText(message.content)}>
-          <Clipboard size={14} />
-          复制
+        <button className="ghost-inline-button icon-only" title="复制" onClick={() => onCopyText(message.content)}>
+          <Copy size={14} />
         </button>
-        <button className="ghost-inline-button" onClick={() => onEditMessage(message.id)}>
+        <button className="ghost-inline-button icon-only" title="编辑" onClick={() => onEditMessage(message.id)}>
           <Pencil size={14} />
-          编辑
         </button>
-        <button className="ghost-inline-button" onClick={() => onResend(message.id)}>
+        <button className="ghost-inline-button icon-only" title="重发" onClick={() => onResend(message.id)}>
           <RefreshCw size={14} />
-          重发
         </button>
       </div>
     </article>
@@ -394,7 +387,6 @@ function UserMessageCard({
 }
 
 export function ChatView({
-  activeSessionTitle,
   messages,
   displayedToolEvents,
   displayedTaskTree,
@@ -426,8 +418,6 @@ export function ChatView({
 }: Props) {
   const [inspectorOpen, setInspectorOpen] = useState(false)
 
-  const workspaceLabel =
-    settings.cwd.split('/').filter(Boolean).at(-1) || settings.cwd || '选择工作目录'
   const modelLabel =
     settings.model.split('/').filter(Boolean).at(-1) || settings.model || '选择模型'
   const providerLabel = providerLabelMap[settings.provider]
@@ -461,30 +451,30 @@ export function ChatView({
   return (
     <section className="chat-workbench-shell">
       <div className="chat-surface">
-        <header className="chat-topbar">
-          <div className="chat-heading">
-            <div className="eyebrow">Session</div>
-            <h2>{activeSessionTitle}</h2>
-            <p className="chat-heading-subtle">
-              {messages.length > 0 ? '对话与执行记录' : '准备开始一个新的任务'}
-            </p>
-          </div>
-          <div className="chat-topbar-actions">
-            <span className="micro-pill">{messages.length} 条消息</span>
-            <span className="micro-pill">
+        <header className="chat-topbar" data-tauri-drag-region>
+          <div className="chat-topbar-center">
+            <span title="当前消息数量">{messages.length} 条消息</span>
+            <span>·</span>
+            <span 
+              className="workspace-trigger"
+              title={settings.cwd || '未设置工作区'}
+              onClick={onChooseWorkspace}
+            >
               <FolderOpen size={13} />
               {summarizePath(settings.cwd)}
             </span>
-            {hasInspectorContent ? (
+          </div>
+          {hasInspectorContent ? (
+            <div className="chat-topbar-actions compact">
               <button
                 className={inspectorOpen ? 'toolbar-toggle active' : 'toolbar-toggle'}
                 onClick={() => setInspectorOpen(current => !current)}
+                title="运行详情"
               >
                 <Eye size={14} />
-                运行详情
               </button>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
         </header>
 
         <div className={inspectorOpen && hasInspectorContent ? 'chat-workbench with-inspector' : 'chat-workbench'}>
@@ -549,25 +539,29 @@ export function ChatView({
 
                 <div className="composer-toolbar-row">
                   <div className="composer-tools-left">
-                    <button className="composer-context-button" onClick={onChooseWorkspace}>
+                    <button
+                      className="composer-icon-button"
+                      title="选择工作目录"
+                      onClick={onChooseWorkspace}
+                    >
                       <FolderOpen size={16} />
-                      <span>{workspaceLabel}</span>
                     </button>
-                    <button className="composer-icon-button" onClick={onOpenProviders}>
+                    <button className="composer-icon-button" title="提供商与模型" onClick={onOpenProviders}>
                       <Settings2 size={16} />
                     </button>
-                    <button className="composer-icon-button" onClick={onRefreshWorkspace}>
+                    <button className="composer-icon-button" title="刷新工作区" onClick={onRefreshWorkspace}>
                       <Wrench size={16} />
                     </button>
                     {selectedFilePath ? (
                       <button
                         className="composer-icon-button"
+                        title="引用当前文件"
                         onClick={() => onInsertFileReference(selectedFilePath)}
                       >
                         <Wand2 size={16} />
                       </button>
                     ) : null}
-                    <button className="composer-model-button" onClick={onOpenProviders}>
+                    <button className="composer-model-button" title="提供商与模型" onClick={onOpenProviders}>
                       <Bot size={16} />
                       <span>
                         {providerLabel} / {modelLabel}
@@ -579,9 +573,8 @@ export function ChatView({
                   <div className="composer-tools-right">
                     <span className="composer-hint">{composerMetaHint}</span>
                     {error ? <div className="error-banner inline">{error}</div> : null}
-                    <button className="composer-send-button" disabled={isRunning} onClick={onSubmit}>
+                    <button className="composer-send-button icon-only" title="发送" disabled={isRunning} onClick={onSubmit}>
                       <SendHorizontal size={16} />
-                      {isRunning ? '执行中' : '发送'}
                     </button>
                   </div>
                 </div>
@@ -661,9 +654,8 @@ export function ChatView({
                       <>
                         <div className="context-row">
                           <strong>聚焦文件</strong>
-                          <button className="ghost-inline-button" onClick={() => onCopyPath(selectedFilePath)}>
-                            <Clipboard size={14} />
-                            复制路径
+                          <button className="ghost-inline-button icon-only" title="复制路径" onClick={() => onCopyPath(selectedFilePath)}>
+                            <Copy size={14} />
                           </button>
                         </div>
                         <div className="focused-file-name">{selectedFilePath}</div>

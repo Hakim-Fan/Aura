@@ -56,7 +56,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 18px 14px 16px;
+  padding: 36px 14px 16px;
   border-right: 1px solid rgba(115, 138, 165, 0.12);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 253, 0.92));
@@ -80,6 +80,11 @@ button {
 .sidebar-header {
   justify-content: space-between;
   padding: 2px 8px 0;
+  -webkit-app-region: drag;
+}
+
+.sidebar-action-button {
+  -webkit-app-region: no-drag;
 }
 
 .sidebar-title {
@@ -1355,7 +1360,6 @@ button:disabled {
 .session-row-meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   color: var(--text-3);
   font-size: 12px;
@@ -1389,8 +1393,9 @@ button:disabled {
 }
 
 .sidebar-utility-button {
-  min-height: 36px;
-  padding: 0 12px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   border-radius: 12px;
 }
 
@@ -1411,29 +1416,40 @@ button:disabled {
 
 .chat-topbar {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 6px 6px 0;
+  position: relative;
+  height: 48px;
+  padding: 0 16px;
+  -webkit-app-region: drag;
 }
 
-.chat-topbar h2 {
-  margin-top: 2px;
-  font-size: 26px;
-  letter-spacing: -0.04em;
-  line-height: 1.2;
-  max-width: 760px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+.chat-topbar-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  -webkit-app-region: no-drag;
 }
 
-.chat-heading-subtle {
-  margin-top: 6px;
-  color: var(--text-3);
-  font-size: 12px;
-  letter-spacing: 0.02em;
+.chat-topbar-center .workspace-trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.chat-topbar-center .workspace-trigger:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
 }
 
 .chat-topbar-actions {
@@ -1442,11 +1458,18 @@ button:disabled {
   gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+}
+
+.chat-topbar-actions.compact {
+  width: 100%;
 }
 
 .toolbar-toggle {
-  min-height: 30px;
-  padding: 0 12px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   border-radius: 999px;
   font-size: 12px;
 }
@@ -1806,6 +1829,14 @@ button:disabled {
   font-size: 12px;
 }
 
+.ghost-inline-button.icon-only,
+.composer-send-button.icon-only {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
 .markdown-body {
   color: var(--text-1);
   font-size: 15px;
@@ -1966,14 +1997,17 @@ button:disabled {
 }
 
 .composer-input-shell textarea {
+  height: 116px;
   min-height: 116px;
+  max-height: 116px;
   padding: 0;
   border: 0;
-  resize: vertical;
+  resize: none;
   background: transparent;
   box-shadow: none;
   font-size: 18px;
   line-height: 1.6;
+  overflow: auto;
 }
 
 .composer-toolbar-row {
@@ -1997,20 +2031,6 @@ button:disabled {
   border-radius: 12px;
 }
 
-.composer-context-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 36px;
-  max-width: 220px;
-  padding: 0 12px;
-  border-radius: 12px;
-  border: 1px solid var(--border-subtle);
-  background: rgba(255, 255, 255, 0.66);
-  color: var(--text-2);
-}
-
-.composer-context-button span,
 .composer-model-button span {
   min-width: 0;
   overflow: hidden;
@@ -2041,8 +2061,10 @@ button:disabled {
 }
 
 .composer-send-button {
+  width: 38px;
+  height: 38px;
   min-height: 38px;
-  padding: 0 16px;
+  padding: 0;
   border-radius: 12px;
   color: #fff;
   background: linear-gradient(135deg, #4f7cff 0%, #4367d6 100%);
