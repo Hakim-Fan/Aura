@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, Plus, Power, RefreshCw, Search, Trash2 } from 'lucide-react'
+import { AlertCircle, Check, CheckCircle2, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
 import type { ProviderMode, ProviderProfile } from '../types'
 
 const providerOptions: Array<{
@@ -7,22 +7,22 @@ const providerOptions: Array<{
   label: string
   description: string
 }> = [
-  {
-    id: 'openai',
-    label: 'OpenAI',
-    description: '适合 GPT 系列模型和 OpenAI 原生 API。',
-  },
-  {
-    id: 'google',
-    label: 'Google',
-    description: '适合 Gemini 原生 API。',
-  },
-  {
-    id: 'custom',
-    label: 'Custom',
-    description: '适合兼容 OpenAI API 的自定义服务。',
-  },
-]
+    {
+      id: 'openai',
+      label: 'OpenAI',
+      description: '适合 GPT 系列模型和 OpenAI 原生 API。',
+    },
+    {
+      id: 'google',
+      label: 'Google',
+      description: '适合 Gemini 原生 API。',
+    },
+    {
+      id: 'custom',
+      label: 'Custom',
+      description: '适合兼容 OpenAI API 的自定义服务。',
+    },
+  ]
 
 type Props = {
   profiles: ProviderProfile[]
@@ -69,6 +69,10 @@ export function ProvidersView({
   const activeProfile = profiles.find(profile => profile.id === activeProfileId) || profiles[0]
   const [modelQuery, setModelQuery] = useState('')
 
+  // Define a reusable minimal input class for UnoCSS
+  const premiumInputClass = "w-full px-3.5 py-2.5 rounded-xl border border-black/8 bg-white focus:border-black/20 outline-none transition-all duration-200 font-500"
+  const labelClass = "text-11px font-700 text-[var(--text-secondary)] opacity-50 uppercase tracking-0.05em text-right"
+
   useEffect(() => {
     setModelQuery('')
   }, [activeProfile?.id])
@@ -108,7 +112,7 @@ export function ProvidersView({
               const isActive = profile.id === activeProfileId
               const profileEnabledModels = profile.models.filter(model => model.enabled).length
               const baseUrl = profile.baseUrl || baseUrlPlaceholder(profile.provider)
-              
+
               return (
                 <button
                   key={profile.id}
@@ -119,9 +123,9 @@ export function ProvidersView({
                     <span className="profile-name">{profile.name}</span>
                     <span className="provider-type-tag">{providerOptions.find(item => item.id === profile.provider)?.label || profile.provider}</span>
                   </div>
-                  
+
                   <div className="card-url" title={baseUrl}>{baseUrl}</div>
-                  
+
                   <div className="card-footer">
                     <div className="status-indicator">
                       <span className={`status-dot ${profile.enabled ? 'online' : 'offline'}`} />
@@ -131,7 +135,7 @@ export function ProvidersView({
                       {profileEnabledModels > 0 ? `${profileEnabledModels} Models` : '未选模型'}
                     </span>
                   </div>
-                  
+
                   {isActive && <div className="active-glow" />}
                 </button>
               )
@@ -148,24 +152,32 @@ export function ProvidersView({
             </div>
 
             <div className="header-actions">
-              <button className="secondary-button" onClick={() => onDeleteProfile(activeProfile.id)} title="删除提供商">
-                <Trash2 size={14} />
+              <button
+                className="w-10 h-10 flex items-center justify-center rounded-xl bg-black/4 hover:bg-black/8 hover:text-red-500 transition-all"
+                onClick={() => onDeleteProfile(activeProfile.id)}
+                title="删除提供商"
+              >
+                <Trash2 size={16} />
               </button>
-              <label className="toggle-inline">
-                <input
-                  checked={activeProfile.enabled}
-                  onChange={event => onProfileChange(activeProfile.id, 'enabled', event.target.checked)}
-                  type="checkbox"
-                />
-                {activeProfile.enabled ? '已启用' : '已停用'}
-              </label>
+
+              <button
+                className={`flex items-center gap-3 px-3 py-1.5 rounded-xl border transition-all ${activeProfile.enabled ? 'bg-green-50/50 border-green-200/50 text-green-700' : 'bg-black/4 border-transparent text-[var(--text-secondary)]'
+                  }`}
+                onClick={() => onProfileChange(activeProfile.id, 'enabled', !activeProfile.enabled)}
+              >
+                <div className={`w-8 h-4.5 rounded-full p-0.5 transition-colors duration-200 ${activeProfile.enabled ? 'bg-green-600' : 'bg-black/20'}`}>
+                  <div className={`w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform duration-200 ${activeProfile.enabled ? 'translate-x-3.5' : 'translate-x-0'}`} />
+                </div>
+                <span className="text-12px font-600">{activeProfile.enabled ? '已启用' : '已停用'}</span>
+              </button>
             </div>
           </div>
 
           <div className="form-container">
             <div className="form-row">
-              <label>显示名称</label>
+              <label className={labelClass}>显示名称</label>
               <input
+                className={premiumInputClass}
                 value={activeProfile.name}
                 onChange={event => onProfileChange(activeProfile.id, 'name', event.target.value)}
                 placeholder="例如 OpenRouter / Nvidia / Moonshot"
@@ -173,7 +185,7 @@ export function ProvidersView({
             </div>
 
             <div className="form-row">
-              <label>Provider 类型</label>
+              <label className={labelClass}>Provider 类型</label>
               <div className="settings-tabs !mb-0">
                 {providerOptions.map(option => (
                   <button
@@ -188,9 +200,9 @@ export function ProvidersView({
             </div>
 
             <div className="form-row">
-              <label>API Key</label>
+              <label className={labelClass}>API Key</label>
               <input
-                className="monospace"
+                className={`${premiumInputClass} font-mono !text-12px`}
                 value={activeProfile.apiKey}
                 onChange={event => onProfileChange(activeProfile.id, 'apiKey', event.target.value)}
                 placeholder="输入真实 API Key"
@@ -199,9 +211,9 @@ export function ProvidersView({
             </div>
 
             <div className="form-row">
-              <label>Base URL</label>
+              <label className={labelClass}>Base URL</label>
               <input
-                className="monospace"
+                className={`${premiumInputClass} font-mono !text-12px`}
                 value={activeProfile.baseUrl}
                 onChange={event => onProfileChange(activeProfile.id, 'baseUrl', event.target.value)}
                 placeholder={baseUrlPlaceholder(activeProfile.provider)}
@@ -209,24 +221,40 @@ export function ProvidersView({
             </div>
 
             <div className="form-row">
-              <label></label>
-              <div className="header-actions">
-                <button className="secondary-button" disabled={isTesting} onClick={onTestConnection}>
-                  <RefreshCw className={isTesting ? 'spin-icon' : ''} size={14} />
-                  {isTesting ? '正在测试...' : '测试连通性'}
+              <label className={labelClass}></label>
+              <div className="flex gap-3">
+                <button
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-black/4 hover:bg-black/8 disabled:opacity-40 transition-all font-600 text-13px"
+                  disabled={isTesting}
+                  onClick={onTestConnection}
+                >
+                  <RefreshCw className={isTesting ? 'animate-spin' : ''} size={14} />
+                  <span>{isTesting ? '正在测试...' : '测试连通性'}</span>
                 </button>
-                <button className="secondary-button" disabled={isFetchingModels} onClick={onFetchModels}>
-                  <RefreshCw className={isFetchingModels ? 'spin-icon' : ''} size={14} />
-                  {isFetchingModels ? '正在获取...' : '获取模型列表'}
+                <button
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-black/4 hover:bg-black/8 disabled:opacity-40 transition-all font-600 text-13px"
+                  disabled={isFetchingModels}
+                  onClick={onFetchModels}
+                >
+                  <RefreshCw className={isFetchingModels ? 'animate-spin' : ''} size={14} />
+                  <span>{isFetchingModels ? '正在获取...' : '获取模型列表'}</span>
                 </button>
               </div>
             </div>
 
             {providerStatus ? (
               <div className="form-row">
-                <label></label>
-                <div className={`provider-feedback ${providerStatus.tone}`}>
-                  <p className="muted">{providerStatus.message}</p>
+                <label className={labelClass}></label>
+                <div className={`px-4 py-3 rounded-xl border flex items-start gap-3 transition-all ${providerStatus.tone === 'success'
+                  ? 'bg-green-50/50 border-green-200/50 text-green-700'
+                  : 'bg-red-50/50 border-red-200/50 text-red-700'
+                  }`}>
+                  <div>
+                    {providerStatus.tone === 'success' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+                  </div>
+                  <div className="flex-1 text-13px font-500">
+                    {providerStatus.message}
+                  </div>
                 </div>
               </div>
             ) : null}
@@ -245,6 +273,7 @@ export function ProvidersView({
                   <div className="provider-model-search">
                     <Search size={14} />
                     <input
+                      className="border-none bg-transparent flex-1 p-0 focus:outline-none focus:ring-0 text-13px"
                       value={modelQuery}
                       onChange={event => setModelQuery(event.target.value)}
                       placeholder="搜索模型名称..."
@@ -262,14 +291,12 @@ export function ProvidersView({
                               <span className="truncate block opacity-60 text-[11px]">{model.id}</span>
                             </div>
                             <div className="flex items-center">
-                              <label className="ios-switch">
-                                <input
-                                  type="checkbox"
-                                  checked={model.enabled}
-                                  onChange={() => onToggleModel(activeProfile.id, model.id)}
-                                />
-                                <span className="switch-slider"></span>
-                              </label>
+                              <button
+                                className={`w-9 h-5 rounded-full p-0.5 transition-colors duration-200 focus:outline-none ${model.enabled ? 'bg-[var(--bg-user-bubble)]' : 'bg-black/10'}`}
+                                onClick={() => onToggleModel(activeProfile.id, model.id)}
+                              >
+                                <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200 transform ${model.enabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                              </button>
                             </div>
                           </div>
                         ))}

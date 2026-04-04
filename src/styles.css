@@ -194,28 +194,37 @@ button {
   margin-bottom: 8px;
   line-height: 1.6;
 }
+
 .markdown-summary p:last-child {
   margin-bottom: 0;
 }
+
 .markdown-summary strong {
   color: var(--text-primary);
   font-weight: 600;
 }
+
 .markdown-summary code {
   padding: 1px 4px;
   background: rgba(15, 23, 42, 0.05);
   border-radius: 5px;
   font-family: monospace;
 }
-.markdown-summary h1, .markdown-summary h2, .markdown-summary h3 {
+
+.markdown-summary h1,
+.markdown-summary h2,
+.markdown-summary h3 {
   font-size: 13px;
   margin: 12px 0 6px;
   font-weight: 600;
 }
-.markdown-summary ul, .markdown-summary ol {
+
+.markdown-summary ul,
+.markdown-summary ol {
   padding-left: 18px;
   margin-bottom: 8px;
 }
+
 .markdown-summary li {
   margin-bottom: 4px;
 }
@@ -328,13 +337,25 @@ button {
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .settings-grid {
@@ -343,7 +364,10 @@ button {
   gap: 20px;
 }
 
-.dashboard-card, .asset-card, .providers-list-card, .provider-detail-card {
+.dashboard-card,
+.asset-card,
+.providers-list-card,
+.provider-detail-card {
   background: #ffffff;
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
@@ -365,7 +389,8 @@ button {
 }
 
 /* UI Elements */
-.primary-button, .secondary-button {
+.primary-button,
+.secondary-button {
   padding: 8px 18px;
   border-radius: 10px;
   font-size: 13px;
@@ -394,7 +419,8 @@ button {
   background: rgba(0, 0, 0, 0.07);
 }
 
-.primary-button:disabled, .secondary-button:disabled {
+.primary-button:disabled,
+.secondary-button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
@@ -404,7 +430,7 @@ button {
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  background: rgba(0,0,0,0.05);
+  background: rgba(0, 0, 0, 0.05);
   padding: 2px 6px;
   border-radius: 4px;
   color: var(--text-secondary);
@@ -666,11 +692,11 @@ button {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
-input:checked + .switch-slider {
+input:checked+.switch-slider {
   background-color: var(--bg-user-bubble);
 }
 
-input:checked + .switch-slider:before {
+input:checked+.switch-slider:before {
   transform: translateX(18px);
 }
 
@@ -845,7 +871,9 @@ input[type="checkbox"] {
   height: 16px;
 }
 
-input[type="password"], input[type="text"], textarea {
+input[type="password"],
+input[type="text"],
+textarea {
   width: 100%;
   padding: 9px 12px;
   border-radius: 8px;
@@ -861,11 +889,13 @@ input.monospace {
   font-size: 13px;
 }
 
-input:focus, textarea:focus {
+input:focus,
+textarea:focus {
   background: white;
   border-color: var(--bg-user-bubble);
   box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.1);
 }
+
 /* --- Hero & Welcome Page Styles --- */
 .hero-shell {
   flex: 1;
@@ -1024,7 +1054,8 @@ input:focus, textarea:focus {
   border-color: rgba(0, 0, 0, 0.12);
 }
 
-input:focus, textarea:focus {
+input:focus,
+textarea:focus {
   background: white;
   border-color: var(--bg-user-bubble);
   box-shadow: 0 0 0 3px rgba(95, 142, 136, 0.1);
