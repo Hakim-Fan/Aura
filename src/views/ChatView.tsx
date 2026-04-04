@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent,
   type KeyboardEvent,
 } from 'react'
 import ReactMarkdown from 'react-markdown'
@@ -28,6 +29,7 @@ import {
   SendHorizontal,
   Settings2,
   Sparkles,
+  Square,
   Wrench,
   X,
 } from 'lucide-react'
@@ -36,6 +38,7 @@ import type {
   AgentSettings,
   AgentTaskSnapshot,
   ChatMessage,
+  MessageAttachment,
   MessageEvent,
   ProviderMode,
   TaskNode,
@@ -64,8 +67,12 @@ type Props = {
   previewImage: string
   previewLoading: boolean
   previewError: string
-  attachmentPath: string | null
-  attachmentPreview: string
+  attachments: Array<{
+    id: string
+    name: string
+    path?: string
+    preview?: string
+  }>
   modelGroups: ModelGroup[]
   activeModelProfileId: string
   onDraftChange: (value: string) => void
@@ -74,15 +81,32 @@ type Props = {
   onHandleApproval: (decision: 'approve' | 'deny') => void
   onChooseWorkspace: () => void
   onPickAttachment: () => void
+  onPasteAttachments: (files: File[]) => void
   onSelectModel: (profileId: string, modelId: string) => void
   onOpenAttachment: (path: string) => void
-  onClearAttachment: () => void
+  onRemoveAttachment: (attachmentId: string) => void
   onCopyPath: (path: string) => void
   onCopyText: (value: string) => void
   onEditMessage: (messageId: string) => void
   onRegenerateMessage: (messageId: string) => void
   onResendMessage: (messageId: string) => void
   onToggleMessageActivity: (messageId: string) => void
+  onStop: () => void
+}
+
+function estimateTokenCount(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return 0
+  }
+  return Math.ceil(trimmed.length / 2.2)
+}
+
+function formatTokenCount(value: number) {
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(1)}k`
+  }
+  return String(value)
 }
 
 const suggestedPrompts = [
@@ -189,10 +213,20 @@ function isGenericTaskSummary(summary?: string) {
   return !normalized || normalized === 'primary agent task'
 }
 
-function sanitizeTaskNodes(nodes: TaskNode[]): TaskNode[] {
+function normalizeComparableText(value?: string) {
+  return (value || '').replace(/\s+/g, ' ').trim()
+}
+
+function sanitizeTaskNodes(nodes: TaskNode[], finalAnswer = ''): TaskNode[] {
+  const normalizedAnswer = normalizeComparableText(finalAnswer)
   return nodes.flatMap(node => {
-    const children = sanitizeTaskNodes(node.children || [])
-    const summary = isGenericTaskSummary(node.summary) ? '' : node.summary
+    const children = sanitizeTaskNodes(node.children || [], finalAnswer)
+    const normalizedSummary = normalizeComparableText(node.summary)
+    const summary =
+      isGenericTaskSummary(node.summary) ||
+      (normalizedAnswer && normalizedSummary === normalizedAnswer)
+        ? ''
+        : node.summary
 
     if (node.kind === 'main' && !summary && children.length > 0) {
       return children
@@ -335,7 +369,7 @@ function AssistantMessageCard({
 }) {
   const activity = message.activity
   const duration = activity ? (activity.finishedAt || Date.now()) - activity.startedAt : undefined
-  const visibleSteps = sanitizeTaskNodes(message.steps || [])
+  const visibleSteps = sanitizeTaskNodes(message.steps || [], message.content)
   const hasExecution = Boolean(activity) || (message.events?.length || 0) > 0 || visibleSteps.length > 0
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
   const activitySummary = activity
@@ -448,14 +482,43 @@ function UserMessageCard({
   onCopyText,
   onEditMessage,
   onResend,
+  onOpenAttachment,
 }: {
   message: ChatMessage
   onCopyText: (value: string) => void
   onEditMessage: (messageId: string) => void
   onResend: (messageId: string) => void
+  onOpenAttachment: (path: string) => void
 }) {
   return (
     <article className="group flex flex-col items-end gap-2">
+      {message.attachments?.length ? (
+        <div className="flex max-w-[78%] flex-wrap justify-end gap-2">
+          {message.attachments.map((attachment: MessageAttachment) => (
+            <button
+              key={attachment.id}
+              className="inline-flex min-w-0 items-center gap-3 rounded-2xl border border-[rgba(15,23,42,0.08)] bg-white px-3 py-2 text-left shadow-sm"
+              onClick={() => onOpenAttachment(attachment.path)}
+              title={attachment.path}
+            >
+              {attachment.preview ? (
+                <img
+                  src={attachment.preview}
+                  alt={attachment.name}
+                  className="h-10 w-10 shrink-0 rounded-xl object-cover border border-[rgba(15,23,42,0.06)]"
+                />
+              ) : (
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.03)] text-[var(--text-secondary)]">
+                  <Paperclip size={16} />
+                </div>
+              )}
+              <span className="max-w-220px truncate text-13px font-600 text-[var(--text-primary)]">
+                {attachment.name}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="max-w-[78%] bg-[var(--bg-user-bubble)] text-[var(--text-user-bubble)] px-5 py-3 rounded-2xl rounded-tr-8px shadow-[0_10px_30px_rgba(60,87,78,0.10)] text-15px leading-relaxed">
         {message.content}
       </div>
@@ -489,8 +552,7 @@ export function ChatView({
   previewImage,
   previewLoading,
   previewError,
-  attachmentPath,
-  attachmentPreview,
+  attachments,
   modelGroups,
   activeModelProfileId,
   onDraftChange,
@@ -499,21 +561,26 @@ export function ChatView({
   onHandleApproval,
   onChooseWorkspace,
   onPickAttachment,
+  onPasteAttachments,
   onSelectModel,
   onOpenAttachment,
-  onClearAttachment,
+  onRemoveAttachment,
   onCopyPath,
   onCopyText,
   onEditMessage,
   onRegenerateMessage,
   onResendMessage,
   onToggleMessageActivity,
+  onStop,
 }: Props) {
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [modelSearchTerm, setModelSearchTerm] = useState('')
   const [collapsedModelGroups, setCollapsedModelGroups] = useState<Set<string>>(new Set())
-  const [attachmentLightboxOpen, setAttachmentLightboxOpen] = useState(false)
+  const [lightboxAttachment, setLightboxAttachment] = useState<{
+    name: string
+    preview: string
+  } | null>(null)
 
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -567,6 +634,15 @@ export function ChatView({
     }))
     .filter(group => group.models.length > 0)
 
+  const currentContextTokenCount = useMemo(() => {
+    const messageTokens = messages.reduce((total, message) => total + estimateTokenCount(message.content), 0)
+    const attachmentTokens = attachments.reduce(
+      (total, attachment) => total + estimateTokenCount(attachment.name),
+      0,
+    )
+    return messageTokens + attachmentTokens + estimateTokenCount(draft)
+  }, [attachments, draft, messages])
+
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isMetaEnter) {
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
@@ -579,6 +655,22 @@ export function ChatView({
         onSubmit()
       }
     }
+  }
+
+  function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const clipboardFiles = Array.from(event.clipboardData.files || [])
+    const itemFiles = Array.from(event.clipboardData.items || [])
+      .filter(item => item.kind === 'file')
+      .map(item => item.getAsFile())
+      .filter((file): file is File => Boolean(file))
+
+    const files = clipboardFiles.length > 0 ? clipboardFiles : itemFiles
+    if (files.length === 0) {
+      return
+    }
+
+    event.preventDefault()
+    onPasteAttachments(files)
   }
 
   return (
@@ -651,6 +743,7 @@ export function ChatView({
                       onCopyText={onCopyText}
                       onEditMessage={onEditMessage}
                       onResend={onResendMessage}
+                      onOpenAttachment={onOpenAttachment}
                     />
                   ) : (
                     <AssistantMessageCard
@@ -676,56 +769,58 @@ export function ChatView({
                   value={draft}
                   onChange={event => onDraftChange(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
+                  onPaste={handleComposerPaste}
                   placeholder="在这里输入你的需求或问题..."
                 />
 
-                {attachmentPath ? (
+                {attachments.length > 0 ? (
                   <div className="mx-3 mb-3 flex items-center gap-2 overflow-x-auto custom-scrollbar">
-                    <div
-                      className="group inline-flex min-w-0 items-center gap-3 rounded-full border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-3 py-2"
-                      title={attachmentPath}
-                    >
-                      <button
-                        className="min-w-0 inline-flex items-center gap-3 text-left"
-                        onClick={() => {
-                          if (attachmentPreview) {
-                            setAttachmentLightboxOpen(true)
-                            return
-                          }
-                          onOpenAttachment(attachmentPath)
-                        }}
-                        title={attachmentPreview ? '预览图片' : '打开附件'}
+                    {attachments.map(attachment => (
+                      <div
+                        key={attachment.id}
+                        className="group inline-flex min-w-0 items-center gap-3 rounded-full border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-3 py-2"
+                        title={attachment.path || attachment.name}
                       >
-                        {attachmentPreview ? (
-                          <img
-                            src={attachmentPreview}
-                            alt={attachmentPath.split('/').pop() || 'attachment'}
-                            className="h-8 w-8 shrink-0 rounded-lg object-cover border border-[rgba(15,23,42,0.06)]"
-                          />
-                        ) : (
-                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[rgba(15,23,42,0.06)] bg-white text-[var(--text-secondary)]">
-                            <Paperclip size={14} />
-                          </div>
-                        )}
-                        <span className="max-w-180px truncate text-13px font-600 text-[var(--text-primary)]">
-                          {attachmentPath.split('/').pop()}
-                        </span>
-                      </button>
-                      <button
-                        className="p-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] opacity-70"
-                        title="用默认应用打开"
-                        onClick={() => onOpenAttachment(attachmentPath)}
-                      >
-                        <ArrowUpRight size={13} />
-                      </button>
-                      <button
-                        className="p-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] opacity-70"
-                        title="移除附件"
-                        onClick={onClearAttachment}
-                      >
-                        <X size={13} />
-                      </button>
-                    </div>
+                        <button
+                          className="min-w-0 inline-flex items-center gap-3 text-left"
+                          onClick={() => {
+                            if (attachment.preview) {
+                              setLightboxAttachment({
+                                name: attachment.name,
+                                preview: attachment.preview,
+                              })
+                              return
+                            }
+                            if (attachment.path) {
+                              onOpenAttachment(attachment.path)
+                            }
+                          }}
+                          title={attachment.preview ? '预览图片' : '打开附件'}
+                        >
+                          {attachment.preview ? (
+                            <img
+                              src={attachment.preview}
+                              alt={attachment.name}
+                              className="h-8 w-8 shrink-0 rounded-lg object-cover border border-[rgba(15,23,42,0.06)]"
+                            />
+                          ) : (
+                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[rgba(15,23,42,0.06)] bg-white text-[var(--text-secondary)]">
+                              <Paperclip size={14} />
+                            </div>
+                          )}
+                          <span className="max-w-180px truncate text-13px font-600 text-[var(--text-primary)]">
+                            {attachment.name}
+                          </span>
+                        </button>
+                        <button
+                          className="p-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] opacity-70"
+                          title="移除附件"
+                          onClick={() => onRemoveAttachment(attachment.id)}
+                        >
+                          <X size={13} />
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 ) : null}
 
@@ -750,10 +845,6 @@ export function ChatView({
                         <LayoutGrid size={14} className="opacity-60" />
                         <span className="max-w-120px truncate font-600 text-[var(--text-primary)] opacity-70 group-hover:opacity-100">{modelLabel}</span>
                         <ChevronDown size={12} className="opacity-30" />
-                        {/* <div className="ml-1 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[rgba(15,23,42,0.04)] text-9px font-700 opacity-60">
-                          <RefreshCw size={8} />
-                          <span>1%</span>
-                        </div> */}
                       </button>
 
                       {modelMenuOpen ? (
@@ -855,17 +946,29 @@ export function ChatView({
                         </div>
                       ) : null}
                     </div>
+                    {/* 上下文占用量 */}
+                    <div className="ml-1 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[rgba(15,23,42,0.04)] text-9px font-700 opacity-60">
+                      <RefreshCw size={8} />
+                      <span>{formatTokenCount(currentContextTokenCount)} tok</span>
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-4">
                     <span className="text-11px text-[var(--text-secondary)] opacity-40 hidden sm:inline">{composerMetaHint}</span>
                     <button
-                      className="flex items-center justify-center p-1.5 rounded-lg bg-[var(--accent-soft-strong)] text-white hover:brightness-110 disabled:opacity-40 disabled:grayscale transition-all"
-                      title="发送"
-                      disabled={isRunning || !draft.trim()}
-                      onClick={onSubmit}
+                      className={`flex items-center justify-center p-1.5 rounded-lg text-white transition-all ${isRunning
+                        ? 'bg-red-500 hover:bg-red-600 shadow-md shadow-red-200'
+                        : 'bg-[var(--accent-soft-strong)] hover:brightness-110 disabled:opacity-40 disabled:grayscale'
+                        }`}
+                      title={isRunning ? '停止生成' : '发送'}
+                      disabled={!isRunning && !draft.trim() && attachments.length === 0}
+                      onClick={isRunning ? onStop : onSubmit}
                     >
-                      <SendHorizontal size={18} />
+                      {isRunning ? (
+                        <Square size={16} fill="currentColor" strokeWidth={0} />
+                      ) : (
+                        <SendHorizontal size={18} />
+                      )}
                     </button>
                   </div>
                 </div>
@@ -956,22 +1059,22 @@ export function ChatView({
         )}
       </div>
 
-      {attachmentLightboxOpen && attachmentPreview ? (
+      {lightboxAttachment ? (
         <div
           className="absolute inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.55)] p-10 backdrop-blur-sm"
-          onClick={() => setAttachmentLightboxOpen(false)}
+          onClick={() => setLightboxAttachment(null)}
         >
           <div className="relative max-h-full max-w-full rounded-2xl bg-white p-3 shadow-2xl">
             <button
               className="absolute right-3 top-3 rounded-full bg-white/90 p-2 text-[var(--text-secondary)] shadow-sm"
-              onClick={() => setAttachmentLightboxOpen(false)}
+              onClick={() => setLightboxAttachment(null)}
               title="关闭预览"
             >
               <X size={16} />
             </button>
             <img
-              src={attachmentPreview}
-              alt={attachmentPath?.split('/').pop() || 'attachment preview'}
+              src={lightboxAttachment.preview}
+              alt={lightboxAttachment.name}
               className="max-h-[80vh] max-w-[80vw] rounded-xl object-contain"
             />
           </div>

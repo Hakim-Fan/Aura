@@ -198,7 +198,7 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
-      taskTracker.completeTask(currentTaskId, result.message || 'Task completed')
+      taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
         status: 'completed',
@@ -220,7 +220,7 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
-      taskTracker.completeTask(currentTaskId, result.message || 'Task completed')
+      taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
         status: 'completed',

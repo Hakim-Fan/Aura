@@ -294,6 +294,40 @@ export function loadSessions(): Session[] {
           content: message.content || '',
           status: message.status || 'completed',
           createdAt: message.createdAt || session.updatedAt || Date.now(),
+          attachments: Array.isArray(message.attachments)
+            ? message.attachments
+                .map(attachment => {
+                  if (!attachment || typeof attachment !== 'object') {
+                    return null
+                  }
+                  const path =
+                    typeof attachment.path === 'string' ? attachment.path : ''
+                  if (!path) {
+                    return null
+                  }
+                  return {
+                    id:
+                      typeof attachment.id === 'string' && attachment.id.trim()
+                        ? attachment.id
+                        : Math.random().toString(36).slice(2, 10),
+                    name:
+                      typeof attachment.name === 'string' && attachment.name.trim()
+                        ? attachment.name
+                        : path.split('/').pop() || '附件',
+                    path,
+                    preview:
+                      typeof attachment.preview === 'string' ? attachment.preview : undefined,
+                    mimeType:
+                      typeof attachment.mimeType === 'string'
+                        ? attachment.mimeType
+                        : undefined,
+                  }
+                })
+                .filter(
+                  (attachment): attachment is NonNullable<typeof attachment> =>
+                    Boolean(attachment),
+                )
+            : [],
           activity: message.activity,
           events: message.events || [],
           steps: message.steps || [],

@@ -31,3 +31,7 @@ export async function respondToApproval(
 ): Promise<void> {
   return invoke('respond_to_agent_approval', { taskId, decision })
 }
+
+export async function abortAgentTask(taskId: string): Promise<void> {
+  return invoke('abort_agent_task', { taskId })
+}

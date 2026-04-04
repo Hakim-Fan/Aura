@@ -2,20 +2,23 @@ import { useEffect, useMemo, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { AppSidebar } from './components/AppSidebar'
-import { getAgentTask, respondToApproval, startAgentTask } from './lib/agent'
+import { abortAgentTask, getAgentTask, respondToApproval, startAgentTask } from './lib/agent'
 import { loadSessions, loadSettings, saveSessions } from './lib/storage'
 import { openSettingsWindow } from './lib/windows'
 import {
   createSessionWorkspace,
+  importAttachmentFromPath,
   openPathInDefaultApp,
   readImagePreview,
   readTextFile,
   readWorkspaceTree,
+  writeAttachmentBytes,
 } from './lib/workspace'
 import type {
   AgentSettings,
   AgentTaskSnapshot,
   ChatMessage,
+  MessageAttachment,
   MessageActivity,
   MessageEvent,
   ProviderProfile,
@@ -116,6 +119,77 @@ function getFileExtension(filePath: string) {
 
 function canPreviewAsText(filePath: string) {
   return textPreviewExtensions.has(getFileExtension(filePath))
+}
+
+type DraftAttachment = {
+  id: string
+  name: string
+  path?: string
+  preview?: string
+  mimeType?: string
+  file?: File
+}
+
+function extensionFromMimeType(mimeType: string) {
+  switch (mimeType) {
+    case 'image/png':
+      return 'png'
+    case 'image/jpeg':
+      return 'jpg'
+    case 'image/gif':
+      return 'gif'
+    case 'image/webp':
+      return 'webp'
+    case 'image/bmp':
+      return 'bmp'
+    case 'image/svg+xml':
+      return 'svg'
+    case 'application/pdf':
+      return 'pdf'
+    default:
+      return ''
+  }
+}
+
+function guessAttachmentName(file: File, fallbackPrefix = 'attachment') {
+  if (file.name.trim()) {
+    return file.name
+  }
+  const extension = extensionFromMimeType(file.type)
+  return extension ? `${fallbackPrefix}.${extension}` : fallbackPrefix
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize)
+    binary += String.fromCharCode(...chunk)
+  }
+  return btoa(binary)
+}
+
+async function createDraftAttachmentFromFile(file: File): Promise<DraftAttachment> {
+  const name = guessAttachmentName(file, `pasted-${Date.now()}`)
+  let preview = ''
+
+  if (file.type.startsWith('image/')) {
+    preview = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+      reader.onerror = () => reject(reader.error)
+      reader.readAsDataURL(file)
+    })
+  }
+
+  return {
+    id: createId(),
+    name,
+    preview,
+    mimeType: file.type || undefined,
+    file,
+  }
 }
 
 function getActiveProviderProfile(settings: AgentSettings) {
@@ -259,8 +333,7 @@ export function MainWindowApp() {
   const [previewImage, setPreviewImage] = useState('')
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState('')
-  const [draftAttachmentPath, setDraftAttachmentPath] = useState<string | null>(null)
-  const [draftAttachmentPreview, setDraftAttachmentPreview] = useState('')
+  const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([])
 
   const activeSession = useMemo(() => {
     if (!activeSessionId) {
@@ -543,8 +616,6 @@ export function MainWindowApp() {
     }
 
     setSelectedFilePath(null)
-    setDraftAttachmentPath(null)
-    setDraftAttachmentPreview('')
     void loadTree()
     return () => {
       cancelled = true
@@ -636,24 +707,87 @@ export function MainWindowApp() {
     setSelectedFilePath(null)
   }
 
-  async function chooseAttachmentForDraft() {
-    const selected = await open({
-      directory: false,
-      multiple: false,
-      title: '选择要引用的附件',
-    })
+  async function appendAttachmentsFromPaths(paths: string[]) {
+    const nextAttachments = await Promise.all(
+      paths.map(async path => {
+        let preview = ''
+        try {
+          preview = (await readImagePreview(path)) || ''
+        } catch {
+          preview = ''
+        }
 
-    if (typeof selected !== 'string') {
+        return {
+          id: createId(),
+          name: path.split('/').pop() || '附件',
+          path,
+          preview,
+        } satisfies DraftAttachment
+      }),
+    )
+
+    setDraftAttachments(current => {
+      const existingPaths = new Set(current.map(attachment => attachment.path).filter(Boolean))
+      const deduped = nextAttachments.filter(
+        attachment => !attachment.path || !existingPaths.has(attachment.path),
+      )
+      return [...current, ...deduped]
+    })
+  }
+
+  async function appendAttachmentsFromFiles(files: File[]) {
+    if (files.length === 0) {
       return
     }
 
-    setDraftAttachmentPath(selected)
-    try {
-      const imageData = await readImagePreview(selected)
-      setDraftAttachmentPreview(imageData || '')
-    } catch {
-      setDraftAttachmentPreview('')
+    const nextAttachments = await Promise.all(files.map(file => createDraftAttachmentFromFile(file))).catch(
+      caught => {
+        setError(caught instanceof Error ? caught.message : '读取剪贴板附件失败。')
+        return null
+      },
+    )
+    if (!nextAttachments) {
+      return
     }
+    setDraftAttachments(current => {
+      const existingSignatures = new Set(
+        current
+          .filter(attachment => attachment.file)
+          .map(attachment =>
+            `${attachment.file?.name || attachment.name}:${attachment.file?.size || 0}:${attachment.file?.lastModified || 0}`,
+          ),
+      )
+      const deduped = nextAttachments.filter(attachment => {
+        const file = attachment.file
+        if (!file) {
+          return true
+        }
+        const signature = `${file.name}:${file.size}:${file.lastModified}`
+        return !existingSignatures.has(signature)
+      })
+      return [...current, ...deduped]
+    })
+  }
+
+  async function chooseAttachmentForDraft() {
+    const selected = await open({
+      directory: false,
+      multiple: true,
+      title: '选择要引用的附件',
+    })
+
+    if (!selected) {
+      return
+    }
+
+    const paths = Array.isArray(selected) ? selected : [selected]
+    await appendAttachmentsFromPaths(paths)
+  }
+
+  function removeDraftAttachment(attachmentId: string) {
+    setDraftAttachments(current =>
+      current.filter(attachment => attachment.id !== attachmentId),
+    )
   }
 
   function createFreshSession() {
@@ -661,15 +795,13 @@ export function MainWindowApp() {
     setSessions(current => [next, ...current])
     setActiveSessionId(next.id)
     setDraft('')
-    setDraftAttachmentPath(null)
-    setDraftAttachmentPreview('')
+    setDraftAttachments([])
     setError('')
   }
 
   function openSession(sessionId: string) {
     setActiveSessionId(sessionId)
-    setDraftAttachmentPath(null)
-    setDraftAttachmentPreview('')
+    setDraftAttachments([])
     setError('')
   }
 
@@ -695,8 +827,7 @@ export function MainWindowApp() {
     if (activeSessionId === sessionId) {
       setActiveSessionId(remaining[0]?.id || null)
       setDraft('')
-      setDraftAttachmentPath(null)
-      setDraftAttachmentPreview('')
+      setDraftAttachments([])
       setError('')
       setSelectedFilePath(null)
       setPreviewContent('')
@@ -736,7 +867,7 @@ export function MainWindowApp() {
 
   async function submitPrompt(rawContent: string) {
     const content = rawContent.trim()
-    if ((!content && !draftAttachmentPath) || isRunning || !activeSession) {
+    if ((!content && draftAttachments.length === 0) || isRunning || !activeSession) {
       return
     }
     if (!settings.apiKey.trim()) {
@@ -747,7 +878,8 @@ export function MainWindowApp() {
       return
     }
 
-    const workspaceHint = content || draftAttachmentPath || activeSession.title
+    const workspaceHint =
+      content || draftAttachments[0]?.name || activeSession.title
     const workspacePath = await ensureSessionWorkspace(activeSession, workspaceHint).catch(caught => {
       setError(caught instanceof Error ? caught.message : '创建会话工作目录失败。')
       return ''
@@ -757,16 +889,51 @@ export function MainWindowApp() {
       return
     }
 
-    const attachmentInstruction = draftAttachmentPath
-      ? `\n\n请重点查看附件：${draftAttachmentPath}`
-      : ''
+    const materializedAttachments = await Promise.all(
+      draftAttachments.map(async attachment => {
+        const path = attachment.path
+          ? await importAttachmentFromPath(workspacePath, attachment.path)
+          : await writeAttachmentBytes(
+              workspacePath,
+              attachment.name,
+              arrayBufferToBase64(await attachment.file!.arrayBuffer()),
+            )
+
+        return {
+          id: attachment.id,
+          name: attachment.name,
+          path,
+          preview: attachment.preview,
+          mimeType: attachment.mimeType,
+        } satisfies MessageAttachment
+      }),
+    ).catch(caught => {
+      setError(caught instanceof Error ? caught.message : '导入附件到当前会话失败。')
+      return null
+    })
+
+    if (!materializedAttachments) {
+      return
+    }
+
+    const attachmentInstruction =
+      materializedAttachments.length > 0
+        ? `\n\n请优先查看以下已附加到当前工作区的附件：\n${materializedAttachments
+            .map(attachment => `- ${attachment.path}`)
+            .join('\n')}`
+        : ''
 
     const userMessage: ChatMessage = {
       id: createId(),
       role: 'user',
-      content: content || `已附加文件：${draftAttachmentPath?.split('/').pop() || '附件'}`,
+      content:
+        content ||
+        `已附加 ${materializedAttachments.length} 个附件：${materializedAttachments
+          .map(attachment => attachment.name)
+          .join('、')}`,
       status: 'completed',
       createdAt: Date.now(),
+      attachments: materializedAttachments,
     }
     const pendingAssistantMessage = createPendingAssistantMessage()
 
@@ -802,8 +969,7 @@ export function MainWindowApp() {
       updatedAt: Date.now(),
     }))
     setDraft('')
-    setDraftAttachmentPath(null)
-    setDraftAttachmentPreview('')
+    setDraftAttachments([])
     setError('')
 
     try {
@@ -915,6 +1081,20 @@ export function MainWindowApp() {
     await submitPrompt(message.content)
   }
 
+  async function handleStopAgentTask() {
+    if (!agentTask?.id) {
+      return
+    }
+    try {
+      await abortAgentTask(agentTask.id)
+      setAgentTask(null)
+      setRunningSessionId(null)
+      setRunningMessageId(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '终止任务失败。')
+    }
+  }
+
   async function refreshWorkspace() {
     if (!activeWorkspacePath.trim()) {
       return
@@ -1001,8 +1181,7 @@ export function MainWindowApp() {
               previewImage={previewImage}
               previewLoading={previewLoading}
               previewError={previewError}
-              attachmentPath={draftAttachmentPath}
-              attachmentPreview={draftAttachmentPreview}
+              attachments={draftAttachments}
               modelGroups={enabledModelGroups}
               activeModelProfileId={activeProviderProfile?.id || ''}
               onDraftChange={setDraft}
@@ -1015,22 +1194,21 @@ export function MainWindowApp() {
               onHandleApproval={decision => void handleApproval(decision)}
               onChooseWorkspace={() => void chooseExplicitWorkspaceForSession()}
               onPickAttachment={() => void chooseAttachmentForDraft()}
+              onPasteAttachments={files => void appendAttachmentsFromFiles(files)}
               onSelectModel={(profileId, modelId) => switchSessionModel(profileId, modelId)}
               onOpenAttachment={path =>
                 void openPathInDefaultApp(path).catch(caught => {
                   setError(caught instanceof Error ? caught.message : '打开文件失败。')
                 })
               }
-              onClearAttachment={() => {
-                setDraftAttachmentPath(null)
-                setDraftAttachmentPreview('')
-              }}
+              onRemoveAttachment={removeDraftAttachment}
               onCopyPath={path => void copyText(path)}
               onCopyText={value => void copyText(value)}
               onEditMessage={applyMessageToDraft}
               onRegenerateMessage={messageId => void regenerateFromMessage(messageId)}
               onResendMessage={messageId => void resendUserMessage(messageId)}
               onToggleMessageActivity={toggleMessageActivity}
+              onStop={() => void handleStopAgentTask()}
             />
           ) : (
             <HomeView

@@ -46,12 +46,21 @@ export type MessageActivity = {
   expanded?: boolean
 }
 
+export type MessageAttachment = {
+  id: string
+  name: string
+  path: string
+  preview?: string
+  mimeType?: string
+}
+
 export type ChatMessage = {
   id: string
   role: ChatRole
   content: string
   status?: MessageStatus
   createdAt?: number
+  attachments?: MessageAttachment[]
   activity?: MessageActivity
   events?: MessageEvent[]
   steps?: TaskNode[]

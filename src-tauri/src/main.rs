@@ -30,6 +30,7 @@ struct AgentTaskSnapshot {
 
 #[derive(Clone)]
 struct AgentTaskHandle {
+    child: Arc<Mutex<Option<std::process::Child>>>,
     stdin: Arc<Mutex<ChildStdin>>,
     snapshot: Arc<Mutex<AgentTaskSnapshot>>,
 }
@@ -198,6 +199,7 @@ fn spawn_agent_task<R: Runtime>(
     }));
 
     let handle = AgentTaskHandle {
+        child: Arc::new(Mutex::new(Some(child))),
         stdin: Arc::new(Mutex::new(stdin)),
         snapshot: snapshot.clone(),
     };
@@ -412,6 +414,43 @@ fn respond_to_agent_approval(
 }
 
 #[tauri::command]
+fn abort_agent_task(
+    state: State<'_, AgentTaskStore>,
+    task_id: String,
+) -> Result<(), String> {
+    let tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| "Failed to lock task store.".to_string())?;
+    let Some(handle) = tasks.get(&task_id) else {
+        return Err(format!("Agent task not found: {task_id}"));
+    };
+
+    {
+        let mut child_guard = handle
+            .child
+            .lock()
+            .map_err(|_| "Failed to lock child handle.".to_string())?;
+        if let Some(mut child) = child_guard.take() {
+            let _ = child.kill();
+        }
+    }
+
+    {
+        let mut snapshot = handle
+            .snapshot
+            .lock()
+            .map_err(|_| "Failed to lock task snapshot.".to_string())?;
+        if snapshot.status == "running" || snapshot.status == "queued" || snapshot.status == "awaiting_approval" {
+            snapshot.status = "failed".into();
+            snapshot.error = Some("任务已被用户强行终止。".into());
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 fn read_workspace_tree(root_path: String) -> Result<WorkspaceNode, String> {
     let root = PathBuf::from(root_path);
     if !root.exists() {
@@ -500,6 +539,66 @@ fn slugify(value: &str) -> String {
     }
 }
 
+fn sanitize_file_name(value: &str) -> String {
+    let path = PathBuf::from(value);
+    let candidate = path
+        .file_name()
+        .and_then(|entry| entry.to_str())
+        .unwrap_or("attachment");
+    let sanitized = candidate
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let trimmed = sanitized.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "attachment".into()
+    } else {
+        trimmed
+    }
+}
+
+fn allocate_attachment_path(workspace_path: &str, file_name: &str) -> Result<PathBuf, String> {
+    let attachments_dir = PathBuf::from(workspace_path).join("attachments");
+    fs::create_dir_all(&attachments_dir).map_err(|error| {
+        format!(
+            "Failed to create attachment directory {}: {error}",
+            attachments_dir.display()
+        )
+    })?;
+
+    let safe_name = sanitize_file_name(file_name);
+    let stem = PathBuf::from(&safe_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("attachment")
+        .to_string();
+    let extension = PathBuf::from(&safe_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+
+    for attempt in 0..1000_u32 {
+        let file_name = if attempt == 0 {
+            format!("{stem}{extension}")
+        } else {
+            format!("{stem}-{attempt}{extension}")
+        };
+        let candidate = attachments_dir.join(file_name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Unable to allocate a unique attachment path.".into())
+}
+
 #[tauri::command]
 fn create_session_workspace(root_path: String, hint: String) -> Result<String, String> {
     let root = PathBuf::from(root_path);
@@ -538,6 +637,46 @@ fn create_session_workspace(root_path: String, hint: String) -> Result<String, S
     Err("Unable to allocate a unique session workspace directory.".into())
 }
 
+#[tauri::command]
+fn import_attachment_from_path(workspace_path: String, source_path: String) -> Result<String, String> {
+    let source = PathBuf::from(&source_path);
+    if !source.exists() {
+        return Err(format!("Attachment does not exist: {}", source.display()));
+    }
+
+    let file_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("attachment");
+    let destination = allocate_attachment_path(&workspace_path, file_name)?;
+    fs::copy(&source, &destination).map_err(|error| {
+        format!(
+            "Failed to copy attachment {} into workspace: {error}",
+            source.display()
+        )
+    })?;
+    Ok(destination.display().to_string())
+}
+
+#[tauri::command]
+fn write_attachment_bytes(
+    workspace_path: String,
+    file_name: String,
+    bytes_base64: String,
+) -> Result<String, String> {
+    let bytes = STANDARD
+        .decode(bytes_base64)
+        .map_err(|error| format!("Failed to decode attachment bytes: {error}"))?;
+    let destination = allocate_attachment_path(&workspace_path, &file_name)?;
+    fs::write(&destination, bytes).map_err(|error| {
+        format!(
+            "Failed to write attachment into workspace {}: {error}",
+            destination.display()
+        )
+    })?;
+    Ok(destination.display().to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AgentTaskStore::default())
@@ -545,13 +684,16 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_agent_task,
             get_agent_task,
+            abort_agent_task,
             respond_to_agent_approval,
             run_provider_action,
             read_workspace_tree,
             read_text_file,
             read_image_preview,
             open_path_in_default_app,
-            create_session_workspace
+            create_session_workspace,
+            import_attachment_from_path,
+            write_attachment_bytes
         ])
         .run(tauri::generate_context!())
         .expect("error while running Desk Agent desktop app")

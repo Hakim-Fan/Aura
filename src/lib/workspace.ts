@@ -23,3 +23,22 @@ export async function createSessionWorkspace(
 ): Promise<string> {
   return invoke<string>('create_session_workspace', { rootPath, hint })
 }
+
+export async function importAttachmentFromPath(
+  workspacePath: string,
+  sourcePath: string,
+): Promise<string> {
+  return invoke<string>('import_attachment_from_path', { workspacePath, sourcePath })
+}
+
+export async function writeAttachmentBytes(
+  workspacePath: string,
+  fileName: string,
+  bytesBase64: string,
+): Promise<string> {
+  return invoke<string>('write_attachment_bytes', {
+    workspacePath,
+    fileName,
+    bytesBase64,
+  })
+}
