@@ -292,6 +292,63 @@ export function loadSessions(): Session[] {
           id: message.id || Math.random().toString(36).slice(2, 10),
           role: message.role || 'assistant',
           content: message.content || '',
+          parts: Array.isArray(message.parts)
+            ? message.parts
+                .map(part => {
+                  if (!part || typeof part !== 'object') {
+                    return null
+                  }
+
+                  if (
+                    (part as { type?: unknown }).type === 'text' &&
+                    typeof (part as { text?: unknown }).text === 'string'
+                  ) {
+                    return {
+                      type: 'text' as const,
+                      text: (part as { text: string }).text,
+                    }
+                  }
+
+                  if (
+                    (part as { type?: unknown }).type === 'image' &&
+                    typeof (part as { name?: unknown }).name === 'string' &&
+                    typeof (part as { mimeType?: unknown }).mimeType === 'string'
+                  ) {
+                    return {
+                      type: 'image' as const,
+                      name: (part as { name: string }).name,
+                      mimeType: (part as { mimeType: string }).mimeType,
+                      path:
+                        typeof (part as { path?: unknown }).path === 'string'
+                          ? (part as { path?: string }).path
+                          : undefined,
+                      dataUrl:
+                        typeof (part as { dataUrl?: unknown }).dataUrl === 'string'
+                          ? (part as { dataUrl?: string }).dataUrl
+                          : undefined,
+                    }
+                  }
+
+                  if (
+                    (part as { type?: unknown }).type === 'file' &&
+                    typeof (part as { name?: unknown }).name === 'string' &&
+                    typeof (part as { path?: unknown }).path === 'string'
+                  ) {
+                    return {
+                      type: 'file' as const,
+                      name: (part as { name: string }).name,
+                      path: (part as { path: string }).path,
+                      mimeType:
+                        typeof (part as { mimeType?: unknown }).mimeType === 'string'
+                          ? (part as { mimeType?: string }).mimeType
+                          : undefined,
+                    }
+                  }
+
+                  return null
+                })
+                .filter((part): part is NonNullable<typeof part> => Boolean(part))
+            : [],
           status: message.status || 'completed',
           createdAt: message.createdAt || session.updatedAt || Date.now(),
           attachments: Array.isArray(message.attachments)
@@ -328,6 +385,47 @@ export function loadSessions(): Session[] {
                     Boolean(attachment),
                 )
             : [],
+          reasoning: Array.isArray(message.reasoning)
+            ? message.reasoning
+                .map(reasoning => {
+                  if (!reasoning || typeof reasoning !== 'object') {
+                    return null
+                  }
+                  if (typeof reasoning.content !== 'string' || !reasoning.content.trim()) {
+                    return null
+                  }
+                  return {
+                    id:
+                      typeof reasoning.id === 'string' && reasoning.id.trim()
+                        ? reasoning.id
+                        : Math.random().toString(36).slice(2, 10),
+                    kind: (reasoning.kind === 'summary' ? 'summary' : 'provider') as
+                      | 'summary'
+                      | 'provider',
+                    content: reasoning.content,
+                  }
+                })
+                .filter((reasoning): reasoning is NonNullable<typeof reasoning> =>
+                  Boolean(reasoning),
+                )
+            : [],
+          usage:
+            message.usage && typeof message.usage === 'object'
+              ? {
+                  inputTokens:
+                    typeof message.usage.inputTokens === 'number'
+                      ? message.usage.inputTokens
+                      : undefined,
+                  outputTokens:
+                    typeof message.usage.outputTokens === 'number'
+                      ? message.usage.outputTokens
+                      : undefined,
+                  contextWindow:
+                    typeof message.usage.contextWindow === 'number'
+                      ? message.usage.contextWindow
+                      : undefined,
+                }
+              : undefined,
           activity: message.activity,
           events: message.events || [],
           steps: message.steps || [],

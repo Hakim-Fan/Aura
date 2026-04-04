@@ -23,6 +23,8 @@ struct AgentTaskSnapshot {
     tool_events: Vec<serde_json::Value>,
     #[serde(rename = "taskTree")]
     task_tree: Vec<serde_json::Value>,
+    reasoning: Vec<serde_json::Value>,
+    usage: Option<serde_json::Value>,
     #[serde(rename = "pendingApproval")]
     pending_approval: Option<serde_json::Value>,
     error: Option<String>,
@@ -155,6 +157,58 @@ fn extract_array(value: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
     value.and_then(|entry| entry.as_array().cloned()).unwrap_or_default()
 }
 
+fn extract_object(value: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    value.and_then(|entry| entry.as_object().cloned().map(serde_json::Value::Object))
+}
+
+fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::Value) {
+    let delta = event
+        .get("delta")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if delta.is_empty() {
+        return;
+    }
+
+    let block_id = event
+        .get("blockId")
+        .and_then(|value| value.as_str())
+        .unwrap_or("provider");
+    let kind = event
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("provider");
+
+    if let Some(existing) = current.reasoning.iter_mut().find(|block| {
+        block
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(|value| value == block_id)
+            .unwrap_or(false)
+    }) {
+        let next_content = format!(
+            "{}{}",
+            existing
+                .get("content")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
+            delta
+        );
+        *existing = serde_json::json!({
+            "id": block_id,
+            "kind": kind,
+            "content": next_content,
+        });
+        return;
+    }
+
+    current.reasoning.push(serde_json::json!({
+        "id": block_id,
+        "kind": kind,
+        "content": delta,
+    }));
+}
+
 fn spawn_agent_task<R: Runtime>(
     app: tauri::AppHandle<R>,
     store: &AgentTaskStore,
@@ -194,6 +248,8 @@ fn spawn_agent_task<R: Runtime>(
         message: None,
         tool_events: Vec::new(),
         task_tree: Vec::new(),
+        reasoning: Vec::new(),
+        usage: None,
         pending_approval: None,
         error: None,
     }));
@@ -235,6 +291,25 @@ fn spawn_agent_task<R: Runtime>(
                     current.status = "running".into();
                     current.error = None;
                 }),
+                Some("text_delta") => with_snapshot(&stdout_snapshot, |current| {
+                    let delta = event
+                        .get("delta")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    if delta.is_empty() {
+                        return;
+                    }
+
+                    let mut next_message = current.message.clone().unwrap_or_default();
+                    next_message.push_str(delta);
+                    current.message = Some(next_message);
+                }),
+                Some("reasoning_delta") => with_snapshot(&stdout_snapshot, |current| {
+                    append_reasoning_delta(current, &event);
+                }),
+                Some("usage") => with_snapshot(&stdout_snapshot, |current| {
+                    current.usage = extract_object(event.get("usage"));
+                }),
                 Some("tool_event") => with_snapshot(&stdout_snapshot, |current| {
                     if let Some(tool_event) = event.get("event") {
                         current.tool_events.push(tool_event.clone());
@@ -251,12 +326,24 @@ fn spawn_agent_task<R: Runtime>(
                     current.status = "completed".into();
                     current.pending_approval = None;
                     if let Some(result) = event.get("result") {
-                        current.message = result
+                        let next_message = result
                             .get("message")
                             .and_then(|value| value.as_str())
                             .map(|value| value.to_string());
+                        let should_replace_message = next_message
+                            .as_ref()
+                            .map(|value| {
+                                let normalized = value.trim();
+                                !normalized.is_empty() && normalized != "模型没有返回文本内容。"
+                            })
+                            .unwrap_or(false);
+                        if should_replace_message {
+                            current.message = next_message;
+                        }
                         current.tool_events = extract_array(result.get("toolEvents"));
                         current.task_tree = extract_array(result.get("taskTree"));
+                        current.reasoning = extract_array(result.get("reasoning"));
+                        current.usage = extract_object(result.get("usage"));
                     }
                 }),
                 Some("failed") => with_snapshot(&stdout_snapshot, |current| {

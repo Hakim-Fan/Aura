@@ -54,13 +54,47 @@ export type MessageAttachment = {
   mimeType?: string
 }
 
+export type ChatContentPart =
+  | {
+      type: 'text'
+      text: string
+    }
+  | {
+      type: 'image'
+      name: string
+      mimeType: string
+      path?: string
+      dataUrl?: string
+    }
+  | {
+      type: 'file'
+      name: string
+      path: string
+      mimeType?: string
+    }
+
+export type MessageReasoning = {
+  id: string
+  kind: 'provider' | 'summary'
+  content: string
+}
+
+export type MessageUsage = {
+  inputTokens?: number
+  outputTokens?: number
+  contextWindow?: number
+}
+
 export type ChatMessage = {
   id: string
   role: ChatRole
   content: string
+  parts?: ChatContentPart[]
   status?: MessageStatus
   createdAt?: number
   attachments?: MessageAttachment[]
+  reasoning?: MessageReasoning[]
+  usage?: MessageUsage
   activity?: MessageActivity
   events?: MessageEvent[]
   steps?: TaskNode[]
@@ -159,10 +193,8 @@ export type AgentResponse = {
   message: string
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]
-  usage?: {
-    inputTokens?: number
-    outputTokens?: number
-  }
+  reasoning?: MessageReasoning[]
+  usage?: MessageUsage
 }
 
 export type AgentTaskSnapshot = {
@@ -171,6 +203,8 @@ export type AgentTaskSnapshot = {
   message?: string
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]
+  reasoning?: MessageReasoning[]
+  usage?: MessageUsage
   pendingApproval?: ApprovalRequest
   error?: string
 }

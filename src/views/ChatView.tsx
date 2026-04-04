@@ -210,7 +210,12 @@ function presentToolEventTitle(event: Pick<ToolEvent, 'name' | 'source'>) {
 
 function isGenericTaskSummary(summary?: string) {
   const normalized = summary?.trim().toLowerCase() || ''
-  return !normalized || normalized === 'primary agent task'
+  return (
+    !normalized ||
+    normalized === 'primary agent task' ||
+    normalized === '生成最终回答' ||
+    normalized === 'generate final answer'
+  )
 }
 
 function normalizeComparableText(value?: string) {
@@ -292,6 +297,28 @@ function MarkdownAnswer({
   )
 }
 
+function ReasoningCard({
+  title,
+  content,
+}: {
+  title: string
+  content: string
+}) {
+  return (
+    <article className="rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.05)] px-3 py-2.5">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded bg-white/80 text-[var(--accent-soft-strong)]">
+          思考
+        </span>
+        <strong className="text-12px text-[var(--text-primary)] opacity-80">{title}</strong>
+      </div>
+      <div className="text-12px leading-relaxed whitespace-pre-wrap text-[var(--text-secondary)] opacity-80">
+        {content}
+      </div>
+    </article>
+  )
+}
+
 function MessageEventCard({
   event,
 }: {
@@ -370,7 +397,14 @@ function AssistantMessageCard({
   const activity = message.activity
   const duration = activity ? (activity.finishedAt || Date.now()) - activity.startedAt : undefined
   const visibleSteps = sanitizeTaskNodes(message.steps || [], message.content)
-  const hasExecution = Boolean(activity) || (message.events?.length || 0) > 0 || visibleSteps.length > 0
+  const visibleReasoning = (message.reasoning || []).filter(entry =>
+    normalizeComparableText(entry.content),
+  )
+  const hasExecution =
+    Boolean(activity) ||
+    (message.events?.length || 0) > 0 ||
+    visibleSteps.length > 0 ||
+    visibleReasoning.length > 0
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
   const activitySummary = activity
     ? [
@@ -409,10 +443,14 @@ function AssistantMessageCard({
 
           {hasExecution && activity?.expanded ? (
             <section className="flex flex-col gap-3 border-l border-[rgba(15,23,42,0.08)] pl-4">
-              <div className="text-11px text-[var(--text-secondary)] opacity-50">
-                {activitySummary || '执行过程'}
-              </div>
               <div className="flex flex-col gap-2.5">
+                {visibleReasoning.map(entry => (
+                  <ReasoningCard
+                    key={entry.id}
+                    title={entry.kind === 'provider' ? '模型思考摘要' : '分析摘要'}
+                    content={entry.content}
+                  />
+                ))}
                 {message.events?.map(event => (
                   <MessageEventCard key={event.id} event={event} />
                 ))}
@@ -642,6 +680,31 @@ export function ChatView({
     )
     return messageTokens + attachmentTokens + estimateTokenCount(draft)
   }, [attachments, draft, messages])
+
+  const latestUsage = useMemo(() => {
+    return [...messages]
+      .reverse()
+      .find(
+        message =>
+          message.role === 'assistant' &&
+          ((message.usage?.inputTokens || 0) > 0 || (message.usage?.outputTokens || 0) > 0),
+      )?.usage
+  }, [messages])
+
+  const usageLabel = latestUsage
+    ? [
+        latestUsage.inputTokens ? `输入 ${formatTokenCount(latestUsage.inputTokens)}` : null,
+        latestUsage.outputTokens ? `输出 ${formatTokenCount(latestUsage.outputTokens)}` : null,
+        latestUsage.contextWindow && latestUsage.inputTokens
+          ? `${Math.min(
+              100,
+              Math.round((latestUsage.inputTokens / latestUsage.contextWindow) * 100),
+            )}%`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : `${formatTokenCount(currentContextTokenCount)} tok 估算`
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isMetaEnter) {
@@ -949,7 +1012,7 @@ export function ChatView({
                     {/* 上下文占用量 */}
                     <div className="ml-1 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[rgba(15,23,42,0.04)] text-9px font-700 opacity-60">
                       <RefreshCw size={8} />
-                      <span>{formatTokenCount(currentContextTokenCount)} tok</span>
+                      <span>{usageLabel}</span>
                     </div>
                   </div>
 

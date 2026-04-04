@@ -15,6 +15,7 @@ export async function startAgentTask(
     messages: messages.map(message => ({
       role: message.role as ChatRole,
       content: message.content,
+      parts: message.parts || [],
     })),
   }
 

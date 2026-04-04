@@ -41,6 +41,20 @@ rl.on('line', line => {
   emit({ type: 'started' })
 
   const hooks = {
+    onTextDelta(delta) {
+      emit({ type: 'text_delta', delta })
+    },
+    onReasoningDelta(delta, meta = {}) {
+      emit({
+        type: 'reasoning_delta',
+        delta,
+        blockId: meta.blockId,
+        kind: meta.kind,
+      })
+    },
+    onUsage(usage) {
+      emit({ type: 'usage', usage })
+    },
     onToolEvent(event) {
       emit({ type: 'tool_event', event })
     },

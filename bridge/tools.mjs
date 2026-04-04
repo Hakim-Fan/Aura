@@ -74,6 +74,56 @@ async function runShell(command, cwd, timeoutMs = 60_000) {
   })
 }
 
+function detectBinary(buffer) {
+  const sample = buffer.subarray(0, Math.min(buffer.length, 2048))
+  let suspicious = 0
+
+  for (const byte of sample) {
+    if (byte === 0) {
+      return true
+    }
+    if ((byte < 7 || (byte > 14 && byte < 32)) && byte !== 9 && byte !== 10 && byte !== 13) {
+      suspicious += 1
+    }
+  }
+
+  return sample.length > 0 && suspicious / sample.length > 0.15
+}
+
+function readPngDimensions(buffer) {
+  if (buffer.length < 24) {
+    return null
+  }
+  const signature = '89504e470d0a1a0a'
+  if (buffer.subarray(0, 8).toString('hex') !== signature) {
+    return null
+  }
+  return {
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20),
+  }
+}
+
+function summarizeBinaryFile(target, buffer) {
+  const extension = path.extname(target).slice(1).toLowerCase() || 'unknown'
+  const size = buffer.byteLength
+  const pngDimensions = readPngDimensions(buffer)
+  const details = [
+    `Binary file detected: ${path.basename(target)}`,
+    `Type: ${extension.toUpperCase()}`,
+    `Size: ${size} bytes`,
+  ]
+
+  if (pngDimensions) {
+    details.push(`Dimensions: ${pngDimensions.width} x ${pngDimensions.height}`)
+  }
+
+  details.push(
+    'This tool only previews text safely. For images, rely on visual input or use a dedicated metadata/image tool instead of reading raw bytes as text.',
+  )
+  return details.join('\n')
+}
+
 export function createBuiltinTools(context) {
   return [
     {
@@ -115,8 +165,11 @@ export function createBuiltinTools(context) {
       },
       async run(args) {
         const target = resolveWorkspacePath(context.cwd, args.path)
-        const content = await fs.readFile(target, 'utf8')
-        return truncate(content)
+        const content = await fs.readFile(target)
+        if (detectBinary(content)) {
+          return summarizeBinaryFile(target, content)
+        }
+        return truncate(content.toString('utf8'))
       },
     },
     {

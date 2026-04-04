@@ -17,6 +17,7 @@ import {
 import type {
   AgentSettings,
   AgentTaskSnapshot,
+  ChatContentPart,
   ChatMessage,
   MessageAttachment,
   MessageActivity,
@@ -73,7 +74,21 @@ function collectExpandablePaths(tree: WorkspaceNode | null) {
 }
 
 function countTaskNodes(nodes: TaskNode[]): number {
-  return nodes.reduce((total, node) => total + 1 + countTaskNodes(node.children), 0)
+  return nodes.reduce((total, node) => {
+    const normalizedSummary = node.summary.trim().toLowerCase()
+    const isGenericSummary =
+      !normalizedSummary ||
+      normalizedSummary === 'primary agent task' ||
+      normalizedSummary === '生成最终回答' ||
+      normalizedSummary === 'generate final answer'
+    const nestedCount = countTaskNodes(node.children)
+
+    if (node.kind === 'main' && isGenericSummary) {
+      return total + nestedCount
+    }
+
+    return total + 1 + nestedCount
+  }, 0)
 }
 
 function prettifyIdentifier(identifier: string) {
@@ -119,6 +134,125 @@ function getFileExtension(filePath: string) {
 
 function canPreviewAsText(filePath: string) {
   return textPreviewExtensions.has(getFileExtension(filePath))
+}
+
+function mimeTypeFromPath(filePath: string) {
+  switch (getFileExtension(filePath)) {
+    case 'png':
+      return 'image/png'
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg'
+    case 'gif':
+      return 'image/gif'
+    case 'webp':
+      return 'image/webp'
+    case 'bmp':
+      return 'image/bmp'
+    case 'svg':
+      return 'image/svg+xml'
+    case 'pdf':
+      return 'application/pdf'
+    default:
+      return ''
+  }
+}
+
+function mimeTypeFromDataUrl(dataUrl?: string) {
+  const match = /^data:([^;,]+)[;,]/u.exec(dataUrl || '')
+  return match?.[1] || ''
+}
+
+function resolveAttachmentMimeType(attachment: {
+  mimeType?: string
+  path?: string
+  preview?: string
+}) {
+  return (
+    attachment.mimeType ||
+    mimeTypeFromDataUrl(attachment.preview) ||
+    (attachment.path ? mimeTypeFromPath(attachment.path) : '')
+  )
+}
+
+function isImageAttachment(attachment: {
+  mimeType?: string
+  path?: string
+  preview?: string
+}) {
+  return resolveAttachmentMimeType(attachment).startsWith('image/')
+}
+
+function buildUserMessageParts(
+  content: string,
+  attachments: MessageAttachment[],
+): ChatContentPart[] {
+  const normalizedContent = content.trim()
+  const imageAttachments = attachments.filter(attachment => isImageAttachment(attachment))
+  const fileAttachments = attachments.filter(attachment => !isImageAttachment(attachment))
+  const promptText =
+    normalizedContent ||
+    `请分析这${attachments.length > 1 ? '些' : '个'}附件。`
+  const attachmentContextParts = []
+
+  if (imageAttachments.length > 0) {
+    attachmentContextParts.push(
+      `这些图片已经作为视觉输入直接提供给你，请优先基于图片内容回答，不要把 PNG/JPG 文件当纯文本读取。${
+        fileAttachments.length > 0 ? '如果还附带了普通文件，可按需读取它们。' : ''
+      }`,
+    )
+    attachmentContextParts.push(
+      `图片文件路径（仅供必要时引用，不必默认读取）:\n${imageAttachments
+        .map(attachment => `- ${attachment.path}`)
+        .join('\n')}`,
+    )
+  }
+
+  if (fileAttachments.length > 0) {
+    attachmentContextParts.push(
+      `当前工作区还附加了以下可读取文件：\n${fileAttachments
+        .map(attachment => `- ${attachment.path}`)
+        .join('\n')}`,
+    )
+  }
+
+  const attachmentContext =
+    attachmentContextParts.length > 0
+      ? `\n\n${attachmentContextParts.join('\n\n')}`
+      : ''
+
+  const parts: ChatContentPart[] = [
+    {
+      type: 'text',
+      text: `${promptText}${attachmentContext}`,
+    },
+  ]
+
+  for (const attachment of attachments) {
+    const mimeType = resolveAttachmentMimeType(attachment)
+    if (
+      mimeType.startsWith('image/') &&
+      attachment.preview?.startsWith('data:')
+    ) {
+      parts.push({
+        type: 'image',
+        name: attachment.name,
+        mimeType,
+        path: attachment.path,
+        dataUrl: attachment.preview,
+      })
+      continue
+    }
+
+    parts.push({
+      type: 'file',
+      name: attachment.name,
+      path: attachment.path,
+      mimeType: mimeType || undefined,
+    })
+  }
+
+  return parts
 }
 
 type DraftAttachment = {
@@ -299,6 +433,7 @@ function createPendingAssistantMessage(): ChatMessage {
     id: createId(),
     role: 'assistant',
     content: '',
+    reasoning: [],
     status: 'streaming',
     createdAt: startedAt,
     events: [],
@@ -360,14 +495,10 @@ export function MainWindowApp() {
     agentTask?.status === 'awaiting_approval'
 
   const displayedToolEvents =
-    activeSession && agentTask && agentTask.toolEvents.length > 0
-      ? agentTask.toolEvents
-      : activeSession?.toolEvents || []
+    agentTask ? agentTask.toolEvents : activeSession?.toolEvents || []
 
   const displayedTaskTree =
-    activeSession && agentTask && agentTask.taskTree.length > 0
-      ? agentTask.taskTree
-      : activeSession?.taskTree || []
+    agentTask ? agentTask.taskTree : activeSession?.taskTree || []
 
   const activeWorkspacePath = activeSession?.workspacePath || ''
   const activeProviderProfile = getSessionProviderProfile(settings, activeSession)
@@ -427,7 +558,7 @@ export function MainWindowApp() {
         updateSession(currentSessionId, session => ({
           ...session,
           messages: session.messages.map(message =>
-            message.id === currentMessageId
+                message.id === currentMessageId
               ? {
                   ...message,
                   content:
@@ -435,6 +566,8 @@ export function MainWindowApp() {
                     (snapshot.status === 'awaiting_approval'
                       ? '等待你的审批后继续执行。'
                       : message.content),
+                  reasoning: snapshot.reasoning || message.reasoning,
+                  usage: snapshot.usage || message.usage,
                   status:
                     snapshot.status === 'failed'
                       ? ('failed' as const)
@@ -484,6 +617,8 @@ export function MainWindowApp() {
                           ? {
                               ...message,
                               content: snapshot.message || '',
+                              reasoning: snapshot.reasoning || message.reasoning,
+                              usage: snapshot.usage || message.usage,
                               status: 'completed' as const,
                               events: snapshot.toolEvents.map(mapToolEventToMessageEvent),
                               steps: snapshot.taskTree,
@@ -525,6 +660,8 @@ export function MainWindowApp() {
                           ? {
                               ...message,
                               content: snapshot.message || '',
+                              reasoning: snapshot.reasoning || message.reasoning,
+                              usage: snapshot.usage || message.usage,
                               status: 'failed' as const,
                               events: snapshot.toolEvents.map(mapToolEventToMessageEvent),
                               steps: snapshot.taskTree,
@@ -722,6 +859,7 @@ export function MainWindowApp() {
           name: path.split('/').pop() || '附件',
           path,
           preview,
+          mimeType: mimeTypeFromDataUrl(preview) || mimeTypeFromPath(path) || undefined,
         } satisfies DraftAttachment
       }),
     )
@@ -904,7 +1042,7 @@ export function MainWindowApp() {
           name: attachment.name,
           path,
           preview: attachment.preview,
-          mimeType: attachment.mimeType,
+          mimeType: resolveAttachmentMimeType(attachment) || undefined,
         } satisfies MessageAttachment
       }),
     ).catch(caught => {
@@ -916,21 +1054,18 @@ export function MainWindowApp() {
       return
     }
 
-    const attachmentInstruction =
-      materializedAttachments.length > 0
-        ? `\n\n请优先查看以下已附加到当前工作区的附件：\n${materializedAttachments
-            .map(attachment => `- ${attachment.path}`)
-            .join('\n')}`
-        : ''
+    const contentForDisplay =
+      content ||
+      `已附加 ${materializedAttachments.length} 个附件：${materializedAttachments
+        .map(attachment => attachment.name)
+        .join('、')}`
+    const userMessageParts = buildUserMessageParts(content, materializedAttachments)
 
     const userMessage: ChatMessage = {
       id: createId(),
       role: 'user',
-      content:
-        content ||
-        `已附加 ${materializedAttachments.length} 个附件：${materializedAttachments
-          .map(attachment => attachment.name)
-          .join('、')}`,
+      content: contentForDisplay,
+      parts: userMessageParts,
       status: 'completed',
       createdAt: Date.now(),
       attachments: materializedAttachments,
@@ -949,13 +1084,6 @@ export function MainWindowApp() {
 
     const sessionId = activeSession.id
     const nextMessages = [...activeSession.messages, userMessage]
-    const nextMessagesForAgent = [
-      ...activeSession.messages,
-      {
-        ...userMessage,
-        content: `${content || '请分析这个附件。'}${attachmentInstruction}`,
-      },
-    ]
     updateSession(sessionId, session => ({
       ...session,
       title: session.messages.length === 0 ? summarizeTitle(content) : session.title,
@@ -973,7 +1101,7 @@ export function MainWindowApp() {
     setError('')
 
     try {
-      const taskId = await startAgentTask(runtimeSettings, nextMessagesForAgent)
+      const taskId = await startAgentTask(runtimeSettings, nextMessages)
       setRunningSessionId(sessionId)
       setRunningMessageId(pendingAssistantMessage.id)
       setAgentTask({
@@ -981,6 +1109,7 @@ export function MainWindowApp() {
         status: 'queued',
         toolEvents: [],
         taskTree: [],
+        reasoning: [],
       })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Agent 启动失败。')

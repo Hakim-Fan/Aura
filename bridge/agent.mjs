@@ -21,6 +21,43 @@ function summarizeMessages(messages) {
   return firstUser.length > 80 ? `${firstUser.slice(0, 80)}...` : firstUser
 }
 
+function summarizeReasoning(messages, toolEvents, finalMessage) {
+  const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')
+  const userIntent = latestUserMessage?.content?.replace(/\s+/g, ' ').trim() || '处理当前任务'
+  const imageCount = (latestUserMessage?.parts || []).filter(part => part.type === 'image').length
+  const fileCount = (latestUserMessage?.parts || []).filter(part => part.type === 'file').length
+  const lines = [
+    `围绕“${userIntent.length > 42 ? `${userIntent.slice(0, 42)}...` : userIntent}”组织本轮处理。`,
+  ]
+
+  if (imageCount > 0 || fileCount > 0) {
+    lines.push(
+      `本轮同时参考了 ${[
+        imageCount > 0 ? `${imageCount} 张图片` : null,
+        fileCount > 0 ? `${fileCount} 个文件` : null,
+      ]
+        .filter(Boolean)
+        .join('、')}。`,
+    )
+  }
+
+  if (toolEvents.length > 0) {
+    lines.push(`执行了 ${toolEvents.length} 个工具步骤来补充上下文和完成操作。`)
+  }
+
+  if (finalMessage?.trim()) {
+    lines.push('最后将结果整理成对用户可直接阅读的回复。')
+  }
+
+  return [
+    {
+      id: 'summary',
+      kind: 'summary',
+      content: lines.join('\n'),
+    },
+  ]
+}
+
 function createTaskTracker(hooks, rootTitle) {
   const root = {
     id: createId('main'),
@@ -110,6 +147,7 @@ function buildSystemPrompt(settings, skillPrompt) {
     'Use tools when they reduce uncertainty or let you act directly inside the workspace.',
     'Prefer concrete changes and verification steps over abstract advice.',
     'Do not access paths outside the configured workspace root.',
+    'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
   ]
 
   const capabilities = []
@@ -198,9 +236,20 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
+      const reasoning =
+        result.reasoning && result.reasoning.length > 0
+          ? result.reasoning
+          : summarizeReasoning(messages, toolEvents, result.message)
+      if (!result.reasoning?.length) {
+        hooks?.onReasoningDelta?.(reasoning[0].content, {
+          blockId: reasoning[0].id,
+          kind: reasoning[0].kind,
+        })
+      }
       taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
+        reasoning,
         status: 'completed',
         taskTree: taskTracker.getTree(),
       }
@@ -220,9 +269,20 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
+      const reasoning =
+        result.reasoning && result.reasoning.length > 0
+          ? result.reasoning
+          : summarizeReasoning(messages, toolEvents, result.message)
+      if (!result.reasoning?.length) {
+        hooks?.onReasoningDelta?.(reasoning[0].content, {
+          blockId: reasoning[0].id,
+          kind: reasoning[0].kind,
+        })
+      }
       taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
+        reasoning,
         status: 'completed',
         taskTree: taskTracker.getTree(),
       }
