@@ -661,11 +661,11 @@ export function ChatView({
           </div>
 
           {/* Docked Composer */}
-          <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[var(--bg-app)] via-[var(--bg-app)] to-transparent pointer-events-none">
+          <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t pointer-events-none">
             <div className="max-w-1000px mx-auto pointer-events-auto">
-              <div className="bg-white border border-[rgba(79,123,116,0.18)] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all focus-within:border-[rgba(79,123,116,0.32)] focus-within:ring-4 focus-within:ring-[rgba(79,123,116,0.08)] relative">
+              <div className="bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none overflow-hidden relative">
                 <textarea
-                  className="w-full h-120px p-4 text-15px leading-relaxed resize-none border-none bg-transparent outline-none"
+                  className="w-full h-120px p-4 text-15px leading-relaxed resize-none !border-none bg-transparent !outline-none !ring-0 !shadow-none"
                   value={draft}
                   onChange={event => onDraftChange(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
