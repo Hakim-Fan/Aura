@@ -5,13 +5,20 @@ import { AppSidebar } from './components/AppSidebar'
 import { getAgentTask, respondToApproval, startAgentTask } from './lib/agent'
 import { loadSessions, loadSettings, saveSessions } from './lib/storage'
 import { openSettingsWindow } from './lib/windows'
-import { createSessionWorkspace, readTextFile, readWorkspaceTree } from './lib/workspace'
+import {
+  createSessionWorkspace,
+  openPathInDefaultApp,
+  readImagePreview,
+  readTextFile,
+  readWorkspaceTree,
+} from './lib/workspace'
 import type {
   AgentSettings,
   AgentTaskSnapshot,
   ChatMessage,
   MessageActivity,
   MessageEvent,
+  ProviderProfile,
   Session,
   TaskNode,
   ToolEvent,
@@ -28,6 +35,7 @@ function createSession(settings: AgentSettings): Session {
   return {
     id: createId(),
     title: '新建聊天',
+    providerProfileId: settings.activeProviderProfileId,
     provider: settings.provider,
     model: settings.model,
     workspacePath: '',
@@ -73,18 +81,101 @@ function prettifyIdentifier(identifier: string) {
     .join(' ')
 }
 
+const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'])
+const textPreviewExtensions = new Set([
+  'md',
+  'txt',
+  'json',
+  'js',
+  'jsx',
+  'ts',
+  'tsx',
+  'html',
+  'css',
+  'scss',
+  'less',
+  'yaml',
+  'yml',
+  'toml',
+  'rs',
+  'py',
+  'java',
+  'go',
+  'rb',
+  'sh',
+  'zsh',
+  'bash',
+  'xml',
+  'csv',
+  'sql',
+])
+
+function getFileExtension(filePath: string) {
+  return filePath.split('.').at(-1)?.toLowerCase() || ''
+}
+
+function canPreviewAsText(filePath: string) {
+  return textPreviewExtensions.has(getFileExtension(filePath))
+}
+
+function getActiveProviderProfile(settings: AgentSettings) {
+  return (
+    settings.providerProfiles.find(profile => profile.id === settings.activeProviderProfileId) ||
+    settings.providerProfiles[0] ||
+    null
+  )
+}
+
+function getFirstEnabledModelId(profile: ProviderProfile | null) {
+  if (!profile) {
+    return ''
+  }
+  return profile.models.find(model => model.enabled)?.id || ''
+}
+
+function getSessionProviderProfile(settings: AgentSettings, session: Session | null) {
+  if (!session) {
+    return getActiveProviderProfile(settings)
+  }
+  return (
+    settings.providerProfiles.find(profile => profile.id === session.providerProfileId) ||
+    settings.providerProfiles.find(
+      profile =>
+        profile.provider === session.provider &&
+        profile.models.some(model => model.id === session.model),
+    ) ||
+    getActiveProviderProfile(settings)
+  )
+}
+
+function collectEnabledModelsByProfile(settings: AgentSettings) {
+  return settings.providerProfiles
+    .filter(profile => profile.enabled)
+    .map(profile => ({
+      profileId: profile.id,
+      profileName: profile.name,
+      provider: profile.provider,
+      models: profile.models.filter(model => model.enabled),
+    }))
+    .filter(group => group.models.length > 0)
+}
+
 function presentToolEventTitle(event: ToolEvent) {
+  const rawName = event.name?.trim()
+  if (!rawName) {
+    return event.source === 'plugin' ? '技能' : '工具'
+  }
   if (event.source === 'plugin') {
-    const tail = event.name.split('__').filter(Boolean).at(-1) || event.name
+    const tail = rawName.split('__').filter(Boolean).at(-1) || rawName
     return prettifyIdentifier(tail)
   }
   if (event.source === 'subagent') {
-    return event.name || '子 Agent'
+    return rawName || '子 Agent'
   }
-  if (event.name.toLowerCase().includes('shell')) {
+  if (rawName.toLowerCase().includes('shell')) {
     return 'Shell 命令'
   }
-  return event.name
+  return prettifyIdentifier(rawName)
 }
 
 function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
@@ -165,8 +256,11 @@ export function MainWindowApp() {
   const [expandedPaths, setExpandedPaths] = useState<string[]>([])
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const [previewContent, setPreviewContent] = useState('')
+  const [previewImage, setPreviewImage] = useState('')
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState('')
+  const [draftAttachmentPath, setDraftAttachmentPath] = useState<string | null>(null)
+  const [draftAttachmentPreview, setDraftAttachmentPreview] = useState('')
 
   const activeSession = useMemo(() => {
     if (!activeSessionId) {
@@ -203,8 +297,10 @@ export function MainWindowApp() {
       : activeSession?.taskTree || []
 
   const activeWorkspacePath = activeSession?.workspacePath || ''
-  const effectiveProvider = activeSession?.provider || settings.provider
-  const effectiveModel = activeSession?.model || settings.model
+  const activeProviderProfile = getSessionProviderProfile(settings, activeSession)
+  const effectiveProvider = activeProviderProfile?.provider || settings.provider
+  const effectiveModel = activeSession?.model || getFirstEnabledModelId(activeProviderProfile) || settings.model
+  const enabledModelGroups = collectEnabledModelsByProfile(settings)
 
   useEffect(() => {
     saveSessions(sessions)
@@ -447,6 +543,8 @@ export function MainWindowApp() {
     }
 
     setSelectedFilePath(null)
+    setDraftAttachmentPath(null)
+    setDraftAttachmentPreview('')
     void loadTree()
     return () => {
       cancelled = true
@@ -456,6 +554,7 @@ export function MainWindowApp() {
   useEffect(() => {
     if (!selectedFilePath) {
       setPreviewContent('')
+      setPreviewImage('')
       setPreviewError('')
       return
     }
@@ -465,8 +564,24 @@ export function MainWindowApp() {
 
     async function loadPreview() {
       setPreviewLoading(true)
+      setPreviewImage('')
+      setPreviewContent('')
       setPreviewError('')
       try {
+        const imageData = await readImagePreview(filePath)
+        if (cancelled) {
+          return
+        }
+
+        if (imageData) {
+          setPreviewImage(imageData)
+          return
+        }
+
+        if (!canPreviewAsText(filePath)) {
+          return
+        }
+
         const content = await readTextFile(filePath)
         if (!cancelled) {
           setPreviewContent(content)
@@ -474,6 +589,7 @@ export function MainWindowApp() {
       } catch (caught) {
         if (!cancelled) {
           setPreviewContent('')
+          setPreviewImage('')
           setPreviewError(caught instanceof Error ? caught.message : '读取文件失败。')
         }
       } finally {
@@ -520,16 +636,40 @@ export function MainWindowApp() {
     setSelectedFilePath(null)
   }
 
+  async function chooseAttachmentForDraft() {
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      title: '选择要引用的附件',
+    })
+
+    if (typeof selected !== 'string') {
+      return
+    }
+
+    setDraftAttachmentPath(selected)
+    try {
+      const imageData = await readImagePreview(selected)
+      setDraftAttachmentPreview(imageData || '')
+    } catch {
+      setDraftAttachmentPreview('')
+    }
+  }
+
   function createFreshSession() {
     const next = createSession(settings)
     setSessions(current => [next, ...current])
     setActiveSessionId(next.id)
     setDraft('')
+    setDraftAttachmentPath(null)
+    setDraftAttachmentPreview('')
     setError('')
   }
 
   function openSession(sessionId: string) {
     setActiveSessionId(sessionId)
+    setDraftAttachmentPath(null)
+    setDraftAttachmentPreview('')
     setError('')
   }
 
@@ -555,9 +695,12 @@ export function MainWindowApp() {
     if (activeSessionId === sessionId) {
       setActiveSessionId(remaining[0]?.id || null)
       setDraft('')
+      setDraftAttachmentPath(null)
+      setDraftAttachmentPreview('')
       setError('')
       setSelectedFilePath(null)
       setPreviewContent('')
+      setPreviewImage('')
       setPreviewError('')
       setWorkspaceTree(null)
       setWorkspaceError('')
@@ -593,7 +736,7 @@ export function MainWindowApp() {
 
   async function submitPrompt(rawContent: string) {
     const content = rawContent.trim()
-    if (!content || isRunning || !activeSession) {
+    if ((!content && !draftAttachmentPath) || isRunning || !activeSession) {
       return
     }
     if (!settings.apiKey.trim()) {
@@ -604,7 +747,8 @@ export function MainWindowApp() {
       return
     }
 
-    const workspacePath = await ensureSessionWorkspace(activeSession, content).catch(caught => {
+    const workspaceHint = content || draftAttachmentPath || activeSession.title
+    const workspacePath = await ensureSessionWorkspace(activeSession, workspaceHint).catch(caught => {
       setError(caught instanceof Error ? caught.message : '创建会话工作目录失败。')
       return ''
     })
@@ -613,10 +757,14 @@ export function MainWindowApp() {
       return
     }
 
+    const attachmentInstruction = draftAttachmentPath
+      ? `\n\n请重点查看附件：${draftAttachmentPath}`
+      : ''
+
     const userMessage: ChatMessage = {
       id: createId(),
       role: 'user',
-      content,
+      content: content || `已附加文件：${draftAttachmentPath?.split('/').pop() || '附件'}`,
       status: 'completed',
       createdAt: Date.now(),
     }
@@ -624,16 +772,29 @@ export function MainWindowApp() {
 
     const runtimeSettings: AgentSettings = {
       ...settings,
+      activeProviderProfileId: activeProviderProfile?.id || settings.activeProviderProfileId,
       provider: effectiveProvider,
+      apiKey: activeProviderProfile?.apiKey || settings.apiKey,
+      baseUrl: activeProviderProfile?.baseUrl || settings.baseUrl,
       model: effectiveModel,
       cwd: workspacePath,
     }
 
     const sessionId = activeSession.id
     const nextMessages = [...activeSession.messages, userMessage]
+    const nextMessagesForAgent = [
+      ...activeSession.messages,
+      {
+        ...userMessage,
+        content: `${content || '请分析这个附件。'}${attachmentInstruction}`,
+      },
+    ]
     updateSession(sessionId, session => ({
       ...session,
       title: session.messages.length === 0 ? summarizeTitle(content) : session.title,
+      providerProfileId: activeProviderProfile?.id || session.providerProfileId,
+      provider: effectiveProvider,
+      model: effectiveModel,
       messages: [...nextMessages, pendingAssistantMessage],
       toolEvents: [],
       taskTree: [],
@@ -641,10 +802,12 @@ export function MainWindowApp() {
       updatedAt: Date.now(),
     }))
     setDraft('')
+    setDraftAttachmentPath(null)
+    setDraftAttachmentPreview('')
     setError('')
 
     try {
-      const taskId = await startAgentTask(runtimeSettings, nextMessages)
+      const taskId = await startAgentTask(runtimeSettings, nextMessagesForAgent)
       setRunningSessionId(sessionId)
       setRunningMessageId(pendingAssistantMessage.id)
       setAgentTask({
@@ -777,9 +940,27 @@ export function MainWindowApp() {
     )
   }
 
+  function switchSessionModel(profileId: string, modelId: string) {
+    const profile = settings.providerProfiles.find(entry => entry.id === profileId)
+    if (!activeSession || !profile) {
+      return
+    }
+
+    updateSession(activeSession.id, session => ({
+      ...session,
+      providerProfileId: profile.id,
+      provider: profile.provider,
+      model: modelId,
+      updatedAt: Date.now(),
+    }))
+  }
+
   const effectiveSettings: AgentSettings = {
     ...settings,
+    activeProviderProfileId: activeProviderProfile?.id || settings.activeProviderProfileId,
     provider: effectiveProvider,
+    apiKey: activeProviderProfile?.apiKey || settings.apiKey,
+    baseUrl: activeProviderProfile?.baseUrl || settings.baseUrl,
     model: effectiveModel,
     cwd: activeWorkspacePath,
   }
@@ -810,8 +991,6 @@ export function MainWindowApp() {
               displayedToolEvents={displayedToolEvents}
               displayedTaskTree={displayedTaskTree}
               settings={effectiveSettings}
-              sessionWorkspaceRoot={activeSession.workspaceRoot}
-              sessionWorkspaceMode={activeSession.workspaceMode}
               draft={draft}
               error={error}
               isRunning={isRunning}
@@ -819,8 +998,13 @@ export function MainWindowApp() {
               workspaceError={workspaceError}
               selectedFilePath={selectedFilePath}
               previewContent={previewContent}
+              previewImage={previewImage}
               previewLoading={previewLoading}
               previewError={previewError}
+              attachmentPath={draftAttachmentPath}
+              attachmentPreview={draftAttachmentPreview}
+              modelGroups={enabledModelGroups}
+              activeModelProfileId={activeProviderProfile?.id || ''}
               onDraftChange={setDraft}
               onSubmit={() => void submit()}
               onOpenProviders={() =>
@@ -829,9 +1013,18 @@ export function MainWindowApp() {
                 })
               }
               onHandleApproval={decision => void handleApproval(decision)}
-              onRefreshWorkspace={() => void refreshWorkspace()}
               onChooseWorkspace={() => void chooseExplicitWorkspaceForSession()}
-              onInsertFileReference={insertFileReference}
+              onPickAttachment={() => void chooseAttachmentForDraft()}
+              onSelectModel={(profileId, modelId) => switchSessionModel(profileId, modelId)}
+              onOpenAttachment={path =>
+                void openPathInDefaultApp(path).catch(caught => {
+                  setError(caught instanceof Error ? caught.message : '打开文件失败。')
+                })
+              }
+              onClearAttachment={() => {
+                setDraftAttachmentPath(null)
+                setDraftAttachmentPreview('')
+              }}
               onCopyPath={path => void copyText(path)}
               onCopyText={value => void copyText(value)}
               onEditMessage={applyMessageToDraft}
@@ -842,7 +1035,9 @@ export function MainWindowApp() {
           ) : (
             <HomeView
               sessions={sessions}
-              providerConfigured={Boolean(settings.apiKey.trim() && settings.model.trim())}
+              providerConfigured={Boolean(
+                activeProviderProfile?.apiKey.trim() && getFirstEnabledModelId(activeProviderProfile),
+              )}
               workspaceConfigured={Boolean(settings.cwd.trim())}
               onOpenSession={openSession}
               onNewSession={createFreshSession}

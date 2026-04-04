@@ -1,5 +1,21 @@
 export type ProviderMode = 'openai' | 'google' | 'custom'
 
+export type ProviderModel = {
+  id: string
+  enabled: boolean
+}
+
+export type ProviderProfile = {
+  id: string
+  name: string
+  provider: ProviderMode
+  apiKey: string
+  baseUrl: string
+  enabled: boolean
+  models: ProviderModel[]
+  defaultModel: string
+}
+
 export type ChatRole = 'user' | 'assistant'
 
 export type MessageStatus = 'pending' | 'streaming' | 'completed' | 'failed'
@@ -98,6 +114,8 @@ export type AgentSettings = {
   apiKey: string
   baseUrl: string
   model: string
+  activeProviderProfileId: string
+  providerProfiles: ProviderProfile[]
   cwd: string
   maxSteps: number
   enableMultiAgent: boolean
@@ -116,6 +134,7 @@ export type AgentSettings = {
 export type Session = {
   id: string
   title: string
+  providerProfileId: string
   provider: ProviderMode
   model: string
   workspacePath: string

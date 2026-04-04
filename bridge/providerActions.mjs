@@ -67,7 +67,7 @@ async function runAction(payload) {
         : await fetchOpenAiModels(settings)
     return {
       ok: true,
-      message: result.message,
+      message: `连通性测试成功，可访问服务并读取到 ${result.models.length} 个模型。`,
       models: result.models,
     }
   }

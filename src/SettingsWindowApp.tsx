@@ -5,11 +5,11 @@ import { builtinPlugins, builtinSkills } from './catalog'
 import { fetchProviderModels, testProviderConnection } from './lib/provider'
 import { loadSettings, saveSettings } from './lib/storage'
 import { broadcastSettingsUpdated, closeCurrentWindow, openMcpEditorWindow } from './lib/windows'
-import type { AgentSettings } from './types'
+import type { AgentSettings, ProviderMode, ProviderProfile } from './types'
 import { ProvidersView } from './views/ProvidersView'
 import { SettingsView, type SettingsTab } from './views/SettingsView'
 
-const PROVIDER_BASE_URLS: Record<AgentSettings['provider'], string> = {
+const PROVIDER_BASE_URLS: Record<ProviderMode, string> = {
   openai: 'https://api.openai.com/v1',
   google: 'https://generativelanguage.googleapis.com/v1beta',
   custom: 'https://api.openai.com/v1',
@@ -17,6 +17,24 @@ const PROVIDER_BASE_URLS: Record<AgentSettings['provider'], string> = {
 
 function cloneSettings(settings: AgentSettings): AgentSettings {
   return JSON.parse(JSON.stringify(settings)) as AgentSettings
+}
+
+function createProviderProfile(provider: ProviderMode = 'custom'): ProviderProfile {
+  return {
+    id: `profile-${provider}-${Math.random().toString(36).slice(2, 8)}`,
+    name: provider === 'custom' ? 'New Provider' : provider === 'google' ? 'Google' : 'OpenAI',
+    provider,
+    apiKey: '',
+    baseUrl: PROVIDER_BASE_URLS[provider],
+    enabled: true,
+    models: [],
+    defaultModel: '',
+  }
+}
+
+type ProviderStatusState = {
+  tone: 'success' | 'error'
+  message: string
 }
 
 type Props = {
@@ -29,9 +47,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
     cloneSettings(loadSettings()),
   )
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
+  const [selectedProviderProfileId, setSelectedProviderProfileId] = useState(
+    loadSettings().activeProviderProfileId,
+  )
   const [saveState, setSaveState] = useState<'idle' | 'saved'>('idle')
-  const [availableModels, setAvailableModels] = useState<string[]>([])
-  const [providerStatus, setProviderStatus] = useState('')
+  const [providerStatus, setProviderStatus] = useState<ProviderStatusState | null>(null)
   const [isTestingProvider, setIsTestingProvider] = useState(false)
   const [isFetchingModels, setIsFetchingModels] = useState(false)
 
@@ -39,6 +59,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
     () => JSON.stringify(savedSettings) !== JSON.stringify(draftSettings),
     [draftSettings, savedSettings],
   )
+
+  const selectedProfile =
+    draftSettings.providerProfiles.find(profile => profile.id === selectedProviderProfileId) ||
+    draftSettings.providerProfiles[0] ||
+    null
 
   useEffect(() => {
     let unlistenOpenTab: (() => void) | undefined
@@ -52,10 +77,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
       unlistenSettingsUpdated = await listen('settings:updated', () => {
         const latest = loadSettings()
         setSavedSettings(latest)
-        setDraftSettings(current => ({
-          ...current,
-          mcpServers: latest.mcpServers,
-        }))
+        setDraftSettings(latest)
+        setSelectedProviderProfileId(latest.activeProviderProfileId)
       })
     })()
 
@@ -82,27 +105,102 @@ export function SettingsWindowApp({ initialTab }: Props) {
       [key]: value,
     }))
     setSaveState('idle')
-    if (key === 'provider' || key === 'apiKey' || key === 'baseUrl') {
-      setProviderStatus('')
-      setAvailableModels([])
-    }
   }
 
-  function handleProviderChange(provider: AgentSettings['provider']) {
-    setDraftSettings(current => {
-      const defaultBaseUrl = PROVIDER_BASE_URLS[provider]
-      const shouldResetBaseUrl =
-        !current.baseUrl.trim() || Object.values(PROVIDER_BASE_URLS).includes(current.baseUrl)
+  function updateProviderProfile<K extends keyof ProviderProfile>(
+    profileId: string,
+    key: K,
+    value: ProviderProfile[K],
+  ) {
+    setDraftSettings(current => ({
+      ...current,
+      providerProfiles: current.providerProfiles.map(profile => {
+        if (profile.id !== profileId) {
+          return profile
+        }
 
-      return {
-        ...current,
-        provider,
-        baseUrl: shouldResetBaseUrl ? defaultBaseUrl : current.baseUrl,
-      }
-    })
+        if (key === 'provider') {
+          const provider = value as ProviderMode
+          const shouldResetBaseUrl =
+            !profile.baseUrl.trim() || Object.values(PROVIDER_BASE_URLS).includes(profile.baseUrl)
+          return {
+            ...profile,
+            provider,
+            baseUrl: shouldResetBaseUrl ? PROVIDER_BASE_URLS[provider] : profile.baseUrl,
+          }
+        }
+
+        return {
+          ...profile,
+          [key]: value,
+        }
+      }),
+    }))
     setSaveState('idle')
-    setProviderStatus('')
-    setAvailableModels([])
+    setProviderStatus(null)
+  }
+
+  function createProfile() {
+    const next = createProviderProfile('custom')
+    setDraftSettings(current => ({
+      ...current,
+      providerProfiles: [next, ...current.providerProfiles],
+    }))
+    setSelectedProviderProfileId(next.id)
+    setSaveState('idle')
+  }
+
+  function deleteProfile(profileId: string) {
+    if (draftSettings.providerProfiles.length <= 1) {
+      return
+    }
+
+    const remaining = draftSettings.providerProfiles.filter(profile => profile.id !== profileId)
+    const nextActive =
+      draftSettings.activeProviderProfileId === profileId
+        ? remaining[0]?.id || ''
+        : draftSettings.activeProviderProfileId
+
+    setDraftSettings(current => ({
+      ...current,
+      activeProviderProfileId: nextActive,
+      providerProfiles: remaining,
+    }))
+    setSelectedProviderProfileId(remaining[0]?.id || '')
+    setSaveState('idle')
+    setProviderStatus(null)
+  }
+
+  function toggleProfileModel(profileId: string, modelId: string) {
+    setDraftSettings(current => ({
+      ...current,
+      providerProfiles: current.providerProfiles.map(profile =>
+        profile.id === profileId
+          ? {
+              ...profile,
+              models: profile.models.map(model =>
+                model.id === modelId ? { ...model, enabled: !model.enabled } : model,
+              ),
+            }
+          : profile,
+      ),
+    }))
+    setSaveState('idle')
+  }
+
+  function getPrimaryModelId(profile: ProviderProfile) {
+    return profile.models.find(model => model.enabled)?.id || ''
+  }
+
+  function buildProviderRequestSettings(profile: ProviderProfile): AgentSettings {
+    const primaryModel = getPrimaryModelId(profile)
+    return {
+      ...draftSettings,
+      provider: profile.provider,
+      apiKey: profile.apiKey,
+      baseUrl: profile.baseUrl,
+      model: primaryModel,
+    }
   }
 
   function toggleSkill(skillId: string) {
@@ -138,30 +236,53 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   async function handleTestConnection() {
+    if (!selectedProfile) {
+      return
+    }
     setIsTestingProvider(true)
-    setProviderStatus('')
+    setProviderStatus(null)
     try {
-      const result = await testProviderConnection(draftSettings)
-      setProviderStatus(result.message)
-      if (result.models.length > 0) {
-        setAvailableModels(result.models)
-      }
+      const result = await testProviderConnection(buildProviderRequestSettings(selectedProfile))
+      setProviderStatus({
+        tone: 'success',
+        message: result.message,
+      })
     } catch (caught) {
-      setProviderStatus(caught instanceof Error ? caught.message : 'Provider 测试失败。')
+      setProviderStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : 'Provider 测试失败。',
+      })
     } finally {
       setIsTestingProvider(false)
     }
   }
 
   async function handleFetchModels() {
+    if (!selectedProfile) {
+      return
+    }
     setIsFetchingModels(true)
-    setProviderStatus('')
+    setProviderStatus(null)
     try {
-      const result = await fetchProviderModels(draftSettings)
-      setAvailableModels(result.models)
-      setProviderStatus(result.message)
+      const result = await fetchProviderModels(buildProviderRequestSettings(selectedProfile))
+      updateProviderProfile(
+        selectedProfile.id,
+        'models',
+        result.models.map(model => ({
+          id: model,
+          enabled:
+            selectedProfile.models.find(existing => existing.id === model)?.enabled ?? false,
+        })),
+      )
+      setProviderStatus({
+        tone: 'success',
+        message: result.message,
+      })
     } catch (caught) {
-      setProviderStatus(caught instanceof Error ? caught.message : '模型拉取失败。')
+      setProviderStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '模型拉取失败。',
+      })
     } finally {
       setIsFetchingModels(false)
     }
@@ -186,15 +307,22 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
-            <div className="section-title">默认会话配置</div>
+            <div className="section-title">提供商概览</div>
             <div className="dashboard-list">
               <div className="dashboard-row">
-                <strong>默认 Provider</strong>
-                <span>{draftSettings.provider}</span>
+                <strong>已启用 Provider</strong>
+                <span>
+                  {draftSettings.providerProfiles.filter(profile => profile.enabled).length || '未配置'}
+                </span>
               </div>
               <div className="dashboard-row">
-                <strong>默认模型</strong>
-                <span>{draftSettings.model || '未配置'}</span>
+                <strong>已启用模型</strong>
+                <span>
+                  {draftSettings.providerProfiles.reduce(
+                    (count, profile) => count + profile.models.filter(model => model.enabled).length,
+                    0,
+                  ) || '未配置'}
+                </span>
               </div>
             </div>
           </section>
@@ -382,13 +510,16 @@ export function SettingsWindowApp({ initialTab }: Props) {
         {activeTab === 'general' ? renderGeneral() : null}
         {activeTab === 'providers' ? (
           <ProvidersView
-            settings={draftSettings}
-            availableModels={availableModels}
+            profiles={draftSettings.providerProfiles}
+            activeProfileId={selectedProviderProfileId}
             providerStatus={providerStatus}
             isTesting={isTestingProvider}
             isFetchingModels={isFetchingModels}
-            onProviderChange={handleProviderChange}
-            onSettingsChange={handleSettingsChange}
+            onSelectProfile={setSelectedProviderProfileId}
+            onCreateProfile={createProfile}
+            onDeleteProfile={deleteProfile}
+            onProfileChange={updateProviderProfile}
+            onToggleModel={toggleProfileModel}
             onTestConnection={() => void handleTestConnection()}
             onFetchModels={() => void handleFetchModels()}
           />

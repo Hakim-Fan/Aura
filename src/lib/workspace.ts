@@ -9,6 +9,14 @@ export async function readTextFile(filePath: string): Promise<string> {
   return invoke<string>('read_text_file', { filePath })
 }
 
+export async function readImagePreview(filePath: string): Promise<string | null> {
+  return invoke<string | null>('read_image_preview', { filePath })
+}
+
+export async function openPathInDefaultApp(path: string): Promise<void> {
+  return invoke('open_path_in_default_app', { path })
+}
+
 export async function createSessionWorkspace(
   rootPath: string,
   hint: string,

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{Manager, Runtime, State};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -435,6 +436,48 @@ fn read_text_file(file_path: String) -> Result<String, String> {
     Ok(String::from_utf8_lossy(truncated).to_string())
 }
 
+#[tauri::command]
+fn read_image_preview(file_path: String) -> Result<Option<String>, String> {
+    let path = PathBuf::from(&file_path);
+    if !path.exists() {
+        return Err(format!("File does not exist: {}", path.display()));
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let mime = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        _ => return Ok(None),
+    };
+
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("Failed to read image {}: {error}", path.display()))?;
+
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("Image is too large to preview inline.".into());
+    }
+
+    Ok(Some(format!("data:{mime};base64,{}", STANDARD.encode(bytes))))
+}
+
+#[tauri::command]
+fn open_path_in_default_app(path: String) -> Result<(), String> {
+    Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map_err(|error| format!("Failed to open path in default app: {error}"))?;
+    Ok(())
+}
+
 fn slugify(value: &str) -> String {
     let mut slug = String::new();
     let mut previous_dash = false;
@@ -506,6 +549,8 @@ fn main() {
             run_provider_action,
             read_workspace_tree,
             read_text_file,
+            read_image_preview,
+            open_path_in_default_app,
             create_session_workspace
         ])
         .run(tauri::generate_context!())

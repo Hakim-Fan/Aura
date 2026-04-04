@@ -1,5 +1,7 @@
 import { memo } from 'react'
-import { CheckCircle2, CircleDashed, Clock3, PauseCircle, XCircle } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { CheckCircle2, ChevronDown, CircleDashed, Clock3, PauseCircle, XCircle } from 'lucide-react'
 import type { TaskNode } from '../types'
 
 function statusLabel(status?: string) {
@@ -34,6 +36,61 @@ function StatusIcon({ status }: { status?: string }) {
   }
 }
 
+function TaskTreeNode({ node }: { node: TaskNode }) {
+  const hasSummary = Boolean(node.summary.trim())
+  const hasChildren = node.children.length > 0
+
+  return (
+    <article className="grid grid-cols-[18px_1fr] gap-3">
+      <div className="relative flex flex-col items-center">
+        <div className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-white text-[var(--text-secondary)] opacity-70">
+          <StatusIcon status={node.status} />
+        </div>
+        <div className="mt-1 w-px flex-1 bg-[rgba(15,23,42,0.08)]" />
+      </div>
+
+      <div className="min-w-0 pb-1">
+        <details className="group" open={node.status === 'running' ? true : undefined}>
+          <summary className="list-none cursor-pointer">
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="min-w-0 flex items-start gap-2">
+                {(hasSummary || hasChildren) ? (
+                  <span className="mt-0.5 rounded-md p-0.5 text-[var(--text-secondary)] opacity-55 transition-transform group-open:rotate-180">
+                    <ChevronDown size={12} />
+                  </span>
+                ) : (
+                  <span className="mt-0.5 h-4 w-4 shrink-0" />
+                )}
+                <strong className="min-w-0 text-13px font-600 leading-relaxed text-[var(--text-primary)]">
+                  {node.title}
+                </strong>
+              </div>
+              <span className="shrink-0 rounded-full bg-[rgba(15,23,42,0.05)] px-2 py-0.5 text-10px font-600 text-[var(--text-secondary)] opacity-70">
+                {statusLabel(node.status)}
+              </span>
+            </div>
+          </summary>
+
+          {(hasSummary || hasChildren) ? (
+            <div className="mt-2 pl-6">
+              {hasSummary ? (
+                <div className="markdown-summary text-12px text-[var(--text-secondary)] opacity-78">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{node.summary}</ReactMarkdown>
+                </div>
+              ) : null}
+              {hasChildren ? (
+                <div className={hasSummary ? 'mt-3' : ''}>
+                  <TaskTreeView nodes={node.children} />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </details>
+      </div>
+    </article>
+  )
+}
+
 export const TaskTreeView = memo(function TaskTreeView({
   nodes,
 }: {
@@ -46,28 +103,7 @@ export const TaskTreeView = memo(function TaskTreeView({
   return (
     <div className="flex flex-col gap-3">
       {nodes.map(node => (
-        <article key={node.id} className="grid grid-cols-[18px_1fr] gap-3">
-          <div className="relative flex flex-col items-center">
-            <div className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-white text-[var(--text-secondary)] opacity-70">
-              <StatusIcon status={node.status} />
-            </div>
-            <div className="mt-1 w-px flex-1 bg-[rgba(15,23,42,0.08)]" />
-          </div>
-          <div className="min-w-0 pb-1">
-            <div className="mb-1 flex min-w-0 items-start justify-between gap-3">
-              <strong className="min-w-0 text-13px font-600 leading-relaxed text-[var(--text-primary)]">{node.title}</strong>
-              <span className="shrink-0 rounded-full bg-[rgba(15,23,42,0.05)] px-2 py-0.5 text-10px font-600 text-[var(--text-secondary)] opacity-70">
-                {statusLabel(node.status)}
-              </span>
-            </div>
-            <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{node.summary}</p>
-            {node.children.length > 0 ? (
-              <div className="mt-3 pl-1">
-                <TaskTreeView nodes={node.children} />
-              </div>
-            ) : null}
-          </div>
-        </article>
+        <TaskTreeNode key={node.id} node={node} />
       ))}
     </div>
   )

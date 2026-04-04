@@ -2,6 +2,7 @@ import { useEffect, useState, type KeyboardEvent } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  ArrowUpRight,
   Bot,
   BrainCircuit,
   Copy,
@@ -9,13 +10,13 @@ import {
   ChevronUp,
   Eye,
   FolderOpen,
+  Paperclip,
   Pencil,
   RefreshCw,
   SendHorizontal,
   Settings2,
   Sparkles,
-  Wand2,
-  Wrench,
+  X,
 } from 'lucide-react'
 import { TaskTreeView } from '../components/TaskTreeView'
 import type {
@@ -23,17 +24,23 @@ import type {
   AgentTaskSnapshot,
   ChatMessage,
   MessageEvent,
+  ProviderMode,
   TaskNode,
   ToolEvent,
 } from '../types'
+
+type ModelGroup = {
+  profileId: string
+  profileName: string
+  provider: ProviderMode
+  models: Array<{ id: string; enabled: boolean }>
+}
 
 type Props = {
   messages: ChatMessage[]
   displayedToolEvents: ToolEvent[]
   displayedTaskTree: TaskNode[]
   settings: AgentSettings
-  sessionWorkspaceRoot: string
-  sessionWorkspaceMode: 'explicit' | 'default'
   draft: string
   error: string
   isRunning: boolean
@@ -41,27 +48,28 @@ type Props = {
   workspaceError: string
   selectedFilePath: string | null
   previewContent: string
+  previewImage: string
   previewLoading: boolean
   previewError: string
+  attachmentPath: string | null
+  attachmentPreview: string
+  modelGroups: ModelGroup[]
+  activeModelProfileId: string
   onDraftChange: (value: string) => void
   onSubmit: () => void
   onOpenProviders: () => void
   onHandleApproval: (decision: 'approve' | 'deny') => void
-  onRefreshWorkspace: () => void
   onChooseWorkspace: () => void
-  onInsertFileReference: (path: string) => void
+  onPickAttachment: () => void
+  onSelectModel: (profileId: string, modelId: string) => void
+  onOpenAttachment: (path: string) => void
+  onClearAttachment: () => void
   onCopyPath: (path: string) => void
   onCopyText: (value: string) => void
   onEditMessage: (messageId: string) => void
   onRegenerateMessage: (messageId: string) => void
   onResendMessage: (messageId: string) => void
   onToggleMessageActivity: (messageId: string) => void
-}
-
-const providerLabelMap: Record<AgentSettings['provider'], string> = {
-  openai: 'OpenAI',
-  google: 'Google',
-  custom: 'Custom',
 }
 
 const suggestedPrompts = [
@@ -137,6 +145,54 @@ function eventStatusLabel(status: MessageEvent['status']) {
   }
 }
 
+function prettifyIdentifier(identifier: string) {
+  return identifier
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+function presentToolEventTitle(event: Pick<ToolEvent, 'name' | 'source'>) {
+  const rawName = event.name?.trim()
+  if (!rawName) {
+    return event.source === 'plugin' ? '技能' : '工具'
+  }
+  if (event.source === 'plugin') {
+    const tail = rawName.split('__').filter(Boolean).at(-1) || rawName
+    return prettifyIdentifier(tail)
+  }
+  if (event.source === 'subagent') {
+    return rawName
+  }
+  if (rawName.toLowerCase().includes('shell')) {
+    return 'Shell 命令'
+  }
+  return prettifyIdentifier(rawName)
+}
+
+function isGenericTaskSummary(summary?: string) {
+  const normalized = summary?.trim().toLowerCase() || ''
+  return !normalized || normalized === 'primary agent task'
+}
+
+function sanitizeTaskNodes(nodes: TaskNode[]): TaskNode[] {
+  return nodes.flatMap(node => {
+    const children = sanitizeTaskNodes(node.children || [])
+    const summary = isGenericTaskSummary(node.summary) ? '' : node.summary
+
+    if (node.kind === 'main' && !summary && children.length > 0) {
+      return children
+    }
+
+    if (node.kind === 'main' && !summary && children.length === 0) {
+      return []
+    }
+
+    return [{ ...node, summary, children }]
+  })
+}
+
 function MarkdownAnswer({
   content,
   onCopyText,
@@ -191,43 +247,39 @@ function MarkdownAnswer({
 
 function MessageEventCard({
   event,
-  onCopyText,
 }: {
   event: MessageEvent
-  onCopyText: (value: string) => void
 }) {
   return (
-    <article className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.025)] px-3 py-2.5">
+    <article className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2">
       <div className="mb-1 flex items-start justify-between gap-3">
         <div className="min-w-0 flex items-center gap-2">
           <span
-            className={`text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded ${
-              event.status === 'error'
+            className={`text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded ${event.status === 'error'
                 ? 'bg-red-50 text-red-500'
                 : event.status === 'awaiting_approval'
                   ? 'bg-amber-50 text-amber-600'
                   : 'bg-gray-100 text-gray-500'
-            }`}
+              }`}
           >
             {eventKindLabel(event)}
           </span>
           <strong className="text-12px text-[var(--text-primary)] opacity-80 leading-tight">{event.title}</strong>
         </div>
         <span
-          className={`shrink-0 text-10px font-500 ${
-              event.status === 'error'
-                ? 'text-red-500'
-                : event.status === 'awaiting_approval'
-                  ? 'text-amber-600'
-                  : 'text-green-600'
+          className={`shrink-0 text-10px font-500 ${event.status === 'error'
+              ? 'text-red-500'
+              : event.status === 'awaiting_approval'
+                ? 'text-amber-600'
+                : 'text-green-600'
             }`}
-          >
-            {eventStatusLabel(event.status)}
-          </span>
+        >
+          {eventStatusLabel(event.status)}
+        </span>
       </div>
       <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
       {(event.input || event.output || event.error) && (
-        <details className="mt-2 group">
+        <details className="mt-1.5 group">
           <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-55">显示详细信息</summary>
           <div className="mt-2 flex flex-col gap-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3">
             {event.input && (
@@ -251,15 +303,6 @@ function MessageEventCard({
           </div>
         </details>
       )}
-      <div className="mt-2 flex justify-end">
-        <button
-          className="p-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] opacity-50 hover:opacity-100 transition-all"
-          title="复制摘要"
-          onClick={() => onCopyText(event.summary)}
-        >
-          <Copy size={12} />
-        </button>
-      </div>
     </article>
   )
 }
@@ -279,18 +322,19 @@ function AssistantMessageCard({
 }) {
   const activity = message.activity
   const duration = activity ? (activity.finishedAt || Date.now()) - activity.startedAt : undefined
-  const hasExecution = Boolean(activity) || (message.events?.length || 0) > 0 || (message.steps?.length || 0) > 0
+  const visibleSteps = sanitizeTaskNodes(message.steps || [])
+  const hasExecution = Boolean(activity) || (message.events?.length || 0) > 0 || visibleSteps.length > 0
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
   const activitySummary = activity
     ? [
-        activityStatusLabel(activity.status),
-        duration ? formatDuration(duration) : null,
-        activity.toolCount > 0 ? `${activity.toolCount} 个工具` : null,
-        activity.skillCount > 0 ? `${activity.skillCount} 个技能` : null,
-        activity.stepCount > 0 ? `${activity.stepCount} 个步骤` : null,
-      ]
-        .filter(Boolean)
-        .join(' · ')
+      activityStatusLabel(activity.status),
+      duration ? formatDuration(duration) : null,
+      activity.toolCount > 0 ? `${activity.toolCount} 个工具` : null,
+      activity.skillCount > 0 ? `${activity.skillCount} 个技能` : null,
+      activity.stepCount > 0 ? `${activity.stepCount} 个步骤` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ')
     : null
 
   return (
@@ -323,11 +367,11 @@ function AssistantMessageCard({
               </div>
               <div className="flex flex-col gap-2.5">
                 {message.events?.map(event => (
-                  <MessageEventCard key={event.id} event={event} onCopyText={onCopyText} />
+                  <MessageEventCard key={event.id} event={event} />
                 ))}
-                {message.steps && message.steps.length > 0 ? (
+                {visibleSteps.length > 0 ? (
                   <div className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2.5">
-                    <TaskTreeView nodes={message.steps} />
+                    <TaskTreeView nodes={visibleSteps} />
                   </div>
                 ) : null}
               </div>
@@ -353,30 +397,32 @@ function AssistantMessageCard({
             </div>
           )}
 
-          <div className="pointer-events-none absolute right-0 top-0 flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:pointer-events-auto group-hover:opacity-100">
-            <button
-              className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
-              title="复制"
-              onClick={() => onCopyText(message.content)}
-            >
-              <Copy size={14} />
-            </button>
-            <button
-              className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
-              title="编辑为新提示"
-              disabled={isStreaming}
-              onClick={() => onEditMessage(message.id)}
-            >
-              <Pencil size={14} />
-            </button>
-            <button
-              className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
-              title="重新生成"
-              disabled={isStreaming}
-              onClick={() => onRegenerateMessage(message.id)}
-            >
-              <RefreshCw size={14} />
-            </button>
+          <div className="flex items-center justify-end pt-1">
+            <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
+              <button
+                className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+                title="复制"
+                onClick={() => onCopyText(message.content)}
+              >
+                <Copy size={14} />
+              </button>
+              <button
+                className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+                title="编辑为新提示"
+                disabled={isStreaming}
+                onClick={() => onEditMessage(message.id)}
+              >
+                <Pencil size={14} />
+              </button>
+              <button
+                className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+                title="重新生成"
+                disabled={isStreaming}
+                onClick={() => onRegenerateMessage(message.id)}
+              >
+                <RefreshCw size={14} />
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -420,8 +466,6 @@ export function ChatView({
   displayedToolEvents,
   displayedTaskTree,
   settings,
-  sessionWorkspaceRoot,
-  sessionWorkspaceMode,
   draft,
   error,
   isRunning,
@@ -429,15 +473,22 @@ export function ChatView({
   workspaceError,
   selectedFilePath,
   previewContent,
+  previewImage,
   previewLoading,
   previewError,
+  attachmentPath,
+  attachmentPreview,
+  modelGroups,
+  activeModelProfileId,
   onDraftChange,
   onSubmit,
   onOpenProviders,
   onHandleApproval,
-  onRefreshWorkspace,
   onChooseWorkspace,
-  onInsertFileReference,
+  onPickAttachment,
+  onSelectModel,
+  onOpenAttachment,
+  onClearAttachment,
   onCopyPath,
   onCopyText,
   onEditMessage,
@@ -446,10 +497,11 @@ export function ChatView({
   onToggleMessageActivity,
 }: Props) {
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [attachmentLightboxOpen, setAttachmentLightboxOpen] = useState(false)
 
   const modelLabel =
     settings.model.split('/').filter(Boolean).at(-1) || settings.model || '选择模型'
-  const providerLabel = providerLabelMap[settings.provider]
   const isMetaEnter = settings.sendShortcut === 'meta-enter'
   const composerMetaHint = settings.cwd
     ? isMetaEnter
@@ -573,7 +625,7 @@ export function ChatView({
           {/* Docked Composer */}
           <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[var(--bg-app)] via-[var(--bg-app)] to-transparent pointer-events-none">
             <div className="max-w-1000px mx-auto pointer-events-auto">
-              <div className="bg-white border border-[var(--border-subtle)] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] overflow-hidden transition-all focus-within:border-[var(--accent-soft-strong)]/30 focus-within:ring-4 focus-within:ring-[var(--accent-soft-strong)]/6">
+              <div className="bg-white border border-[rgba(79,123,116,0.18)] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] overflow-hidden transition-all focus-within:border-[rgba(79,123,116,0.32)] focus-within:ring-4 focus-within:ring-[rgba(79,123,116,0.08)]">
                 <textarea
                   className="w-full h-120px p-4 text-15px leading-relaxed resize-none border-none bg-transparent outline-none"
                   value={draft}
@@ -582,23 +634,141 @@ export function ChatView({
                   placeholder="在这里输入你的需求或问题..."
                 />
 
+                {attachmentPath ? (
+                  <div className="mx-3 mb-3 flex items-center gap-2 overflow-x-auto custom-scrollbar">
+                    <div
+                      className="group inline-flex min-w-0 items-center gap-3 rounded-full border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-3 py-2"
+                      title={attachmentPath}
+                    >
+                      <button
+                        className="min-w-0 inline-flex items-center gap-3 text-left"
+                        onClick={() => {
+                          if (attachmentPreview) {
+                            setAttachmentLightboxOpen(true)
+                            return
+                          }
+                          onOpenAttachment(attachmentPath)
+                        }}
+                        title={attachmentPreview ? '预览图片' : '打开附件'}
+                      >
+                        {attachmentPreview ? (
+                          <img
+                            src={attachmentPreview}
+                            alt={attachmentPath.split('/').pop() || 'attachment'}
+                            className="h-8 w-8 shrink-0 rounded-lg object-cover border border-[rgba(15,23,42,0.06)]"
+                          />
+                        ) : (
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[rgba(15,23,42,0.06)] bg-white text-[var(--text-secondary)]">
+                            <Paperclip size={14} />
+                          </div>
+                        )}
+                        <span className="max-w-180px truncate text-13px font-600 text-[var(--text-primary)]">
+                          {attachmentPath.split('/').pop()}
+                        </span>
+                      </button>
+                      <button
+                        className="p-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] opacity-70"
+                        title="用默认应用打开"
+                        onClick={() => onOpenAttachment(attachmentPath)}
+                      >
+                        <ArrowUpRight size={13} />
+                      </button>
+                      <button
+                        className="p-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] opacity-70"
+                        title="移除附件"
+                        onClick={onClearAttachment}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
                 <div className="h-10 px-3 border-t border-[var(--border-subtle)] bg-[rgba(0,0,0,0.01)] flex items-center justify-between">
                   <div className="flex items-center gap-1">
-                    <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" onClick={onChooseWorkspace} title="工作目录">
-                      <FolderOpen size={16} />
+                    <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" onClick={onPickAttachment} title="上传附件">
+                      <Paperclip size={16} />
                     </button>
-                    <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" onClick={onOpenProviders} title="模型设置">
+                    <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" onClick={onOpenProviders} title="提供商设置">
                       <Settings2 size={16} />
                     </button>
                     <div className="h-4 w-1px bg-[var(--border-subtle)] mx-1" />
-                    <button
-                      className="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-12px text-[var(--text-secondary)] transition-colors"
-                      onClick={onOpenProviders}
-                    >
-                      <Bot size={14} className="opacity-70" />
-                      <span className="max-w-100px truncate">{modelLabel}</span>
-                      <ChevronDown size={12} className="opacity-40" />
-                    </button>
+                    <div className="relative">
+                      <button
+                        className="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-12px text-[var(--text-secondary)] transition-colors"
+                        onClick={() => setModelMenuOpen(current => !current)}
+                        title="切换模型"
+                      >
+                        <Bot size={14} className="opacity-70" />
+                        <span className="max-w-120px truncate">{modelLabel}</span>
+                        <ChevronDown size={12} className="opacity-40" />
+                      </button>
+
+                      {modelMenuOpen ? (
+                        <div className="absolute bottom-[calc(100%+10px)] left-0 z-20 min-w-300px max-w-360px rounded-2xl border border-[rgba(15,23,42,0.08)] bg-white/96 p-2 shadow-xl shadow-[rgba(15,23,42,0.12)] backdrop-blur-xl">
+                          <div className="mb-1 flex items-center justify-between px-2 py-1">
+                            <span className="text-11px font-700 tracking-wider uppercase text-[var(--text-secondary)] opacity-55">
+                              可用模型
+                            </span>
+                            <button
+                              className="text-11px text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                              onClick={onOpenProviders}
+                            >
+                              管理
+                            </button>
+                          </div>
+
+                          {modelGroups.length > 0 ? (
+                            <div className="flex max-h-320px flex-col gap-2 overflow-y-auto custom-scrollbar pr-1">
+                              {modelGroups.map(group => (
+                                <div key={group.profileId} className="rounded-xl bg-[rgba(15,23,42,0.025)] p-2">
+                                  <div className="mb-1 px-2 text-11px font-600 text-[var(--text-secondary)] opacity-65">
+                                    {group.profileName}
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    {group.models.map(model => {
+                                      const isActive =
+                                        group.profileId === activeModelProfileId &&
+                                        model.id === settings.model
+                                      return (
+                                        <button
+                                          key={model.id}
+                                          className={`flex items-center justify-between rounded-lg px-2 py-2 text-left transition-colors ${
+                                            isActive
+                                              ? 'bg-[rgba(79,123,116,0.12)] text-[var(--text-primary)]'
+                                              : 'hover:bg-[rgba(15,23,42,0.05)] text-[var(--text-secondary)]'
+                                          }`}
+                                          onClick={() => {
+                                            onSelectModel(group.profileId, model.id)
+                                            setModelMenuOpen(false)
+                                          }}
+                                        >
+                                          <div className="min-w-0">
+                                            <div className="truncate text-13px font-600">
+                                              {model.id.split('/').filter(Boolean).at(-1) || model.id}
+                                            </div>
+                                            <div className="truncate text-11px opacity-55">{model.id}</div>
+                                          </div>
+                                          {isActive ? (
+                                            <span className="ml-3 shrink-0 rounded-full bg-[rgba(79,123,116,0.16)] px-2 py-0.5 text-10px font-700 text-[var(--accent-soft-strong)]">
+                                              当前
+                                            </span>
+                                          ) : null}
+                                        </button>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="px-3 py-4 text-12px text-[var(--text-secondary)]">
+                              还没有可直接切换的模型，先到提供商设置里拉取并启用模型。
+                            </div>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-4">
@@ -650,7 +820,7 @@ export function ChatView({
                       event={{
                         id: event.id,
                         kind: event.source === 'plugin' ? 'skill' : event.source === 'subagent' ? 'subagent' : event.name.toLowerCase().includes('shell') ? 'shell' : 'tool',
-                        title: event.name,
+                        title: presentToolEventTitle(event),
                         summary: event.summary,
                         source: event.source,
                         status: event.status === 'error' ? 'error' : 'success',
@@ -658,7 +828,6 @@ export function ChatView({
                         output: event.output,
                         error: event.error,
                       }}
-                      onCopyText={onCopyText}
                     />
                   ))}
                 </div>
@@ -669,16 +838,31 @@ export function ChatView({
               <div className="flex flex-col gap-3">
                 <div className="text-12px font-600 text-[var(--text-secondary)] opacity-50 uppercase tracking-wider">当前文件</div>
                 <div className="bg-white p-3 rounded-xl border border-[var(--border-subtle)]">
-                  <div className="flex-between mb-2">
+                  <div className="mb-2 flex items-start justify-between gap-3">
                     <span className="text-13px font-500 truncate flex-1 pr-4">{selectedFilePath.split('/').pop()}</span>
-                    <button className="p-1 hover:bg-gray-100 rounded" onClick={() => onCopyPath(selectedFilePath)} title="复制路径">
-                      <Copy size={12} />
-                    </button>
+                    <div className="flex items-center gap-1">
+                      <button className="p-1 hover:bg-gray-100 rounded" onClick={() => onCopyPath(selectedFilePath)} title="复制路径">
+                        <Copy size={12} />
+                      </button>
+                      <button className="p-1 hover:bg-gray-100 rounded" onClick={() => onOpenAttachment(selectedFilePath)} title="用默认应用打开">
+                        <ArrowUpRight size={12} />
+                      </button>
+                    </div>
                   </div>
                   <div className="text-11px text-[var(--text-secondary)] mb-3 opacity-60 break-all">{selectedFilePath}</div>
-                  {previewContent && (
+                  {previewImage ? (
+                    <img
+                      src={previewImage}
+                      alt={selectedFilePath.split('/').pop() || 'preview'}
+                      className="max-h-300px w-full rounded-lg border border-gray-100 object-contain bg-white"
+                    />
+                  ) : previewContent ? (
                     <pre className="text-10px bg-gray-50 p-2 rounded border border-gray-100 max-h-300px overflow-y-auto whitespace-pre-wrap">{previewContent}</pre>
-                  )}
+                  ) : !previewLoading ? (
+                    <div className="rounded-lg border border-dashed border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-3 py-4 text-11px text-[var(--text-secondary)]">
+                      该文件不支持内联预览，可使用默认应用打开。
+                    </div>
+                  ) : null}
                   {previewLoading && <div className="text-11px text-center py-4 animate-pulse">正在读取...</div>}
                 </div>
               </div>
@@ -686,6 +870,28 @@ export function ChatView({
           </aside>
         )}
       </div>
+
+      {attachmentLightboxOpen && attachmentPreview ? (
+        <div
+          className="absolute inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.55)] p-10 backdrop-blur-sm"
+          onClick={() => setAttachmentLightboxOpen(false)}
+        >
+          <div className="relative max-h-full max-w-full rounded-2xl bg-white p-3 shadow-2xl">
+            <button
+              className="absolute right-3 top-3 rounded-full bg-white/90 p-2 text-[var(--text-secondary)] shadow-sm"
+              onClick={() => setAttachmentLightboxOpen(false)}
+              title="关闭预览"
+            >
+              <X size={16} />
+            </button>
+            <img
+              src={attachmentPreview}
+              alt={attachmentPath?.split('/').pop() || 'attachment preview'}
+              className="max-h-[80vh] max-w-[80vw] rounded-xl object-contain"
+            />
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }

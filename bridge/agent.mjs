@@ -25,7 +25,7 @@ function createTaskTracker(hooks, rootTitle) {
   const root = {
     id: createId('main'),
     title: rootTitle,
-    summary: 'Primary agent task',
+    summary: '',
     kind: 'main',
     status: 'running',
     children: [],
