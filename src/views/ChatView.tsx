@@ -516,6 +516,13 @@ export function ChatView({
   const [attachmentLightboxOpen, setAttachmentLightboxOpen] = useState(false)
 
   const modelMenuRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [messages, isRunning])
 
   useEffect(() => {
     if (!modelMenuOpen) return
@@ -609,7 +616,7 @@ export function ChatView({
       <div className="flex-1 flex overflow-hidden">
         {/* Messages Stage */}
         <div className="flex-1 flex flex-col min-w-0 relative">
-          <div className="flex-1 overflow-y-auto custom-scrollbar pt-8 pb-72 scroll-smooth">
+          <div ref={scrollRef} className="flex-1 overflow-y-auto custom-scrollbar pt-8 pb-72 scroll-smooth">
             {messages.length === 0 ? (
               <div className="max-w-1000px mx-auto px-6 py-20 flex flex-col items-center text-center">
                 <div className="text-11px font-700 text-[var(--text-secondary)] tracking-0.2em uppercase mb-4 opacity-50">
@@ -743,10 +750,10 @@ export function ChatView({
                         <LayoutGrid size={14} className="opacity-60" />
                         <span className="max-w-120px truncate font-600 text-[var(--text-primary)] opacity-70 group-hover:opacity-100">{modelLabel}</span>
                         <ChevronDown size={12} className="opacity-30" />
-                        <div className="ml-1 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[rgba(15,23,42,0.04)] text-9px font-700 opacity-60">
+                        {/* <div className="ml-1 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[rgba(15,23,42,0.04)] text-9px font-700 opacity-60">
                           <RefreshCw size={8} />
                           <span>1%</span>
-                        </div>
+                        </div> */}
                       </button>
 
                       {modelMenuOpen ? (
@@ -851,7 +858,6 @@ export function ChatView({
                   </div>
 
                   <div className="flex items-center gap-4">
-                    {error && <span className="text-11px text-red-500 font-500">{error}</span>}
                     <span className="text-11px text-[var(--text-secondary)] opacity-40 hidden sm:inline">{composerMetaHint}</span>
                     <button
                       className="flex items-center justify-center p-1.5 rounded-lg bg-[var(--accent-soft-strong)] text-white hover:brightness-110 disabled:opacity-40 disabled:grayscale transition-all"
