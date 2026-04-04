@@ -2,6 +2,7 @@ import { Plus, Search, Settings2, Trash2 } from 'lucide-react'
 import type { Session } from '../types'
 
 type Props = {
+  width: number
   sessionFilter: string
   onSessionFilterChange: (value: string) => void
   sessions: Session[]
@@ -14,6 +15,7 @@ type Props = {
 }
 
 export function AppSidebar({
+  width,
   sessionFilter,
   onSessionFilterChange,
   sessions,
@@ -25,7 +27,10 @@ export function AppSidebar({
   settingsOpen,
 }: Props) {
   return (
-    <aside className="relative w-260px h-screen flex flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-subtle)]">
+    <aside
+      className="relative h-screen flex flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-subtle)] shrink-0"
+      style={{ width, minWidth: width, maxWidth: width }}
+    >
       {/* Top spacer: macOS traffic lights area + drag region */}
       <div className="relative h-10 w-full shrink-0" data-tauri-drag-region />
 

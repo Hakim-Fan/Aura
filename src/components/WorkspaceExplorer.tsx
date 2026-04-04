@@ -7,9 +7,11 @@ type Props = {
   error: string
   selectedFilePath: string | null
   previewContent: string
+  previewImage: string
   previewLoading: boolean
   previewError: string
   expandedPaths: string[]
+  canChooseWorkspace: boolean
   onRefresh: () => void
   onChooseWorkspace: () => void
   onToggle: (path: string) => void
@@ -83,9 +85,11 @@ export function WorkspaceExplorer({
   error,
   selectedFilePath,
   previewContent,
+  previewImage,
   previewLoading,
   previewError,
   expandedPaths,
+  canChooseWorkspace,
   onRefresh,
   onChooseWorkspace,
   onToggle,
@@ -100,9 +104,11 @@ export function WorkspaceExplorer({
         <div className="workspace-toolbar">
           <div className="workspace-root">{rootPath || '未设置工作目录'}</div>
           <div className="header-actions">
-            <button className="mini-button" onClick={onChooseWorkspace}>
-              更换
-            </button>
+            {canChooseWorkspace ? (
+              <button className="mini-button" onClick={onChooseWorkspace}>
+                更换
+              </button>
+            ) : null}
             <button className="mini-button" onClick={onRefresh}>
               刷新
             </button>
@@ -147,6 +153,13 @@ export function WorkspaceExplorer({
         {previewLoading ? <p className="muted">正在读取文件...</p> : null}
         {previewError ? <div className="error-banner">{previewError}</div> : null}
         {selectedFilePath ? <div className="preview-path">{selectedFilePath}</div> : null}
+        {previewImage ? (
+          <img
+            src={previewImage}
+            alt={selectedFilePath?.split('/').pop() || 'preview'}
+            className="max-h-300px w-full rounded-lg border border-gray-100 object-contain bg-white"
+          />
+        ) : null}
         {previewContent ? <pre className="preview-content">{previewContent}</pre> : null}
       </div>
     </section>

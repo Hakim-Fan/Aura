@@ -447,6 +447,44 @@ export function loadSessions(): Session[] {
   }
 }
 
+function serializeSessions(sessions: Session[]) {
+  return sessions.map(session => ({
+    ...session,
+    messages: session.messages.map(message => ({
+      ...message,
+      parts: (message.parts || []).map(part => {
+        if (part.type === 'image') {
+          return {
+            ...part,
+            dataUrl: undefined,
+          }
+        }
+        return part
+      }),
+      attachments: (message.attachments || []).map(attachment => ({
+        ...attachment,
+        preview: undefined,
+      })),
+    })),
+  }))
+}
+
 export function saveSessions(sessions: Session[]) {
-  localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions))
+  try {
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(serializeSessions(sessions)))
+  } catch (error) {
+    if (
+      error instanceof DOMException &&
+      (error.name === 'QuotaExceededError' || error.code === 22)
+    ) {
+      try {
+        localStorage.removeItem(SESSIONS_KEY)
+        localStorage.setItem(SESSIONS_KEY, JSON.stringify(serializeSessions(sessions)))
+      } catch {
+        // Swallow storage quota failures to keep the UI responsive.
+      }
+      return
+    }
+    throw error
+  }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { AppSidebar } from './components/AppSidebar'
@@ -402,7 +402,12 @@ function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
     title: presentToolEventTitle(event),
     summary: event.summary,
     source: event.source,
-    status: event.status === 'error' ? 'error' : 'success',
+    status:
+      event.status === 'running'
+        ? 'running'
+        : event.status === 'error'
+          ? 'error'
+          : 'success',
     input: event.input,
     output: event.output,
     error: event.error,
@@ -449,6 +454,18 @@ function createPendingAssistantMessage(): ChatMessage {
   }
 }
 
+const SIDEBAR_WIDTH_KEY = 'desk-agent-main-sidebar-width'
+const INSPECTOR_WIDTH_KEY = 'desk-agent-main-inspector-width'
+
+function loadPaneWidth(storageKey: string, fallback: number, min: number, max: number) {
+  const raw = localStorage.getItem(storageKey)
+  const parsed = raw ? Number(raw) : Number.NaN
+  if (!Number.isFinite(parsed)) {
+    return fallback
+  }
+  return Math.max(min, Math.min(max, parsed))
+}
+
 export function MainWindowApp() {
   const [settings, setSettings] = useState<AgentSettings>(() => loadSettings())
   const [sessions, setSessions] = useState<Session[]>(() => loadSessions())
@@ -469,6 +486,12 @@ export function MainWindowApp() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState('')
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([])
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    loadPaneWidth(SIDEBAR_WIDTH_KEY, 260, 220, 420),
+  )
+  const [inspectorWidth, setInspectorWidth] = useState(() =>
+    loadPaneWidth(INSPECTOR_WIDTH_KEY, 360, 280, 640),
+  )
 
   const activeSession = useMemo(() => {
     if (!activeSessionId) {
@@ -500,7 +523,8 @@ export function MainWindowApp() {
   const displayedTaskTree =
     agentTask ? agentTask.taskTree : activeSession?.taskTree || []
 
-  const activeWorkspacePath = activeSession?.workspacePath || ''
+  const activeWorkspacePath =
+    activeSession?.workspacePath || activeSession?.workspaceRoot || ''
   const activeProviderProfile = getSessionProviderProfile(settings, activeSession)
   const effectiveProvider = activeProviderProfile?.provider || settings.provider
   const effectiveModel = activeSession?.model || getFirstEnabledModelId(activeProviderProfile) || settings.model
@@ -509,6 +533,14 @@ export function MainWindowApp() {
   useEffect(() => {
     saveSessions(sessions)
   }, [sessions])
+
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth))
+  }, [sidebarWidth])
+
+  useEffect(() => {
+    localStorage.setItem(INSPECTOR_WIDTH_KEY, String(inspectorWidth))
+  }, [inspectorWidth])
 
   useEffect(() => {
     let unlisten: (() => void) | undefined
@@ -713,7 +745,7 @@ export function MainWindowApp() {
     }
 
     void poll()
-    const timer = window.setInterval(() => void poll(), 900)
+    const timer = window.setInterval(() => void poll(), 250)
     return () => {
       cancelled = true
       window.clearInterval(timer)
@@ -822,6 +854,11 @@ export function MainWindowApp() {
   }
 
   async function chooseExplicitWorkspaceForSession() {
+    if (activeSession?.messages.length) {
+      setError('当前会话已经有消息记录，工作区已锁定。请新建会话后再切换目录。')
+      return
+    }
+
     const selected = await open({
       directory: true,
       multiple: false,
@@ -1274,10 +1311,30 @@ export function MainWindowApp() {
     cwd: activeWorkspacePath,
   }
 
+  function handleSidebarResizeStart(event: ReactMouseEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = sidebarWidth
+
+    function handleMouseMove(moveEvent: MouseEvent) {
+      const delta = moveEvent.clientX - startX
+      setSidebarWidth(Math.max(220, Math.min(420, startWidth + delta)))
+    }
+
+    function handleMouseUp() {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }
+
   return (
     <>
       <div className="flex h-screen overflow-hidden bg-[var(--bg-app)]">
         <AppSidebar
+          width={sidebarWidth}
           sessionFilter={sessionFilter}
           onSessionFilterChange={setSessionFilter}
           sessions={filteredSessions}
@@ -1292,6 +1349,11 @@ export function MainWindowApp() {
           }
           settingsOpen={false}
         />
+        <div
+          className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-[rgba(79,123,116,0.18)] transition-colors"
+          onMouseDown={handleSidebarResizeStart}
+          title="拖动调整会话列表宽度"
+        />
 
         <main className="flex-1 flex flex-col min-w-0">
           {activeSession ? (
@@ -1304,12 +1366,18 @@ export function MainWindowApp() {
               error={error}
               isRunning={isRunning}
               agentTask={agentTask}
+              workspaceRootPath={activeWorkspacePath}
+              workspaceTree={workspaceTree}
+              workspaceLoading={workspaceLoading}
               workspaceError={workspaceError}
+              expandedPaths={expandedPaths}
               selectedFilePath={selectedFilePath}
               previewContent={previewContent}
               previewImage={previewImage}
               previewLoading={previewLoading}
               previewError={previewError}
+              canChangeWorkspace={activeSession.messages.length === 0 && !isRunning}
+              inspectorWidth={inspectorWidth}
               attachments={draftAttachments}
               modelGroups={enabledModelGroups}
               activeModelProfileId={activeProviderProfile?.id || ''}
@@ -1321,6 +1389,11 @@ export function MainWindowApp() {
                 })
               }
               onHandleApproval={decision => void handleApproval(decision)}
+              onOpenWorkspaceExplorer={() => {
+                if (activeWorkspacePath.trim() && !workspaceTree && !workspaceLoading) {
+                  void refreshWorkspace()
+                }
+              }}
               onChooseWorkspace={() => void chooseExplicitWorkspaceForSession()}
               onPickAttachment={() => void chooseAttachmentForDraft()}
               onPasteAttachments={files => void appendAttachmentsFromFiles(files)}
@@ -1330,6 +1403,11 @@ export function MainWindowApp() {
                   setError(caught instanceof Error ? caught.message : '打开文件失败。')
                 })
               }
+              onRefreshWorkspace={() => void refreshWorkspace()}
+              onToggleWorkspacePath={toggleWorkspacePath}
+              onSelectWorkspaceFile={setSelectedFilePath}
+              onInsertFileReference={insertFileReference}
+              onInspectorWidthChange={setInspectorWidth}
               onRemoveAttachment={removeDraftAttachment}
               onCopyPath={path => void copyText(path)}
               onCopyText={value => void copyText(value)}

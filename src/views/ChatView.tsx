@@ -8,11 +8,11 @@ import {
   useState,
   type ClipboardEvent,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  ArrowUpRight,
   Bot,
   BrainCircuit,
   Check,
@@ -33,6 +33,7 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
+import { WorkspaceExplorer } from '../components/WorkspaceExplorer'
 import { TaskTreeView } from '../components/TaskTreeView'
 import type {
   AgentSettings,
@@ -43,6 +44,7 @@ import type {
   ProviderMode,
   TaskNode,
   ToolEvent,
+  WorkspaceNode,
 } from '../types'
 
 type ModelGroup = {
@@ -61,12 +63,18 @@ type Props = {
   error: string
   isRunning: boolean
   agentTask: AgentTaskSnapshot | null
+  workspaceRootPath: string
+  workspaceTree: WorkspaceNode | null
+  workspaceLoading: boolean
   workspaceError: string
+  expandedPaths: string[]
   selectedFilePath: string | null
   previewContent: string
   previewImage: string
   previewLoading: boolean
   previewError: string
+  canChangeWorkspace: boolean
+  inspectorWidth: number
   attachments: Array<{
     id: string
     name: string
@@ -79,12 +87,18 @@ type Props = {
   onSubmit: () => void
   onOpenProviders: () => void
   onHandleApproval: (decision: 'approve' | 'deny') => void
+  onOpenWorkspaceExplorer: () => void
   onChooseWorkspace: () => void
   onPickAttachment: () => void
   onPasteAttachments: (files: File[]) => void
   onSelectModel: (profileId: string, modelId: string) => void
   onOpenAttachment: (path: string) => void
   onRemoveAttachment: (attachmentId: string) => void
+  onRefreshWorkspace: () => void
+  onToggleWorkspacePath: (path: string) => void
+  onSelectWorkspaceFile: (path: string) => void
+  onInsertFileReference: (path: string) => void
+  onInspectorWidthChange: (value: number) => void
   onCopyPath: (path: string) => void
   onCopyText: (value: string) => void
   onEditMessage: (messageId: string) => void
@@ -324,6 +338,9 @@ function MessageEventCard({
 }: {
   event: MessageEvent
 }) {
+  const isShellLog = event.kind === 'shell'
+  const hasShellDetails = isShellLog && (event.input || event.output || event.error)
+
   return (
     <article className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2">
       <div className="mb-1 flex items-start justify-between gap-3">
@@ -352,17 +369,40 @@ function MessageEventCard({
         </span>
       </div>
       <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
-      {(event.input || event.output || event.error) && (
-        <details className="mt-1.5 group">
+      {hasShellDetails ? (
+        <div className="mt-2 rounded-xl border border-[rgba(15,23,42,0.06)] bg-[#f4f4f5] p-3">
+          {event.input ? (
+            <div className="mb-2 font-[SFMono-Regular,Menlo,monospace] text-12px text-[var(--text-primary)]">
+              {event.input}
+            </div>
+          ) : null}
+          {event.output ? (
+            <pre className="max-h-260px overflow-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-12px leading-6 text-[#52525b]">
+              {event.output}
+            </pre>
+          ) : event.status === 'running' ? (
+            <div className="font-[SFMono-Regular,Menlo,monospace] text-12px text-[#71717a]">
+              正在等待命令输出...
+            </div>
+          ) : null}
+          {event.error ? (
+            <pre className="mt-2 max-h-180px overflow-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-12px leading-6 text-red-600">
+              {event.error}
+            </pre>
+          ) : null}
+        </div>
+      ) : null}
+      {(!isShellLog || event.error) && (event.input || event.output || event.error) && (
+        <details className="mt-1.5 group" open={!isShellLog && event.status === 'error'}>
           <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-55">显示详细信息</summary>
           <div className="mt-2 flex flex-col gap-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3">
-            {event.input && (
+            {!isShellLog && event.input && (
               <div className="flex flex-col gap-1">
                 <span className="text-10px font-600 text-gray-400 uppercase">Input</span>
                 <pre className="text-11px text-gray-600 whitespace-pre-wrap">{event.input}</pre>
               </div>
             )}
-            {event.output && (
+            {!isShellLog && event.output && (
               <div className="flex flex-col gap-1">
                 <span className="text-10px font-600 text-gray-400 uppercase">Output</span>
                 <pre className="text-11px text-gray-600 whitespace-pre-wrap">{event.output}</pre>
@@ -584,12 +624,18 @@ export function ChatView({
   error,
   isRunning,
   agentTask,
+  workspaceRootPath,
+  workspaceTree,
+  workspaceLoading,
   workspaceError,
+  expandedPaths,
   selectedFilePath,
   previewContent,
   previewImage,
   previewLoading,
   previewError,
+  canChangeWorkspace,
+  inspectorWidth,
   attachments,
   modelGroups,
   activeModelProfileId,
@@ -597,12 +643,18 @@ export function ChatView({
   onSubmit,
   onOpenProviders,
   onHandleApproval,
+  onOpenWorkspaceExplorer,
   onChooseWorkspace,
   onPickAttachment,
   onPasteAttachments,
   onSelectModel,
   onOpenAttachment,
   onRemoveAttachment,
+  onRefreshWorkspace,
+  onToggleWorkspacePath,
+  onSelectWorkspaceFile,
+  onInsertFileReference,
+  onInspectorWidthChange,
   onCopyPath,
   onCopyText,
   onEditMessage,
@@ -619,15 +671,54 @@ export function ChatView({
     name: string
     preview: string
   } | null>(null)
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true)
 
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  const scrollFollowKey = useMemo(() => {
+    const lastMessage = messages.at(-1)
+    if (!lastMessage) {
+      return 'empty'
     }
-  }, [messages, isRunning])
+    const eventSignal = (lastMessage.events || [])
+      .map(
+        event =>
+          `${event.id}:${event.status}:${event.output?.length || 0}:${event.error?.length || 0}`,
+      )
+      .join('|')
+    const reasoningSignal = (lastMessage.reasoning || [])
+      .map(entry => `${entry.id}:${entry.content.length}`)
+      .join('|')
+    return [
+      messages.length,
+      lastMessage.id,
+      lastMessage.content.length,
+      lastMessage.status || '',
+      eventSignal,
+      reasoningSignal,
+      isRunning ? 'running' : 'idle',
+    ].join(':')
+  }, [isRunning, messages])
+
+  function isNearBottom() {
+    const container = scrollRef.current
+    if (!container) {
+      return true
+    }
+    return container.scrollHeight - (container.scrollTop + container.clientHeight) < 72
+  }
+
+  useEffect(() => {
+    if (!autoScrollEnabled || !scrollRef.current) {
+      return
+    }
+    scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  }, [autoScrollEnabled, scrollFollowKey])
+
+  useEffect(() => {
+    setAutoScrollEnabled(true)
+  }, [messages.at(-1)?.id])
 
   useEffect(() => {
     if (!modelMenuOpen) return
@@ -649,18 +740,13 @@ export function ChatView({
       : 'Enter 发送，Shift + Enter 换行'
     : '请设置工作区'
 
-  const hasInspectorContent =
-    isRunning ||
-    Boolean(agentTask?.pendingApproval) ||
-    Boolean(selectedFilePath) ||
-    Boolean(previewError) ||
-    Boolean(workspaceError)
+  const hasInspectorContent = true
 
   useEffect(() => {
-    if (agentTask?.pendingApproval || workspaceError || previewError) {
+    if (agentTask?.pendingApproval || workspaceError || previewError || selectedFilePath) {
       setInspectorOpen(true)
     }
-  }, [agentTask?.pendingApproval, previewError, workspaceError])
+  }, [agentTask?.pendingApproval, previewError, selectedFilePath, workspaceError])
 
   const filteredModelGroups = modelGroups
     .map(group => ({
@@ -736,19 +822,46 @@ export function ChatView({
     onPasteAttachments(files)
   }
 
+  function handleMessageScroll() {
+    setAutoScrollEnabled(isNearBottom())
+  }
+
+  function handleInspectorResizeStart(event: ReactMouseEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = inspectorWidth
+
+    function handleMouseMove(moveEvent: MouseEvent) {
+      const delta = startX - moveEvent.clientX
+      onInspectorWidthChange(Math.max(280, Math.min(640, startWidth + delta)))
+    }
+
+    function handleMouseUp() {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }
+
   return (
     <section className="flex-1 flex flex-col h-screen bg-[var(--bg-app)] relative overflow-hidden">
       <header
-        className="relative h-10 border-b border-[var(--border-subtle)] px-4 flex items-center justify-center shrink-0"
+        className="relative h-16 border-b border-[var(--border-subtle)] px-4 flex items-end justify-center shrink-0 pb-2"
         data-tauri-drag-region
       >
+        <div className="absolute inset-x-0 top-0 h-7" data-tauri-drag-region />
         <div className="flex items-center gap-2 text-12px text-[var(--text-secondary)] opacity-60">
           <span>{messages.length} 条消息</span>
           <span>·</span>
           <button
-            className="flex items-center gap-1 hover:text-[var(--text-primary)] cursor-pointer transition-colors bg-transparent border-none p-0 text-12px text-[var(--text-secondary)] opacity-100"
+            className="relative z-10 flex items-center gap-1 hover:text-[var(--text-primary)] cursor-pointer transition-colors bg-transparent border-none p-0 text-12px text-[var(--text-secondary)] opacity-100"
             title={settings.cwd || '未设置工作区'}
-            onClick={onChooseWorkspace}
+            onClick={() => {
+              setInspectorOpen(true)
+              onOpenWorkspaceExplorer()
+            }}
           >
             <FolderOpen size={12} />
             {summarizePath(settings.cwd)}
@@ -756,7 +869,7 @@ export function ChatView({
         </div>
 
         {hasInspectorContent && (
-          <div className="absolute right-4">
+          <div className="absolute right-4 z-10">
             <button
               className={`p-1.5 rounded-md transition-colors ${inspectorOpen ? 'bg-[rgba(0,0,0,0.05)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[rgba(0,0,0,0.03)]'}`}
               onClick={() => setInspectorOpen(current => !current)}
@@ -771,7 +884,11 @@ export function ChatView({
       <div className="flex-1 flex overflow-hidden">
         {/* Messages Stage */}
         <div className="flex-1 flex flex-col min-w-0 relative">
-          <div ref={scrollRef} className="flex-1 overflow-y-auto custom-scrollbar pt-8 pb-72 scroll-smooth">
+          <div
+            ref={scrollRef}
+            className="flex-1 overflow-y-auto custom-scrollbar pt-8 pb-72 scroll-smooth"
+            onScroll={handleMessageScroll}
+          >
             {messages.length === 0 ? (
               <div className="max-w-1000px mx-auto px-6 py-20 flex flex-col items-center text-center">
                 <div className="text-11px font-700 text-[var(--text-secondary)] tracking-0.2em uppercase mb-4 opacity-50">
@@ -1042,7 +1159,20 @@ export function ChatView({
 
         {/* Inspector Panel */}
         {inspectorOpen && hasInspectorContent && (
-          <aside className="w-320px border-l border-[var(--border-subtle)] bg-[rgba(0,0,0,0.01)] flex flex-col shrink-0 overflow-y-auto custom-scrollbar p-5 gap-6">
+          <>
+            <div
+              className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-[rgba(79,123,116,0.18)] transition-colors"
+              onMouseDown={handleInspectorResizeStart}
+              title="拖动调整文件管理器宽度"
+            />
+            <aside
+              className="border-l border-[var(--border-subtle)] bg-[rgba(0,0,0,0.01)] flex flex-col shrink-0 overflow-y-auto custom-scrollbar p-5 gap-6"
+              style={{
+                width: inspectorWidth,
+                minWidth: inspectorWidth,
+                maxWidth: inspectorWidth,
+              }}
+            >
             {agentTask?.pendingApproval ? (
               <div className="p-4 bg-white border border-amber-200 rounded-xl shadow-sm">
                 <div className="text-12px font-600 text-amber-600 uppercase tracking-wider mb-2">待执行审批</div>
@@ -1074,7 +1204,12 @@ export function ChatView({
                         title: presentToolEventTitle(event),
                         summary: event.summary,
                         source: event.source,
-                        status: event.status === 'error' ? 'error' : 'success',
+                        status:
+                          event.status === 'running'
+                            ? 'running'
+                            : event.status === 'error'
+                              ? 'error'
+                              : 'success',
                         input: event.input,
                         output: event.output,
                         error: event.error,
@@ -1085,40 +1220,27 @@ export function ChatView({
               </div>
             )}
 
-            {selectedFilePath && (
-              <div className="flex flex-col gap-3">
-                <div className="text-12px font-600 text-[var(--text-secondary)] opacity-50 uppercase tracking-wider">当前文件</div>
-                <div className="bg-white p-3 rounded-xl border border-[var(--border-subtle)]">
-                  <div className="mb-2 flex items-start justify-between gap-3">
-                    <span className="text-13px font-500 truncate flex-1 pr-4">{selectedFilePath.split('/').pop()}</span>
-                    <div className="flex items-center gap-1">
-                      <button className="p-1 hover:bg-gray-100 rounded" onClick={() => onCopyPath(selectedFilePath)} title="复制路径">
-                        <Copy size={12} />
-                      </button>
-                      <button className="p-1 hover:bg-gray-100 rounded" onClick={() => onOpenAttachment(selectedFilePath)} title="用默认应用打开">
-                        <ArrowUpRight size={12} />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="text-11px text-[var(--text-secondary)] mb-3 opacity-60 break-all">{selectedFilePath}</div>
-                  {previewImage ? (
-                    <img
-                      src={previewImage}
-                      alt={selectedFilePath.split('/').pop() || 'preview'}
-                      className="max-h-300px w-full rounded-lg border border-gray-100 object-contain bg-white"
-                    />
-                  ) : previewContent ? (
-                    <pre className="text-10px bg-gray-50 p-2 rounded border border-gray-100 max-h-300px overflow-y-auto whitespace-pre-wrap">{previewContent}</pre>
-                  ) : !previewLoading ? (
-                    <div className="rounded-lg border border-dashed border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-3 py-4 text-11px text-[var(--text-secondary)]">
-                      该文件不支持内联预览，可使用默认应用打开。
-                    </div>
-                  ) : null}
-                  {previewLoading && <div className="text-11px text-center py-4 animate-pulse">正在读取...</div>}
-                </div>
-              </div>
-            )}
-          </aside>
+            <WorkspaceExplorer
+              rootPath={workspaceRootPath}
+              tree={workspaceTree}
+              loading={workspaceLoading}
+              error={workspaceError}
+              selectedFilePath={selectedFilePath}
+              previewContent={previewContent}
+              previewImage={previewImage}
+              previewLoading={previewLoading}
+              previewError={previewError}
+              expandedPaths={expandedPaths}
+              canChooseWorkspace={canChangeWorkspace}
+              onRefresh={onRefreshWorkspace}
+              onChooseWorkspace={onChooseWorkspace}
+              onToggle={onToggleWorkspacePath}
+              onSelectFile={onSelectWorkspaceFile}
+              onInsertReference={onInsertFileReference}
+              onCopyPath={onCopyPath}
+            />
+            </aside>
+          </>
         )}
       </div>
 

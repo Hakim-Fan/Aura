@@ -106,7 +106,7 @@ export type ToolEvent = {
   source: 'builtin' | 'mcp' | 'plugin' | 'subagent'
   name: string
   summary: string
-  status: 'success' | 'error'
+  status: 'running' | 'success' | 'error'
   input?: string
   output?: string
   error?: string

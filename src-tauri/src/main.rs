@@ -209,6 +209,31 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
     }));
 }
 
+fn merge_tool_event(current: &mut AgentTaskSnapshot, tool_event: &serde_json::Value) {
+    let event_id = tool_event
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    if event_id.is_empty() {
+        current.tool_events.push(tool_event.clone());
+        return;
+    }
+
+    if let Some(existing) = current.tool_events.iter_mut().find(|event| {
+        event
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(|value| value == event_id)
+            .unwrap_or(false)
+    }) {
+        *existing = tool_event.clone();
+        return;
+    }
+
+    current.tool_events.push(tool_event.clone());
+}
+
 fn spawn_agent_task<R: Runtime>(
     app: tauri::AppHandle<R>,
     store: &AgentTaskStore,
@@ -312,7 +337,7 @@ fn spawn_agent_task<R: Runtime>(
                 }),
                 Some("tool_event") => with_snapshot(&stdout_snapshot, |current| {
                     if let Some(tool_event) = event.get("event") {
-                        current.tool_events.push(tool_event.clone());
+                        merge_tool_event(current, tool_event);
                     }
                 }),
                 Some("task_tree") => with_snapshot(&stdout_snapshot, |current| {

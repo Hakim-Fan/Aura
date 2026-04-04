@@ -30,6 +30,15 @@ async function walkDirectory(dirPath, maxDepth, currentDepth = 0) {
 }
 
 async function runShell(command, cwd, timeoutMs = 60_000) {
+  return runShellStreaming(command, cwd, timeoutMs)
+}
+
+async function runShellStreaming(
+  command,
+  cwd,
+  timeoutMs = 60_000,
+  onUpdate,
+) {
   return new Promise((resolve, reject) => {
     const child = spawn('/bin/zsh', ['-lc', command], {
       cwd,
@@ -39,6 +48,25 @@ async function runShell(command, cwd, timeoutMs = 60_000) {
 
     let stdout = ''
     let stderr = ''
+    let flushTimer = null
+
+    function flush() {
+      flushTimer = null
+      onUpdate?.(
+        truncate(
+          [stdout.trim(), stderr.trim()].filter(Boolean).join('\n\n') ||
+            'Command is running...',
+        ),
+      )
+    }
+
+    function scheduleFlush() {
+      if (flushTimer !== null) {
+        return
+      }
+      flushTimer = setTimeout(flush, 60)
+    }
+
     const timer = setTimeout(() => {
       child.kill('SIGTERM')
       reject(new Error(`Shell command timed out after ${timeoutMs}ms`))
@@ -46,15 +74,21 @@ async function runShell(command, cwd, timeoutMs = 60_000) {
 
     child.stdout.on('data', chunk => {
       stdout += chunk.toString()
+      scheduleFlush()
     })
 
     child.stderr.on('data', chunk => {
       stderr += chunk.toString()
+      scheduleFlush()
     })
 
     child.on('error', reject)
     child.on('close', code => {
       clearTimeout(timer)
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer)
+      }
+      flush()
       if (code === 0) {
         resolve(
           truncate(
@@ -260,8 +294,14 @@ export function createBuiltinTools(context) {
         },
         required: ['command'],
       },
-      async run(args) {
-        return runShell(args.command, context.cwd, args.timeoutMs ?? 60_000)
+      liveUpdates: true,
+      async run(args, runtime = {}) {
+        return runShellStreaming(
+          args.command,
+          context.cwd,
+          args.timeoutMs ?? 60_000,
+          output => runtime.onUpdate?.(output),
+        )
       },
     },
   ]
@@ -283,14 +323,42 @@ function isAutoApproved(tool, settings) {
 }
 
 function emitToolEvent(event, toolEvents, hooks) {
-  toolEvents.push(event)
+  const index = toolEvents.findIndex(entry => entry.id === event.id)
+  if (index >= 0) {
+    toolEvents[index] = event
+  } else {
+    toolEvents.push(event)
+  }
   hooks?.onToolEvent?.(event)
 }
 
 export async function invokeTool(tool, args, toolEvents, hooks = {}) {
+  const eventId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const baseEvent = {
+    id: eventId,
+    source: tool.source,
+    name: tool.name,
+    summary: tool.description,
+    input:
+      tool.name === 'run_shell' && typeof args?.command === 'string'
+        ? `$ ${args.command}`
+        : stringifyOutput(args ?? {}),
+  }
+
+  function updateEvent(partial) {
+    emitToolEvent(
+      {
+        ...baseEvent,
+        ...partial,
+      },
+      toolEvents,
+      hooks,
+    )
+  }
+
   if (tool.approvalCategory && !isAutoApproved(tool, hooks.settings || {})) {
     const decision = await hooks.requestApproval?.({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: eventId,
       category: tool.approvalCategory,
       toolName: tool.name,
       summary: tool.description,
@@ -298,43 +366,42 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     })
 
     if (decision !== 'approve') {
-      const denialEvent = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        source: tool.source,
-        name: tool.name,
+      updateEvent({
         summary: `${tool.description} (denied by user)`,
         status: 'error',
-        input: stringifyOutput(args ?? {}),
         error: 'Tool execution was denied by the user.',
-      }
-      emitToolEvent(denialEvent, toolEvents, hooks)
+      })
       return `Tool ${tool.name} was denied by the user.`
     }
   }
 
   try {
-    const output = await tool.run(args)
-    emitToolEvent({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      source: tool.source,
-      name: tool.name,
-      summary: tool.description,
+    if (tool.liveUpdates) {
+      updateEvent({
+        status: 'running',
+        output: '',
+      })
+    }
+    const output = await tool.run(args, {
+      onUpdate(nextOutput) {
+        updateEvent({
+          status: 'running',
+          output: stringifyOutput(nextOutput),
+        })
+      },
+    })
+    updateEvent({
       status: 'success',
-      input: stringifyOutput(args ?? {}),
       output: stringifyOutput(output),
-    }, toolEvents, hooks)
+      error: undefined,
+    })
     return stringifyOutput(output)
   } catch (error) {
     const detail = formatToolError(error)
-    emitToolEvent({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      source: tool.source,
-      name: tool.name,
-      summary: tool.description,
+    updateEvent({
       status: 'error',
-      input: stringifyOutput(args ?? {}),
       error: detail,
-    }, toolEvents, hooks)
+    })
     return `Tool ${tool.name} failed.\n\n${detail}`
   }
 }
