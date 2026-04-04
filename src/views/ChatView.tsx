@@ -464,7 +464,7 @@ export function ChatView({
       <div className="flex-1 flex overflow-hidden">
         {/* Messages Stage */}
         <div className="flex-1 flex flex-col min-w-0 relative">
-          <div className="flex-1 overflow-y-auto custom-scrollbar pt-6 pb-32">
+          <div className="flex-1 overflow-y-auto custom-scrollbar pt-6 pb-72 scroll-smooth">
             {messages.length === 0 ? (
               <div className="max-w-1000px mx-auto px-6 py-20 flex flex-col items-center text-center">
                 <div className="text-11px font-700 text-[var(--text-secondary)] tracking-0.2em uppercase mb-4 opacity-50">
@@ -520,9 +520,9 @@ export function ChatView({
           {/* Docked Composer */}
           <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[var(--bg-app)] via-[var(--bg-app)] to-transparent pointer-events-none">
             <div className="max-w-1000px mx-auto pointer-events-auto">
-              <div className="bg-white border border-[var(--border-subtle)] rounded-2xl shadow-xl shadow-[rgba(0,0,0,0.06)] overflow-hidden transition-all focus-within:border-[rgba(0,122,255,0.3)] focus-within:shadow-[rgba(0,122,255,0.05)]">
+              <div className="bg-white border-1 border-solid border-[#cbd5e1] rounded-2xl shadow-lg shadow-[rgba(0,0,0,0.04)] overflow-hidden transition-all focus-within:border-[#007aff]/50 focus-within:ring-4 focus-within:ring-[#007aff]/10 focus-within:shadow-2xl">
                 <textarea
-                  className="w-full min-h-120px max-h-400px p-4 text-15px leading-relaxed resize-none border-none bg-transparent"
+                  className="w-full min-h-120px max-h-400px p-4 text-15px leading-relaxed resize-none border-none bg-transparent outline-none"
                   value={draft}
                   onChange={event => onDraftChange(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
