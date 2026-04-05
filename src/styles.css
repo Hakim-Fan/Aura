@@ -388,6 +388,66 @@ button {
   line-height: 1.5;
 }
 
+.settings-mode-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.settings-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.settings-preset-chip {
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-preset-chip.active {
+  background: rgba(79, 123, 116, 0.12);
+  color: var(--accent-soft-strong);
+}
+
+.settings-preset-chip:disabled {
+  background: rgba(0, 0, 0, 0.025);
+  color: rgba(0, 0, 0, 0.28);
+  cursor: not-allowed;
+}
+
+.settings-number-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-number-field input {
+  width: 110px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.settings-number-field input:disabled {
+  background: rgba(0, 0, 0, 0.025);
+  border-color: rgba(0, 0, 0, 0.04);
+  color: rgba(0, 0, 0, 0.3);
+  cursor: not-allowed;
+}
+
 /* UI Elements */
 .primary-button,
 .secondary-button {
@@ -864,6 +924,11 @@ input:checked+.switch-slider:before {
   gap: 12px;
   font-size: 14px;
   cursor: pointer;
+}
+
+.toggle-inline.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 input[type="checkbox"] {

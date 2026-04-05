@@ -152,6 +152,10 @@ export type McpServerConfig = {
   enabled: boolean
 }
 
+export type ExecutionMode = 'bounded' | 'long-task'
+
+export type MemoryMode = 'summary' | 'claude-like'
+
 export type AgentSettings = {
   provider: ProviderMode
   apiKey: string
@@ -161,6 +165,8 @@ export type AgentSettings = {
   providerProfiles: ProviderProfile[]
   cwd: string
   maxSteps: number
+  executionMode: ExecutionMode
+  memoryMode: MemoryMode
   enableMultiAgent: boolean
   enableComputerUse: boolean
   enableChromeAutomation: boolean

@@ -15,6 +15,8 @@ const PROVIDER_BASE_URLS: Record<ProviderMode, string> = {
   custom: 'https://api.openai.com/v1',
 }
 
+const STEP_PRESETS = [8, 16, 32, 64] as const
+
 function cloneSettings(settings: AgentSettings): AgentSettings {
   return JSON.parse(JSON.stringify(settings)) as AgentSettings
 }
@@ -319,6 +321,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   function renderGeneral() {
+    const isLongTaskMode = draftSettings.executionMode === 'long-task'
+
     return (
       <section className="section-shell settings-panel">
         <div className="settings-grid">
@@ -382,6 +386,105 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 <div className="flex flex-col">
                   <strong>Enter 发送</strong>
                   <span className="muted">Shift + Enter 用于换行</span>
+                </div>
+              </label>
+            </div>
+          </section>
+
+          <section className="dashboard-card">
+            <div className="section-title">任务轮数</div>
+            <p className="muted">
+              普通模式下，Agent 每完成一轮“模型判断 + 工具调用 + 继续推理”都会消耗一次轮数。
+              项目分析、重构和排错通常需要更高轮数。
+            </p>
+            <div className="settings-mode-stack">
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.executionMode === 'bounded'}
+                  onChange={() => handleSettingsChange('executionMode', 'bounded')}
+                  type="radio"
+                />
+                <div className="flex flex-col">
+                  <strong>普通模式</strong>
+                  <span className="muted">
+                    使用你设定的最大轮数，适合大多数任务，成本和耗时更可控。
+                  </span>
+                </div>
+              </label>
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.executionMode === 'long-task'}
+                  onChange={() => handleSettingsChange('executionMode', 'long-task')}
+                  type="radio"
+                />
+                <div className="flex flex-col">
+                  <strong>长任务模式</strong>
+                  <span className="muted">
+                    类似持续执行模式，更适合大型代码库分析。系统会持续尝试直到完成、你手动停止，或命中保护条件。
+                  </span>
+                </div>
+              </label>
+            </div>
+            <div className="settings-preset-row">
+              {STEP_PRESETS.map(preset => (
+                <button
+                  key={preset}
+                  className={`settings-preset-chip ${draftSettings.maxSteps === preset ? 'active' : ''}`}
+                  onClick={() => handleSettingsChange('maxSteps', preset)}
+                  disabled={isLongTaskMode}
+                  type="button"
+                >
+                  {preset} 轮
+                </button>
+              ))}
+            </div>
+            <label className="settings-number-field">
+              <span>最大轮数</span>
+              <input
+                type="number"
+                min={1}
+                max={128}
+                step={1}
+                value={draftSettings.maxSteps}
+                disabled={isLongTaskMode}
+                onChange={event =>
+                  handleSettingsChange(
+                    'maxSteps',
+                    Math.max(1, Math.min(128, Number(event.target.value) || 1)),
+                  )
+                }
+              />
+            </label>
+            <div className="provider-note">
+              <p>
+                更高轮数意味着更长执行时间和更高 token 成本。
+                长任务模式还可能让模型进行更多探索性工具调用，适合复杂任务，不适合简单问答。
+              </p>
+              {isLongTaskMode ? (
+                <p>当前已启用长任务模式，轮数预设和最大轮数输入不会生效。</p>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="dashboard-card">
+            <div className="section-title">记忆模式</div>
+            <div className="toggle-stack">
+              <label className="toggle-inline">
+                <input checked={draftSettings.memoryMode === 'summary'} disabled type="radio" />
+                <div className="flex flex-col">
+                  <strong>摘要模式</strong>
+                  <span className="muted">
+                    保留上一轮的分析摘要和结论，成本更低，当前版本已实现。
+                  </span>
+                </div>
+              </label>
+              <label className="toggle-inline disabled">
+                <input checked={draftSettings.memoryMode === 'claude-like'} disabled type="radio" />
+                <div className="flex flex-col">
+                  <strong>持续上下文模式</strong>
+                  <span className="muted">
+                    未来会像 Claude Code 一样持续保留更多工具结果和上下文；当前版本暂未开放切换。
+                  </span>
                 </div>
               </label>
             </div>

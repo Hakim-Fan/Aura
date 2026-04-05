@@ -18,3 +18,4 @@ target/
 .idea/
 .vscode/
 pnpm-lock.yaml
+claude-code-runnable/

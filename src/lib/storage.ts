@@ -1,4 +1,11 @@
-import type { AgentSettings, ProviderMode, ProviderProfile, Session } from '../types'
+import type {
+  AgentSettings,
+  ExecutionMode,
+  MemoryMode,
+  ProviderMode,
+  ProviderProfile,
+  Session,
+} from '../types'
 
 const SETTINGS_KEY = 'desk-agent-settings-v2'
 const SESSIONS_KEY = 'desk-agent-sessions-v2'
@@ -62,6 +69,8 @@ export const defaultSettings: AgentSettings = {
   providerProfiles: defaultProfiles(),
   cwd: '',
   maxSteps: 8,
+  executionMode: 'bounded',
+  memoryMode: 'summary',
   enableMultiAgent: true,
   enableComputerUse: true,
   enableChromeAutomation: true,
@@ -73,6 +82,21 @@ export const defaultSettings: AgentSettings = {
   enabledPluginIds: ['workspace-inspector'],
   mcpServers: [],
   sendShortcut: 'meta-enter',
+}
+
+function normalizeExecutionMode(value: unknown): ExecutionMode {
+  return value === 'long-task' ? 'long-task' : 'bounded'
+}
+
+function normalizeMemoryMode(value: unknown): MemoryMode {
+  return value === 'summary' ? 'summary' : 'summary'
+}
+
+function normalizeMaxSteps(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return defaultSettings.maxSteps
+  }
+  return Math.max(1, Math.min(128, Math.round(value)))
 }
 
 function normalizeProvider(
@@ -257,6 +281,9 @@ export function loadSettings(): AgentSettings {
       ...parsed,
       providerProfiles,
       activeProviderProfileId,
+      maxSteps: normalizeMaxSteps(parsed.maxSteps),
+      executionMode: normalizeExecutionMode(parsed.executionMode),
+      memoryMode: normalizeMemoryMode(parsed.memoryMode),
     })
   } catch {
     return defaultSettings

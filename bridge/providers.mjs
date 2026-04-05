@@ -348,6 +348,48 @@ function presentProviderError(message, messages) {
   return message
 }
 
+function getLoopConfig(settings) {
+  const boundedLimit = Math.max(1, Math.min(128, Number(settings.maxSteps) || 8))
+  if (settings.executionMode === 'long-task') {
+    return {
+      mode: 'long-task',
+      maxIterations: 128,
+      limitMessage:
+        'Agent 长任务模式已被保护性停止：持续执行过久仍未收敛到最终回答。请尝试缩小任务范围、切换模型，或改用更高轮数的普通模式。',
+    }
+  }
+  return {
+    mode: 'bounded',
+    maxIterations: boundedLimit,
+    limitMessage: 'Agent reached the max step limit without a final answer.',
+  }
+}
+
+function createLongTaskGuard(loopConfig) {
+  let lastFingerprint = ''
+  let repeatedCount = 0
+
+  return {
+    record(toolFingerprint) {
+      if (loopConfig.mode !== 'long-task' || !toolFingerprint) {
+        return
+      }
+      if (toolFingerprint === lastFingerprint) {
+        repeatedCount += 1
+      } else {
+        repeatedCount = 0
+        lastFingerprint = toolFingerprint
+      }
+
+      if (repeatedCount >= 2) {
+        throw new Error(
+          'Agent 长任务模式已被保护性停止：连续多轮重复调用相同工具但没有形成最终回答。请尝试缩小任务范围，或改用更高轮数的普通模式。',
+        )
+      }
+    },
+  }
+}
+
 export async function runOpenAiCompatibleAgent({
   settings,
   systemPrompt,
@@ -361,8 +403,10 @@ export async function runOpenAiCompatibleAgent({
   const transcript = toOpenAiTranscript(systemPrompt, messages)
   let latestUsage
   let providerReasoning = ''
+  const loopConfig = getLoopConfig(settings)
+  const loopGuard = createLongTaskGuard(loopConfig)
 
-  for (let step = 0; step < settings.maxSteps; step += 1) {
+  for (let step = 0; step < loopConfig.maxIterations; step += 1) {
     const response = await fetch(`${apiBase}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -469,6 +513,15 @@ export async function runOpenAiCompatibleAgent({
       }
     }
 
+    loopGuard.record(
+      JSON.stringify(
+        finalizedToolCalls.map(toolCall => ({
+          name: toolCall.function.name,
+          args: toolCall.function.arguments || '{}',
+        })),
+      ),
+    )
+
     transcript.push({
       role: 'assistant',
       content,
@@ -490,7 +543,7 @@ export async function runOpenAiCompatibleAgent({
     }
   }
 
-  throw new Error('Agent reached the max step limit without a final answer.')
+  throw new Error(loopConfig.limitMessage)
 }
 
 function collectGeminiFunctionCalls(existingCalls, parts) {
@@ -529,8 +582,10 @@ export async function runGoogleAgent({
   const transcript = toGeminiContents(messages)
   let latestUsage
   let providerReasoning = ''
+  const loopConfig = getLoopConfig(settings)
+  const loopGuard = createLongTaskGuard(loopConfig)
 
-  for (let step = 0; step < settings.maxSteps; step += 1) {
+  for (let step = 0; step < loopConfig.maxIterations; step += 1) {
     const response = await fetch(
       `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
       {
@@ -620,6 +675,15 @@ export async function runGoogleAgent({
       }
     }
 
+    loopGuard.record(
+      JSON.stringify(
+        functionCalls.map(entry => ({
+          name: entry.name,
+          args: entry.args || {},
+        })),
+      ),
+    )
+
     transcript.push({
       role: 'model',
       parts: [
@@ -656,5 +720,5 @@ export async function runGoogleAgent({
     })
   }
 
-  throw new Error('Agent reached the max step limit without a final answer.')
+  throw new Error(loopConfig.limitMessage)
 }
