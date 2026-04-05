@@ -339,6 +339,10 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     source: tool.source,
     name: tool.name,
     summary: tool.description,
+    order:
+      typeof hooks.timelineOrder === 'number'
+        ? hooks.timelineOrder
+        : undefined,
     input:
       tool.name === 'run_shell' && typeof args?.command === 'string'
         ? `$ ${args.command}`

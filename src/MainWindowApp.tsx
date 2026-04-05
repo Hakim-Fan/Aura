@@ -401,6 +401,7 @@ function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
     kind,
     title: presentToolEventTitle(event),
     summary: event.summary,
+    order: event.order,
     source: event.source,
     status:
       event.status === 'running'
@@ -615,6 +616,10 @@ export function MainWindowApp() {
                             kind: 'approval' as const,
                             title: snapshot.pendingApproval.toolName,
                             summary: snapshot.pendingApproval.summary,
+                            order:
+                              (snapshot.toolEvents
+                                .map(event => event.order || 0)
+                                .reduce((max, value) => Math.max(max, value), 0) || 0) + 1,
                             status: 'awaiting_approval' as const,
                             input: snapshot.pendingApproval.input,
                           },

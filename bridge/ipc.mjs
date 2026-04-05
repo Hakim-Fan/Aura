@@ -129,6 +129,7 @@ rl.on('line', line => {
       emitReasoningDelta(delta, {
         blockId: meta.blockId,
         kind: meta.kind,
+        order: meta.order,
       })
     },
     onUsage(usage) {
@@ -162,6 +163,21 @@ rl.on('line', line => {
       emit({
         type: 'failed',
         message: error instanceof Error ? error.message : String(error),
+        code:
+          error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+            ? error.code
+            : undefined,
+        source:
+          error && typeof error === 'object' && 'source' in error && typeof error.source === 'string'
+            ? error.source
+            : undefined,
+        rawMessage:
+          error &&
+          typeof error === 'object' &&
+          'rawMessage' in error &&
+          typeof error.rawMessage === 'string'
+            ? error.rawMessage
+            : undefined,
       })
       process.exitCode = 1
     })

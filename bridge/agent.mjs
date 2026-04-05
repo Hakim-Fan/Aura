@@ -3,7 +3,12 @@ import { fileURLToPath } from 'node:url'
 import { createAdvancedTools } from './advancedTools.mjs'
 import { loadPluginTools, loadSkillPrompt } from './extensions.mjs'
 import { connectMcpTools } from './mcp.mjs'
-import { runGoogleAgent, runOpenAiCompatibleAgent } from './providers.mjs'
+import {
+  finalizeGoogleAnswer,
+  finalizeOpenAiCompatibleAnswer,
+  runGoogleAgent,
+  runOpenAiCompatibleAgent,
+} from './providers.mjs'
 import { createBuiltinTools } from './tools.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -56,6 +61,57 @@ function summarizeReasoning(messages, toolEvents, finalMessage) {
       content: lines.join('\n'),
     },
   ]
+}
+
+function extractProviderReasoning(reasoning = []) {
+  return reasoning
+    .filter(entry => entry.kind === 'provider')
+    .map(entry => entry.content.trim())
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function normalizeFinalAnswer(message) {
+  return (message || '').trim()
+}
+
+function shouldRunFinalization(result) {
+  const finalMessage = normalizeFinalAnswer(result.message)
+  const providerReasoning = extractProviderReasoning(result.reasoning || [])
+  const hasContext = (result.toolEvents || []).length > 0 || providerReasoning.length > 200
+  if (!hasContext) {
+    return false
+  }
+  if (!finalMessage || finalMessage === '模型没有返回文本内容。') {
+    return true
+  }
+  if (finalMessage.length >= 120) {
+    return false
+  }
+  return !/[。！？!?\n]/u.test(finalMessage.slice(60))
+}
+
+function normalizeAgentError(error) {
+  const rawMessage = error instanceof Error ? error.message : String(error)
+  const code =
+    error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+      ? error.code
+      : 'unknown'
+  const source =
+    error && typeof error === 'object' && 'source' in error && typeof error.source === 'string'
+      ? error.source
+      : 'runtime'
+  const raw =
+    error && typeof error === 'object' && 'rawMessage' in error && typeof error.rawMessage === 'string'
+      ? error.rawMessage
+      : rawMessage
+
+  return {
+    code,
+    source,
+    rawMessage: raw,
+    message: rawMessage,
+  }
 }
 
 function createTaskTracker(hooks, rootTitle) {
@@ -223,7 +279,7 @@ export async function runAgent(request) {
     ]
     const systemPrompt = buildSystemPrompt(settings, skillPrompt)
     if (settings.provider === 'google') {
-      const result = await runGoogleAgent({
+      let result = await runGoogleAgent({
         settings,
         systemPrompt,
         messages,
@@ -236,16 +292,34 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
-      const reasoning =
-        result.reasoning && result.reasoning.length > 0
-          ? result.reasoning
-          : summarizeReasoning(messages, toolEvents, result.message)
-      if (!result.reasoning?.length) {
-        hooks?.onReasoningDelta?.(reasoning[0].content, {
-          blockId: reasoning[0].id,
-          kind: reasoning[0].kind,
-        })
+
+      if (shouldRunFinalization(result)) {
+        try {
+          const finalizedMessage = await finalizeGoogleAnswer({
+            settings,
+            systemPrompt,
+            messages,
+            toolEvents,
+            reasoningText: extractProviderReasoning(result.reasoning || []),
+            draftMessage: result.message,
+          })
+          if (finalizedMessage.trim()) {
+            result = {
+              ...result,
+              message: finalizedMessage,
+            }
+          }
+        } catch {
+          // 如果收尾补答失败，回退到原始结果，避免把整轮执行直接打成失败。
+        }
       }
+
+      const summaryReasoning = summarizeReasoning(messages, toolEvents, result.message)
+      hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
+        blockId: summaryReasoning[0].id,
+        kind: summaryReasoning[0].kind,
+      })
+      const reasoning = [...summaryReasoning, ...(result.reasoning || [])]
       taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
@@ -256,7 +330,7 @@ export async function runAgent(request) {
     }
 
     if (settings.provider === 'openai' || settings.provider === 'custom') {
-      const result = await runOpenAiCompatibleAgent({
+      let result = await runOpenAiCompatibleAgent({
         settings,
         systemPrompt,
         messages,
@@ -269,16 +343,34 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
-      const reasoning =
-        result.reasoning && result.reasoning.length > 0
-          ? result.reasoning
-          : summarizeReasoning(messages, toolEvents, result.message)
-      if (!result.reasoning?.length) {
-        hooks?.onReasoningDelta?.(reasoning[0].content, {
-          blockId: reasoning[0].id,
-          kind: reasoning[0].kind,
-        })
+
+      if (shouldRunFinalization(result)) {
+        try {
+          const finalizedMessage = await finalizeOpenAiCompatibleAnswer({
+            settings,
+            systemPrompt,
+            messages,
+            toolEvents,
+            reasoningText: extractProviderReasoning(result.reasoning || []),
+            draftMessage: result.message,
+          })
+          if (finalizedMessage.trim()) {
+            result = {
+              ...result,
+              message: finalizedMessage,
+            }
+          }
+        } catch {
+          // 如果收尾补答失败，回退到原始结果，避免把整轮执行直接打成失败。
+        }
       }
+
+      const summaryReasoning = summarizeReasoning(messages, toolEvents, result.message)
+      hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
+        blockId: summaryReasoning[0].id,
+        kind: summaryReasoning[0].kind,
+      })
+      const reasoning = [...summaryReasoning, ...(result.reasoning || [])]
       taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
@@ -289,9 +381,13 @@ export async function runAgent(request) {
     }
     throw new Error(`Unsupported provider: ${settings.provider}`)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    taskTracker.setStatus(currentTaskId, 'failed', message)
-    throw error
+    const normalized = normalizeAgentError(error)
+    taskTracker.setStatus(currentTaskId, 'failed', normalized.message)
+    const enriched = new Error(normalized.message)
+    enriched.code = normalized.code
+    enriched.source = normalized.source
+    enriched.rawMessage = normalized.rawMessage
+    throw enriched
   } finally {
     await mcp.close()
   }

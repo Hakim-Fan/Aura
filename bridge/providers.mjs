@@ -1,6 +1,30 @@
 import { invokeTool } from './tools.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
 
+function flattenOpenAiMessageContent(content) {
+  if (typeof content === 'string') {
+    return content
+  }
+  if (!Array.isArray(content)) {
+    return ''
+  }
+  return content
+    .map(block => {
+      if (!block || typeof block !== 'object') {
+        return ''
+      }
+      if (block.type === 'text' && typeof block.text === 'string') {
+        return block.text
+      }
+      if (typeof block.text === 'string') {
+        return block.text
+      }
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
 function openAiToolDefs(tools) {
   return tools.map(tool => ({
     type: 'function',
@@ -134,6 +158,31 @@ function toGeminiContents(messages) {
     role: message.role === 'assistant' ? 'model' : 'user',
     parts: toGeminiParts(message),
   }))
+}
+
+function buildFinalizerPrompt({ toolEvents, reasoningText, draftMessage }) {
+  const toolDigest = toolEvents
+    .slice(-8)
+    .map(event => {
+      const pieces = [
+        `- ${event.name} [${event.status}]`,
+        event.output ? `输出摘要: ${String(event.output).slice(0, 600)}` : null,
+        event.error ? `错误: ${String(event.error).slice(0, 300)}` : null,
+      ].filter(Boolean)
+      return pieces.join('\n')
+    })
+    .join('\n')
+
+  return [
+    '请基于当前对话和以下执行结果，直接输出给用户的最终回答。',
+    '不要继续思考，不要调用工具，不要输出 <think> 标签。',
+    '如果前面已经写了一句开场白，请直接补成完整、可交付的最终回答。',
+    draftMessage?.trim() ? `当前已有但不完整的回答：\n${draftMessage}` : null,
+    toolDigest ? `本轮工具结果摘要：\n${toolDigest}` : null,
+    reasoningText?.trim() ? `本轮原始思考流（仅供你整理最终回答，不要照抄）：\n${reasoningText.slice(0, 6000)}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n\n')
 }
 
 async function parseJsonResponse(response) {
@@ -348,6 +397,34 @@ function presentProviderError(message, messages) {
   return message
 }
 
+function createClassifiedError(message, extras = {}) {
+  const error = new Error(message)
+  Object.assign(error, extras)
+  return error
+}
+
+function maybeNormalizeProviderTermination(error, messages) {
+  const message = error instanceof Error ? error.message : String(error)
+  const normalized = message.trim().toLowerCase()
+  if (
+    normalized === 'terminated' ||
+    normalized.includes('terminated') ||
+    normalized.includes('socket hang up') ||
+    normalized.includes('eof') ||
+    normalized.includes('aborted')
+  ) {
+    return createClassifiedError(
+      '模型连接在生成过程中被中断。可能是 Provider 侧超时、连接断开，或当前模型/兼容接口对工具调用支持不稳定。',
+      {
+        code: 'provider_terminated',
+        source: 'provider',
+        rawMessage: presentProviderError(message, messages),
+      },
+    )
+  }
+  return error
+}
+
 function getLoopConfig(settings) {
   const boundedLimit = Math.max(1, Math.min(128, Number(settings.maxSteps) || 8))
   if (settings.executionMode === 'long-task') {
@@ -390,6 +467,130 @@ function createLongTaskGuard(loopConfig) {
   }
 }
 
+function shouldFinalizeAnswer(message, toolEvents, reasoningText) {
+  const normalized = (message || '').trim()
+  const hasContext = toolEvents.length > 0 || reasoningText.trim().length > 200
+  if (!hasContext) {
+    return false
+  }
+  if (!normalized || normalized === '模型没有返回文本内容。') {
+    return true
+  }
+  if (normalized.length >= 120) {
+    return false
+  }
+  return !/[。！？!?\n]/u.test(normalized.slice(60))
+}
+
+export async function finalizeOpenAiCompatibleAnswer({
+  settings,
+  systemPrompt,
+  messages,
+  toolEvents,
+  reasoningText,
+  draftMessage,
+}) {
+  const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
+  const transcript = toOpenAiTranscript(systemPrompt, [
+    ...messages,
+    ...(draftMessage?.trim()
+      ? [
+          {
+            role: 'assistant',
+            content: draftMessage,
+          },
+        ]
+      : []),
+    {
+      role: 'user',
+      content: buildFinalizerPrompt({
+        toolEvents,
+        reasoningText,
+        draftMessage,
+      }),
+    },
+  ])
+
+  const response = await fetch(`${apiBase}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${settings.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: settings.model,
+      messages: transcript,
+      stream: false,
+    }),
+  })
+
+  if (!response.ok) {
+    const data = await parseJsonResponse(response)
+    throw new Error(data.error?.message || 'OpenAI-compatible finalization request failed')
+  }
+
+  const data = await parseJsonResponse(response)
+  const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content)
+  return content.trim()
+}
+
+export async function finalizeGoogleAnswer({
+  settings,
+  systemPrompt,
+  messages,
+  toolEvents,
+  reasoningText,
+  draftMessage,
+}) {
+  const apiBase = normalizeBaseUrl(
+    settings.baseUrl,
+    'https://generativelanguage.googleapis.com/v1beta',
+  )
+  const response = await fetch(`${apiBase}/models/${settings.model}:generateContent`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-goog-api-key': settings.apiKey,
+    },
+    body: JSON.stringify({
+      system_instruction: {
+        parts: [{ text: systemPrompt }],
+      },
+      contents: toGeminiContents([
+        ...messages,
+        ...(draftMessage?.trim()
+          ? [
+              {
+                role: 'assistant',
+                content: draftMessage,
+              },
+            ]
+          : []),
+        {
+          role: 'user',
+          content: buildFinalizerPrompt({
+            toolEvents,
+            reasoningText,
+            draftMessage,
+          }),
+        },
+      ]),
+    }),
+  })
+
+  if (!response.ok) {
+    const data = await parseJsonResponse(response)
+    throw new Error(data.error?.message || 'Google finalization request failed')
+  }
+
+  const data = await parseJsonResponse(response)
+  const parts = data.candidates?.[0]?.content?.parts || []
+  return parts
+    .map(part => (typeof part.text === 'string' ? part.text : ''))
+    .join('\n')
+    .trim()
+}
+
 export async function runOpenAiCompatibleAgent({
   settings,
   systemPrompt,
@@ -403,10 +604,15 @@ export async function runOpenAiCompatibleAgent({
   const transcript = toOpenAiTranscript(systemPrompt, messages)
   let latestUsage
   let providerReasoning = ''
+  const providerReasoningBlocks = []
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
 
-  for (let step = 0; step < loopConfig.maxIterations; step += 1) {
+  try {
+    for (let step = 0; step < loopConfig.maxIterations; step += 1) {
+    const reasoningBlockId = `provider-phase-${step + 1}`
+    const reasoningOrder = step * 2
+    const toolOrder = reasoningOrder + 1
     const response = await fetch(`${apiBase}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -440,6 +646,7 @@ export async function runOpenAiCompatibleAgent({
     }
 
     let content = ''
+    let phaseReasoning = ''
     const toolCalls = []
     const streamParser = createThinkStreamParser({
       onContent(text) {
@@ -448,9 +655,11 @@ export async function runOpenAiCompatibleAgent({
       },
       onReasoning(text) {
         providerReasoning += text
+        phaseReasoning += text
         hooks?.onReasoningDelta?.(text, {
-          blockId: 'provider',
+          blockId: reasoningBlockId,
           kind: 'provider',
+          order: reasoningOrder,
         })
       },
     })
@@ -492,6 +701,15 @@ export async function runOpenAiCompatibleAgent({
 
     streamParser.flush()
 
+    if (phaseReasoning.trim()) {
+      providerReasoningBlocks.push({
+        id: reasoningBlockId,
+        kind: 'provider',
+        content: phaseReasoning,
+        order: reasoningOrder,
+      })
+    }
+
     const finalizedToolCalls = toolCalls.filter(
       toolCall => toolCall?.function?.name?.trim(),
     )
@@ -500,15 +718,7 @@ export async function runOpenAiCompatibleAgent({
       return {
         message: content || '模型没有返回文本内容。',
         toolEvents,
-        reasoning: providerReasoning.trim()
-          ? [
-              {
-                id: 'provider',
-                kind: 'provider',
-                content: providerReasoning,
-              },
-            ]
-          : undefined,
+        reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
         usage: latestUsage,
       }
     }
@@ -532,7 +742,10 @@ export async function runOpenAiCompatibleAgent({
       const tool = registry.get(toolCall.function.name)
       const args = parseToolArguments(toolCall.function.arguments || '{}')
       const result = tool
-        ? await invokeTool(tool, args, toolEvents, hooks)
+        ? await invokeTool(tool, args, toolEvents, {
+            ...hooks,
+            timelineOrder: toolOrder,
+          })
         : `Tool not found: ${toolCall.function.name}`
 
       transcript.push({
@@ -541,9 +754,12 @@ export async function runOpenAiCompatibleAgent({
         content: result,
       })
     }
-  }
+    }
 
-  throw new Error(loopConfig.limitMessage)
+    throw new Error(loopConfig.limitMessage)
+  } catch (error) {
+    throw maybeNormalizeProviderTermination(error, messages)
+  }
 }
 
 function collectGeminiFunctionCalls(existingCalls, parts) {
@@ -582,10 +798,15 @@ export async function runGoogleAgent({
   const transcript = toGeminiContents(messages)
   let latestUsage
   let providerReasoning = ''
+  const providerReasoningBlocks = []
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
 
-  for (let step = 0; step < loopConfig.maxIterations; step += 1) {
+  try {
+    for (let step = 0; step < loopConfig.maxIterations; step += 1) {
+    const reasoningBlockId = `provider-phase-${step + 1}`
+    const reasoningOrder = step * 2
+    const toolOrder = reasoningOrder + 1
     const response = await fetch(
       `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
       {
@@ -612,6 +833,7 @@ export async function runGoogleAgent({
     }
 
     let content = ''
+    let phaseReasoning = ''
     const functionCalls = []
     const streamParser = createThinkStreamParser({
       onContent(text) {
@@ -620,9 +842,11 @@ export async function runGoogleAgent({
       },
       onReasoning(text) {
         providerReasoning += text
+        phaseReasoning += text
         hooks?.onReasoningDelta?.(text, {
-          blockId: 'provider',
+          blockId: reasoningBlockId,
           kind: 'provider',
+          order: reasoningOrder,
         })
       },
     })
@@ -658,19 +882,20 @@ export async function runGoogleAgent({
 
     streamParser.flush()
 
+    if (phaseReasoning.trim()) {
+      providerReasoningBlocks.push({
+        id: reasoningBlockId,
+        kind: 'provider',
+        content: phaseReasoning,
+        order: reasoningOrder,
+      })
+    }
+
     if (functionCalls.length === 0) {
       return {
         message: content || '模型没有返回文本内容。',
         toolEvents,
-        reasoning: providerReasoning.trim()
-          ? [
-              {
-                id: 'provider',
-                kind: 'provider',
-                content: providerReasoning,
-              },
-            ]
-          : undefined,
+        reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
         usage: latestUsage,
       }
     }
@@ -701,7 +926,10 @@ export async function runGoogleAgent({
     for (const entry of functionCalls) {
       const tool = registry.get(entry.name)
       const result = tool
-        ? await invokeTool(tool, entry.args || {}, toolEvents, hooks)
+        ? await invokeTool(tool, entry.args || {}, toolEvents, {
+            ...hooks,
+            timelineOrder: toolOrder,
+          })
         : `Tool not found: ${entry.name}`
 
       toolResponses.push({
@@ -718,7 +946,10 @@ export async function runGoogleAgent({
       role: 'user',
       parts: toolResponses,
     })
-  }
+    }
 
-  throw new Error(loopConfig.limitMessage)
+    throw new Error(loopConfig.limitMessage)
+  } catch (error) {
+    throw maybeNormalizeProviderTermination(error, messages)
+  }
 }

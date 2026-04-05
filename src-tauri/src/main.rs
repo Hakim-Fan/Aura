@@ -28,6 +28,12 @@ struct AgentTaskSnapshot {
     #[serde(rename = "pendingApproval")]
     pending_approval: Option<serde_json::Value>,
     error: Option<String>,
+    #[serde(rename = "errorCode")]
+    error_code: Option<String>,
+    #[serde(rename = "errorSource")]
+    error_source: Option<String>,
+    #[serde(rename = "rawError")]
+    raw_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -178,6 +184,7 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
         .get("kind")
         .and_then(|value| value.as_str())
         .unwrap_or("provider");
+    let order = event.get("order").and_then(|value| value.as_u64());
 
     if let Some(existing) = current.reasoning.iter_mut().find(|block| {
         block
@@ -198,6 +205,7 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
             "id": block_id,
             "kind": kind,
             "content": next_content,
+            "order": order,
         });
         return;
     }
@@ -206,6 +214,7 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
         "id": block_id,
         "kind": kind,
         "content": delta,
+        "order": order,
     }));
 }
 
@@ -277,6 +286,9 @@ fn spawn_agent_task<R: Runtime>(
         usage: None,
         pending_approval: None,
         error: None,
+        error_code: None,
+        error_source: None,
+        raw_error: None,
     }));
 
     let handle = AgentTaskHandle {
@@ -315,6 +327,9 @@ fn spawn_agent_task<R: Runtime>(
                 Some("started") => with_snapshot(&stdout_snapshot, |current| {
                     current.status = "running".into();
                     current.error = None;
+                    current.error_code = None;
+                    current.error_source = None;
+                    current.raw_error = None;
                 }),
                 Some("text_delta") => with_snapshot(&stdout_snapshot, |current| {
                     let delta = event
@@ -376,6 +391,18 @@ fn spawn_agent_task<R: Runtime>(
                     current.pending_approval = None;
                     current.error = event
                         .get("message")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    current.error_code = event
+                        .get("code")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    current.error_source = event
+                        .get("source")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    current.raw_error = event
+                        .get("rawMessage")
                         .and_then(|value| value.as_str())
                         .map(|value| value.to_string());
                 }),

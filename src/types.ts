@@ -29,6 +29,7 @@ export type MessageEvent = {
   kind: MessageEventKind
   title: string
   summary: string
+  order?: number
   source?: 'builtin' | 'mcp' | 'plugin' | 'subagent'
   status: MessageEventStatus
   input?: string
@@ -77,6 +78,7 @@ export type MessageReasoning = {
   id: string
   kind: 'provider' | 'summary'
   content: string
+  order?: number
 }
 
 export type MessageUsage = {
@@ -106,6 +108,7 @@ export type ToolEvent = {
   source: 'builtin' | 'mcp' | 'plugin' | 'subagent'
   name: string
   summary: string
+  order?: number
   status: 'running' | 'success' | 'error'
   input?: string
   output?: string
@@ -213,6 +216,9 @@ export type AgentTaskSnapshot = {
   usage?: MessageUsage
   pendingApproval?: ApprovalRequest
   error?: string
+  errorCode?: string
+  errorSource?: string
+  rawError?: string
 }
 
 export type WorkspaceNodeKind = 'file' | 'directory'

@@ -41,6 +41,7 @@ import type {
   ChatMessage,
   MessageAttachment,
   MessageEvent,
+  MessageReasoning,
   ProviderMode,
   TaskNode,
   ToolEvent,
@@ -243,7 +244,7 @@ function sanitizeTaskNodes(nodes: TaskNode[], finalAnswer = ''): TaskNode[] {
     const normalizedSummary = normalizeComparableText(node.summary)
     const summary =
       isGenericTaskSummary(node.summary) ||
-      (normalizedAnswer && normalizedSummary === normalizedAnswer)
+        (normalizedAnswer && normalizedSummary === normalizedAnswer)
         ? ''
         : node.summary
 
@@ -311,24 +312,100 @@ function MarkdownAnswer({
   )
 }
 
-function ReasoningCard({
-  title,
+function summarizeReasoningPreview(content: string) {
+  const firstLine = content
+    .split('\n')
+    .map(line => line.trim())
+    .find(Boolean)
+
+  if (!firstLine) {
+    return '正在整理这一阶段的思路。'
+  }
+
+  return firstLine.length > 96 ? `${firstLine.slice(0, 96)}...` : firstLine
+}
+
+function buildExecutionTimeline(
+  reasoningEntries: MessageReasoning[],
+  events: MessageEvent[],
+) {
+  const reasoningTimeline = reasoningEntries.map((entry, index) => ({
+    key: `reasoning-${entry.id}`,
+    kind: 'reasoning' as const,
+    order: typeof entry.order === 'number' ? entry.order : index * 2,
+    phaseIndex: index + 1,
+    originalIndex: index,
+    entry,
+  }))
+
+  const eventTimeline = events.map((event, index) => ({
+    key: `event-${event.id}`,
+    kind: 'event' as const,
+    order: typeof event.order === 'number' ? event.order : index * 2 + 1,
+    originalIndex: index,
+    event,
+  }))
+
+  return [...reasoningTimeline, ...eventTimeline].sort((left, right) => {
+    if (left.order !== right.order) {
+      return left.order - right.order
+    }
+    if (left.kind !== right.kind) {
+      return left.kind === 'reasoning' ? -1 : 1
+    }
+    return left.originalIndex - right.originalIndex
+  })
+}
+
+function ReasoningPhaseCard({
   content,
+  isActive,
 }: {
-  title: string
   content: string
+  isActive: boolean
 }) {
+  const [expanded, setExpanded] = useState(isActive)
+  const previousActiveRef = useRef(isActive)
+  const preview = summarizeReasoningPreview(content)
+
+  useEffect(() => {
+    if (isActive) {
+      setExpanded(true)
+    } else if (previousActiveRef.current && !isActive) {
+      setExpanded(false)
+    }
+    previousActiveRef.current = isActive
+  }, [isActive])
+
   return (
     <article className="rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.05)] px-3 py-2.5">
-      <div className="mb-1 flex items-center gap-2">
-        <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded bg-white/80 text-[var(--accent-soft-strong)]">
-          思考
-        </span>
-        <strong className="text-12px text-[var(--text-primary)] opacity-80">{title}</strong>
-      </div>
-      <div className="text-12px leading-relaxed whitespace-pre-wrap text-[var(--text-secondary)] opacity-80">
-        {content}
-      </div>
+      <button
+        className="flex w-full items-start justify-between gap-3 text-left"
+        onClick={() => setExpanded(current => !current)}
+        type="button"
+      >
+        <div className="min-w-0">
+          <div className="mb-1 flex items-center gap-2">
+            <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded bg-white/80 text-[var(--accent-soft-strong)]">
+              思考
+            </span>
+            <strong className="text-12px text-[var(--text-primary)] opacity-85">{preview}</strong>
+            <span className="text-10px text-[var(--text-secondary)] opacity-55">
+              {isActive ? '思考中' : ''}
+            </span>
+          </div>
+        </div>
+        {expanded ? (
+          <ChevronUp size={14} className="mt-0.5 shrink-0 text-[var(--text-secondary)] opacity-60" />
+        ) : (
+          <ChevronDown size={14} className="mt-0.5 shrink-0 text-[var(--text-secondary)] opacity-60" />
+        )}
+      </button>
+      {expanded ? (
+        <div className="mt-2 text-12px leading-relaxed whitespace-pre-wrap text-[var(--text-secondary)] opacity-80">
+          {content}
+        </div>
+      ) : null}
     </article>
   )
 }
@@ -440,6 +517,13 @@ function AssistantMessageCard({
   const visibleReasoning = (message.reasoning || []).filter(entry =>
     normalizeComparableText(entry.content),
   )
+  const providerReasoning = visibleReasoning.filter(entry => entry.kind === 'provider')
+  const displayReasoning =
+    providerReasoning.length > 0
+      ? providerReasoning
+      : visibleReasoning.filter(entry => entry.kind === 'summary')
+  const executionTimeline = buildExecutionTimeline(displayReasoning, message.events || [])
+  const latestReasoningId = displayReasoning.at(-1)?.id || ''
   const hasExecution =
     Boolean(activity) ||
     (message.events?.length || 0) > 0 ||
@@ -484,16 +568,17 @@ function AssistantMessageCard({
           {hasExecution && activity?.expanded ? (
             <section className="flex flex-col gap-3 border-l border-[rgba(15,23,42,0.08)] pl-4">
               <div className="flex flex-col gap-2.5">
-                {visibleReasoning.map(entry => (
-                  <ReasoningCard
-                    key={entry.id}
-                    title={entry.kind === 'provider' ? '模型思考摘要' : '分析摘要'}
-                    content={entry.content}
-                  />
-                ))}
-                {message.events?.map(event => (
-                  <MessageEventCard key={event.id} event={event} />
-                ))}
+                {executionTimeline.map(item =>
+                  item.kind === 'reasoning' ? (
+                    <ReasoningPhaseCard
+                      key={item.key}
+                      content={item.entry.content}
+                      isActive={isStreaming && item.entry.id === latestReasoningId}
+                    />
+                  ) : (
+                    <MessageEventCard key={item.key} event={item.event} />
+                  ),
+                )}
                 {visibleSteps.length > 0 ? (
                   <div className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2.5">
                     <TaskTreeView nodes={visibleSteps} />
@@ -513,7 +598,11 @@ function AssistantMessageCard({
             <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
           ) : !isStreaming ? (
             <div className="rounded-xl border border-dashed border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-4 py-3 text-13px text-[var(--text-secondary)]">
-              模型执行了操作，但没有生成最终总结回答。
+              {(message.events?.length || 0) > 0
+                ? '模型执行了操作，但没有生成最终总结回答。'
+                : providerReasoning.length > 0
+                  ? '模型在思考中计划了后续动作，但没有成功形成最终回答。'
+                  : '模型执行了操作，但没有生成最终总结回答。'}
             </div>
           ) : (
             <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
@@ -779,17 +868,17 @@ export function ChatView({
 
   const usageLabel = latestUsage
     ? [
-        latestUsage.inputTokens ? `输入 ${formatTokenCount(latestUsage.inputTokens)}` : null,
-        latestUsage.outputTokens ? `输出 ${formatTokenCount(latestUsage.outputTokens)}` : null,
-        latestUsage.contextWindow && latestUsage.inputTokens
-          ? `${Math.min(
-              100,
-              Math.round((latestUsage.inputTokens / latestUsage.contextWindow) * 100),
-            )}%`
-          : null,
-      ]
-        .filter(Boolean)
-        .join(' · ')
+      latestUsage.inputTokens ? `输入 ${formatTokenCount(latestUsage.inputTokens)}` : null,
+      latestUsage.outputTokens ? `输出 ${formatTokenCount(latestUsage.outputTokens)}` : null,
+      latestUsage.contextWindow && latestUsage.inputTokens
+        ? `${Math.min(
+          100,
+          Math.round((latestUsage.inputTokens / latestUsage.contextWindow) * 100),
+        )}%`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(' · ')
     : `${formatTokenCount(currentContextTokenCount)} tok 估算`
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -1173,72 +1262,72 @@ export function ChatView({
                 maxWidth: inspectorWidth,
               }}
             >
-            {agentTask?.pendingApproval ? (
-              <div className="p-4 bg-white border border-amber-200 rounded-xl shadow-sm">
-                <div className="text-12px font-600 text-amber-600 uppercase tracking-wider mb-2">待执行审批</div>
-                <div className="flex-between mb-3">
-                  <strong className="text-14px">{agentTask.pendingApproval.toolName}</strong>
-                  <span className="text-10px px-2 py-0.5 bg-amber-50 text-amber-600 rounded-full border border-amber-100">{agentTask.pendingApproval.category}</span>
+              {agentTask?.pendingApproval ? (
+                <div className="p-4 bg-white border border-amber-200 rounded-xl shadow-sm">
+                  <div className="text-12px font-600 text-amber-600 uppercase tracking-wider mb-2">待执行审批</div>
+                  <div className="flex-between mb-3">
+                    <strong className="text-14px">{agentTask.pendingApproval.toolName}</strong>
+                    <span className="text-10px px-2 py-0.5 bg-amber-50 text-amber-600 rounded-full border border-amber-100">{agentTask.pendingApproval.category}</span>
+                  </div>
+                  <p className="text-13px text-[var(--text-secondary)] mb-4">{agentTask.pendingApproval.summary}</p>
+                  {agentTask.pendingApproval.input && (
+                    <pre className="text-11px bg-gray-50 p-3 rounded-lg overflow-x-auto mb-4 border border-gray-100">{agentTask.pendingApproval.input}</pre>
+                  )}
+                  <div className="grid grid-cols-2 gap-3">
+                    <button className="py-2 px-3 text-13px font-500 rounded-lg bg-gray-100 hover:bg-gray-200 transition-colors" onClick={() => onHandleApproval('deny')}>拒绝</button>
+                    <button className="py-2 px-3 text-13px font-500 rounded-lg bg-[var(--accent-soft-strong)] text-white hover:brightness-110 transition-all" onClick={() => onHandleApproval('approve')}>允许</button>
+                  </div>
                 </div>
-                <p className="text-13px text-[var(--text-secondary)] mb-4">{agentTask.pendingApproval.summary}</p>
-                {agentTask.pendingApproval.input && (
-                  <pre className="text-11px bg-gray-50 p-3 rounded-lg overflow-x-auto mb-4 border border-gray-100">{agentTask.pendingApproval.input}</pre>
-                )}
-                <div className="grid grid-cols-2 gap-3">
-                  <button className="py-2 px-3 text-13px font-500 rounded-lg bg-gray-100 hover:bg-gray-200 transition-colors" onClick={() => onHandleApproval('deny')}>拒绝</button>
-                  <button className="py-2 px-3 text-13px font-500 rounded-lg bg-[var(--accent-soft-strong)] text-white hover:brightness-110 transition-all" onClick={() => onHandleApproval('approve')}>允许</button>
-                </div>
-              </div>
-            ) : null}
+              ) : null}
 
-            {(displayedToolEvents.length > 0 || displayedTaskTree.length > 0) && isRunning && (
-              <div className="flex flex-col gap-4">
-                <div className="text-12px font-600 text-[var(--text-secondary)] opacity-50 uppercase tracking-wider">执行详情</div>
-                <div className="flex flex-col gap-3">
-                  {displayedToolEvents.map(event => (
-                    <MessageEventCard
-                      key={event.id}
-                      event={{
-                        id: event.id,
-                        kind: event.source === 'plugin' ? 'skill' : event.source === 'subagent' ? 'subagent' : event.name.toLowerCase().includes('shell') ? 'shell' : 'tool',
-                        title: presentToolEventTitle(event),
-                        summary: event.summary,
-                        source: event.source,
-                        status:
-                          event.status === 'running'
-                            ? 'running'
-                            : event.status === 'error'
-                              ? 'error'
-                              : 'success',
-                        input: event.input,
-                        output: event.output,
-                        error: event.error,
-                      }}
-                    />
-                  ))}
+              {(displayedToolEvents.length > 0 || displayedTaskTree.length > 0) && isRunning && (
+                <div className="flex flex-col gap-4">
+                  <div className="text-12px font-600 text-[var(--text-secondary)] opacity-50 uppercase tracking-wider">执行详情</div>
+                  <div className="flex flex-col gap-3">
+                    {displayedToolEvents.map(event => (
+                      <MessageEventCard
+                        key={event.id}
+                        event={{
+                          id: event.id,
+                          kind: event.source === 'plugin' ? 'skill' : event.source === 'subagent' ? 'subagent' : event.name.toLowerCase().includes('shell') ? 'shell' : 'tool',
+                          title: presentToolEventTitle(event),
+                          summary: event.summary,
+                          source: event.source,
+                          status:
+                            event.status === 'running'
+                              ? 'running'
+                              : event.status === 'error'
+                                ? 'error'
+                                : 'success',
+                          input: event.input,
+                          output: event.output,
+                          error: event.error,
+                        }}
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            <WorkspaceExplorer
-              rootPath={workspaceRootPath}
-              tree={workspaceTree}
-              loading={workspaceLoading}
-              error={workspaceError}
-              selectedFilePath={selectedFilePath}
-              previewContent={previewContent}
-              previewImage={previewImage}
-              previewLoading={previewLoading}
-              previewError={previewError}
-              expandedPaths={expandedPaths}
-              canChooseWorkspace={canChangeWorkspace}
-              onRefresh={onRefreshWorkspace}
-              onChooseWorkspace={onChooseWorkspace}
-              onToggle={onToggleWorkspacePath}
-              onSelectFile={onSelectWorkspaceFile}
-              onInsertReference={onInsertFileReference}
-              onCopyPath={onCopyPath}
-            />
+              <WorkspaceExplorer
+                rootPath={workspaceRootPath}
+                tree={workspaceTree}
+                loading={workspaceLoading}
+                error={workspaceError}
+                selectedFilePath={selectedFilePath}
+                previewContent={previewContent}
+                previewImage={previewImage}
+                previewLoading={previewLoading}
+                previewError={previewError}
+                expandedPaths={expandedPaths}
+                canChooseWorkspace={canChangeWorkspace}
+                onRefresh={onRefreshWorkspace}
+                onChooseWorkspace={onChooseWorkspace}
+                onToggle={onToggleWorkspacePath}
+                onSelectFile={onSelectWorkspaceFile}
+                onInsertReference={onInsertFileReference}
+                onCopyPath={onCopyPath}
+              />
             </aside>
           </>
         )}
