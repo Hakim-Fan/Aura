@@ -944,7 +944,7 @@ export function ChatView({
   return (
     <section className="flex-1 flex flex-col h-screen bg-[var(--bg-app)] relative overflow-hidden">
       <header
-        className="relative h-16 border-b border-[var(--border-subtle)] px-4 flex items-end justify-center shrink-0 pb-2"
+        className="relative h-12 border-b border-[var(--border-subtle)] px-4 flex items-center justify-center shrink-0"
         data-tauri-drag-region
       >
         <div className="absolute inset-x-0 top-0 h-7" data-tauri-drag-region />
@@ -1039,7 +1039,7 @@ export function ChatView({
           {/* Docked Composer */}
           <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t pointer-events-none">
             <div className="max-w-1000px mx-auto pointer-events-auto">
-              <div className="bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none overflow-hidden relative">
+              <div className="bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none relative">
                 <textarea
                   className="w-full h-120px p-4 text-15px leading-relaxed resize-none !border-none bg-transparent !outline-none !ring-0 !shadow-none"
                   value={draft}

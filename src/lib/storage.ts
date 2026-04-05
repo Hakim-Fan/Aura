@@ -140,51 +140,51 @@ function normalizeProfiles(
 ) {
   const profiles = Array.isArray(parsed.providerProfiles)
     ? parsed.providerProfiles
-        .map((profile, index) => {
-          if (!profile || typeof profile !== 'object') {
-            return null
-          }
-          const provider = normalizeProvider(
-            (profile as { provider?: unknown }).provider,
-            index === 0 ? defaultSettings.provider : 'custom',
-          )
-          const baseUrl =
-            typeof (profile as { baseUrl?: unknown }).baseUrl === 'string' &&
+      .map((profile, index) => {
+        if (!profile || typeof profile !== 'object') {
+          return null
+        }
+        const provider = normalizeProvider(
+          (profile as { provider?: unknown }).provider,
+          index === 0 ? defaultSettings.provider : 'custom',
+        )
+        const baseUrl =
+          typeof (profile as { baseUrl?: unknown }).baseUrl === 'string' &&
             (profile as { baseUrl?: string }).baseUrl?.trim()
-              ? String((profile as { baseUrl?: string }).baseUrl)
-              : baseUrlForProvider(provider)
-          const models = normalizeModels((profile as { models?: unknown }).models)
-          const defaultModel =
-            typeof (profile as { defaultModel?: unknown }).defaultModel === 'string'
-              ? (profile as { defaultModel?: string }).defaultModel || models[0]?.id || ''
-              : models[0]?.id || ''
-          return {
-            id:
-              typeof (profile as { id?: unknown }).id === 'string' &&
+            ? String((profile as { baseUrl?: string }).baseUrl)
+            : baseUrlForProvider(provider)
+        const models = normalizeModels((profile as { models?: unknown }).models)
+        const defaultModel =
+          typeof (profile as { defaultModel?: unknown }).defaultModel === 'string'
+            ? (profile as { defaultModel?: string }).defaultModel || models[0]?.id || ''
+            : models[0]?.id || ''
+        return {
+          id:
+            typeof (profile as { id?: unknown }).id === 'string' &&
               (profile as { id?: string }).id?.trim()
-                ? String((profile as { id?: string }).id)
-                : createProfileId(`profile-${provider}`),
-            name:
-              typeof (profile as { name?: unknown }).name === 'string' &&
+              ? String((profile as { id?: string }).id)
+              : createProfileId(`profile-${provider}`),
+          name:
+            typeof (profile as { name?: unknown }).name === 'string' &&
               (profile as { name?: string }).name?.trim()
-                ? String((profile as { name?: string }).name)
-                : provider === 'custom'
-                  ? 'Custom'
-                  : provider === 'google'
-                    ? 'Google'
-                    : 'OpenAI',
-            provider,
-            apiKey:
-              typeof (profile as { apiKey?: unknown }).apiKey === 'string'
-                ? String((profile as { apiKey?: string }).apiKey)
-                : '',
-            baseUrl,
-            enabled: (profile as { enabled?: boolean }).enabled !== false,
-            models,
-            defaultModel,
-          } satisfies ProviderProfile
-        })
-        .filter((profile): profile is ProviderProfile => Boolean(profile))
+              ? String((profile as { name?: string }).name)
+              : provider === 'custom'
+                ? 'Custom'
+                : provider === 'google'
+                  ? 'Google'
+                  : 'OpenAI',
+          provider,
+          apiKey:
+            typeof (profile as { apiKey?: unknown }).apiKey === 'string'
+              ? String((profile as { apiKey?: string }).apiKey)
+              : '',
+          baseUrl,
+          enabled: (profile as { enabled?: boolean }).enabled !== false,
+          models,
+          defaultModel,
+        } satisfies ProviderProfile
+      })
+      .filter((profile): profile is ProviderProfile => Boolean(profile))
     : []
 
   if (profiles.length > 0) {
@@ -215,6 +215,21 @@ function normalizeProfiles(
 
 function firstEnabledModelId(profile: ProviderProfile) {
   return profile.models.find(model => model.enabled)?.id || ''
+}
+
+function resolvePreferredModelId(profile: ProviderProfile | null, preferredModelId?: string) {
+  if (!profile) {
+    return ''
+  }
+
+  if (
+    preferredModelId &&
+    profile.models.some(model => model.enabled && model.id === preferredModelId)
+  ) {
+    return preferredModelId
+  }
+
+  return firstEnabledModelId(profile)
 }
 
 function resolveActiveProfile(
@@ -255,7 +270,7 @@ function syncLegacyFields(settings: AgentSettings): AgentSettings {
     provider: activeProfile.provider,
     apiKey: activeProfile.apiKey,
     baseUrl: activeProfile.baseUrl,
-    model: firstEnabledModelId(activeProfile),
+    model: resolvePreferredModelId(activeProfile, settings.model),
   }
 }
 
@@ -321,137 +336,137 @@ export function loadSessions(): Session[] {
           content: message.content || '',
           parts: Array.isArray(message.parts)
             ? message.parts
-                .map(part => {
-                  if (!part || typeof part !== 'object') {
-                    return null
-                  }
-
-                  if (
-                    (part as { type?: unknown }).type === 'text' &&
-                    typeof (part as { text?: unknown }).text === 'string'
-                  ) {
-                    return {
-                      type: 'text' as const,
-                      text: (part as { text: string }).text,
-                    }
-                  }
-
-                  if (
-                    (part as { type?: unknown }).type === 'image' &&
-                    typeof (part as { name?: unknown }).name === 'string' &&
-                    typeof (part as { mimeType?: unknown }).mimeType === 'string'
-                  ) {
-                    return {
-                      type: 'image' as const,
-                      name: (part as { name: string }).name,
-                      mimeType: (part as { mimeType: string }).mimeType,
-                      path:
-                        typeof (part as { path?: unknown }).path === 'string'
-                          ? (part as { path?: string }).path
-                          : undefined,
-                      dataUrl:
-                        typeof (part as { dataUrl?: unknown }).dataUrl === 'string'
-                          ? (part as { dataUrl?: string }).dataUrl
-                          : undefined,
-                    }
-                  }
-
-                  if (
-                    (part as { type?: unknown }).type === 'file' &&
-                    typeof (part as { name?: unknown }).name === 'string' &&
-                    typeof (part as { path?: unknown }).path === 'string'
-                  ) {
-                    return {
-                      type: 'file' as const,
-                      name: (part as { name: string }).name,
-                      path: (part as { path: string }).path,
-                      mimeType:
-                        typeof (part as { mimeType?: unknown }).mimeType === 'string'
-                          ? (part as { mimeType?: string }).mimeType
-                          : undefined,
-                    }
-                  }
-
+              .map(part => {
+                if (!part || typeof part !== 'object') {
                   return null
-                })
-                .filter((part): part is NonNullable<typeof part> => Boolean(part))
+                }
+
+                if (
+                  (part as { type?: unknown }).type === 'text' &&
+                  typeof (part as { text?: unknown }).text === 'string'
+                ) {
+                  return {
+                    type: 'text' as const,
+                    text: (part as { text: string }).text,
+                  }
+                }
+
+                if (
+                  (part as { type?: unknown }).type === 'image' &&
+                  typeof (part as { name?: unknown }).name === 'string' &&
+                  typeof (part as { mimeType?: unknown }).mimeType === 'string'
+                ) {
+                  return {
+                    type: 'image' as const,
+                    name: (part as { name: string }).name,
+                    mimeType: (part as { mimeType: string }).mimeType,
+                    path:
+                      typeof (part as { path?: unknown }).path === 'string'
+                        ? (part as { path?: string }).path
+                        : undefined,
+                    dataUrl:
+                      typeof (part as { dataUrl?: unknown }).dataUrl === 'string'
+                        ? (part as { dataUrl?: string }).dataUrl
+                        : undefined,
+                  }
+                }
+
+                if (
+                  (part as { type?: unknown }).type === 'file' &&
+                  typeof (part as { name?: unknown }).name === 'string' &&
+                  typeof (part as { path?: unknown }).path === 'string'
+                ) {
+                  return {
+                    type: 'file' as const,
+                    name: (part as { name: string }).name,
+                    path: (part as { path: string }).path,
+                    mimeType:
+                      typeof (part as { mimeType?: unknown }).mimeType === 'string'
+                        ? (part as { mimeType?: string }).mimeType
+                        : undefined,
+                  }
+                }
+
+                return null
+              })
+              .filter((part): part is NonNullable<typeof part> => Boolean(part))
             : [],
           status: message.status || 'completed',
           createdAt: message.createdAt || session.updatedAt || Date.now(),
           attachments: Array.isArray(message.attachments)
             ? message.attachments
-                .map(attachment => {
-                  if (!attachment || typeof attachment !== 'object') {
-                    return null
-                  }
-                  const path =
-                    typeof attachment.path === 'string' ? attachment.path : ''
-                  if (!path) {
-                    return null
-                  }
-                  return {
-                    id:
-                      typeof attachment.id === 'string' && attachment.id.trim()
-                        ? attachment.id
-                        : Math.random().toString(36).slice(2, 10),
-                    name:
-                      typeof attachment.name === 'string' && attachment.name.trim()
-                        ? attachment.name
-                        : path.split('/').pop() || '附件',
-                    path,
-                    preview:
-                      typeof attachment.preview === 'string' ? attachment.preview : undefined,
-                    mimeType:
-                      typeof attachment.mimeType === 'string'
-                        ? attachment.mimeType
-                        : undefined,
-                  }
-                })
-                .filter(
-                  (attachment): attachment is NonNullable<typeof attachment> =>
-                    Boolean(attachment),
-                )
+              .map(attachment => {
+                if (!attachment || typeof attachment !== 'object') {
+                  return null
+                }
+                const path =
+                  typeof attachment.path === 'string' ? attachment.path : ''
+                if (!path) {
+                  return null
+                }
+                return {
+                  id:
+                    typeof attachment.id === 'string' && attachment.id.trim()
+                      ? attachment.id
+                      : Math.random().toString(36).slice(2, 10),
+                  name:
+                    typeof attachment.name === 'string' && attachment.name.trim()
+                      ? attachment.name
+                      : path.split('/').pop() || '附件',
+                  path,
+                  preview:
+                    typeof attachment.preview === 'string' ? attachment.preview : undefined,
+                  mimeType:
+                    typeof attachment.mimeType === 'string'
+                      ? attachment.mimeType
+                      : undefined,
+                }
+              })
+              .filter(
+                (attachment): attachment is NonNullable<typeof attachment> =>
+                  Boolean(attachment),
+              )
             : [],
           reasoning: Array.isArray(message.reasoning)
             ? message.reasoning
-                .map(reasoning => {
-                  if (!reasoning || typeof reasoning !== 'object') {
-                    return null
-                  }
-                  if (typeof reasoning.content !== 'string' || !reasoning.content.trim()) {
-                    return null
-                  }
-                  return {
-                    id:
-                      typeof reasoning.id === 'string' && reasoning.id.trim()
-                        ? reasoning.id
-                        : Math.random().toString(36).slice(2, 10),
-                    kind: (reasoning.kind === 'summary' ? 'summary' : 'provider') as
-                      | 'summary'
-                      | 'provider',
-                    content: reasoning.content,
-                  }
-                })
-                .filter((reasoning): reasoning is NonNullable<typeof reasoning> =>
-                  Boolean(reasoning),
-                )
+              .map(reasoning => {
+                if (!reasoning || typeof reasoning !== 'object') {
+                  return null
+                }
+                if (typeof reasoning.content !== 'string' || !reasoning.content.trim()) {
+                  return null
+                }
+                return {
+                  id:
+                    typeof reasoning.id === 'string' && reasoning.id.trim()
+                      ? reasoning.id
+                      : Math.random().toString(36).slice(2, 10),
+                  kind: (reasoning.kind === 'summary' ? 'summary' : 'provider') as
+                    | 'summary'
+                    | 'provider',
+                  content: reasoning.content,
+                }
+              })
+              .filter((reasoning): reasoning is NonNullable<typeof reasoning> =>
+                Boolean(reasoning),
+              )
             : [],
           usage:
             message.usage && typeof message.usage === 'object'
               ? {
-                  inputTokens:
-                    typeof message.usage.inputTokens === 'number'
-                      ? message.usage.inputTokens
-                      : undefined,
-                  outputTokens:
-                    typeof message.usage.outputTokens === 'number'
-                      ? message.usage.outputTokens
-                      : undefined,
-                  contextWindow:
-                    typeof message.usage.contextWindow === 'number'
-                      ? message.usage.contextWindow
-                      : undefined,
-                }
+                inputTokens:
+                  typeof message.usage.inputTokens === 'number'
+                    ? message.usage.inputTokens
+                    : undefined,
+                outputTokens:
+                  typeof message.usage.outputTokens === 'number'
+                    ? message.usage.outputTokens
+                    : undefined,
+                contextWindow:
+                  typeof message.usage.contextWindow === 'number'
+                    ? message.usage.contextWindow
+                    : undefined,
+              }
               : undefined,
           activity: message.activity,
           events: message.events || [],

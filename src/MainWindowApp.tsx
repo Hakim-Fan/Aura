@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { AppSidebar } from './components/AppSidebar'
 import { abortAgentTask, getAgentTask, respondToApproval, startAgentTask } from './lib/agent'
-import { loadSessions, loadSettings, saveSessions } from './lib/storage'
+import { loadSessions, loadSettings, saveSessions, saveSettings } from './lib/storage'
 import { openSettingsWindow } from './lib/windows'
 import {
   createSessionWorkspace,
@@ -36,12 +36,21 @@ function createId() {
 }
 
 function createSession(settings: AgentSettings): Session {
+  const activeProfile =
+    settings.providerProfiles.find(profile => profile.id === settings.activeProviderProfileId) ||
+    settings.providerProfiles[0] ||
+    null
+  const preferredModel =
+    activeProfile?.models.some(model => model.enabled && model.id === settings.model)
+      ? settings.model
+      : activeProfile?.models.find(model => model.enabled)?.id || ''
+
   return {
     id: createId(),
     title: '新建聊天',
     providerProfileId: settings.activeProviderProfileId,
     provider: settings.provider,
-    model: settings.model,
+    model: preferredModel,
     workspacePath: '',
     workspaceRoot: settings.cwd,
     workspaceMode: 'default',
@@ -197,8 +206,7 @@ function buildUserMessageParts(
 
   if (imageAttachments.length > 0) {
     attachmentContextParts.push(
-      `这些图片已经作为视觉输入直接提供给你，请优先基于图片内容回答，不要把 PNG/JPG 文件当纯文本读取。${
-        fileAttachments.length > 0 ? '如果还附带了普通文件，可按需读取它们。' : ''
+      `这些图片已经作为视觉输入直接提供给你，请优先基于图片内容回答，不要把 PNG/JPG 文件当纯文本读取。${fileAttachments.length > 0 ? '如果还附带了普通文件，可按需读取它们。' : ''
       }`,
     )
     attachmentContextParts.push(
@@ -339,6 +347,19 @@ function getFirstEnabledModelId(profile: ProviderProfile | null) {
     return ''
   }
   return profile.models.find(model => model.enabled)?.id || ''
+}
+
+function resolvePreferredModelId(profile: ProviderProfile | null, preferredModelId?: string) {
+  if (!profile) {
+    return ''
+  }
+  if (
+    preferredModelId &&
+    profile.models.some(model => model.enabled && model.id === preferredModelId)
+  ) {
+    return preferredModelId
+  }
+  return getFirstEnabledModelId(profile)
 }
 
 function getSessionProviderProfile(settings: AgentSettings, session: Session | null) {
@@ -528,7 +549,10 @@ export function MainWindowApp() {
     activeSession?.workspacePath || activeSession?.workspaceRoot || ''
   const activeProviderProfile = getSessionProviderProfile(settings, activeSession)
   const effectiveProvider = activeProviderProfile?.provider || settings.provider
-  const effectiveModel = activeSession?.model || getFirstEnabledModelId(activeProviderProfile) || settings.model
+  const effectiveModel =
+    activeSession?.model ||
+    resolvePreferredModelId(activeProviderProfile, settings.model) ||
+    settings.model
   const enabledModelGroups = collectEnabledModelsByProfile(settings)
 
   useEffect(() => {
@@ -591,51 +615,51 @@ export function MainWindowApp() {
         updateSession(currentSessionId, session => ({
           ...session,
           messages: session.messages.map(message =>
-                message.id === currentMessageId
+            message.id === currentMessageId
               ? {
-                  ...message,
-                  content:
-                    snapshot.message ||
-                    (snapshot.status === 'awaiting_approval'
-                      ? '等待你的审批后继续执行。'
-                      : message.content),
-                  reasoning: snapshot.reasoning || message.reasoning,
-                  usage: snapshot.usage || message.usage,
-                  status:
-                    snapshot.status === 'failed'
-                      ? ('failed' as const)
-                      : snapshot.status === 'completed'
-                        ? ('completed' as const)
-                        : ('streaming' as const),
-                  events: [
-                    ...snapshot.toolEvents.map(mapToolEventToMessageEvent),
-                    ...(snapshot.pendingApproval
-                      ? [
-                          {
-                            id: snapshot.pendingApproval.id,
-                            kind: 'approval' as const,
-                            title: snapshot.pendingApproval.toolName,
-                            summary: snapshot.pendingApproval.summary,
-                            order:
-                              (snapshot.toolEvents
-                                .map(event => event.order || 0)
-                                .reduce((max, value) => Math.max(max, value), 0) || 0) + 1,
-                            status: 'awaiting_approval' as const,
-                            input: snapshot.pendingApproval.input,
-                          },
-                        ]
-                      : []),
-                  ],
-                  steps: snapshot.taskTree,
-                  activity: buildMessageActivity(
-                    snapshot.status,
-                    message.createdAt || Date.now(),
-                    snapshot.toolEvents,
-                    snapshot.taskTree,
-                    message.activity?.expanded ?? true,
-                  ),
-                  error: snapshot.error,
-                }
+                ...message,
+                content:
+                  snapshot.message ||
+                  (snapshot.status === 'awaiting_approval'
+                    ? '等待你的审批后继续执行。'
+                    : message.content),
+                reasoning: snapshot.reasoning || message.reasoning,
+                usage: snapshot.usage || message.usage,
+                status:
+                  snapshot.status === 'failed'
+                    ? ('failed' as const)
+                    : snapshot.status === 'completed'
+                      ? ('completed' as const)
+                      : ('streaming' as const),
+                events: [
+                  ...snapshot.toolEvents.map(mapToolEventToMessageEvent),
+                  ...(snapshot.pendingApproval
+                    ? [
+                      {
+                        id: snapshot.pendingApproval.id,
+                        kind: 'approval' as const,
+                        title: snapshot.pendingApproval.toolName,
+                        summary: snapshot.pendingApproval.summary,
+                        order:
+                          (snapshot.toolEvents
+                            .map(event => event.order || 0)
+                            .reduce((max, value) => Math.max(max, value), 0) || 0) + 1,
+                        status: 'awaiting_approval' as const,
+                        input: snapshot.pendingApproval.input,
+                      },
+                    ]
+                    : []),
+                ],
+                steps: snapshot.taskTree,
+                activity: buildMessageActivity(
+                  snapshot.status,
+                  message.createdAt || Date.now(),
+                  snapshot.toolEvents,
+                  snapshot.taskTree,
+                  message.activity?.expanded ?? true,
+                ),
+                error: snapshot.error,
+              }
               : message,
           ),
           toolEvents: snapshot.toolEvents,
@@ -648,32 +672,32 @@ export function MainWindowApp() {
               .map(session =>
                 session.id === currentSessionId
                   ? {
-                      ...session,
-                      messages: session.messages.map(message =>
-                        message.id === currentMessageId
-                          ? {
-                              ...message,
-                              content: snapshot.message || '',
-                              reasoning: snapshot.reasoning || message.reasoning,
-                              usage: snapshot.usage || message.usage,
-                              status: 'completed' as const,
-                              events: snapshot.toolEvents.map(mapToolEventToMessageEvent),
-                              steps: snapshot.taskTree,
-                              activity: buildMessageActivity(
-                                snapshot.status,
-                                message.createdAt || Date.now(),
-                                snapshot.toolEvents,
-                                snapshot.taskTree,
-                                false,
-                              ),
-                              error: undefined,
-                            }
-                          : message,
-                      ),
-                      toolEvents: snapshot.toolEvents,
-                      taskTree: snapshot.taskTree,
-                      updatedAt: Date.now(),
-                    }
+                    ...session,
+                    messages: session.messages.map(message =>
+                      message.id === currentMessageId
+                        ? {
+                          ...message,
+                          content: snapshot.message || '',
+                          reasoning: snapshot.reasoning || message.reasoning,
+                          usage: snapshot.usage || message.usage,
+                          status: 'completed' as const,
+                          events: snapshot.toolEvents.map(mapToolEventToMessageEvent),
+                          steps: snapshot.taskTree,
+                          activity: buildMessageActivity(
+                            snapshot.status,
+                            message.createdAt || Date.now(),
+                            snapshot.toolEvents,
+                            snapshot.taskTree,
+                            false,
+                          ),
+                          error: undefined,
+                        }
+                        : message,
+                    ),
+                    toolEvents: snapshot.toolEvents,
+                    taskTree: snapshot.taskTree,
+                    updatedAt: Date.now(),
+                  }
                   : session,
               )
               .sort((a, b) => b.updatedAt - a.updatedAt),
@@ -691,32 +715,32 @@ export function MainWindowApp() {
               .map(session =>
                 session.id === currentSessionId
                   ? {
-                      ...session,
-                      messages: session.messages.map(message =>
-                        message.id === currentMessageId
-                          ? {
-                              ...message,
-                              content: snapshot.message || '',
-                              reasoning: snapshot.reasoning || message.reasoning,
-                              usage: snapshot.usage || message.usage,
-                              status: 'failed' as const,
-                              events: snapshot.toolEvents.map(mapToolEventToMessageEvent),
-                              steps: snapshot.taskTree,
-                              activity: buildMessageActivity(
-                                snapshot.status,
-                                message.createdAt || Date.now(),
-                                snapshot.toolEvents,
-                                snapshot.taskTree,
-                                true,
-                              ),
-                              error: snapshot.error || 'Agent 执行失败。',
-                            }
-                          : message,
-                      ),
-                      toolEvents: snapshot.toolEvents,
-                      taskTree: snapshot.taskTree,
-                      updatedAt: Date.now(),
-                    }
+                    ...session,
+                    messages: session.messages.map(message =>
+                      message.id === currentMessageId
+                        ? {
+                          ...message,
+                          content: snapshot.message || '',
+                          reasoning: snapshot.reasoning || message.reasoning,
+                          usage: snapshot.usage || message.usage,
+                          status: 'failed' as const,
+                          events: snapshot.toolEvents.map(mapToolEventToMessageEvent),
+                          steps: snapshot.taskTree,
+                          activity: buildMessageActivity(
+                            snapshot.status,
+                            message.createdAt || Date.now(),
+                            snapshot.toolEvents,
+                            snapshot.taskTree,
+                            true,
+                          ),
+                          error: snapshot.error || 'Agent 执行失败。',
+                        }
+                        : message,
+                    ),
+                    toolEvents: snapshot.toolEvents,
+                    taskTree: snapshot.taskTree,
+                    updatedAt: Date.now(),
+                  }
                   : session,
               )
               .sort((a, b) => b.updatedAt - a.updatedAt),
@@ -734,10 +758,10 @@ export function MainWindowApp() {
             messages: session.messages.map(entry =>
               entry.id === currentMessageId
                 ? {
-                    ...entry,
-                    status: 'failed' as const,
-                    error: message,
-                  }
+                  ...entry,
+                  status: 'failed' as const,
+                  error: message,
+                }
                 : entry,
             ),
             updatedAt: Date.now(),
@@ -971,7 +995,9 @@ export function MainWindowApp() {
   }
 
   function createFreshSession() {
-    const next = createSession(settings)
+    const latestSettings = loadSettings()
+    setSettings(latestSettings)
+    const next = createSession(latestSettings)
     setSessions(current => [next, ...current])
     setActiveSessionId(next.id)
     setDraft('')
@@ -1074,10 +1100,10 @@ export function MainWindowApp() {
         const path = attachment.path
           ? await importAttachmentFromPath(workspacePath, attachment.path)
           : await writeAttachmentBytes(
-              workspacePath,
-              attachment.name,
-              arrayBufferToBase64(await attachment.file!.arrayBuffer()),
-            )
+            workspacePath,
+            attachment.name,
+            arrayBufferToBase64(await attachment.file!.arrayBuffer()),
+          )
 
         return {
           id: attachment.id,
@@ -1178,10 +1204,10 @@ export function MainWindowApp() {
     setAgentTask(current =>
       current
         ? {
-            ...current,
-            status: 'running',
-            pendingApproval: undefined,
-          }
+          ...current,
+          status: 'running',
+          pendingApproval: undefined,
+        }
         : current,
     )
   }
@@ -1211,12 +1237,12 @@ export function MainWindowApp() {
       messages: session.messages.map(message =>
         message.id === messageId && message.activity
           ? {
-              ...message,
-              activity: {
-                ...message.activity,
-                expanded: !message.activity.expanded,
-              },
-            }
+            ...message,
+            activity: {
+              ...message.activity,
+              expanded: !message.activity.expanded,
+            },
+          }
           : message,
       ),
       updatedAt: Date.now(),
@@ -1297,6 +1323,15 @@ export function MainWindowApp() {
       return
     }
 
+    const nextSettings: AgentSettings = {
+      ...settings,
+      activeProviderProfileId: profile.id,
+      provider: profile.provider,
+      apiKey: profile.apiKey,
+      baseUrl: profile.baseUrl,
+      model: modelId,
+    }
+
     updateSession(activeSession.id, session => ({
       ...session,
       providerProfileId: profile.id,
@@ -1304,6 +1339,8 @@ export function MainWindowApp() {
       model: modelId,
       updatedAt: Date.now(),
     }))
+    setSettings(nextSettings)
+    saveSettings(nextSettings)
   }
 
   const effectiveSettings: AgentSettings = {
