@@ -1000,21 +1000,25 @@ fn run_provider_action<R: Runtime>(
 }
 
 #[tauri::command]
-fn run_mcp_action<R: Runtime>(
+async fn run_mcp_action<R: Runtime>(
     app: tauri::AppHandle<R>,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let script_path = resolve_bridge_script_path(&app, "mcpActions.mjs")?;
     let bridge_cwd = resolve_bridge_cwd()?;
-    let output = Command::new("node")
-        .arg(script_path)
-        .arg(
-            serde_json::to_string(&payload)
-                .map_err(|error| format!("Failed to serialize MCP action payload: {error}"))?,
-        )
-        .current_dir(bridge_cwd)
-        .output()
-        .map_err(|error| format!("Failed to run MCP action bridge: {error}"))?;
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|error| format!("Failed to serialize MCP action payload: {error}"))?;
+
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        Command::new("node")
+            .arg(script_path)
+            .arg(payload_json)
+            .current_dir(bridge_cwd)
+            .output()
+    })
+    .await
+    .map_err(|error| format!("Failed to join MCP action task: {error}"))?
+    .map_err(|error| format!("Failed to run MCP action bridge: {error}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

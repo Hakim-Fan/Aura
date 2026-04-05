@@ -43,6 +43,28 @@ export function parseArgString(input) {
   })
 }
 
+export function parseCommandSpec(commandInput, argsInput = '') {
+  const commandText = typeof commandInput === 'string' ? commandInput.trim() : ''
+  const argsText = typeof argsInput === 'string' ? argsInput.trim() : ''
+
+  if (!commandText) {
+    return {
+      command: '',
+      args: parseArgString(argsText),
+    }
+  }
+
+  const inlineParts = parseArgString(commandText)
+  const fallbackCommand = inlineParts[0] || commandText
+  const inlineArgs = inlineParts.slice(1)
+  const extraArgs = parseArgString(argsText)
+
+  return {
+    command: fallbackCommand,
+    args: [...inlineArgs, ...extraArgs],
+  }
+}
+
 export function resolveWorkspacePath(cwd, target = '.') {
   const root = path.resolve(cwd)
   const resolved = path.resolve(root, target)

@@ -27,7 +27,7 @@ import {
   RefreshCw,
   Search,
   SendHorizontal,
-  Settings2,
+  SlidersHorizontal,
   Sparkles,
   Square,
   Wrench,
@@ -43,6 +43,7 @@ import type {
   MessageEvent,
   MessageReasoning,
   ProviderMode,
+  ReasoningEffort,
   TaskNode,
   ToolEvent,
   WorkspaceNode,
@@ -93,6 +94,7 @@ type Props = {
   onPickAttachment: () => void
   onPasteAttachments: (files: File[]) => void
   onSelectModel: (profileId: string, modelId: string) => void
+  onSelectReasoningEffort: (value: ReasoningEffort) => void
   onOpenAttachment: (path: string) => void
   onRemoveAttachment: (attachmentId: string) => void
   onRefreshWorkspace: () => void
@@ -108,6 +110,18 @@ type Props = {
   onToggleMessageActivity: (messageId: string) => void
   onStop: () => void
 }
+
+const reasoningEffortOptions: Array<{
+  value: ReasoningEffort
+  label: string
+  description: string
+}> = [
+  { value: 'off', label: '关闭', description: '禁用扩展思考' },
+  { value: 'low', label: '低', description: '快速响应，最少推理' },
+  { value: 'medium', label: '中', description: '平衡速度与推理深度' },
+  { value: 'high', label: '高', description: '深度推理，适合复杂任务' },
+  { value: 'max', label: '超高', description: '最强推理强度，适合最复杂任务' },
+]
 
 function estimateTokenCount(value: string) {
   const trimmed = value.trim()
@@ -744,6 +758,7 @@ export function ChatView({
   onPickAttachment,
   onPasteAttachments,
   onSelectModel,
+  onSelectReasoningEffort,
   onOpenAttachment,
   onRemoveAttachment,
   onRefreshWorkspace,
@@ -761,6 +776,7 @@ export function ChatView({
 }: Props) {
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false)
   const [modelSearchTerm, setModelSearchTerm] = useState('')
   const [collapsedModelGroups, setCollapsedModelGroups] = useState<Set<string>>(new Set())
   const [lightboxAttachment, setLightboxAttachment] = useState<{
@@ -770,6 +786,7 @@ export function ChatView({
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true)
 
   const modelMenuRef = useRef<HTMLDivElement>(null)
+  const reasoningMenuRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const scrollFollowKey = useMemo(() => {
@@ -817,18 +834,27 @@ export function ChatView({
   }, [messages.at(-1)?.id])
 
   useEffect(() => {
-    if (!modelMenuOpen) return
+    if (!modelMenuOpen && !reasoningMenuOpen) return
     function handleClickOutside(event: MouseEvent) {
       if (modelMenuRef.current && !modelMenuRef.current.contains(event.target as Node)) {
         setModelMenuOpen(false)
       }
+      if (
+        reasoningMenuRef.current &&
+        !reasoningMenuRef.current.contains(event.target as Node)
+      ) {
+        setReasoningMenuOpen(false)
+      }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [modelMenuOpen])
+  }, [modelMenuOpen, reasoningMenuOpen])
 
   const modelLabel =
     settings.model.split('/').filter(Boolean).at(-1) || settings.model || '选择模型'
+  const selectedReasoningOption =
+    reasoningEffortOptions.find(option => option.value === settings.reasoningEffort) ||
+    reasoningEffortOptions[2]
   const isMetaEnter = settings.sendShortcut === 'meta-enter'
   const composerMetaHint = settings.cwd
     ? isMetaEnter
@@ -1105,9 +1131,51 @@ export function ChatView({
                     <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" onClick={onPickAttachment} title="上传附件">
                       <Paperclip size={16} />
                     </button>
-                    <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" onClick={onOpenProviders} title="提供商设置">
-                      <Settings2 size={16} />
-                    </button>
+                    <div className="relative" ref={reasoningMenuRef}>
+                      <button
+                        className={`p-1.5 rounded-md transition-colors ${reasoningMenuOpen ? 'bg-[rgba(0,0,0,0.07)] text-[var(--text-primary)]' : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'}`}
+                        onClick={() => setReasoningMenuOpen(current => !current)}
+                        title={`推理强度：${selectedReasoningOption.label}`}
+                      >
+                        <SlidersHorizontal size={16} />
+                      </button>
+
+                      {reasoningMenuOpen ? (
+                        <div className="absolute bottom-[calc(100%+10px)] left-0 z-20 w-300px overflow-hidden rounded-xl border border-[rgba(15,23,42,0.08)] bg-white/98 shadow-2xl shadow-[rgba(15,23,42,0.15)] backdrop-blur-xl">
+                          <div className="border-b border-[rgba(15,23,42,0.05)] px-4 py-3">
+                            <strong className="block text-14px font-700 text-[var(--text-primary)]">推理</strong>
+                            <p className="mt-1 text-12px leading-relaxed text-[var(--text-secondary)]">
+                              调整支持扩展思考模型的推理强度。
+                            </p>
+                          </div>
+                          <div className="p-2">
+                            {reasoningEffortOptions.map(option => {
+                              const checked = option.value === settings.reasoningEffort
+                              return (
+                                <button
+                                  key={option.value}
+                                  className={`flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition-colors ${checked ? 'bg-[rgba(79,123,116,0.08)]' : 'hover:bg-[rgba(15,23,42,0.03)]'}`}
+                                  onClick={() => {
+                                    onSelectReasoningEffort(option.value)
+                                    setReasoningMenuOpen(false)
+                                  }}
+                                >
+                                  <div className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${checked ? 'border-[var(--accent-soft-strong)] bg-[var(--accent-soft-strong)] text-white' : 'border-[rgba(15,23,42,0.12)] bg-white text-transparent'}`}>
+                                    <Check size={12} />
+                                  </div>
+                                  <div className="flex min-w-0 flex-col">
+                                    <span className="text-15px font-700 text-[var(--text-primary)]">{option.label}</span>
+                                    <span className="text-12px leading-relaxed text-[var(--text-secondary)]">
+                                      {option.description}
+                                    </span>
+                                  </div>
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
                     <div className="h-4 w-1px bg-[var(--border-subtle)] mx-1" />
                     <div className="relative">
                       <button

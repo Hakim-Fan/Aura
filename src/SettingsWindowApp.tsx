@@ -677,47 +677,28 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
           <section className="dashboard-card">
             <div className="section-title">审批策略</div>
-            <div className="toggle-stack">
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.autoApproveShell}
-                  onChange={event =>
-                    handleSettingsChange('autoApproveShell', event.target.checked)
-                  }
-                  type="checkbox"
-                />
-                Shell 默认自动允许
-              </label>
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.autoApproveFileWrite}
-                  onChange={event =>
-                    handleSettingsChange('autoApproveFileWrite', event.target.checked)
-                  }
-                  type="checkbox"
-                />
-                文件写入默认自动允许
-              </label>
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.autoApproveComputerUse}
-                  onChange={event =>
-                    handleSettingsChange('autoApproveComputerUse', event.target.checked)
-                  }
-                  type="checkbox"
-                />
-                Computer Use 默认自动允许
-              </label>
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.autoApproveChromeAutomation}
-                  onChange={event =>
-                    handleSettingsChange('autoApproveChromeAutomation', event.target.checked)
-                  }
-                  type="checkbox"
-                />
-                Chrome 自动化默认自动允许
-              </label>
+            <div className="flex flex-col gap-3">
+              {[
+                { key: 'autoApproveShell', label: 'Shell 默认自动允许' },
+                { key: 'autoApproveFileWrite', label: '文件写入默认自动允许' },
+                { key: 'autoApproveComputerUse', label: 'Computer Use 默认自动允许' },
+                { key: 'autoApproveChromeAutomation', label: 'Chrome 自动化默认自动允许' },
+              ].map(item => (
+                <label key={item.key} className="relative flex items-center gap-3 cursor-pointer group">
+                  <input
+                    checked={draftSettings[item.key as keyof AgentSettings] as boolean}
+                    onChange={event =>
+                      handleSettingsChange(item.key as keyof AgentSettings, event.target.checked)
+                    }
+                    type="checkbox"
+                    className="peer sr-only"
+                  />
+                  <div className="relative h-5 w-9 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-[var(--bg-user-bubble)] after:absolute after:top-0.5 after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-4" />
+                  <span className="text-13px font-600 text-black/60 group-hover:text-black/80 transition-colors whitespace-nowrap">
+                    {item.label}
+                  </span>
+                </label>
+              ))}
             </div>
           </section>
         </div>
@@ -764,16 +745,29 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 <div className="asset-card-head">
                   <div>
                     <strong>{server.name}</strong>
-                    <p>{server.command || '尚未配置 command'}</p>
+                    <p>{server.description || server.command || '尚未添加描述'}</p>
                   </div>
-                  <label className="toggle-inline">
-                    <input checked={server.enabled} disabled type="checkbox" />
-                    {server.enabled ? '已启用' : '已停用'}
+                  <label className="relative flex cursor-pointer items-center gap-2.5 truncate">
+                    <input
+                      checked={server.enabled}
+                      disabled
+                      type="checkbox"
+                      className="peer sr-only"
+                    />
+                    <div className="relative h-4.5 w-8 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-green-500/80 after:absolute after:top-0.5 after:left-[2px] after:h-3.5 after:w-3.5 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-3.5" />
+                    <span className="text-12px font-600 text-black/40 truncate whitespace-nowrap">
+                      {server.enabled ? '已启用' : '已停用'}
+                    </span>
                   </label>
                 </div>
                 <div className="asset-card-meta">
-                  <span className="micro-pill">{server.cwd || '无单独 cwd'}</span>
-                  <span className="micro-pill">{server.args || '无 args'}</span>
+                  <span className="micro-pill">
+                    {server.command ? `命令: ${server.command}` : '未配置安装命令'}
+                  </span>
+                  <span className="micro-pill">{server.args || '无参数'}</span>
+                  {server.env.trim() !== '{}' ? (
+                    <span className="micro-pill">已配置环境变量</span>
+                  ) : null}
                 </div>
                 {mcpInspectResults[server.id] ? (
                   <div
@@ -781,11 +775,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   >
                     <strong>{mcpInspectResults[server.id]?.message}</strong>
                     {mcpInspectResults[server.id]?.tools.length ? (
-                      <div className="mcp-tool-list">
+                      <div className="mcp-tool-chip-list">
                         {mcpInspectResults[server.id]?.tools.map(tool => (
-                          <div key={`${server.id}-${tool.name}`} className="mcp-tool-row">
-                            <span className="micro-pill mono-pill">{tool.name}</span>
-                            <span>{tool.description}</span>
+                          <div key={`${server.id}-${tool.name}`} className="mcp-tool-chip-group">
+                            <span className="mcp-tool-chip">
+                              {tool.name}
+                            </span>
+                            <div className="mcp-tool-tooltip">
+                              {tool.description}
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -901,14 +899,16 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   <strong>{item.name}</strong>
                   <p>{item.description}</p>
                 </div>
-                <label className={`switch-pill${canToggle ? '' : ' disabled'}`}>
+                <label className={`relative flex items-center gap-3 cursor-pointer ${canToggle ? '' : 'opacity-40 cursor-not-allowed'}`}>
                   <input
                     checked={isEnabled}
                     disabled={!canToggle}
                     onChange={() => onToggle(item.id)}
                     type="checkbox"
+                    className="peer sr-only"
                   />
-                  <span>
+                  <div className="relative h-5 w-9 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-[var(--bg-user-bubble)] after:absolute after:top-0.5 after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-4" />
+                  <span className="text-13px font-700 text-black/60 peer-checked:text-black/80 transition-colors select-none whitespace-nowrap">
                     {canToggle
                       ? isEnabled
                         ? '启用中'

@@ -4,6 +4,7 @@ import type {
   MemoryMode,
   ProviderMode,
   ProviderProfile,
+  ReasoningEffort,
   Session,
 } from '../types'
 import { ensureAuraHome, readAuraFile, writeAuraFile, type AuraHomeState } from './aura'
@@ -92,6 +93,7 @@ export const defaultSettings: AgentSettings = {
   maxSteps: 8,
   executionMode: 'bounded',
   memoryMode: 'summary',
+  reasoningEffort: 'medium',
   enableMultiAgent: true,
   enableComputerUse: true,
   enableChromeAutomation: true,
@@ -103,6 +105,54 @@ export const defaultSettings: AgentSettings = {
   enabledPluginIds: ['workspace-inspector'],
   mcpServers: [],
   sendShortcut: 'meta-enter',
+}
+
+function normalizeMcpServers(value: unknown) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') {
+        return null
+      }
+
+      const server = entry as Partial<AgentSettings['mcpServers'][number]>
+      const id =
+        typeof server.id === 'string' && server.id.trim()
+          ? server.id
+          : `mcp-${Math.random().toString(36).slice(2, 10)}-${index}`
+      const name =
+        typeof server.name === 'string' && server.name.trim() ? server.name : 'new-mcp'
+
+      return {
+        id,
+        name,
+        description:
+          typeof server.description === 'string'
+            ? server.description
+            : '',
+        command:
+          typeof server.command === 'string'
+            ? server.command
+            : '',
+        args:
+          typeof server.args === 'string'
+            ? server.args
+            : '',
+        env:
+          typeof server.env === 'string'
+            ? server.env
+            : '{}',
+        cwd:
+          typeof server.cwd === 'string'
+            ? server.cwd
+            : '',
+        enabled: server.enabled !== false,
+      }
+    })
+    .filter((entry): entry is AgentSettings['mcpServers'][number] => Boolean(entry))
 }
 
 function parseSettings(raw: string | null): AgentSettings {
@@ -129,6 +179,8 @@ function parseSettings(raw: string | null): AgentSettings {
       maxSteps: normalizeMaxSteps(parsed.maxSteps),
       executionMode: normalizeExecutionMode(parsed.executionMode),
       memoryMode: normalizeMemoryMode(parsed.memoryMode),
+      reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
+      mcpServers: normalizeMcpServers(parsed.mcpServers),
     })
   } catch {
     return defaultSettings
@@ -141,6 +193,19 @@ function normalizeExecutionMode(value: unknown): ExecutionMode {
 
 function normalizeMemoryMode(value: unknown): MemoryMode {
   return value === 'summary' ? 'summary' : 'summary'
+}
+
+function normalizeReasoningEffort(value: unknown): ReasoningEffort {
+  if (
+    value === 'off' ||
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'max'
+  ) {
+    return value
+  }
+  return defaultSettings.reasoningEffort
 }
 
 function normalizeMaxSteps(value: unknown) {
@@ -623,7 +688,7 @@ export async function hydrateStorageFromAuraHome(): Promise<{
       if (Array.isArray(parsedMcp)) {
         settings = {
           ...settings,
-          mcpServers: parsedMcp,
+          mcpServers: normalizeMcpServers(parsedMcp),
         }
       }
     } catch {

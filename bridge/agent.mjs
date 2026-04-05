@@ -206,6 +206,15 @@ function buildSystemPrompt(settings, skillPrompt) {
     'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
   ]
 
+  const reasoningInstructions = {
+    off: 'Reasoning intensity: off. Prefer fast, concise answers and avoid extended internal exploration unless the task clearly requires it.',
+    low: 'Reasoning intensity: low. Optimize for speed and keep reasoning lightweight.',
+    medium: 'Reasoning intensity: medium. Balance speed and reasoning depth.',
+    high: 'Reasoning intensity: high. Spend more effort on analysis before acting, especially for complex tasks.',
+    max: 'Reasoning intensity: maximum. Use your deepest available reasoning for difficult tasks, while still avoiding unnecessary repetition.',
+  }
+  sections.push(reasoningInstructions[settings.reasoningEffort] || reasoningInstructions.medium)
+
   const capabilities = []
   if (settings.enableMultiAgent) {
     capabilities.push('- You may delegate sharply scoped subtasks with spawn_subagent.')

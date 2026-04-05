@@ -1,15 +1,16 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { parseArgString, parseLooseJson, stringifyOutput } from './utils.mjs'
+import { parseCommandSpec, parseLooseJson, stringifyOutput } from './utils.mjs'
 
 export async function connectMcpTools(servers) {
   const clients = []
   const tools = []
 
   for (const server of servers.filter(item => item.enabled && item.command.trim())) {
+    const commandSpec = parseCommandSpec(server.command, server.args || '')
     const transport = new StdioClientTransport({
-      command: server.command,
-      args: parseArgString(server.args || ''),
+      command: commandSpec.command,
+      args: commandSpec.args,
       env: {
         ...process.env,
         ...parseLooseJson(server.env || '{}', {}),

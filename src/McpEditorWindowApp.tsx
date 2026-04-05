@@ -14,6 +14,7 @@ function createEmptyServer(): McpServerConfig {
   return {
     id: createId(),
     name: 'new-mcp',
+    description: '',
     command: '',
     args: '',
     env: '{}',
@@ -156,7 +157,7 @@ export function McpEditorWindowApp() {
             {/* Form Fields */}
             <div className="grid grid-cols-1 gap-6">
               <div>
-                <label className={labelClass}>名称 (Name)</label>
+                <label className={labelClass}>名称</label>
                 <input
                   className={premiumInputClass}
                   value={server.name}
@@ -165,42 +166,44 @@ export function McpEditorWindowApp() {
                 />
               </div>
 
-              <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-                <div>
-                  <label className={labelClass}>命令 (Command)</label>
-                  <input
-                    className={`${premiumInputClass} font-mono !text-12px`}
-                    value={server.command}
-                    onChange={event =>
-                      setServer(current => ({ ...current, command: event.target.value }))
-                    }
-                    placeholder="npx / node / python"
-                  />
-                </div>
-                <div>
-                  <label className={labelClass}>工作目录 (Cwd)</label>
-                  <input
-                    className={premiumInputClass}
-                    value={server.cwd}
-                    onChange={event => setServer(current => ({ ...current, cwd: event.target.value }))}
-                    placeholder="可选，继承会话目录"
-                  />
-                </div>
+              <div>
+                <label className={labelClass}>描述</label>
+                <textarea
+                  rows={2}
+                  className={`${premiumInputClass} resize-none`}
+                  value={server.description}
+                  onChange={event =>
+                    setServer(current => ({ ...current, description: event.target.value }))
+                  }
+                  placeholder="例如: 检索最新文档、浏览器自动化、GitHub 操作等"
+                />
               </div>
 
               <div>
-                <label className={labelClass}>运行参数 (Arguments)</label>
+                <label className={labelClass}>安装命令</label>
+                <input
+                  className={`${premiumInputClass} font-mono !text-12px`}
+                  value={server.command}
+                  onChange={event =>
+                    setServer(current => ({ ...current, command: event.target.value }))
+                  }
+                  placeholder="可直接填完整命令，例如: npx -y @upstash/context7-mcp@latest"
+                />
+              </div>
+
+              <div>
+                <label className={labelClass}>参数</label>
                 <textarea
                   rows={2}
                   className={`${premiumInputClass} font-mono !text-12px resize-none`}
                   value={server.args}
                   onChange={event => setServer(current => ({ ...current, args: event.target.value }))}
-                  placeholder="-y @modelcontextprotocol/server-filesystem /path/to/search"
+                  placeholder="可选；如果安装命令里已经写完整，这里可以留空"
                 />
               </div>
 
               <div>
-                <label className={labelClass}>环境变量 (Env JSON)</label>
+                <label className={labelClass}>环境变量</label>
                 <textarea
                   rows={4}
                   className={`${premiumInputClass} font-mono !text-12px resize-none`}
@@ -220,8 +223,8 @@ export function McpEditorWindowApp() {
                       setServer(current => ({ ...current, enabled: event.target.checked }))
                     }
                   />
-                  <div className="h-5 w-9 rounded-full bg-black/10 transition-all peer-checked:bg-[var(--bg-user-bubble)] after:absolute after:top-0.5 after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-4" />
-                  <span className="text-13px font-600 text-black/60 group-hover:text-black/80 transition-colors">开启 MCP Server 服务</span>
+                  <div className="relative h-5 w-9 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-[var(--bg-user-bubble)] after:absolute after:top-0.5 after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-4" />
+                  <span className="text-13px font-600 text-black/60 group-hover:text-black/80 transition-colors whitespace-nowrap">开启 MCP Server 服务</span>
                 </label>
               </div>
             </div>
@@ -238,13 +241,13 @@ export function McpEditorWindowApp() {
                   <strong className="text-13px font-700">{testResult.message}</strong>
                 </div>
                 {testResult.tools.length > 0 && (
-                  <div className="flex flex-wrap gap-2">
+                  <div className="mcp-tool-chip-list">
                     {testResult.tools.map(tool => (
-                      <div key={tool.name} className="group relative">
-                        <span className="inline-block rounded-lg border border-green-200/50 bg-white px-2.5 py-1 text-10px font-700 text-green-700 shadow-sm transition-transform hover:-translate-y-0.5 cursor-default">
+                      <div key={tool.name} className="mcp-tool-chip-group">
+                        <span className="mcp-tool-chip">
                           {tool.name}
                         </span>
-                        <div className="absolute bottom-full left-0 mb-2 hidden w-56 rounded-xl bg-black/90 p-2.5 text-10px leading-relaxed text-white shadow-2xl backdrop-blur-md group-hover:block z-50">
+                        <div className="mcp-tool-tooltip">
                           {tool.description}
                         </div>
                       </div>
@@ -280,12 +283,6 @@ export function McpEditorWindowApp() {
             {isTesting ? '测试中...' : '测试连接'}
           </button>
           <button 
-            className="h-9 px-4 text-12px font-700 text-black/60 hover:bg-black/4 rounded-xl transition-colors"
-            onClick={() => void closeCurrentWindow()}
-          >
-            取消
-          </button>
-          <button 
             className="h-9 px-6 text-12px font-700 bg-[var(--accent-soft-strong)] text-white rounded-xl shadow-lg shadow-[#4f7b74]/20 hover:brightness-110 active:scale-95 transition-all"
             onClick={() => void saveServer()}
           >
@@ -296,4 +293,3 @@ export function McpEditorWindowApp() {
     </div>
   )
 }
-

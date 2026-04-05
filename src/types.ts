@@ -148,6 +148,7 @@ export type TaskNode = {
 export type McpServerConfig = {
   id: string
   name: string
+  description: string
   command: string
   args: string
   env: string
@@ -158,6 +159,8 @@ export type McpServerConfig = {
 export type ExecutionMode = 'bounded' | 'long-task'
 
 export type MemoryMode = 'summary' | 'claude-like'
+
+export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max'
 
 export type AgentSettings = {
   provider: ProviderMode
@@ -170,6 +173,7 @@ export type AgentSettings = {
   maxSteps: number
   executionMode: ExecutionMode
   memoryMode: MemoryMode
+  reasoningEffort: ReasoningEffort
   enableMultiAgent: boolean
   enableComputerUse: boolean
   enableChromeAutomation: boolean

@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { parseArgString } from './utils.mjs'
+import { parseCommandSpec } from './utils.mjs'
 
 function parseEnv(input) {
   if (!input || !input.trim()) {
@@ -22,13 +22,15 @@ function parseEnv(input) {
 
 function normalizeServer(server) {
   if (!server?.command?.trim()) {
-    throw new Error('缺少 MCP command。')
+    throw new Error('缺少 MCP 安装命令。')
   }
+
+  const commandSpec = parseCommandSpec(server.command, server.args || '')
 
   return {
     name: server.name?.trim() || 'unnamed-mcp',
-    command: server.command.trim(),
-    args: parseArgString(server.args || ''),
+    command: commandSpec.command,
+    args: commandSpec.args,
     env: parseEnv(server.env || '{}'),
     cwd: server.cwd?.trim() || undefined,
   }

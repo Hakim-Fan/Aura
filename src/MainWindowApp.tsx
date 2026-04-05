@@ -29,6 +29,7 @@ import type {
   MessageActivity,
   MessageEvent,
   ProviderProfile,
+  ReasoningEffort,
   Session,
   TaskNode,
   ToolEvent,
@@ -1380,6 +1381,15 @@ export function MainWindowApp() {
     saveSettings(nextSettings)
   }
 
+  function updateReasoningEffort(effort: ReasoningEffort) {
+    const nextSettings: AgentSettings = {
+      ...settings,
+      reasoningEffort: effort,
+    }
+    setSettings(nextSettings)
+    saveSettings(nextSettings)
+  }
+
   const effectiveSettings: AgentSettings = {
     ...settings,
     activeProviderProfileId: activeProviderProfile?.id || settings.activeProviderProfileId,
@@ -1477,6 +1487,7 @@ export function MainWindowApp() {
               onPickAttachment={() => void chooseAttachmentForDraft()}
               onPasteAttachments={files => void appendAttachmentsFromFiles(files)}
               onSelectModel={(profileId, modelId) => switchSessionModel(profileId, modelId)}
+              onSelectReasoningEffort={updateReasoningEffort}
               onOpenAttachment={path =>
                 void openPathInDefaultApp(path).catch(caught => {
                   setError(caught instanceof Error ? caught.message : '打开文件失败。')
