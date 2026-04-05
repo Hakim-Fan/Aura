@@ -366,7 +366,14 @@ function ReasoningPhaseCard({
 }) {
   const [expanded, setExpanded] = useState(isActive)
   const previousActiveRef = useRef(isActive)
-  const preview = summarizeReasoningPreview(content)
+  const trimmedContent = content.trim()
+  const firstLine = trimmedContent
+    .split('\n')
+    .map(line => line.trim())
+    .find(Boolean) || summarizeReasoningPreview(trimmedContent)
+  const remainingContent = trimmedContent.startsWith(firstLine)
+    ? trimmedContent.slice(firstLine.length).trimStart()
+    : trimmedContent
 
   useEffect(() => {
     if (isActive) {
@@ -389,7 +396,7 @@ function ReasoningPhaseCard({
             <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded bg-white/80 text-[var(--accent-soft-strong)]">
               思考
             </span>
-            <strong className="text-12px text-[var(--text-primary)] opacity-85">{preview}</strong>
+            <strong className="text-12px text-[var(--text-primary)] opacity-85">{firstLine}</strong>
             <span className="text-10px text-[var(--text-secondary)] opacity-55">
               {isActive ? '思考中' : ''}
             </span>
@@ -401,9 +408,9 @@ function ReasoningPhaseCard({
           <ChevronDown size={14} className="mt-0.5 shrink-0 text-[var(--text-secondary)] opacity-60" />
         )}
       </button>
-      {expanded ? (
+      {expanded && remainingContent ? (
         <div className="mt-2 text-12px leading-relaxed whitespace-pre-wrap text-[var(--text-secondary)] opacity-80">
-          {content}
+          {remainingContent}
         </div>
       ) : null}
     </article>
