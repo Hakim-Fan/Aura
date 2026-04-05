@@ -6,12 +6,33 @@ import type {
   ProviderProfile,
   Session,
 } from '../types'
+import { ensureAuraHome, readAuraFile, writeAuraFile, type AuraHomeState } from './aura'
 
-const SETTINGS_KEY = 'desk-agent-settings-v2'
-const SESSIONS_KEY = 'desk-agent-sessions-v2'
+const SETTINGS_KEY = 'aura-settings-cache-v1'
+const SESSIONS_KEY = 'aura-sessions-cache-v1'
+const LEGACY_SETTINGS_KEY = 'desk-agent-settings-v2'
+const LEGACY_SESSIONS_KEY = 'desk-agent-sessions-v2'
+const SETTINGS_FILE_PATH = 'config/settings.json'
+const SESSIONS_FILE_PATH = 'config/sessions.json'
+const MCP_FILE_PATH = 'mcp/servers.json'
 
 function createProfileId(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function readCachedValue(primaryKey: string, legacyKey: string) {
+  const primary = localStorage.getItem(primaryKey)
+  if (primary) {
+    return primary
+  }
+
+  const legacy = localStorage.getItem(legacyKey)
+  if (legacy) {
+    localStorage.setItem(primaryKey, legacy)
+    return legacy
+  }
+
+  return null
 }
 
 function baseUrlForProvider(provider: ProviderMode) {
@@ -82,6 +103,36 @@ export const defaultSettings: AgentSettings = {
   enabledPluginIds: ['workspace-inspector'],
   mcpServers: [],
   sendShortcut: 'meta-enter',
+}
+
+function parseSettings(raw: string | null): AgentSettings {
+  if (!raw) {
+    return defaultSettings
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<AgentSettings> & { provider?: unknown }
+    const providerProfiles = normalizeProfiles(parsed)
+    const activeProviderProfileId =
+      resolveActiveProfile(
+        providerProfiles,
+        typeof parsed.activeProviderProfileId === 'string'
+          ? parsed.activeProviderProfileId
+          : undefined,
+      )?.id || ''
+
+    return syncLegacyFields({
+      ...defaultSettings,
+      ...parsed,
+      providerProfiles,
+      activeProviderProfileId,
+      maxSteps: normalizeMaxSteps(parsed.maxSteps),
+      executionMode: normalizeExecutionMode(parsed.executionMode),
+      memoryMode: normalizeMemoryMode(parsed.memoryMode),
+    })
+  } catch {
+    return defaultSettings
+  }
 }
 
 function normalizeExecutionMode(value: unknown): ExecutionMode {
@@ -274,43 +325,7 @@ function syncLegacyFields(settings: AgentSettings): AgentSettings {
   }
 }
 
-export function loadSettings(): AgentSettings {
-  const raw = localStorage.getItem(SETTINGS_KEY)
-  if (!raw) {
-    return defaultSettings
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as Partial<AgentSettings> & { provider?: unknown }
-    const providerProfiles = normalizeProfiles(parsed)
-    const activeProviderProfileId =
-      resolveActiveProfile(
-        providerProfiles,
-        typeof parsed.activeProviderProfileId === 'string'
-          ? parsed.activeProviderProfileId
-          : undefined,
-      )?.id || ''
-
-    return syncLegacyFields({
-      ...defaultSettings,
-      ...parsed,
-      providerProfiles,
-      activeProviderProfileId,
-      maxSteps: normalizeMaxSteps(parsed.maxSteps),
-      executionMode: normalizeExecutionMode(parsed.executionMode),
-      memoryMode: normalizeMemoryMode(parsed.memoryMode),
-    })
-  } catch {
-    return defaultSettings
-  }
-}
-
-export function saveSettings(settings: AgentSettings) {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(syncLegacyFields(settings)))
-}
-
-export function loadSessions(): Session[] {
-  const raw = localStorage.getItem(SESSIONS_KEY)
+function parseSessions(raw: string | null): Session[] {
   if (!raw) {
     return []
   }
@@ -445,6 +460,8 @@ export function loadSessions(): Session[] {
                     | 'summary'
                     | 'provider',
                   content: reasoning.content,
+                  order:
+                    typeof reasoning.order === 'number' ? reasoning.order : undefined,
                 }
               })
               .filter((reasoning): reasoning is NonNullable<typeof reasoning> =>
@@ -489,6 +506,14 @@ export function loadSessions(): Session[] {
   }
 }
 
+export function loadSettings(): AgentSettings {
+  return parseSettings(readCachedValue(SETTINGS_KEY, LEGACY_SETTINGS_KEY))
+}
+
+export function loadSessions(): Session[] {
+  return parseSessions(readCachedValue(SESSIONS_KEY, LEGACY_SESSIONS_KEY))
+}
+
 function serializeSessions(sessions: Session[]) {
   return sessions.map(session => ({
     ...session,
@@ -511,9 +536,9 @@ function serializeSessions(sessions: Session[]) {
   }))
 }
 
-export function saveSessions(sessions: Session[]) {
+function writeSessionCache(serializedSessions: ReturnType<typeof serializeSessions>) {
   try {
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(serializeSessions(sessions)))
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(serializedSessions))
   } catch (error) {
     if (
       error instanceof DOMException &&
@@ -521,12 +546,125 @@ export function saveSessions(sessions: Session[]) {
     ) {
       try {
         localStorage.removeItem(SESSIONS_KEY)
-        localStorage.setItem(SESSIONS_KEY, JSON.stringify(serializeSessions(sessions)))
+        localStorage.setItem(SESSIONS_KEY, JSON.stringify(serializedSessions))
       } catch {
         // Swallow storage quota failures to keep the UI responsive.
       }
       return
     }
     throw error
+  }
+}
+
+async function writeSettingsToAuraHome(settings: AgentSettings) {
+  const serialized = JSON.stringify(
+    {
+      ...syncLegacyFields(settings),
+      mcpServers: [],
+    },
+    null,
+    2,
+  )
+  await writeAuraFile(
+    SETTINGS_FILE_PATH,
+    serialized,
+  )
+}
+
+async function writeSessionsToAuraHome(sessions: Session[]) {
+  await writeAuraFile(
+    SESSIONS_FILE_PATH,
+    JSON.stringify(serializeSessions(sessions), null, 2),
+  )
+}
+
+async function writeMcpServersToAuraHome(settings: AgentSettings) {
+  await writeAuraFile(
+    MCP_FILE_PATH,
+    JSON.stringify(settings.mcpServers || [], null, 2),
+  )
+}
+
+export function saveSettings(settings: AgentSettings) {
+  const normalized = syncLegacyFields(settings)
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalized))
+  void writeSettingsToAuraHome(normalized).catch(() => {
+    // Keep the UI responsive even if Aura file persistence fails.
+  })
+  void writeMcpServersToAuraHome(normalized).catch(() => {
+    // Keep the UI responsive even if Aura file persistence fails.
+  })
+}
+
+export function saveSessions(sessions: Session[]) {
+  const serialized = serializeSessions(sessions)
+  writeSessionCache(serialized)
+  void writeSessionsToAuraHome(sessions).catch(() => {
+    // Keep the UI responsive even if Aura file persistence fails.
+  })
+}
+
+export async function hydrateStorageFromAuraHome(): Promise<{
+  aura: AuraHomeState
+  settings: AgentSettings
+  sessions: Session[]
+}> {
+  const aura = await ensureAuraHome()
+  const cachedSettingsRaw = readCachedValue(SETTINGS_KEY, LEGACY_SETTINGS_KEY)
+  const cachedSessionsRaw = readCachedValue(SESSIONS_KEY, LEGACY_SESSIONS_KEY)
+  const diskSettingsRaw = await readAuraFile(SETTINGS_FILE_PATH)
+  const diskSessionsRaw = await readAuraFile(SESSIONS_FILE_PATH)
+  const diskMcpRaw = await readAuraFile(MCP_FILE_PATH)
+
+  let settings = parseSettings(diskSettingsRaw || cachedSettingsRaw)
+  if (diskMcpRaw) {
+    try {
+      const parsedMcp = JSON.parse(diskMcpRaw)
+      if (Array.isArray(parsedMcp)) {
+        settings = {
+          ...settings,
+          mcpServers: parsedMcp,
+        }
+      }
+    } catch {
+      // Ignore invalid MCP persistence and keep the last valid in-memory settings.
+    }
+  }
+  if (!settings.cwd.trim()) {
+    settings = syncLegacyFields({
+      ...settings,
+      cwd: aura.workspaceDir,
+    })
+  }
+
+  const sessions = parseSessions(diskSessionsRaw || cachedSessionsRaw)
+  const serializedSettings = JSON.stringify(
+    {
+      ...syncLegacyFields(settings),
+      mcpServers: [],
+    },
+    null,
+    2,
+  )
+  const serializedMcp = JSON.stringify(settings.mcpServers || [], null, 2)
+  const serializedSessions = JSON.stringify(serializeSessions(sessions), null, 2)
+
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+  writeSessionCache(serializeSessions(sessions))
+
+  if (diskSettingsRaw !== serializedSettings) {
+    await writeSettingsToAuraHome(settings)
+  }
+  if (diskMcpRaw !== serializedMcp) {
+    await writeMcpServersToAuraHome(settings)
+  }
+  if (diskSessionsRaw !== serializedSessions) {
+    await writeSessionsToAuraHome(sessions)
+  }
+
+  return {
+    aura,
+    settings,
+    sessions,
   }
 }

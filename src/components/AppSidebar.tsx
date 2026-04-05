@@ -36,7 +36,7 @@ export function AppSidebar({
 
       <div className="relative px-4 mb-6 flex-between shrink-0 z-10">
         <div className="text-11px font-700 text-[var(--text-secondary)] tracking-0.1em uppercase pointer-events-none">
-          Desk Agent
+          Aura
         </div>
         <button
           className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"

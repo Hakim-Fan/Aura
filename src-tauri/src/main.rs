@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,6 +54,524 @@ struct WorkspaceNode {
     path: String,
     kind: String,
     children: Vec<WorkspaceNode>,
+}
+
+#[derive(Clone, Serialize)]
+struct AuraAssetMetadata {
+    id: String,
+    name: String,
+    description: String,
+    path: String,
+    #[serde(rename = "entryPath")]
+    entry_path: Option<String>,
+    supported: bool,
+    #[serde(rename = "supportMessage")]
+    support_message: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct AuraHomeState {
+    #[serde(rename = "homeDir")]
+    home_dir: String,
+    #[serde(rename = "configDir")]
+    config_dir: String,
+    #[serde(rename = "skillsDir")]
+    skills_dir: String,
+    #[serde(rename = "pluginsDir")]
+    plugins_dir: String,
+    #[serde(rename = "mcpDir")]
+    mcp_dir: String,
+    #[serde(rename = "workspaceDir")]
+    workspace_dir: String,
+    #[serde(rename = "logsDir")]
+    logs_dir: String,
+    #[serde(rename = "settingsPath")]
+    settings_path: String,
+    #[serde(rename = "sessionsPath")]
+    sessions_path: String,
+    #[serde(rename = "mcpServersPath")]
+    mcp_servers_path: String,
+    skills: Vec<AuraAssetMetadata>,
+    plugins: Vec<AuraAssetMetadata>,
+}
+
+fn resolve_user_home() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "Failed to resolve the user home directory.".to_string())
+}
+
+fn resolve_aura_home() -> Result<PathBuf, String> {
+    Ok(resolve_user_home()?.join(".aura"))
+}
+
+fn ensure_directory(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path)
+        .map_err(|error| format!("Failed to create directory {}: {error}", path.display()))
+}
+
+fn prettify_asset_name(value: &str) -> String {
+    value
+        .split(['-', '_'])
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn extract_metadata_field(content: &str, field_name: &str) -> Option<String> {
+    let needle = format!("{field_name}:");
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with(&needle) {
+            continue;
+        }
+        let raw = trimmed[needle.len()..].trim();
+        let value = raw
+            .trim_matches(',')
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
+    let normalized = content.strip_prefix("\u{feff}").unwrap_or(content);
+    if !normalized.starts_with("---\n") {
+        return (None, normalized);
+    }
+
+    let remainder = &normalized[4..];
+    if let Some(index) = remainder.find("\n---\n") {
+        let frontmatter = &remainder[..index];
+        let body = &remainder[index + 5..];
+        return (Some(frontmatter), body);
+    }
+
+    (None, normalized)
+}
+
+fn extract_markdown_metadata_field(content: &str, field_name: &str) -> Option<String> {
+    let (frontmatter, _) = split_frontmatter(content);
+    if let Some(frontmatter) = frontmatter {
+        if let Some(value) = extract_metadata_field(frontmatter, field_name) {
+            return Some(value);
+        }
+    }
+
+    extract_metadata_field(content, field_name)
+}
+
+fn infer_skill_description(content: &str) -> String {
+    if let Some(description) = extract_markdown_metadata_field(content, "description") {
+        return description;
+    }
+
+    let (_, body) = split_frontmatter(content);
+    let mut in_code_block = false;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        return trimmed.to_string();
+    }
+    "Aura skill".into()
+}
+
+fn infer_plugin_description(content: &str) -> String {
+    extract_metadata_field(content, "description").unwrap_or_else(|| "Aura plugin".into())
+}
+
+fn parse_json_string_field(content: &str, field_name: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
+    parsed
+        .get(field_name)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn infer_plugin_support(entry_path: Option<&Path>, entry_content: &str) -> (bool, Option<String>) {
+    let Some(entry_path) = entry_path else {
+        return (
+            false,
+            Some("未找到可运行的插件入口文件。Aura 当前支持 .mjs / .js 工具插件入口。".into()),
+        );
+    };
+
+    let extension = entry_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if extension != "mjs" && extension != "js" {
+        return (
+            false,
+            Some("当前只支持 .mjs / .js 作为插件入口。".into()),
+        );
+    }
+
+    let normalized = entry_content
+        .chars()
+        .filter(|value| !value.is_whitespace())
+        .collect::<String>();
+    let has_plugin_export = normalized.contains("exportconstplugin=")
+        || normalized.contains("export{plugin}")
+        || normalized.contains("module.exports={plugin")
+        || normalized.contains("module.exports.plugin=")
+        || normalized.contains("exports.plugin=");
+
+    if has_plugin_export {
+        return (true, None);
+    }
+
+    (
+        false,
+        Some("已发现插件入口，但它不是 Aura 当前支持的工具插件格式。需要导出 plugin 对象及 tools。".into()),
+    )
+}
+
+fn resolve_plugin_entry(dir: &Path, manifest_content: Option<&str>) -> (Option<PathBuf>, Option<String>) {
+    if let Some(manifest_content) = manifest_content {
+        if let Some(main_path) = parse_json_string_field(manifest_content, "main") {
+            let candidate = dir.join(&main_path);
+            if candidate.exists() {
+                return (Some(candidate), None);
+            }
+
+            if let Some(extension) = candidate.extension().and_then(|value| value.to_str()) {
+                if extension == "js" || extension == "mjs" {
+                    let ts_candidate = candidate.with_extension("ts");
+                    if ts_candidate.exists() {
+                        let ts_file_name = ts_candidate
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("main.ts")
+                            .to_string();
+                        return (
+                            Some(ts_candidate),
+                            Some(format!(
+                                "manifest 指定的入口文件不存在：{main_path}；检测到源码入口 {}。Aura 当前不能直接运行 TypeScript 插件，请先编译为 {}，或改成 .mjs/.js 工具插件入口。",
+                                ts_file_name,
+                                main_path
+                            )),
+                        );
+                    }
+                }
+            }
+
+            return (
+                None,
+                Some(format!("manifest 指定的入口文件不存在：{main_path}")),
+            );
+        }
+    }
+
+    for candidate in ["main.mjs", "index.mjs", "plugin.mjs", "main.js", "index.js"] {
+        let path = dir.join(candidate);
+        if path.exists() {
+            return (Some(path), None);
+        }
+    }
+
+    (None, None)
+}
+
+fn scan_aura_assets(dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, String> {
+    let mut assets = Vec::new();
+
+    let entries = fs::read_dir(dir)
+        .map_err(|error| format!("Failed to read Aura asset directory {}: {error}", dir.display()))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let (id, name, description, content_path, entry_path, supported, support_message) = if kind == "skills" {
+            if path.is_file()
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    == "md"
+            {
+                let id = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let content = fs::read_to_string(&path).unwrap_or_default();
+                let name = extract_markdown_metadata_field(&content, "name")
+                    .unwrap_or_else(|| prettify_asset_name(&id));
+                let description = infer_skill_description(&content);
+                (id, name, description, path.clone(), Some(path.clone()), true, None)
+            } else if path.is_dir() {
+                let skill_path = path.join("SKILL.md");
+                if !skill_path.exists() {
+                    continue;
+                }
+                let id = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let content = fs::read_to_string(&skill_path).unwrap_or_default();
+                let name = extract_markdown_metadata_field(&content, "name")
+                    .unwrap_or_else(|| prettify_asset_name(&id));
+                let description = infer_skill_description(&content);
+                (id, name, description, skill_path.clone(), Some(skill_path), true, None)
+            } else {
+                continue;
+            }
+        } else {
+            if path.is_file() {
+                if path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    != "mjs"
+                {
+                    continue;
+                }
+
+                let id = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let content = fs::read_to_string(&path).unwrap_or_default();
+                let name = extract_metadata_field(&content, "name")
+                    .unwrap_or_else(|| prettify_asset_name(&id));
+                let description = infer_plugin_description(&content);
+                let (supported, support_message) = infer_plugin_support(Some(&path), &content);
+                (
+                    id,
+                    name,
+                    description,
+                    path.clone(),
+                    Some(path.clone()),
+                    supported,
+                    support_message,
+                )
+            } else if path.is_dir() {
+                let manifest_path = path.join("manifest.json");
+                let manifest_content = fs::read_to_string(&manifest_path).ok();
+                let (entry_path, mut support_message) =
+                    resolve_plugin_entry(&path, manifest_content.as_deref());
+
+                let id = manifest_content
+                    .as_deref()
+                    .and_then(|value| parse_json_string_field(value, "id"))
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    });
+
+                let name = manifest_content
+                    .as_deref()
+                    .and_then(|value| parse_json_string_field(value, "name"))
+                    .unwrap_or_else(|| prettify_asset_name(&id));
+
+                let preview_path = if manifest_path.exists() {
+                    manifest_path
+                } else if let Some(entry_path) = &entry_path {
+                    entry_path.clone()
+                } else {
+                    path.clone()
+                };
+                let entry_content = entry_path
+                    .as_ref()
+                    .and_then(|value| fs::read_to_string(value).ok())
+                    .unwrap_or_default();
+                let description = manifest_content
+                    .as_deref()
+                    .and_then(|value| parse_json_string_field(value, "description"))
+                    .or_else(|| {
+                        if entry_content.is_empty() {
+                            None
+                        } else {
+                            Some(infer_plugin_description(&entry_content))
+                        }
+                    })
+                    .unwrap_or_else(|| "Aura plugin".into());
+                let (supported, inferred_message) =
+                    infer_plugin_support(entry_path.as_deref(), &entry_content);
+                if support_message.is_none() {
+                    support_message = inferred_message;
+                }
+
+                (
+                    id,
+                    name,
+                    description,
+                    preview_path,
+                    entry_path,
+                    supported,
+                    support_message,
+                )
+            } else {
+                continue;
+            }
+        };
+
+        if id.is_empty() {
+            continue;
+        }
+
+        assets.push(AuraAssetMetadata {
+            id,
+            name,
+            description,
+            path: content_path.display().to_string(),
+            entry_path: entry_path.map(|value| value.display().to_string()),
+            supported,
+            support_message,
+        });
+    }
+
+    assets.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    Ok(assets)
+}
+
+fn resolve_default_asset_dir<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    dir_name: &str,
+) -> Result<PathBuf, String> {
+    let dev_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../{dir_name}"));
+    if dev_dir.exists() {
+        return dev_dir
+            .canonicalize()
+            .map_err(|error| format!("Failed to canonicalize default {dir_name} directory: {error}"));
+    }
+
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Failed to resolve resource directory: {error}"))?;
+    let bundled_dir = resource_dir.join(dir_name);
+    if bundled_dir.exists() {
+        return Ok(bundled_dir);
+    }
+
+    Err(format!("Unable to locate bundled {dir_name} directory."))
+}
+
+fn seed_directory_from_defaults<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    dir_name: &str,
+    target_dir: &Path,
+) -> Result<(), String> {
+    ensure_directory(target_dir)?;
+    let source_dir = resolve_default_asset_dir(app, dir_name)?;
+    let entries = fs::read_dir(&source_dir)
+        .map_err(|error| format!("Failed to read bundled {dir_name} directory {}: {error}", source_dir.display()))?;
+
+    for entry in entries.flatten() {
+        let source_path = entry.path();
+        if !source_path.is_file() {
+            continue;
+        }
+        let Some(file_name) = source_path.file_name() else {
+            continue;
+        };
+        let target_path = target_dir.join(file_name);
+        if target_path.exists() {
+            continue;
+        }
+        fs::copy(&source_path, &target_path).map_err(|error| {
+            format!(
+                "Failed to seed Aura {dir_name} asset {}: {error}",
+                source_path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeState, String> {
+    let home_dir = resolve_aura_home()?;
+    let config_dir = home_dir.join("config");
+    let skills_dir = home_dir.join("skills");
+    let plugins_dir = home_dir.join("plugins");
+    let mcp_dir = home_dir.join("mcp");
+    let workspace_dir = home_dir.join("workspace");
+    let logs_dir = home_dir.join("logs");
+
+    for dir in [
+        &home_dir,
+        &config_dir,
+        &skills_dir,
+        &plugins_dir,
+        &mcp_dir,
+        &workspace_dir,
+        &logs_dir,
+    ] {
+        ensure_directory(dir)?;
+    }
+
+    seed_directory_from_defaults(app, "skills", &skills_dir)?;
+    seed_directory_from_defaults(app, "plugins", &plugins_dir)?;
+
+    let settings_path = config_dir.join("settings.json");
+    let sessions_path = config_dir.join("sessions.json");
+    let mcp_servers_path = mcp_dir.join("servers.json");
+
+    Ok(AuraHomeState {
+        home_dir: home_dir.display().to_string(),
+        config_dir: config_dir.display().to_string(),
+        skills_dir: skills_dir.display().to_string(),
+        plugins_dir: plugins_dir.display().to_string(),
+        mcp_dir: mcp_dir.display().to_string(),
+        workspace_dir: workspace_dir.display().to_string(),
+        logs_dir: logs_dir.display().to_string(),
+        settings_path: settings_path.display().to_string(),
+        sessions_path: sessions_path.display().to_string(),
+        mcp_servers_path: mcp_servers_path.display().to_string(),
+        skills: scan_aura_assets(&skills_dir, "skills")?,
+        plugins: scan_aura_assets(&plugins_dir, "plugins")?,
+    })
+}
+
+fn resolve_aura_relative_path<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let sanitized = relative_path.trim().trim_start_matches('/');
+    if sanitized.is_empty() {
+        return Err("Aura relative path must not be empty.".into());
+    }
+
+    let candidate = ensure_aura_layout(app)?
+        .home_dir;
+    let candidate = PathBuf::from(candidate).join(sanitized);
+    let aura_home = resolve_aura_home()?;
+
+    if candidate
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("Parent directory traversal is not allowed in Aura paths.".into());
+    }
+
+    if !candidate.starts_with(&aura_home) {
+        return Err("Aura path escapes the configured Aura home directory.".into());
+    }
+
+    Ok(candidate)
 }
 
 fn ignored_name(name: &str) -> bool {
@@ -482,6 +1000,36 @@ fn run_provider_action<R: Runtime>(
 }
 
 #[tauri::command]
+fn run_mcp_action<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let script_path = resolve_bridge_script_path(&app, "mcpActions.mjs")?;
+    let bridge_cwd = resolve_bridge_cwd()?;
+    let output = Command::new("node")
+        .arg(script_path)
+        .arg(
+            serde_json::to_string(&payload)
+                .map_err(|error| format!("Failed to serialize MCP action payload: {error}"))?,
+        )
+        .current_dir(bridge_cwd)
+        .output()
+        .map_err(|error| format!("Failed to run MCP action bridge: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "MCP action failed.".into()
+        } else {
+            stderr
+        });
+    }
+
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|error| format!("Failed to parse MCP action response: {error}"))
+}
+
+#[tauri::command]
 fn start_agent_task<R: Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, AgentTaskStore>,
@@ -615,6 +1163,39 @@ fn read_text_file(file_path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn ensure_aura_home<R: Runtime>(app: tauri::AppHandle<R>) -> Result<AuraHomeState, String> {
+    ensure_aura_layout(&app)
+}
+
+#[tauri::command]
+fn read_aura_file<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    relative_path: String,
+) -> Result<Option<String>, String> {
+    let target = resolve_aura_relative_path(&app, &relative_path)?;
+    if !target.exists() {
+        return Ok(None);
+    }
+    fs::read_to_string(&target)
+        .map(Some)
+        .map_err(|error| format!("Failed to read Aura file {}: {error}", target.display()))
+}
+
+#[tauri::command]
+fn write_aura_file<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    relative_path: String,
+    content: String,
+) -> Result<(), String> {
+    let target = resolve_aura_relative_path(&app, &relative_path)?;
+    if let Some(parent) = target.parent() {
+        ensure_directory(parent)?;
+    }
+    fs::write(&target, content)
+        .map_err(|error| format!("Failed to write Aura file {}: {error}", target.display()))
+}
+
+#[tauri::command]
 fn read_image_preview(file_path: String) -> Result<Option<String>, String> {
     let path = PathBuf::from(&file_path);
     if !path.exists() {
@@ -739,8 +1320,16 @@ fn allocate_attachment_path(workspace_path: &str, file_name: &str) -> Result<Pat
 }
 
 #[tauri::command]
-fn create_session_workspace(root_path: String, hint: String) -> Result<String, String> {
-    let root = PathBuf::from(root_path);
+fn create_session_workspace<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    root_path: String,
+    hint: String,
+) -> Result<String, String> {
+    let root = if root_path.trim().is_empty() {
+        PathBuf::from(ensure_aura_layout(&app)?.workspace_dir)
+    } else {
+        PathBuf::from(root_path)
+    };
     if !root.exists() {
         return Err(format!(
             "Default workspace path does not exist: {}",
@@ -826,6 +1415,10 @@ fn main() {
             abort_agent_task,
             respond_to_agent_approval,
             run_provider_action,
+            run_mcp_action,
+            ensure_aura_home,
+            read_aura_file,
+            write_aura_file,
             read_workspace_tree,
             read_text_file,
             read_image_preview,
@@ -835,5 +1428,5 @@ fn main() {
             write_attachment_bytes
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Desk Agent desktop app")
+        .expect("error while running Aura desktop app")
 }

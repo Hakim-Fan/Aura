@@ -3,7 +3,13 @@ import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { AppSidebar } from './components/AppSidebar'
 import { abortAgentTask, getAgentTask, respondToApproval, startAgentTask } from './lib/agent'
-import { loadSessions, loadSettings, saveSessions, saveSettings } from './lib/storage'
+import {
+  hydrateStorageFromAuraHome,
+  loadSessions,
+  loadSettings,
+  saveSessions,
+  saveSettings,
+} from './lib/storage'
 import { openSettingsWindow } from './lib/windows'
 import {
   createSessionWorkspace,
@@ -508,12 +514,40 @@ export function MainWindowApp() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState('')
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([])
+  const [storageReady, setStorageReady] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     loadPaneWidth(SIDEBAR_WIDTH_KEY, 260, 220, 420),
   )
   const [inspectorWidth, setInspectorWidth] = useState(() =>
     loadPaneWidth(INSPECTOR_WIDTH_KEY, 360, 280, 640),
   )
+
+  useEffect(() => {
+    let cancelled = false
+
+    void (async () => {
+      try {
+        const hydrated = await hydrateStorageFromAuraHome()
+        if (cancelled) {
+          return
+        }
+        setSettings(hydrated.settings)
+        setSessions(hydrated.sessions)
+      } catch (caught) {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : '初始化 Aura 目录失败。')
+        }
+      } finally {
+        if (!cancelled) {
+          setStorageReady(true)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const activeSession = useMemo(() => {
     if (!activeSessionId) {
@@ -556,8 +590,11 @@ export function MainWindowApp() {
   const enabledModelGroups = collectEnabledModelsByProfile(settings)
 
   useEffect(() => {
+    if (!storageReady) {
+      return
+    }
     saveSessions(sessions)
-  }, [sessions])
+  }, [sessions, storageReady])
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth))

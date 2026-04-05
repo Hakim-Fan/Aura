@@ -19,7 +19,7 @@ export async function connectMcpTools(servers) {
 
     const client = new Client(
       {
-        name: 'desk-agent-desktop',
+        name: 'aura-desktop',
         version: '0.1.0',
       },
       {

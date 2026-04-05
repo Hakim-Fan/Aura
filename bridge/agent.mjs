@@ -198,7 +198,7 @@ function createTaskTracker(hooks, rootTitle) {
 
 function buildSystemPrompt(settings, skillPrompt) {
   const sections = [
-    'You are Desk Agent, a local-first desktop coding agent.',
+    'You are Aura, a local-first desktop coding agent.',
     `The active workspace is: ${settings.cwd}`,
     'Use tools when they reduce uncertainty or let you act directly inside the workspace.',
     'Prefer concrete changes and verification steps over abstract advice.',

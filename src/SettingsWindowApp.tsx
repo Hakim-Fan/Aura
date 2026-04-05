@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { ask, open } from '@tauri-apps/plugin-dialog'
+import { ChevronDown, ChevronUp, FolderOpen, RefreshCw, Search } from 'lucide-react'
 import { builtinPlugins, builtinSkills } from './catalog'
+import { inspectMcpServer, type McpInspectResult } from './lib/mcp'
 import { fetchProviderModels, testProviderConnection } from './lib/provider'
-import { loadSettings, saveSettings } from './lib/storage'
+import { ensureAuraHome, type AuraAsset, type AuraHomeState } from './lib/aura'
+import { hydrateStorageFromAuraHome, loadSettings, saveSettings } from './lib/storage'
+import { openPathInDefaultApp, readTextFile } from './lib/workspace'
 import { broadcastSettingsUpdated, closeCurrentWindow, openMcpEditorWindow } from './lib/windows'
 import type { AgentSettings, ProviderMode, ProviderProfile } from './types'
 import { ProvidersView } from './views/ProvidersView'
@@ -19,6 +23,15 @@ const STEP_PRESETS = [8, 16, 32, 64] as const
 
 function cloneSettings(settings: AgentSettings): AgentSettings {
   return JSON.parse(JSON.stringify(settings)) as AgentSettings
+}
+
+function mergeAuraAssets(items: AuraAsset[], fallback: typeof builtinSkills | typeof builtinPlugins) {
+  const fallbackMap = new Map(fallback.map(item => [item.id, item]))
+  return items.map(item => ({
+    ...item,
+    name: fallbackMap.get(item.id)?.name || item.name,
+    description: fallbackMap.get(item.id)?.description || item.description,
+  }))
 }
 
 function createProviderProfile(provider: ProviderMode = 'custom'): ProviderProfile {
@@ -56,6 +69,33 @@ export function SettingsWindowApp({ initialTab }: Props) {
   const [providerStatus, setProviderStatus] = useState<ProviderStatusState | null>(null)
   const [isTestingProvider, setIsTestingProvider] = useState(false)
   const [isFetchingModels, setIsFetchingModels] = useState(false)
+  const [availableSkills, setAvailableSkills] = useState<AuraAsset[]>(() =>
+    builtinSkills.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '' })),
+  )
+  const [availablePlugins, setAvailablePlugins] = useState<AuraAsset[]>(() =>
+    builtinPlugins.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '' })),
+  )
+  const [auraHome, setAuraHome] = useState<AuraHomeState | null>(null)
+  const [assetSearch, setAssetSearch] = useState({
+    skills: '',
+    plugins: '',
+  })
+  const [expandedAssetIds, setExpandedAssetIds] = useState<Set<string>>(new Set())
+  const [assetPreviewCache, setAssetPreviewCache] = useState<Record<string, string>>({})
+  const [loadingPreviewPath, setLoadingPreviewPath] = useState('')
+  const [refreshingAssets, setRefreshingAssets] = useState<'skills' | 'plugins' | ''>('')
+  const [isRefreshingMcp, setIsRefreshingMcp] = useState(false)
+  const [testingMcpServerId, setTestingMcpServerId] = useState('')
+  const [mcpInspectResults, setMcpInspectResults] = useState<
+    Record<
+      string,
+      {
+        tone: 'success' | 'error'
+        message: string
+        tools: McpInspectResult['tools']
+      }
+    >
+  >({})
 
   const isDirty = useMemo(
     () => JSON.stringify(savedSettings) !== JSON.stringify(draftSettings),
@@ -72,6 +112,36 @@ export function SettingsWindowApp({ initialTab }: Props) {
     let unlistenSettingsUpdated: (() => void) | undefined
 
     void (async () => {
+      try {
+        const hydrated = await hydrateStorageFromAuraHome()
+        setSavedSettings(hydrated.settings)
+        setDraftSettings(cloneSettings(hydrated.settings))
+        setSelectedProviderProfileId(hydrated.settings.activeProviderProfileId)
+      } catch {
+        // Fall back to cached settings if Aura initialization is unavailable.
+      }
+
+      await refreshAuraAssets().catch(() => {
+        setAvailableSkills(
+          builtinSkills.map(item => ({
+            ...item,
+            path: '',
+            entryPath: '',
+            supported: true,
+            supportMessage: '',
+          })),
+        )
+        setAvailablePlugins(
+          builtinPlugins.map(item => ({
+            ...item,
+            path: '',
+            entryPath: '',
+            supported: true,
+            supportMessage: '',
+          })),
+        )
+      })
+
       unlistenOpenTab = await listen<SettingsTab>('settings:open-tab', event => {
         setActiveTab(event.payload)
       })
@@ -243,10 +313,125 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   function togglePlugin(pluginId: string) {
+    const target = availablePlugins.find(item => item.id === pluginId)
+    if (target && !target.supported) {
+      return
+    }
     const next = draftSettings.enabledPluginIds.includes(pluginId)
       ? draftSettings.enabledPluginIds.filter(id => id !== pluginId)
       : [...draftSettings.enabledPluginIds, pluginId]
     handleSettingsChange('enabledPluginIds', next)
+  }
+
+  async function refreshAuraAssets(kind?: 'skills' | 'plugins') {
+    setRefreshingAssets(kind || 'skills')
+    try {
+      const aura = await ensureAuraHome()
+      setAuraHome(aura)
+      setAvailableSkills(mergeAuraAssets(aura.skills, builtinSkills))
+      setAvailablePlugins(mergeAuraAssets(aura.plugins, builtinPlugins))
+    } finally {
+      setRefreshingAssets('')
+    }
+  }
+
+  async function refreshMcpServers() {
+    setIsRefreshingMcp(true)
+    try {
+      const hydrated = await hydrateStorageFromAuraHome()
+      setAuraHome(hydrated.aura)
+      setSavedSettings(current => ({
+        ...current,
+        mcpServers: hydrated.settings.mcpServers,
+      }))
+      setDraftSettings(current => ({
+        ...current,
+        mcpServers: hydrated.settings.mcpServers,
+      }))
+      setMcpInspectResults({})
+      setSaveState('idle')
+    } finally {
+      setIsRefreshingMcp(false)
+    }
+  }
+
+  async function openAuraMcpFolder() {
+    const nextAura = auraHome || (await ensureAuraHome())
+    setAuraHome(nextAura)
+    await openPathInDefaultApp(nextAura.mcpDir)
+  }
+
+  async function testMcpServer(serverId: string) {
+    const server = draftSettings.mcpServers.find(entry => entry.id === serverId)
+    if (!server) {
+      return
+    }
+
+    setTestingMcpServerId(serverId)
+    try {
+      const result = await inspectMcpServer(server)
+      setMcpInspectResults(current => ({
+        ...current,
+        [serverId]: {
+          tone: 'success',
+          message: result.message,
+          tools: result.tools,
+        },
+      }))
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'MCP 连接测试失败。'
+      setMcpInspectResults(current => ({
+        ...current,
+        [serverId]: {
+          tone: 'error',
+          message,
+          tools: [],
+        },
+      }))
+    } finally {
+      setTestingMcpServerId('')
+    }
+  }
+
+  async function openAuraAssetFolder(kind: 'skills' | 'plugins') {
+    const nextAura = auraHome || (await ensureAuraHome())
+    setAuraHome(nextAura)
+    const folderPath = kind === 'skills' ? nextAura.skillsDir : nextAura.pluginsDir
+    await openPathInDefaultApp(folderPath)
+  }
+
+  async function toggleAssetExpanded(item: { id: string; path?: string }) {
+    const nextExpanded = new Set(expandedAssetIds)
+    const isExpanded = nextExpanded.has(item.id)
+    if (isExpanded) {
+      nextExpanded.delete(item.id)
+      setExpandedAssetIds(nextExpanded)
+      return
+    }
+
+    nextExpanded.add(item.id)
+    setExpandedAssetIds(nextExpanded)
+
+    if (!item.path || assetPreviewCache[item.path]) {
+      return
+    }
+
+    setLoadingPreviewPath(item.path)
+    try {
+      const content = await readTextFile(item.path)
+      setAssetPreviewCache(current => ({
+        ...current,
+        [item.path!]: content,
+      }))
+    } catch (caught) {
+      setAssetPreviewCache(current => ({
+        ...current,
+        [item.path!]:
+          caught instanceof Error ? caught.message : '读取内容失败。',
+      }))
+    } finally {
+      setLoadingPreviewPath('')
+    }
   }
 
   async function chooseDefaultWorkspace() {
@@ -548,15 +733,34 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <div className="eyebrow">MCP Servers</div>
             <h2>MCP 服务器</h2>
           </div>
-          <button className="primary-button" onClick={() => void openMcpEditorWindow()}>
-            新增 MCP
-          </button>
+          <div className="header-actions">
+            <button
+              className="secondary-button"
+              onClick={() => void refreshMcpServers()}
+            >
+              <RefreshCw
+                size={14}
+                className={isRefreshingMcp ? 'spin-icon' : undefined}
+              />
+              刷新
+            </button>
+            <button
+              className="secondary-button"
+              onClick={() => void openAuraMcpFolder()}
+            >
+              <FolderOpen size={14} />
+              打开文件夹
+            </button>
+            <button className="primary-button" onClick={() => void openMcpEditorWindow()}>
+              新增 MCP
+            </button>
+          </div>
         </header>
 
         <div className="asset-card-list">
           {draftSettings.mcpServers.length > 0 ? (
             draftSettings.mcpServers.map(server => (
-              <article key={server.id} className="asset-card">
+              <article key={server.id} className="asset-card asset-card-rich">
                 <div className="asset-card-head">
                   <div>
                     <strong>{server.name}</strong>
@@ -571,7 +775,35 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   <span className="micro-pill">{server.cwd || '无单独 cwd'}</span>
                   <span className="micro-pill">{server.args || '无 args'}</span>
                 </div>
+                {mcpInspectResults[server.id] ? (
+                  <div
+                    className={`provider-feedback ${mcpInspectResults[server.id]?.tone === 'success' ? 'success' : 'error'}`}
+                  >
+                    <strong>{mcpInspectResults[server.id]?.message}</strong>
+                    {mcpInspectResults[server.id]?.tools.length ? (
+                      <div className="mcp-tool-list">
+                        {mcpInspectResults[server.id]?.tools.map(tool => (
+                          <div key={`${server.id}-${tool.name}`} className="mcp-tool-row">
+                            <span className="micro-pill mono-pill">{tool.name}</span>
+                            <span>{tool.description}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="header-actions">
+                  <button
+                    className="secondary-button"
+                    disabled={testingMcpServerId === server.id}
+                    onClick={() => void testMcpServer(server.id)}
+                  >
+                    <RefreshCw
+                      size={14}
+                      className={testingMcpServerId === server.id ? 'spin-icon' : undefined}
+                    />
+                    测试连接
+                  </button>
                   <button
                     className="secondary-button"
                     onClick={() => void openMcpEditorWindow(server.id)}
@@ -594,11 +826,21 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
   function renderAssets(
     kind: 'skills' | 'plugins',
-    items: typeof builtinSkills | typeof builtinPlugins,
+    items: Array<AuraAsset>,
     enabledIds: string[],
     onToggle: (id: string) => void,
   ) {
     const title = kind === 'skills' ? '技能' : '插件'
+    const searchValue = assetSearch[kind]
+    const normalizedKeyword = searchValue.trim().toLowerCase()
+    const filteredItems = items.filter(item =>
+      !normalizedKeyword ||
+      `${item.name} ${item.description} ${item.id} ${item.path || ''} ${item.entryPath || ''} ${item.supportMessage || ''}`
+        .toLowerCase()
+        .includes(normalizedKeyword),
+    )
+    const folderPath =
+      kind === 'skills' ? auraHome?.skillsDir || '' : auraHome?.pluginsDir || ''
 
     return (
       <section className="section-shell settings-panel">
@@ -607,31 +849,113 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <div className="eyebrow">{title}</div>
             <h2>{title}</h2>
           </div>
-          <span className="micro-pill">{items.length} 个可用</span>
+          <div className="header-actions">
+            <span className="micro-pill">{items.length} 个可用</span>
+            <button
+              className="secondary-button"
+              onClick={() => void refreshAuraAssets(kind)}
+            >
+              <RefreshCw
+                size={14}
+                className={refreshingAssets === kind ? 'spin-icon' : undefined}
+              />
+              刷新
+            </button>
+            <button
+              className="secondary-button"
+              disabled={!folderPath}
+              onClick={() => void openAuraAssetFolder(kind)}
+            >
+              <FolderOpen size={14} />
+              打开文件夹
+            </button>
+          </div>
         </header>
 
+        <div className="settings-search-bar">
+          <Search size={16} />
+          <input
+            value={searchValue}
+            onChange={event =>
+              setAssetSearch(current => ({
+                ...current,
+                [kind]: event.target.value,
+              }))
+            }
+            placeholder={`搜索${title}名称、描述或路径...`}
+          />
+        </div>
+
         <div className="asset-card-list">
-          {items.map(item => (
-            <article key={item.id} className="asset-card">
+          {filteredItems.length > 0 ? filteredItems.map(item => {
+            const expanded = expandedAssetIds.has(item.id)
+            const preview = item.path ? assetPreviewCache[item.path] : ''
+            const isLoadingPreview = item.path === loadingPreviewPath
+            const isEnabled = enabledIds.includes(item.id)
+            const canToggle = kind === 'skills' || item.supported
+
+            return (
+            <article key={item.id} className="asset-card asset-card-rich">
               <div className="asset-card-head">
                 <div>
                   <strong>{item.name}</strong>
                   <p>{item.description}</p>
                 </div>
-                <label className="switch-pill">
+                <label className={`switch-pill${canToggle ? '' : ' disabled'}`}>
                   <input
-                    checked={enabledIds.includes(item.id)}
+                    checked={isEnabled}
+                    disabled={!canToggle}
                     onChange={() => onToggle(item.id)}
                     type="checkbox"
                   />
-                  <span>{enabledIds.includes(item.id) ? '启用中' : '已关闭'}</span>
+                  <span>
+                    {canToggle
+                      ? isEnabled
+                        ? '启用中'
+                        : '已关闭'
+                      : '当前不兼容'}
+                  </span>
                 </label>
               </div>
               <div className="asset-card-meta">
                 <span className="micro-pill">{item.id}</span>
+                <span className={`micro-pill ${item.supported ? 'pill-success' : 'pill-warning'}`}>
+                  {item.supported ? '可用' : '仅发现'}
+                </span>
+                {item.path ? (
+                  <span className="micro-pill mono-pill">{item.path}</span>
+                ) : null}
+                {item.entryPath && item.entryPath !== item.path ? (
+                  <span className="micro-pill mono-pill">入口：{item.entryPath}</span>
+                ) : null}
               </div>
+              {!item.supported && item.supportMessage ? (
+                <div className="asset-compat-note">{item.supportMessage}</div>
+              ) : null}
+              <button
+                className="asset-preview-toggle"
+                onClick={() => void toggleAssetExpanded(item)}
+                type="button"
+              >
+                <span>{expanded ? '隐藏内容' : '查看内容'}</span>
+                {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              </button>
+              {expanded ? (
+                <div className="asset-preview-panel">
+                  {isLoadingPreview ? (
+                    <div className="muted">正在读取内容...</div>
+                  ) : (
+                    <pre>{preview || '暂无可读内容。'}</pre>
+                  )}
+                </div>
+              ) : null}
             </article>
-          ))}
+          )}) : (
+            <article className="asset-card empty">
+              <strong>没有匹配的{title}</strong>
+              <p>你可以尝试清空搜索词，或点击“刷新”重新扫描 Aura 目录。</p>
+            </article>
+          )}
         </div>
       </section>
     )
@@ -661,7 +985,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
         {activeTab === 'skills'
           ? renderAssets(
             'skills',
-            builtinSkills,
+            availableSkills,
             draftSettings.enabledSkillIds,
             toggleSkill,
           )
@@ -669,7 +993,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
         {activeTab === 'plugins'
           ? renderAssets(
             'plugins',
-            builtinPlugins,
+            availablePlugins,
             draftSettings.enabledPluginIds,
             togglePlugin,
           )

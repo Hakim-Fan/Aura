@@ -558,7 +558,7 @@ function AssistantMessageCard({
 
         <div className="min-w-0 flex-1 flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-12px text-[var(--text-secondary)] opacity-60">
-            <span className="font-600 text-[var(--text-primary)] opacity-70">Desk Agent</span>
+            <span className="font-600 text-[var(--text-primary)] opacity-70">Aura</span>
             {activitySummary ? (
               <button
                 className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 hover:bg-[rgba(15,23,42,0.04)] transition-colors"

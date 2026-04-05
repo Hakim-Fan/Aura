@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Desk Agent",
+  "productName": "Aura",
   "version": "0.1.0",
-  "identifier": "com.fanhuaze.desk-agent",
+  "identifier": "com.fanhuaze.aura",
   "build": {
     "beforeDevCommand": "pnpm dev:web",
     "beforeBuildCommand": "pnpm build",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Desk Agent",
+        "title": "Aura",
         "width": 1280,
         "height": 850,
         "minWidth": 1024,

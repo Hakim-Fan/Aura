@@ -1,6 +1,6 @@
-# desk-agent
+# Aura
 
-一个桌面优先的本地 Agent 工作区，使用 `Tauri + React` 做 UI，用 `Node` 运行本地 Agent runtime。
+Aura 是一个桌面优先的本地 Agent 工作区，使用 `Tauri + React` 做 UI，用 `Node` 运行本地 Agent runtime。
 
 ## 当前结构
 

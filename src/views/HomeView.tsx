@@ -33,7 +33,7 @@ export function HomeView({
       <div className="h-10 w-full shrink-0" data-tauri-drag-region />
 
       <div className="hero-card modern">
-        <div className="hero-badge">Desk Agent Beta</div>
+        <div className="hero-badge">Aura Beta</div>
         <h2>开发者桌面 Agent</h2>
         <p className="hero-copy">
           本地工作区、模型配置和工具执行全部收纳在一个现代化的桌面工作台里。你可以直接开始对话，或者检查环境状态。

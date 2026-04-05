@@ -144,7 +144,7 @@ function buildComputerTools({ settings, context }) {
         ensureMacOs('Computer use')
         const relativePath =
           args.relativePath ||
-          `.desk-agent/captures/capture-${Date.now()}.png`
+          `.aura/captures/capture-${Date.now()}.png`
         const target = resolveWorkspacePath(context.cwd, relativePath)
         await fs.mkdir(path.dirname(target), { recursive: true })
         await runCommand('screencapture', ['-x', target], context.cwd)
