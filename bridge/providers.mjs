@@ -262,6 +262,33 @@ function parseToolArguments(rawArgs) {
   }
 }
 
+function mergeStreamedField(currentValue, incomingValue) {
+  const current = currentValue || ''
+  const incoming = incomingValue || ''
+
+  if (!current) {
+    return incoming
+  }
+  if (!incoming) {
+    return current
+  }
+  if (incoming.startsWith(current)) {
+    return incoming
+  }
+  if (current.endsWith(incoming)) {
+    return current
+  }
+
+  const maxOverlap = Math.min(current.length, incoming.length)
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    if (current.slice(-size) === incoming.slice(0, size)) {
+      return `${current}${incoming.slice(size)}`
+    }
+  }
+
+  return `${current}${incoming}`
+}
+
 function mergeOpenAiToolCalls(existingCalls, deltaCalls) {
   for (const deltaCall of deltaCalls || []) {
     const index = deltaCall.index ?? existingCalls.length
@@ -278,7 +305,10 @@ function mergeOpenAiToolCalls(existingCalls, deltaCalls) {
       current.id = deltaCall.id
     }
     if (deltaCall.function?.name) {
-      current.function.name += deltaCall.function.name
+      current.function.name = mergeStreamedField(
+        current.function.name,
+        deltaCall.function.name,
+      )
     }
     if (deltaCall.function?.arguments) {
       current.function.arguments += deltaCall.function.arguments

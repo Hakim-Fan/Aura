@@ -426,13 +426,13 @@ function ReasoningPhaseCard({
       >
         <div className="min-w-0">
           <div className="mb-1 flex items-center gap-2">
-            <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded bg-white/80 text-[var(--accent-soft-strong)]">
-              思考
+            <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 min-w-12 text-center rounded bg-white/80 text-[var(--accent-soft-strong)]">
+              {isActive ? '思考中' : '思考'}
             </span>
             <strong className="text-12px text-[var(--text-primary)] opacity-85">{firstLine}</strong>
-            <span className="text-10px text-[var(--text-secondary)] opacity-55">
+            {/* <span className="text-10px text-[var(--text-secondary)] opacity-55">
               {isActive ? '思考中' : ''}
-            </span>
+            </span> */}
           </div>
         </div>
         {expanded ? (
@@ -452,11 +452,14 @@ function ReasoningPhaseCard({
 
 function MessageEventCard({
   event,
+  onHandleApproval,
 }: {
   event: MessageEvent
+  onHandleApproval?: (decision: 'approve' | 'deny') => void
 }) {
   const isShellLog = event.kind === 'shell'
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
+  const isApproval = event.kind === 'approval' && event.status === 'awaiting_approval'
 
   return (
     <article className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2">
@@ -486,6 +489,31 @@ function MessageEventCard({
         </span>
       </div>
       <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
+      {isApproval ? (
+        <div className="mt-2 rounded-xl border border-amber-200 bg-white p-3">
+          {event.input ? (
+            <pre className="overflow-x-auto rounded-lg border border-gray-100 bg-gray-50 p-3 text-11px">
+              {event.input}
+            </pre>
+          ) : null}
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <button
+              className="rounded-lg bg-gray-100 px-3 py-2 text-12px font-500 transition-colors hover:bg-gray-200"
+              onClick={() => onHandleApproval?.('deny')}
+              type="button"
+            >
+              拒绝
+            </button>
+            <button
+              className="rounded-lg bg-[var(--accent-soft-strong)] px-3 py-2 text-12px font-500 text-white transition-all hover:brightness-110"
+              onClick={() => onHandleApproval?.('approve')}
+              type="button"
+            >
+              允许
+            </button>
+          </div>
+        </div>
+      ) : null}
       {hasShellDetails ? (
         <div className="mt-2 rounded-xl border border-[rgba(15,23,42,0.06)] bg-[#f4f4f5] p-3">
           {event.input ? (
@@ -509,7 +537,7 @@ function MessageEventCard({
           ) : null}
         </div>
       ) : null}
-      {(!isShellLog || event.error) && (event.input || event.output || event.error) && (
+      {!isApproval && (!isShellLog || event.error) && (event.input || event.output || event.error) && (
         <details className="mt-1.5 group" open={!isShellLog && event.status === 'error'}>
           <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-55">显示详细信息</summary>
           <div className="mt-2 flex flex-col gap-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3">
@@ -598,10 +626,14 @@ function CapabilitySnapshotCard({
 function CapabilityPanel({
   items,
   snapshot,
+  collapsedGroups,
+  onToggleGroup,
   onSetCapabilityOverride,
 }: {
   items: CapabilityPanelItem[]
   snapshot?: CapabilityUsageSnapshot
+  collapsedGroups: Set<'skill' | 'plugin' | 'mcp'>
+  onToggleGroup: (group: 'skill' | 'plugin' | 'mcp') => void
   onSetCapabilityOverride: (
     kind: 'skills' | 'plugins' | 'mcp',
     id: string,
@@ -646,17 +678,25 @@ function CapabilityPanel({
       <div className="max-h-[420px] overflow-y-auto custom-scrollbar p-2">
         {sections.map(section => {
           const sectionItems = items.filter(item => item.kind === section.key)
+          const isCollapsed = collapsedGroups.has(section.key)
           return (
             <div key={section.key} className="mb-1 last:mb-0">
-              <div className="sticky top-0 z-10 mb-1 flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2">
+              <button
+                className="sticky top-0 z-10 mb-1 flex w-full items-center justify-between gap-3 rounded-lg bg-white px-3 py-2 text-left hover:bg-[rgba(15,23,42,0.03)]"
+                onClick={() => onToggleGroup(section.key)}
+                type="button"
+              >
                 <div className="text-10px font-800 uppercase tracking-widest text-[var(--text-secondary)] opacity-55">
                   {section.label}
                 </div>
-                <div className="text-11px text-[var(--text-secondary)] opacity-55">
-                  {sectionItems.filter(item => item.effectiveEnabled).length}/{sectionItems.length} 生效
+                <div className="flex items-center gap-2 text-11px text-[var(--text-secondary)] opacity-55">
+                  <span>
+                    {sectionItems.filter(item => item.effectiveEnabled).length}/{sectionItems.length} 生效
+                  </span>
+                  <ChevronDown size={12} className={`transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
                 </div>
-              </div>
-              {sectionItems.length > 0 ? (
+              </button>
+              {!isCollapsed && sectionItems.length > 0 ? (
                 <div className="flex flex-col gap-1">
                   {sectionItems.map(item => {
                     const settingKey =
@@ -680,11 +720,10 @@ function CapabilityPanel({
                                 {item.source === 'builtin' ? '内置' : '用户安装'}
                               </span>
                               <span
-                                className={`rounded-full px-2 py-0.5 text-10px ${
-                                  item.effectiveEnabled
-                                    ? 'bg-green-50 text-green-600'
-                                    : 'bg-gray-100 text-gray-500'
-                                }`}
+                                className={`rounded-full px-2 py-0.5 text-10px ${item.effectiveEnabled
+                                  ? 'bg-green-50 text-green-600'
+                                  : 'bg-gray-100 text-gray-500'
+                                  }`}
                               >
                                 {item.effectiveEnabled ? '生效中' : '未生效'}
                               </span>
@@ -699,9 +738,8 @@ function CapabilityPanel({
                             ) : null}
                           </div>
                           <label
-                            className={`relative flex shrink-0 items-center gap-3 ${
-                              item.supported ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'
-                            }`}
+                            className={`relative flex shrink-0 items-center gap-3 ${item.supported ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'
+                              }`}
                           >
                             <input
                               type="checkbox"
@@ -723,11 +761,11 @@ function CapabilityPanel({
                     )
                   })}
                 </div>
-              ) : (
+              ) : !isCollapsed ? (
                 <div className="rounded-xl px-3 py-3 text-12px text-[var(--text-secondary)] opacity-65">
                   还没有可用的 {section.label}。
                 </div>
-              )}
+              ) : null}
             </div>
           )
         })}
@@ -741,12 +779,14 @@ function AssistantMessageCard({
   onCopyText,
   onEditMessage,
   onRegenerateMessage,
+  onHandleApproval,
   onToggleActivity,
 }: {
   message: ChatMessage
   onCopyText: (value: string) => void
   onEditMessage: (messageId: string) => void
   onRegenerateMessage: (messageId: string) => void
+  onHandleApproval: (decision: 'approve' | 'deny') => void
   onToggleActivity: (messageId: string) => void
 }) {
   const activity = message.activity
@@ -814,7 +854,11 @@ function AssistantMessageCard({
                       isActive={isStreaming && item.entry.id === latestReasoningId}
                     />
                   ) : (
-                    <MessageEventCard key={item.key} event={item.event} />
+                    <MessageEventCard
+                      key={item.key}
+                      event={item.event}
+                      onHandleApproval={onHandleApproval}
+                    />
                   ),
                 )}
                 {visibleSteps.length > 0 ? (
@@ -1000,6 +1044,9 @@ export function ChatView({
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false)
   const [modelSearchTerm, setModelSearchTerm] = useState('')
   const [collapsedModelGroups, setCollapsedModelGroups] = useState<Set<string>>(new Set())
+  const [collapsedCapabilityGroups, setCollapsedCapabilityGroups] = useState<
+    Set<'skill' | 'plugin' | 'mcp'>
+  >(new Set(['skill', 'plugin', 'mcp']))
   const [lightboxAttachment, setLightboxAttachment] = useState<{
     name: string
     preview: string
@@ -1093,10 +1140,10 @@ export function ChatView({
   const hasInspectorContent = true
 
   useEffect(() => {
-    if (agentTask?.pendingApproval || workspaceError || previewError || selectedFilePath) {
+    if (workspaceError || previewError || selectedFilePath) {
       setInspectorOpen(true)
     }
-  }, [agentTask?.pendingApproval, previewError, selectedFilePath, workspaceError])
+  }, [previewError, selectedFilePath, workspaceError])
 
   const filteredModelGroups = modelGroups
     .map(group => ({
@@ -1262,6 +1309,7 @@ export function ChatView({
                       onCopyText={onCopyText}
                       onEditMessage={onEditMessage}
                       onRegenerateMessage={onRegenerateMessage}
+                      onHandleApproval={onHandleApproval}
                       onToggleActivity={onToggleMessageActivity}
                     />
                   ),
@@ -1355,12 +1403,19 @@ export function ChatView({
                     </button>
                     <div className="relative" ref={capabilityMenuRef}>
                       <button
-                        className={`flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors ${
-                          capabilityPanelOpen
-                            ? 'bg-[rgba(79,123,116,0.10)] text-[var(--accent-soft-strong)]'
-                            : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'
-                        }`}
-                        onClick={() => setCapabilityPanelOpen(current => !current)}
+                        className={`flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors ${capabilityPanelOpen
+                          ? 'bg-[rgba(79,123,116,0.10)] text-[var(--accent-soft-strong)]'
+                          : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'
+                          }`}
+                        onClick={() =>
+                          setCapabilityPanelOpen(current => {
+                            const next = !current
+                            if (next) {
+                              setCollapsedCapabilityGroups(new Set())
+                            }
+                            return next
+                          })
+                        }
                         title="项目能力"
                       >
                         <Wrench size={15} />
@@ -1376,10 +1431,19 @@ export function ChatView({
                       </button>
 
                       {capabilityPanelOpen ? (
-                        <div className="absolute bottom-[calc(100%+10px)] left-0 z-20 w-[min(440px,calc(100vw-48px))] max-w-[440px]">
+                        <div className="absolute bottom-[calc(100%+10px)] left-0 z-20 w-[min(390px,calc(100vw-48px))] max-w-[390px]">
                           <CapabilityPanel
                             items={capabilityItems}
                             snapshot={capabilitySnapshot}
+                            collapsedGroups={collapsedCapabilityGroups}
+                            onToggleGroup={group =>
+                              setCollapsedCapabilityGroups(current => {
+                                const next = new Set(current)
+                                if (next.has(group)) next.delete(group)
+                                else next.add(group)
+                                return next
+                              })
+                            }
                             onSetCapabilityOverride={onSetCapabilityOverride}
                           />
                         </div>
@@ -1435,7 +1499,15 @@ export function ChatView({
                       <button
                         className="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-12px text-[var(--text-secondary)] transition-colors group"
                         onClick={() => {
-                          setModelMenuOpen(current => !current)
+                          setModelMenuOpen(current => {
+                            const next = !current
+                            if (next) {
+                              setCollapsedModelGroups(
+                                new Set(modelGroups.map(group => group.profileId)),
+                              )
+                            }
+                            return next
+                          })
                           setModelSearchTerm('')
                         }}
                         title="切换模型"
@@ -1591,53 +1663,6 @@ export function ChatView({
                 maxWidth: inspectorWidth,
               }}
             >
-              {agentTask?.pendingApproval ? (
-                <div className="p-4 bg-white border border-amber-200 rounded-xl shadow-sm">
-                  <div className="text-12px font-600 text-amber-600 uppercase tracking-wider mb-2">待执行审批</div>
-                  <div className="flex-between mb-3">
-                    <strong className="text-14px">{agentTask.pendingApproval.toolName}</strong>
-                    <span className="text-10px px-2 py-0.5 bg-amber-50 text-amber-600 rounded-full border border-amber-100">{agentTask.pendingApproval.category}</span>
-                  </div>
-                  <p className="text-13px text-[var(--text-secondary)] mb-4">{agentTask.pendingApproval.summary}</p>
-                  {agentTask.pendingApproval.input && (
-                    <pre className="text-11px bg-gray-50 p-3 rounded-lg overflow-x-auto mb-4 border border-gray-100">{agentTask.pendingApproval.input}</pre>
-                  )}
-                  <div className="grid grid-cols-2 gap-3">
-                    <button className="py-2 px-3 text-13px font-500 rounded-lg bg-gray-100 hover:bg-gray-200 transition-colors" onClick={() => onHandleApproval('deny')}>拒绝</button>
-                    <button className="py-2 px-3 text-13px font-500 rounded-lg bg-[var(--accent-soft-strong)] text-white hover:brightness-110 transition-all" onClick={() => onHandleApproval('approve')}>允许</button>
-                  </div>
-                </div>
-              ) : null}
-
-              {(displayedToolEvents.length > 0 || displayedTaskTree.length > 0) && isRunning && (
-                <div className="flex flex-col gap-4">
-                  <div className="text-12px font-600 text-[var(--text-secondary)] opacity-50 uppercase tracking-wider">执行详情</div>
-                  <div className="flex flex-col gap-3">
-                    {displayedToolEvents.map(event => (
-                      <MessageEventCard
-                        key={event.id}
-                        event={{
-                          id: event.id,
-                          kind: event.source === 'plugin' ? 'skill' : event.source === 'subagent' ? 'subagent' : event.name.toLowerCase().includes('shell') ? 'shell' : 'tool',
-                          title: presentToolEventTitle(event),
-                          summary: event.summary,
-                          source: event.source,
-                          status:
-                            event.status === 'running'
-                              ? 'running'
-                              : event.status === 'error'
-                                ? 'error'
-                                : 'success',
-                          input: event.input,
-                          output: event.output,
-                          error: event.error,
-                        }}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-
               <WorkspaceExplorer
                 rootPath={workspaceRootPath}
                 tree={workspaceTree}

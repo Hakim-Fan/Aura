@@ -29,6 +29,18 @@ async function walkDirectory(dirPath, maxDepth, currentDepth = 0) {
   return lines
 }
 
+function shouldSkipSearchEntry(name) {
+  return (
+    name === '.git' ||
+    name === 'node_modules' ||
+    name === 'dist' ||
+    name === 'build' ||
+    name === 'target' ||
+    name === '.next' ||
+    name === '.turbo'
+  )
+}
+
 async function runShell(command, cwd, timeoutMs = 60_000) {
   return runShellStreaming(command, cwd, timeoutMs)
 }
@@ -158,6 +170,87 @@ function summarizeBinaryFile(target, buffer) {
   return details.join('\n')
 }
 
+async function collectSearchMatches(rootPath, query, baseCwd, matches = []) {
+  const entries = await fs.readdir(rootPath, { withFileTypes: true })
+
+  for (const entry of entries) {
+    if (shouldSkipSearchEntry(entry.name)) {
+      continue
+    }
+
+    const entryPath = path.join(rootPath, entry.name)
+    if (entry.isDirectory()) {
+      await collectSearchMatches(entryPath, query, baseCwd, matches)
+      continue
+    }
+
+    if (!entry.isFile()) {
+      continue
+    }
+
+    let content
+    try {
+      content = await fs.readFile(entryPath)
+    } catch {
+      continue
+    }
+
+    if (detectBinary(content)) {
+      continue
+    }
+
+    const text = content.toString('utf8')
+    const lines = text.split(/\r?\n/u)
+    for (let index = 0; index < lines.length; index += 1) {
+      if (!lines[index].includes(query)) {
+        continue
+      }
+      matches.push(
+        `${path.relative(baseCwd, entryPath) || path.basename(entryPath)}:${index + 1}:${lines[index]}`,
+      )
+      if (matches.length >= 200) {
+        return matches
+      }
+    }
+  }
+
+  return matches
+}
+
+async function searchWorkspace(query, target, cwd) {
+  try {
+    const { stdout } = await execFileAsync(
+      'rg',
+      [
+        '-n',
+        '--hidden',
+        '--glob',
+        '!node_modules',
+        '--glob',
+        '!.git',
+        query,
+        target,
+      ],
+      {
+        cwd,
+        maxBuffer: 1024 * 1024,
+      },
+    )
+    return truncate(stdout || 'No matches found')
+  } catch (error) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      const matches = await collectSearchMatches(target, query, cwd)
+      return truncate(matches.join('\n') || 'No matches found')
+    }
+    throw error
+  }
+}
+
 export function createBuiltinTools(context) {
   return [
     {
@@ -254,24 +347,7 @@ export function createBuiltinTools(context) {
       },
       async run(args) {
         const target = resolveWorkspacePath(context.cwd, args.path || '.')
-        const { stdout } = await execFileAsync(
-          'rg',
-          [
-            '-n',
-            '--hidden',
-            '--glob',
-            '!node_modules',
-            '--glob',
-            '!.git',
-            args.query,
-            target,
-          ],
-          {
-            cwd: context.cwd,
-            maxBuffer: 1024 * 1024,
-          },
-        )
-        return truncate(stdout || 'No matches found')
+        return searchWorkspace(args.query, target, context.cwd)
       },
     },
     {

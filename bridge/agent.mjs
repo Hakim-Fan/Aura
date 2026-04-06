@@ -286,15 +286,15 @@ export async function runAgent(request) {
     context,
   )
   const mcp = await connectMcpTools(capabilities?.mcpServers || settings.mcpServers || [])
+  const allTools = [
+    ...builtinTools,
+    ...advancedTools,
+    ...pluginTools,
+    ...mcp.tools,
+  ]
+  const systemPrompt = buildSystemPrompt(settings, skillPrompt)
 
   try {
-    const allTools = [
-      ...builtinTools,
-      ...advancedTools,
-      ...pluginTools,
-      ...mcp.tools,
-    ]
-    const systemPrompt = buildSystemPrompt(settings, skillPrompt)
     if (settings.provider === 'google') {
       let result = await runGoogleAgent({
         settings,
@@ -399,6 +399,49 @@ export async function runAgent(request) {
     throw new Error(`Unsupported provider: ${settings.provider}`)
   } catch (error) {
     const normalized = normalizeAgentError(error)
+
+    if (normalized.source === 'provider' && toolEvents.length > 0) {
+      try {
+        const recoveredMessage =
+          settings.provider === 'google'
+            ? await finalizeGoogleAnswer({
+                settings,
+                systemPrompt,
+                messages,
+                toolEvents,
+                reasoningText: '',
+                draftMessage: '',
+              })
+            : await finalizeOpenAiCompatibleAnswer({
+                settings,
+                systemPrompt,
+                messages,
+                toolEvents,
+                reasoningText: '',
+                draftMessage: '',
+              })
+
+        if (recoveredMessage.trim()) {
+          const summaryReasoning = summarizeReasoning(messages, toolEvents, recoveredMessage)
+          hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
+            blockId: summaryReasoning[0].id,
+            kind: summaryReasoning[0].kind,
+          })
+          taskTracker.completeTask(currentTaskId, '生成最终回答')
+          return {
+            message: recoveredMessage,
+            toolEvents,
+            reasoning: summaryReasoning,
+            usage: undefined,
+            status: 'completed',
+            taskTree: taskTracker.getTree(),
+          }
+        }
+      } catch {
+        // Recovery finalization is best-effort only. Preserve the original failure if it also fails.
+      }
+    }
+
     taskTracker.setStatus(currentTaskId, 'failed', normalized.message)
     const enriched = new Error(normalized.message)
     enriched.code = normalized.code
