@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { TrayIcon } from '@tauri-apps/api/tray'
+import { Menu, MenuItem, Submenu } from '@tauri-apps/api/menu'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { AppSidebar } from './components/AppSidebar'
 import { abortAgentTask, getAgentTask, respondToApproval, startAgentTask } from './lib/agent'
@@ -604,6 +608,111 @@ export function MainWindowApp() {
   useEffect(() => {
     localStorage.setItem(INSPECTOR_WIDTH_KEY, String(inspectorWidth))
   }, [inspectorWidth])
+
+  useEffect(() => {
+    if (!storageReady) return
+
+    let cancelled = false;
+    let currentMenu: Menu | null = null;
+
+    async function updateTray() {
+      try {
+        const historyItems = await Promise.all(
+          sessions.slice(0, 10).map(s =>
+            MenuItem.new({
+              text: s.title || '新会话',
+              action: async () => {
+                const win = await getCurrentWindow()
+                await win.show()
+                await win.setFocus()
+                setActiveSessionId(s.id)
+              },
+            })
+          )
+        )
+
+        const historyMenu = await Submenu.new({
+          text: '会话历史',
+          items: [
+            ...historyItems,
+            await MenuItem.new({
+              text: '更多...',
+              action: async () => {
+                const win = await getCurrentWindow()
+                await win.show()
+                await win.setFocus()
+              },
+            }),
+          ],
+        })
+
+        const menu = await Menu.new({
+          items: [
+            await MenuItem.new({
+              text: '显示 Aura',
+              action: async () => {
+                const win = await getCurrentWindow()
+                await win.show()
+                await win.setFocus()
+              },
+            }),
+            await MenuItem.new({
+              text: '快速开始',
+              action: async () => {
+                const win = await getCurrentWindow()
+                await win.show()
+                await win.setFocus()
+                const newSess = createSession(settings)
+                setSessions(cur => [newSess, ...cur])
+                setActiveSessionId(newSess.id)
+              },
+            }),
+            historyMenu,
+            await MenuItem.new({
+              text: '设置',
+              action: async () => {
+                await openSettingsWindow()
+              },
+            }),
+            await MenuItem.new({
+              text: '退出 Aura',
+              action: async () => {
+                await invoke('quit_app')
+              },
+            }),
+          ],
+        })
+
+        if (cancelled) return
+        currentMenu = menu
+
+        const existingTray = await TrayIcon.getById('main-tray')
+        if (existingTray) {
+          await existingTray.setMenu(menu)
+        } else {
+          await TrayIcon.new({
+            id: 'main-tray',
+            menu,
+            action: async (event) => {
+              // optional left click action on tray itself could toggle window
+            }
+          })
+        }
+      } catch (err) {
+        console.error('Failed to update Tray menu:', err)
+      }
+    }
+
+    updateTray()
+
+    return () => {
+      cancelled = true
+      // Tauri 2 beta doesn't strictly require menu closing in garbage collected envs, but good practice.
+      if (currentMenu && typeof currentMenu.close === 'function') {
+        currentMenu.close().catch(console.error)
+      }
+    }
+  }, [sessions, settings, storageReady])
 
   useEffect(() => {
     let unlisten: (() => void) | undefined

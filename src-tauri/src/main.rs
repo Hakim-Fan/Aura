@@ -1370,36 +1370,37 @@ fn create_session_workspace<R: Runtime>(
 }
 
 #[tauri::command]
-fn import_attachment_from_path(workspace_path: String, source_path: String) -> Result<String, String> {
-    let source = PathBuf::from(&source_path);
-    if !source.exists() {
-        return Err(format!("Attachment does not exist: {}", source.display()));
-    }
-
-    let file_name = source
+async fn import_attachment_from_path(
+    workspace_dir: String,
+    file_path: String,
+) -> Result<String, String> {
+    let source_path = PathBuf::from(&file_path);
+    let file_name = source_path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or("attachment");
-    let destination = allocate_attachment_path(&workspace_path, file_name)?;
-    fs::copy(&source, &destination).map_err(|error| {
+        .ok_or_else(|| "Invalid file path.".to_string())?;
+
+    let destination = allocate_attachment_path(&workspace_dir, file_name)?;
+    fs::copy(&source_path, &destination).map_err(|error| {
         format!(
-            "Failed to copy attachment {} into workspace: {error}",
-            source.display()
+            "Failed to copy attachment into workspace {}: {error}",
+            destination.display()
         )
     })?;
+
     Ok(destination.display().to_string())
 }
 
 #[tauri::command]
-fn write_attachment_bytes(
-    workspace_path: String,
+async fn write_attachment_bytes(
+    workspace_dir: String,
     file_name: String,
     bytes_base64: String,
 ) -> Result<String, String> {
     let bytes = STANDARD
         .decode(bytes_base64)
         .map_err(|error| format!("Failed to decode attachment bytes: {error}"))?;
-    let destination = allocate_attachment_path(&workspace_path, &file_name)?;
+    let destination = allocate_attachment_path(&workspace_dir, &file_name)?;
     fs::write(&destination, bytes).map_err(|error| {
         format!(
             "Failed to write attachment into workspace {}: {error}",
@@ -1409,10 +1410,30 @@ fn write_attachment_bytes(
     Ok(destination.display().to_string())
 }
 
+#[tauri::command]
+fn quit_app(app_handle: tauri::AppHandle) {
+    app_handle.exit(0);
+}
+
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            if let Some(icon) = app.default_window_icon() {
+                let _ = tauri::tray::TrayIconBuilder::with_id("main-tray")
+                    .icon(icon.clone())
+                    .build(app);
+            }
+            Ok(())
+        })
         .manage(AgentTaskStore::default())
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+            _ => {}
+        })
         .invoke_handler(tauri::generate_handler![
             start_agent_task,
             get_agent_task,
@@ -1429,7 +1450,8 @@ fn main() {
             open_path_in_default_app,
             create_session_workspace,
             import_attachment_from_path,
-            write_attachment_bytes
+            write_attachment_bytes,
+            quit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running Aura desktop app")
