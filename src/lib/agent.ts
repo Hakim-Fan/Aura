@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  ResolvedAgentCapabilities,
   AgentTaskSnapshot,
   ChatMessage,
   ChatRole,
@@ -9,9 +10,11 @@ import type {
 export async function startAgentTask(
   settings: AgentSettings,
   messages: ChatMessage[],
+  capabilities?: ResolvedAgentCapabilities,
 ): Promise<string> {
   const payload = {
     settings,
+    capabilities,
     messages: messages.map(message => ({
       role: message.role as ChatRole,
       content: message.content,

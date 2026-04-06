@@ -87,6 +87,64 @@ export type MessageUsage = {
   contextWindow?: number
 }
 
+export type CapabilityKind = 'skill' | 'plugin' | 'mcp'
+
+export type CapabilityOverrideMode = 'inherit' | 'on' | 'off'
+
+export type CapabilityUsageEntry = {
+  id: string
+  name: string
+}
+
+export type CapabilityUsageSnapshot = {
+  workspaceRoot: string
+  resolvedAt: number
+  skills: CapabilityUsageEntry[]
+  plugins: CapabilityUsageEntry[]
+  mcpServers: CapabilityUsageEntry[]
+}
+
+export type ResolvedSkillCapability = CapabilityUsageEntry & {
+  promptPath?: string
+}
+
+export type ResolvedPluginCapability = CapabilityUsageEntry & {
+  entryPath?: string
+}
+
+export type ResolvedAgentCapabilities = {
+  workspaceRoot: string
+  resolvedAt: number
+  skills: ResolvedSkillCapability[]
+  plugins: ResolvedPluginCapability[]
+  mcpServers: McpServerConfig[]
+}
+
+export type WorkspaceCapabilityOverrides = {
+  skills: Record<string, CapabilityOverrideMode>
+  plugins: Record<string, CapabilityOverrideMode>
+  mcp: Record<string, CapabilityOverrideMode>
+}
+
+export type ProjectCapabilityOverrides = Record<string, WorkspaceCapabilityOverrides>
+
+export type CapabilityPanelItem = {
+  id: string
+  kind: CapabilityKind
+  name: string
+  description: string
+  source: 'builtin' | 'user'
+  installed: boolean
+  supported: boolean
+  supportMessage?: string
+  path?: string
+  entryPath?: string
+  readonly: boolean
+  globalEnabled: boolean
+  projectOverride: CapabilityOverrideMode
+  effectiveEnabled: boolean
+}
+
 export type ChatMessage = {
   id: string
   role: ChatRole
@@ -97,6 +155,7 @@ export type ChatMessage = {
   attachments?: MessageAttachment[]
   reasoning?: MessageReasoning[]
   usage?: MessageUsage
+  capabilitySnapshot?: CapabilityUsageSnapshot
   activity?: MessageActivity
   events?: MessageEvent[]
   steps?: TaskNode[]

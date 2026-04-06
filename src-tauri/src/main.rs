@@ -340,12 +340,11 @@ fn scan_aura_assets<R: Runtime>(app: &tauri::AppHandle<R>, dir: &Path, kind: &st
             }
         } else {
             if path.is_file() {
-                if path
+                let extension = path
                     .extension()
                     .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    != "mjs"
-                {
+                    .unwrap_or_default();
+                if extension != "mjs" && extension != "js" {
                     continue;
                 }
 
@@ -670,11 +669,125 @@ fn resolve_bridge_script_path<R: Runtime>(
     Err("Unable to locate the Node bridge script.".into())
 }
 
-fn resolve_bridge_cwd() -> Result<PathBuf, String> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .canonicalize()
-        .map_err(|error| format!("Failed to resolve desktop app root: {error}"))
+fn resolve_bridge_cwd<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    let dev_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    if dev_root.exists() {
+        return dev_root
+            .canonicalize()
+            .map_err(|error| format!("Failed to resolve desktop app root in dev: {error}"));
+    }
+
+    app.path()
+        .resource_dir()
+        .map_err(|error| format!("Failed to resolve resource directory for bridge CWD: {error}"))
+}
+
+/// Resolve the full path to the `node` binary.
+/// When launched from Finder/Launchpad, macOS gives a minimal PATH that
+/// doesn't include Homebrew, nvm, fnm, volta, etc. We probe common locations.
+fn resolve_node_binary() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
+    let candidates = [
+        // Homebrew Apple Silicon
+        "/opt/homebrew/bin/node",
+        // Homebrew Intel
+        "/usr/local/bin/node",
+        // System
+        "/usr/bin/node",
+    ];
+
+    for candidate in &candidates {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+
+    // nvm
+    let nvm_dir = format!("{}/.nvm/versions/node", home);
+    if let Ok(entries) = fs::read_dir(&nvm_dir) {
+        let mut versions: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.join("bin/node").exists())
+            .collect();
+        versions.sort();
+        if let Some(latest) = versions.last() {
+            return latest.join("bin/node").display().to_string();
+        }
+    }
+
+    // fnm
+    let fnm_dir = format!("{}/.local/share/fnm/node-versions", home);
+    if let Ok(entries) = fs::read_dir(&fnm_dir) {
+        let mut versions: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().join("installation"))
+            .filter(|p| p.join("bin/node").exists())
+            .collect();
+        versions.sort();
+        if let Some(latest) = versions.last() {
+            return latest.join("bin/node").display().to_string();
+        }
+    }
+
+    // volta
+    let volta_node = format!("{}/.volta/bin/node", home);
+    if Path::new(&volta_node).exists() {
+        return volta_node;
+    }
+
+    // Fallback — hope it's on PATH
+    "node".to_string()
+}
+
+/// Build an augmented PATH that includes common Node.js install locations.
+/// This ensures child processes can also find npx, npm, etc.
+fn build_augmented_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| String::new());
+    let current_path = std::env::var("PATH").unwrap_or_else(|_| String::new());
+
+    let mut extra_dirs: Vec<String> = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
+
+    // Add nvm current bin if exists
+    let nvm_dir = format!("{}/.nvm/versions/node", home);
+    if let Ok(entries) = fs::read_dir(&nvm_dir) {
+        let mut versions: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.join("bin/node").exists())
+            .collect();
+        versions.sort();
+        if let Some(latest) = versions.last() {
+            extra_dirs.push(latest.join("bin").display().to_string());
+        }
+    }
+
+    // Add fnm
+    let fnm_dir = format!("{}/.local/share/fnm/node-versions", home);
+    if let Ok(entries) = fs::read_dir(&fnm_dir) {
+        let mut versions: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().join("installation"))
+            .filter(|p| p.join("bin/node").exists())
+            .collect();
+        versions.sort();
+        if let Some(latest) = versions.last() {
+            extra_dirs.push(latest.join("bin").display().to_string());
+        }
+    }
+
+    // Add volta
+    let volta_bin = format!("{}/.volta/bin", home);
+    if Path::new(&volta_bin).exists() {
+        extra_dirs.push(volta_bin);
+    }
+
+    // Merge: extra dirs first, then existing PATH
+    extra_dirs.push(current_path);
+    extra_dirs.join(":")
 }
 
 fn with_snapshot<F>(snapshot: &Arc<Mutex<AgentTaskSnapshot>>, mutator: F)
@@ -776,17 +889,20 @@ fn spawn_agent_task<R: Runtime>(
     payload: serde_json::Value,
 ) -> Result<String, String> {
     let bridge_path = resolve_bridge_script_path(&app, "ipc.mjs")?;
-    let bridge_cwd = resolve_bridge_cwd()?;
+    let bridge_cwd = resolve_bridge_cwd(&app)?;
 
-    let mut child = Command::new("node")
+    let node_bin = resolve_node_binary();
+    let augmented_path = build_augmented_path();
+    let mut child = Command::new(&node_bin)
         .arg(bridge_path)
         .current_dir(bridge_cwd)
+        .env("PATH", &augmented_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| {
-            format!("Failed to spawn Node bridge. Is node installed and on PATH?\n\n{error}")
+            format!("Failed to spawn Node bridge. Is node installed?\nTried: {node_bin}\n\n{error}")
         })?;
 
     let stdin = child
@@ -984,14 +1100,17 @@ fn run_provider_action<R: Runtime>(
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let script_path = resolve_bridge_script_path(&app, "providerActions.mjs")?;
-    let bridge_cwd = resolve_bridge_cwd()?;
-    let output = Command::new("node")
+    let bridge_cwd = resolve_bridge_cwd(&app)?;
+    let node_bin = resolve_node_binary();
+    let augmented_path = build_augmented_path();
+    let output = Command::new(&node_bin)
         .arg(script_path)
         .arg(
             serde_json::to_string(&payload)
                 .map_err(|error| format!("Failed to serialize provider action payload: {error}"))?,
         )
         .current_dir(bridge_cwd)
+        .env("PATH", &augmented_path)
         .output()
         .map_err(|error| format!("Failed to run provider action bridge: {error}"))?;
 
@@ -1014,15 +1133,18 @@ async fn run_mcp_action<R: Runtime>(
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let script_path = resolve_bridge_script_path(&app, "mcpActions.mjs")?;
-    let bridge_cwd = resolve_bridge_cwd()?;
+    let bridge_cwd = resolve_bridge_cwd(&app)?;
     let payload_json = serde_json::to_string(&payload)
         .map_err(|error| format!("Failed to serialize MCP action payload: {error}"))?;
 
     let output = tauri::async_runtime::spawn_blocking(move || {
-        Command::new("node")
+        let node_bin = resolve_node_binary();
+        let augmented_path = build_augmented_path();
+        Command::new(&node_bin)
             .arg(script_path)
             .arg(payload_json)
             .current_dir(bridge_cwd)
+            .env("PATH", &augmented_path)
             .output()
     })
     .await

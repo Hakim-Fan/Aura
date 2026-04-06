@@ -7,12 +7,20 @@ import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { AppSidebar } from './components/AppSidebar'
 import { abortAgentTask, getAgentTask, respondToApproval, startAgentTask } from './lib/agent'
+import { type AuraHomeState } from './lib/aura'
+import { builtinPlugins, builtinSkills } from './catalog'
 import {
+  getWorkspaceCapabilityOverrides,
   hydrateStorageFromAuraHome,
+  hydrateProjectCapabilityOverridesFromAuraHome,
   loadSessions,
   loadSettings,
+  loadProjectCapabilityOverrides,
+  resolveCapabilitiesForWorkspace,
   saveSessions,
   saveSettings,
+  saveProjectCapabilityOverrides,
+  updateWorkspaceCapabilityOverride,
 } from './lib/storage'
 import { openSettingsWindow } from './lib/windows'
 import {
@@ -27,11 +35,14 @@ import {
 import type {
   AgentSettings,
   AgentTaskSnapshot,
+  CapabilityOverrideMode,
+  CapabilityPanelItem,
   ChatContentPart,
   ChatMessage,
   MessageAttachment,
   MessageActivity,
   MessageEvent,
+  ProjectCapabilityOverrides,
   ProviderProfile,
   ReasoningEffort,
   Session,
@@ -499,9 +510,92 @@ function loadPaneWidth(storageKey: string, fallback: number, min: number, max: n
   return Math.max(min, Math.min(max, parsed))
 }
 
+const builtinSkillIds = new Set(builtinSkills.map(skill => skill.id))
+const builtinPluginIds = new Set(builtinPlugins.map(plugin => plugin.id))
+
+function buildCapabilityPanelItems(
+  aura: AuraHomeState | null,
+  settings: AgentSettings,
+  workspaceRoot: string,
+  overrides: ProjectCapabilityOverrides,
+): CapabilityPanelItem[] {
+  const workspaceOverrides = getWorkspaceCapabilityOverrides(overrides, workspaceRoot)
+
+  const skillItems = (aura?.skills || []).map(skill => ({
+    id: skill.id,
+    kind: 'skill' as const,
+    name: skill.name,
+    description: skill.description,
+    source: builtinSkillIds.has(skill.id) ? ('builtin' as const) : ('user' as const),
+    installed: true,
+    supported: skill.supported,
+    supportMessage: skill.supportMessage || undefined,
+    path: skill.path || undefined,
+    entryPath: skill.entryPath || undefined,
+    readonly: skill.readonly,
+    globalEnabled: settings.enabledSkillIds.includes(skill.id),
+    projectOverride: workspaceOverrides.skills[skill.id] || 'inherit',
+    effectiveEnabled:
+      workspaceOverrides.skills[skill.id] === 'on'
+        ? true
+        : workspaceOverrides.skills[skill.id] === 'off'
+          ? false
+          : settings.enabledSkillIds.includes(skill.id),
+  }))
+
+  const pluginItems = (aura?.plugins || []).map(plugin => ({
+    id: plugin.id,
+    kind: 'plugin' as const,
+    name: plugin.name,
+    description: plugin.description,
+    source: builtinPluginIds.has(plugin.id) ? ('builtin' as const) : ('user' as const),
+    installed: true,
+    supported: plugin.supported,
+    supportMessage: plugin.supportMessage || undefined,
+    path: plugin.path || undefined,
+    entryPath: plugin.entryPath || undefined,
+    readonly: plugin.readonly,
+    globalEnabled: settings.enabledPluginIds.includes(plugin.id),
+    projectOverride: workspaceOverrides.plugins[plugin.id] || 'inherit',
+    effectiveEnabled:
+      workspaceOverrides.plugins[plugin.id] === 'on'
+        ? true
+        : workspaceOverrides.plugins[plugin.id] === 'off'
+          ? false
+          : settings.enabledPluginIds.includes(plugin.id),
+  }))
+
+  const mcpItems = settings.mcpServers.map(server => ({
+    id: server.id,
+    kind: 'mcp' as const,
+    name: server.name,
+    description: server.description || server.command || 'MCP server',
+    source: 'user' as const,
+    installed: true,
+    supported: Boolean(server.command.trim()),
+    supportMessage: server.command.trim() ? undefined : '尚未填写 MCP 启动命令。',
+    path: server.cwd || undefined,
+    entryPath: undefined,
+    readonly: Boolean(server.isDefault),
+    globalEnabled: server.enabled,
+    projectOverride: workspaceOverrides.mcp[server.id] || 'inherit',
+    effectiveEnabled:
+      workspaceOverrides.mcp[server.id] === 'on'
+        ? true
+        : workspaceOverrides.mcp[server.id] === 'off'
+          ? false
+          : server.enabled,
+  }))
+
+  return [...skillItems, ...pluginItems, ...mcpItems]
+}
+
 export function MainWindowApp() {
   const [settings, setSettings] = useState<AgentSettings>(() => loadSettings())
   const [sessions, setSessions] = useState<Session[]>(() => loadSessions())
+  const [auraHome, setAuraHome] = useState<AuraHomeState | null>(null)
+  const [projectCapabilityOverrides, setProjectCapabilityOverrides] =
+    useState<ProjectCapabilityOverrides>(() => loadProjectCapabilityOverrides())
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sessionFilter, setSessionFilter] = useState('')
   const [draft, setDraft] = useState('')
@@ -532,12 +626,17 @@ export function MainWindowApp() {
 
     void (async () => {
       try {
-        const hydrated = await hydrateStorageFromAuraHome()
+        const [hydrated, hydratedProjectOverrides] = await Promise.all([
+          hydrateStorageFromAuraHome(),
+          hydrateProjectCapabilityOverridesFromAuraHome(),
+        ])
         if (cancelled) {
           return
         }
+        setAuraHome(hydrated.aura)
         setSettings(hydrated.settings)
         setSessions(hydrated.sessions)
+        setProjectCapabilityOverrides(hydratedProjectOverrides)
       } catch (caught) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : '初始化 Aura 目录失败。')
@@ -586,6 +685,8 @@ export function MainWindowApp() {
 
   const activeWorkspacePath =
     activeSession?.workspacePath || activeSession?.workspaceRoot || ''
+  const activeProjectWorkspaceRoot =
+    activeSession?.workspaceRoot || settings.cwd || ''
   const activeProviderProfile = getSessionProviderProfile(settings, activeSession)
   const effectiveProvider = activeProviderProfile?.provider || settings.provider
   const effectiveModel =
@@ -593,6 +694,27 @@ export function MainWindowApp() {
     resolvePreferredModelId(activeProviderProfile, settings.model) ||
     settings.model
   const enabledModelGroups = collectEnabledModelsByProfile(settings)
+  const currentCapabilityItems = useMemo(
+    () =>
+      buildCapabilityPanelItems(
+        auraHome,
+        settings,
+        activeProjectWorkspaceRoot,
+        projectCapabilityOverrides,
+      ),
+    [activeProjectWorkspaceRoot, auraHome, projectCapabilityOverrides, settings],
+  )
+  const currentResolvedCapabilityUsage = useMemo(() => {
+    if (!auraHome || !activeProjectWorkspaceRoot.trim()) {
+      return undefined
+    }
+    return resolveCapabilitiesForWorkspace({
+      workspaceRoot: activeProjectWorkspaceRoot,
+      settings,
+      aura: auraHome,
+      overrides: projectCapabilityOverrides,
+    }).usage
+  }, [activeProjectWorkspaceRoot, auraHome, projectCapabilityOverrides, settings])
 
   useEffect(() => {
     if (!storageReady) {
@@ -719,8 +841,20 @@ export function MainWindowApp() {
 
     void (async () => {
       unlisten = await listen('settings:updated', () => {
-        const next = loadSettings()
-        setSettings(next)
+        void (async () => {
+          try {
+            const [hydrated, hydratedProjectOverrides] = await Promise.all([
+              hydrateStorageFromAuraHome(),
+              hydrateProjectCapabilityOverridesFromAuraHome(),
+            ])
+            setAuraHome(hydrated.aura)
+            setSettings(hydrated.settings)
+            setProjectCapabilityOverrides(hydratedProjectOverrides)
+          } catch {
+            setSettings(loadSettings())
+            setProjectCapabilityOverrides(loadProjectCapabilityOverrides())
+          }
+        })()
       })
     })()
 
@@ -1217,7 +1351,34 @@ export function MainWindowApp() {
     if ((!content && draftAttachments.length === 0) || isRunning || !activeSession) {
       return
     }
-    if (!settings.apiKey.trim()) {
+
+    let latestSettings = loadSettings()
+    let latestAuraHome = auraHome
+    let latestProjectOverrides = loadProjectCapabilityOverrides()
+
+    try {
+      const [hydrated, hydratedProjectOverrides] = await Promise.all([
+        hydrateStorageFromAuraHome(),
+        hydrateProjectCapabilityOverridesFromAuraHome(),
+      ])
+      latestSettings = hydrated.settings
+      latestAuraHome = hydrated.aura
+      latestProjectOverrides = hydratedProjectOverrides
+      setSettings(hydrated.settings)
+      setAuraHome(hydrated.aura)
+      setProjectCapabilityOverrides(hydratedProjectOverrides)
+    } catch {
+      // Fall back to the latest cached state if hydration is temporarily unavailable.
+    }
+
+    const latestProviderProfile = getSessionProviderProfile(latestSettings, activeSession)
+    const latestEffectiveProvider = latestProviderProfile?.provider || latestSettings.provider
+    const latestEffectiveModel =
+      activeSession.model ||
+      resolvePreferredModelId(latestProviderProfile, latestSettings.model) ||
+      latestSettings.model
+
+    if (!latestProviderProfile?.apiKey.trim() && !latestSettings.apiKey.trim()) {
       setError('请先在设置窗口里完成 Provider 配置。')
       await openSettingsWindow('providers').catch(caught => {
         setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')
@@ -1279,15 +1440,44 @@ export function MainWindowApp() {
       createdAt: Date.now(),
       attachments: materializedAttachments,
     }
-    const pendingAssistantMessage = createPendingAssistantMessage()
+    const projectWorkspaceRoot =
+      activeSession.workspaceRoot || latestSettings.cwd || workspacePath
+    const resolvedCapabilities = latestAuraHome
+      ? resolveCapabilitiesForWorkspace({
+        workspaceRoot: projectWorkspaceRoot,
+        settings: latestSettings,
+        aura: latestAuraHome,
+        overrides: latestProjectOverrides,
+      })
+      : {
+        runtime: {
+          workspaceRoot: projectWorkspaceRoot,
+          resolvedAt: Date.now(),
+          skills: [],
+          plugins: [],
+          mcpServers: [],
+        },
+        usage: {
+          workspaceRoot: projectWorkspaceRoot,
+          resolvedAt: Date.now(),
+          skills: [],
+          plugins: [],
+          mcpServers: [],
+        },
+      }
+    const pendingAssistantMessage = {
+      ...createPendingAssistantMessage(),
+      capabilitySnapshot: resolvedCapabilities.usage,
+    }
 
     const runtimeSettings: AgentSettings = {
-      ...settings,
-      activeProviderProfileId: activeProviderProfile?.id || settings.activeProviderProfileId,
-      provider: effectiveProvider,
-      apiKey: activeProviderProfile?.apiKey || settings.apiKey,
-      baseUrl: activeProviderProfile?.baseUrl || settings.baseUrl,
-      model: effectiveModel,
+      ...latestSettings,
+      activeProviderProfileId:
+        latestProviderProfile?.id || latestSettings.activeProviderProfileId,
+      provider: latestEffectiveProvider,
+      apiKey: latestProviderProfile?.apiKey || latestSettings.apiKey,
+      baseUrl: latestProviderProfile?.baseUrl || latestSettings.baseUrl,
+      model: latestEffectiveModel,
       cwd: workspacePath,
     }
 
@@ -1296,9 +1486,9 @@ export function MainWindowApp() {
     updateSession(sessionId, session => ({
       ...session,
       title: session.messages.length === 0 ? summarizeTitle(content) : session.title,
-      providerProfileId: activeProviderProfile?.id || session.providerProfileId,
-      provider: effectiveProvider,
-      model: effectiveModel,
+      providerProfileId: latestProviderProfile?.id || session.providerProfileId,
+      provider: latestEffectiveProvider,
+      model: latestEffectiveModel,
       messages: [...nextMessages, pendingAssistantMessage],
       toolEvents: [],
       taskTree: [],
@@ -1310,7 +1500,11 @@ export function MainWindowApp() {
     setError('')
 
     try {
-      const taskId = await startAgentTask(runtimeSettings, nextMessages)
+      const taskId = await startAgentTask(
+        runtimeSettings,
+        nextMessages,
+        resolvedCapabilities.runtime,
+      )
       setRunningSessionId(sessionId)
       setRunningMessageId(pendingAssistantMessage.id)
       setAgentTask({
@@ -1493,6 +1687,27 @@ export function MainWindowApp() {
     saveSettings(nextSettings)
   }
 
+  function setProjectCapabilityOverride(
+    kind: 'skills' | 'plugins' | 'mcp',
+    id: string,
+    mode: CapabilityOverrideMode,
+  ) {
+    if (!activeProjectWorkspaceRoot.trim()) {
+      setError('当前项目尚未配置工作区，暂时无法保存项目级能力设置。')
+      return
+    }
+
+    const nextOverrides = updateWorkspaceCapabilityOverride(
+      projectCapabilityOverrides,
+      activeProjectWorkspaceRoot,
+      kind,
+      id,
+      mode,
+    )
+    setProjectCapabilityOverrides(nextOverrides)
+    saveProjectCapabilityOverrides(nextOverrides)
+  }
+
   const effectiveSettings: AgentSettings = {
     ...settings,
     activeProviderProfileId: activeProviderProfile?.id || settings.activeProviderProfileId,
@@ -1571,9 +1786,12 @@ export function MainWindowApp() {
               canChangeWorkspace={activeSession.messages.length === 0 && !isRunning}
               inspectorWidth={inspectorWidth}
               attachments={draftAttachments}
+              capabilityItems={currentCapabilityItems}
+              capabilitySnapshot={currentResolvedCapabilityUsage}
               modelGroups={enabledModelGroups}
               activeModelProfileId={activeProviderProfile?.id || ''}
               onDraftChange={setDraft}
+              onSetCapabilityOverride={setProjectCapabilityOverride}
               onSubmit={() => void submit()}
               onOpenProviders={() =>
                 void openSettingsWindow('providers').catch(caught => {

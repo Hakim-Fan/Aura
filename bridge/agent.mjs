@@ -246,7 +246,7 @@ function buildSystemPrompt(settings, skillPrompt) {
 }
 
 export async function runAgent(request) {
-  const { settings, messages, runtime = {}, hooks = {} } = request
+  const { settings, messages, runtime = {}, hooks = {}, capabilities } = request
   if (!settings?.apiKey?.trim()) {
     throw new Error('Missing API key.')
   }
@@ -263,7 +263,10 @@ export async function runAgent(request) {
   const currentTaskId = runtime.currentTaskId || taskTracker.rootId
   taskTracker.setStatus(currentTaskId, 'running')
 
-  const skillPrompt = await loadSkillPrompt(appRoot, settings.enabledSkillIds || [])
+  const skillPrompt = await loadSkillPrompt(
+    appRoot,
+    capabilities?.skills || settings.enabledSkillIds || [],
+  )
   const builtinTools = createBuiltinTools(context)
   const advancedTools = createAdvancedTools({
     appRoot,
@@ -279,10 +282,10 @@ export async function runAgent(request) {
   })
   const pluginTools = await loadPluginTools(
     appRoot,
-    settings.enabledPluginIds || [],
+    capabilities?.plugins || settings.enabledPluginIds || [],
     context,
   )
-  const mcp = await connectMcpTools(settings.mcpServers || [])
+  const mcp = await connectMcpTools(capabilities?.mcpServers || settings.mcpServers || [])
 
   try {
     const allTools = [

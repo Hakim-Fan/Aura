@@ -28,11 +28,13 @@ async function resolveAuraAssetPath(kind, id, extension) {
 }
 
 async function resolveAuraPluginModulePath(id) {
-  const directFilePath = path.join(resolveAuraHome(), 'plugins', `${id}.mjs`)
-  try {
-    await fs.access(directFilePath)
-    return directFilePath
-  } catch {}
+  for (const extension of ['mjs', 'js']) {
+    const directFilePath = path.join(resolveAuraHome(), 'plugins', `${id}.${extension}`)
+    try {
+      await fs.access(directFilePath)
+      return directFilePath
+    } catch {}
+  }
 
   const pluginDir = path.join(resolveAuraHome(), 'plugins', id)
   try {
@@ -68,19 +70,27 @@ async function resolveAuraPluginModulePath(id) {
 }
 
 async function resolveBundledPluginModulePath(appRoot, id) {
-  const filePath = path.join(appRoot, 'plugins', `${id}.mjs`)
-  try {
-    await fs.access(filePath)
-    return filePath
-  } catch {
-    return null
+  for (const extension of ['mjs', 'js']) {
+    const filePath = path.join(appRoot, 'plugins', `${id}.${extension}`)
+    try {
+      await fs.access(filePath)
+      return filePath
+    } catch {}
   }
+
+  return null
 }
 
-export async function loadSkillPrompt(appRoot, enabledSkillIds) {
+export async function loadSkillPrompt(appRoot, enabledSkills) {
   const sections = []
-  for (const skillId of enabledSkillIds) {
+  for (const entry of enabledSkills) {
+    const skillId = typeof entry === 'string' ? entry : entry?.id
+    const explicitPath = typeof entry === 'object' ? entry?.promptPath : ''
+    if (!skillId) {
+      continue
+    }
     const filePath =
+      explicitPath ||
       (await resolveAuraAssetPath('skills', skillId, 'md')) ||
       path.join(appRoot, 'skills', `${skillId}.md`)
     try {
@@ -94,11 +104,17 @@ export async function loadSkillPrompt(appRoot, enabledSkillIds) {
   return sections.join('\n\n')
 }
 
-export async function loadPluginTools(appRoot, enabledPluginIds, context) {
+export async function loadPluginTools(appRoot, enabledPlugins, context) {
   const tools = []
 
-  for (const pluginId of enabledPluginIds) {
+  for (const entry of enabledPlugins) {
+    const pluginId = typeof entry === 'string' ? entry : entry?.id
+    const explicitPath = typeof entry === 'object' ? entry?.entryPath : ''
+    if (!pluginId) {
+      continue
+    }
     const filePath =
+      explicitPath ||
       (await resolveAuraPluginModulePath(pluginId)) ||
       (await resolveBundledPluginModulePath(appRoot, pluginId))
     if (!filePath) {

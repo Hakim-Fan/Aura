@@ -39,6 +39,9 @@ import { TaskTreeView } from '../components/TaskTreeView'
 import type {
   AgentSettings,
   AgentTaskSnapshot,
+  CapabilityOverrideMode,
+  CapabilityPanelItem,
+  CapabilityUsageSnapshot,
   ChatMessage,
   MessageAttachment,
   MessageEvent,
@@ -84,9 +87,16 @@ type Props = {
     path?: string
     preview?: string
   }>
+  capabilityItems: CapabilityPanelItem[]
+  capabilitySnapshot?: CapabilityUsageSnapshot
   modelGroups: ModelGroup[]
   activeModelProfileId: string
   onDraftChange: (value: string) => void
+  onSetCapabilityOverride: (
+    kind: 'skills' | 'plugins' | 'mcp',
+    id: string,
+    mode: CapabilityOverrideMode,
+  ) => void
   onSubmit: () => void
   onOpenProviders: () => void
   onHandleApproval: (decision: 'approve' | 'deny') => void
@@ -520,6 +530,200 @@ function MessageEventCard({
   )
 }
 
+function CapabilitySnapshotCard({
+  snapshot,
+}: {
+  snapshot: CapabilityUsageSnapshot
+}) {
+  const sections = [
+    { key: 'skills', label: 'Skills', items: snapshot.skills },
+    { key: 'plugins', label: 'Plugins', items: snapshot.plugins },
+    { key: 'mcp', label: 'MCP', items: snapshot.mcpServers },
+  ]
+
+  return (
+    <details className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="rounded-full bg-[rgba(79,123,116,0.10)] px-2 py-0.5 text-9px font-700 uppercase tracking-wider text-[var(--accent-soft-strong)]">
+            能力
+          </span>
+          <span className="text-12px text-[var(--text-secondary)]">
+            {[
+              snapshot.skills.length > 0 ? `Skills ${snapshot.skills.length}` : null,
+              snapshot.plugins.length > 0 ? `Plugins ${snapshot.plugins.length}` : null,
+              snapshot.mcpServers.length > 0 ? `MCP ${snapshot.mcpServers.length}` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ') || '本轮未启用额外能力'}
+          </span>
+        </div>
+        <ChevronDown size={14} className="text-[var(--text-secondary)] opacity-60" />
+      </summary>
+      <div className="mt-3 flex flex-col gap-3">
+        {sections.map(section => (
+          <div key={section.key}>
+            <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--text-secondary)] opacity-55">
+              {section.label}
+            </div>
+            {section.items.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {section.items.map(item => (
+                  <span
+                    key={`${section.key}-${item.id}`}
+                    className="rounded-full border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1 text-11px text-[var(--text-primary)]"
+                  >
+                    {item.name}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="text-12px text-[var(--text-secondary)] opacity-60">未启用</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+function CapabilityPanel({
+  items,
+  snapshot,
+  onSetCapabilityOverride,
+}: {
+  items: CapabilityPanelItem[]
+  snapshot?: CapabilityUsageSnapshot
+  onSetCapabilityOverride: (
+    kind: 'skills' | 'plugins' | 'mcp',
+    id: string,
+    mode: CapabilityOverrideMode,
+  ) => void
+}) {
+  const sections: Array<{ key: 'skill' | 'plugin' | 'mcp'; label: string }> = [
+    { key: 'skill', label: 'Skills' },
+    { key: 'plugin', label: 'Plugins' },
+    { key: 'mcp', label: 'MCP' },
+  ]
+
+  function resolveNextOverrideMode(item: CapabilityPanelItem) {
+    const nextEffectiveEnabled = !item.effectiveEnabled
+    if (nextEffectiveEnabled === item.globalEnabled) {
+      return 'inherit' as const
+    }
+    return nextEffectiveEnabled ? ('on' as const) : ('off' as const)
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-[rgba(15,23,42,0.08)] bg-white/98 shadow-2xl shadow-[rgba(15,23,42,0.15)] backdrop-blur-xl">
+      <div className="border-b border-[rgba(15,23,42,0.05)] px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Sparkles size={14} className="text-[var(--accent-soft-strong)]" />
+              <strong className="text-14px font-700 text-[var(--text-primary)]">项目工具</strong>
+            </div>
+            <p className="mt-1 text-12px leading-relaxed text-[var(--text-secondary)]">
+              这里的开关只影响当前项目，不会修改全局默认设置。
+            </p>
+          </div>
+          {snapshot ? (
+            <div className="shrink-0 rounded-full bg-[rgba(79,123,116,0.08)] px-3 py-1 text-11px font-600 text-[var(--accent-soft-strong)]">
+              生效 {snapshot.skills.length + snapshot.plugins.length + snapshot.mcpServers.length}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="max-h-[420px] overflow-y-auto custom-scrollbar p-2">
+        {sections.map(section => {
+          const sectionItems = items.filter(item => item.kind === section.key)
+          return (
+            <div key={section.key} className="mb-1 last:mb-0">
+              <div className="sticky top-0 z-10 mb-1 flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2">
+                <div className="text-10px font-800 uppercase tracking-widest text-[var(--text-secondary)] opacity-55">
+                  {section.label}
+                </div>
+                <div className="text-11px text-[var(--text-secondary)] opacity-55">
+                  {sectionItems.filter(item => item.effectiveEnabled).length}/{sectionItems.length} 生效
+                </div>
+              </div>
+              {sectionItems.length > 0 ? (
+                <div className="flex flex-col gap-1">
+                  {sectionItems.map(item => {
+                    const settingKey =
+                      item.kind === 'skill'
+                        ? 'skills'
+                        : item.kind === 'plugin'
+                          ? 'plugins'
+                          : 'mcp'
+                    return (
+                      <div
+                        key={`${item.kind}-${item.id}`}
+                        className="rounded-xl px-3 py-3 transition-colors hover:bg-[rgba(15,23,42,0.025)]"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <strong className="text-13px text-[var(--text-primary)]">{item.name}</strong>
+                              <span className="rounded-full bg-white px-2 py-0.5 text-10px text-[var(--text-secondary)]">
+                                {item.source === 'builtin' ? '内置' : '用户安装'}
+                              </span>
+                              <span
+                                className={`rounded-full px-2 py-0.5 text-10px ${
+                                  item.effectiveEnabled
+                                    ? 'bg-green-50 text-green-600'
+                                    : 'bg-gray-100 text-gray-500'
+                                }`}
+                              >
+                                {item.effectiveEnabled ? '生效中' : '未生效'}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-12px leading-relaxed text-[var(--text-secondary)]">
+                              {item.description}
+                            </p>
+                            {item.supportMessage ? (
+                              <p className="mt-1 text-11px text-amber-600">{item.supportMessage}</p>
+                            ) : null}
+                          </div>
+                          <label
+                            className={`relative flex shrink-0 items-center gap-3 ${
+                              item.supported ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              className="peer sr-only"
+                              checked={item.effectiveEnabled}
+                              disabled={!item.supported}
+                              onChange={() =>
+                                onSetCapabilityOverride(
+                                  settingKey,
+                                  item.id,
+                                  resolveNextOverrideMode(item),
+                                )
+                              }
+                            />
+                            <div className="relative h-5 w-9 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-[var(--bg-user-bubble)] after:absolute after:top-0.5 after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-4" />
+                          </label>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-xl px-3 py-3 text-12px text-[var(--text-secondary)] opacity-65">
+                  还没有可用的 {section.label}。
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function AssistantMessageCard({
   message,
   onCopyText,
@@ -748,9 +952,12 @@ export function ChatView({
   canChangeWorkspace,
   inspectorWidth,
   attachments,
+  capabilityItems,
+  capabilitySnapshot,
   modelGroups,
   activeModelProfileId,
   onDraftChange,
+  onSetCapabilityOverride,
   onSubmit,
   onOpenProviders,
   onHandleApproval,
@@ -776,6 +983,7 @@ export function ChatView({
   onStop,
 }: Props) {
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [capabilityPanelOpen, setCapabilityPanelOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false)
   const [modelSearchTerm, setModelSearchTerm] = useState('')
@@ -788,6 +996,7 @@ export function ChatView({
 
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const reasoningMenuRef = useRef<HTMLDivElement>(null)
+  const capabilityMenuRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const scrollFollowKey = useMemo(() => {
@@ -835,7 +1044,7 @@ export function ChatView({
   }, [messages.at(-1)?.id])
 
   useEffect(() => {
-    if (!modelMenuOpen && !reasoningMenuOpen) return
+    if (!modelMenuOpen && !reasoningMenuOpen && !capabilityPanelOpen) return
     function handleClickOutside(event: MouseEvent) {
       if (modelMenuRef.current && !modelMenuRef.current.contains(event.target as Node)) {
         setModelMenuOpen(false)
@@ -846,10 +1055,16 @@ export function ChatView({
       ) {
         setReasoningMenuOpen(false)
       }
+      if (
+        capabilityMenuRef.current &&
+        !capabilityMenuRef.current.contains(event.target as Node)
+      ) {
+        setCapabilityPanelOpen(false)
+      }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [modelMenuOpen, reasoningMenuOpen])
+  }, [capabilityPanelOpen, modelMenuOpen, reasoningMenuOpen])
 
   const modelLabel =
     settings.model.split('/').filter(Boolean).at(-1) || settings.model || '选择模型'
@@ -1126,6 +1341,38 @@ export function ChatView({
                     <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" onClick={onPickAttachment} title="上传附件">
                       <Paperclip size={16} />
                     </button>
+                    <div className="relative" ref={capabilityMenuRef}>
+                      <button
+                        className={`flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors ${
+                          capabilityPanelOpen
+                            ? 'bg-[rgba(79,123,116,0.10)] text-[var(--accent-soft-strong)]'
+                            : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'
+                        }`}
+                        onClick={() => setCapabilityPanelOpen(current => !current)}
+                        title="项目能力"
+                      >
+                        <Wrench size={15} />
+                        <span className="text-12px font-600">
+                          工具
+                        </span>
+                        {capabilitySnapshot ? (
+                          <span className="rounded-full bg-white px-1.5 py-0.5 text-10px text-[var(--text-secondary)]">
+                            {capabilitySnapshot.skills.length + capabilitySnapshot.plugins.length + capabilitySnapshot.mcpServers.length}
+                          </span>
+                        ) : null}
+                        <ChevronDown size={12} className="opacity-40" />
+                      </button>
+
+                      {capabilityPanelOpen ? (
+                        <div className="absolute bottom-[calc(100%+10px)] left-0 z-20 w-[min(720px,calc(100vw-48px))] max-w-[720px]">
+                          <CapabilityPanel
+                            items={capabilityItems}
+                            snapshot={capabilitySnapshot}
+                            onSetCapabilityOverride={onSetCapabilityOverride}
+                          />
+                        </div>
+                      ) : null}
+                    </div>
                     <div className="relative" ref={reasoningMenuRef}>
                       <button
                         className={`p-1.5 rounded-md transition-colors ${reasoningMenuOpen ? 'bg-[rgba(0,0,0,0.07)] text-[var(--text-primary)]' : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'}`}

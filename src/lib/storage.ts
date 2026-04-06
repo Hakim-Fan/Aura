@@ -1,21 +1,28 @@
 import type {
   AgentSettings,
+  CapabilityOverrideMode,
+  CapabilityUsageSnapshot,
   ExecutionMode,
   MemoryMode,
+  ProjectCapabilityOverrides,
+  ResolvedAgentCapabilities,
   ProviderMode,
   ProviderProfile,
   ReasoningEffort,
   Session,
+  WorkspaceCapabilityOverrides,
 } from '../types'
 import { ensureAuraHome, readAuraFile, writeAuraFile, type AuraHomeState } from './aura'
 
 const SETTINGS_KEY = 'aura-settings-cache-v1'
 const SESSIONS_KEY = 'aura-sessions-cache-v1'
+const PROJECT_CAPABILITIES_KEY = 'aura-project-capability-overrides-v1'
 const LEGACY_SETTINGS_KEY = 'desk-agent-settings-v2'
 const LEGACY_SESSIONS_KEY = 'desk-agent-sessions-v2'
 const SETTINGS_FILE_PATH = 'config/settings.json'
 const SESSIONS_FILE_PATH = 'config/sessions.json'
 const MCP_FILE_PATH = 'mcp/servers.json'
+const PROJECT_CAPABILITIES_FILE_PATH = 'config/project-capabilities.json'
 
 function createProfileId(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`
@@ -34,6 +41,10 @@ function readCachedValue(primaryKey: string, legacyKey: string) {
   }
 
   return null
+}
+
+function readLocalStorageValue(key: string) {
+  return localStorage.getItem(key)
 }
 
 function baseUrlForProvider(provider: ProviderMode) {
@@ -105,6 +116,131 @@ export const defaultSettings: AgentSettings = {
   enabledPluginIds: ['workspace-inspector'],
   mcpServers: [],
   sendShortcut: 'meta-enter',
+}
+
+function createEmptyWorkspaceCapabilityOverrides(): WorkspaceCapabilityOverrides {
+  return {
+    skills: {},
+    plugins: {},
+    mcp: {},
+  }
+}
+
+function normalizeCapabilityOverrideMode(value: unknown): CapabilityOverrideMode {
+  return value === 'on' || value === 'off' ? value : 'inherit'
+}
+
+function normalizeCapabilityOverrideMap(value: unknown): Record<string, CapabilityOverrideMode> {
+  if (!value || typeof value !== 'object') {
+    return {}
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, entry]) => [key, normalizeCapabilityOverrideMode(entry)])
+      .filter(([, entry]) => entry !== 'inherit'),
+  )
+}
+
+function normalizeWorkspaceCapabilityOverrides(value: unknown): WorkspaceCapabilityOverrides {
+  if (!value || typeof value !== 'object') {
+    return createEmptyWorkspaceCapabilityOverrides()
+  }
+
+  return {
+    skills: normalizeCapabilityOverrideMap((value as { skills?: unknown }).skills),
+    plugins: normalizeCapabilityOverrideMap((value as { plugins?: unknown }).plugins),
+    mcp: normalizeCapabilityOverrideMap((value as { mcp?: unknown }).mcp),
+  }
+}
+
+function parseProjectCapabilityOverrides(raw: string | null): ProjectCapabilityOverrides {
+  if (!raw) {
+    return {}
+  }
+
+  try {
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') {
+      return {}
+    }
+
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([workspaceRoot]) => Boolean(workspaceRoot.trim()))
+        .map(([workspaceRoot, value]) => [
+          workspaceRoot,
+          normalizeWorkspaceCapabilityOverrides(value),
+        ]),
+    )
+  } catch {
+    return {}
+  }
+}
+
+function normalizeCapabilityUsageSnapshot(value: unknown): CapabilityUsageSnapshot | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const snapshot = value as Partial<CapabilityUsageSnapshot>
+  const workspaceRoot =
+    typeof snapshot.workspaceRoot === 'string' ? snapshot.workspaceRoot : ''
+  if (!workspaceRoot.trim()) {
+    return undefined
+  }
+
+  function normalizeEntries(entries: unknown) {
+    if (!Array.isArray(entries)) {
+      return []
+    }
+
+    return entries
+      .map(entry => {
+        if (!entry || typeof entry !== 'object') {
+          return null
+        }
+
+        const id = typeof (entry as { id?: unknown }).id === 'string' ? (entry as { id: string }).id : ''
+        const name =
+          typeof (entry as { name?: unknown }).name === 'string'
+            ? (entry as { name: string }).name
+            : id
+        if (!id.trim()) {
+          return null
+        }
+
+        return {
+          id,
+          name: name || id,
+        }
+      })
+      .filter((entry): entry is { id: string; name: string } => Boolean(entry))
+  }
+
+  return {
+    workspaceRoot,
+    resolvedAt:
+      typeof snapshot.resolvedAt === 'number' && Number.isFinite(snapshot.resolvedAt)
+        ? snapshot.resolvedAt
+        : Date.now(),
+    skills: normalizeEntries(snapshot.skills),
+    plugins: normalizeEntries(snapshot.plugins),
+    mcpServers: normalizeEntries(snapshot.mcpServers),
+  }
+}
+
+function resolveCapabilityEnabled(
+  globalEnabled: boolean,
+  override: CapabilityOverrideMode | undefined,
+) {
+  if (override === 'on') {
+    return true
+  }
+  if (override === 'off') {
+    return false
+  }
+  return globalEnabled
 }
 
 function normalizeMcpServers(value: unknown) {
@@ -551,6 +687,7 @@ function parseSessions(raw: string | null): Session[] {
                     : undefined,
               }
               : undefined,
+          capabilitySnapshot: normalizeCapabilityUsageSnapshot(message.capabilitySnapshot),
           activity: message.activity,
           events: message.events || [],
           steps: message.steps || [],
@@ -651,6 +788,13 @@ async function writeMcpServersToAuraHome(settings: AgentSettings) {
   )
 }
 
+async function writeProjectCapabilitiesToAuraHome(overrides: ProjectCapabilityOverrides) {
+  await writeAuraFile(
+    PROJECT_CAPABILITIES_FILE_PATH,
+    JSON.stringify(overrides, null, 2),
+  )
+}
+
 export function saveSettings(settings: AgentSettings) {
   const normalized = syncLegacyFields(settings)
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalized))
@@ -668,6 +812,175 @@ export function saveSessions(sessions: Session[]) {
   void writeSessionsToAuraHome(sessions).catch(() => {
     // Keep the UI responsive even if Aura file persistence fails.
   })
+}
+
+export function loadProjectCapabilityOverrides(): ProjectCapabilityOverrides {
+  return parseProjectCapabilityOverrides(readLocalStorageValue(PROJECT_CAPABILITIES_KEY))
+}
+
+export function saveProjectCapabilityOverrides(overrides: ProjectCapabilityOverrides) {
+  localStorage.setItem(PROJECT_CAPABILITIES_KEY, JSON.stringify(overrides))
+  void writeProjectCapabilitiesToAuraHome(overrides).catch(() => {
+    // Keep the UI responsive even if Aura file persistence fails.
+  })
+}
+
+export async function hydrateProjectCapabilityOverridesFromAuraHome(): Promise<ProjectCapabilityOverrides> {
+  const cachedRaw = readLocalStorageValue(PROJECT_CAPABILITIES_KEY)
+  const diskRaw = await readAuraFile(PROJECT_CAPABILITIES_FILE_PATH)
+  const overrides = parseProjectCapabilityOverrides(diskRaw || cachedRaw)
+  const serialized = JSON.stringify(overrides, null, 2)
+
+  localStorage.setItem(PROJECT_CAPABILITIES_KEY, JSON.stringify(overrides))
+  if (diskRaw !== serialized) {
+    await writeProjectCapabilitiesToAuraHome(overrides)
+  }
+
+  return overrides
+}
+
+export function getWorkspaceCapabilityOverrides(
+  overrides: ProjectCapabilityOverrides,
+  workspaceRoot: string,
+): WorkspaceCapabilityOverrides {
+  return overrides[workspaceRoot] || createEmptyWorkspaceCapabilityOverrides()
+}
+
+export function updateWorkspaceCapabilityOverride(
+  overrides: ProjectCapabilityOverrides,
+  workspaceRoot: string,
+  kind: 'skills' | 'plugins' | 'mcp',
+  id: string,
+  mode: CapabilityOverrideMode,
+): ProjectCapabilityOverrides {
+  const current = getWorkspaceCapabilityOverrides(overrides, workspaceRoot)
+  const nextKindEntries = {
+    ...current[kind],
+  }
+
+  if (mode === 'inherit') {
+    delete nextKindEntries[id]
+  } else {
+    nextKindEntries[id] = mode
+  }
+
+  const nextWorkspaceOverrides: WorkspaceCapabilityOverrides = {
+    ...current,
+    [kind]: nextKindEntries,
+  }
+
+  const hasAnyOverrides =
+    Object.keys(nextWorkspaceOverrides.skills).length > 0 ||
+    Object.keys(nextWorkspaceOverrides.plugins).length > 0 ||
+    Object.keys(nextWorkspaceOverrides.mcp).length > 0
+
+  if (!hasAnyOverrides) {
+    const next = { ...overrides }
+    delete next[workspaceRoot]
+    return next
+  }
+
+  return {
+    ...overrides,
+    [workspaceRoot]: nextWorkspaceOverrides,
+  }
+}
+
+export function resolveCapabilitiesForWorkspace(args: {
+  workspaceRoot: string
+  settings: AgentSettings
+  aura: AuraHomeState
+  overrides: ProjectCapabilityOverrides
+}): {
+  runtime: ResolvedAgentCapabilities
+  usage: CapabilityUsageSnapshot
+} {
+  const { workspaceRoot, settings, aura, overrides } = args
+  const projectOverrides = getWorkspaceCapabilityOverrides(overrides, workspaceRoot)
+  const resolvedAt = Date.now()
+
+  const skillMap = new Map(aura.skills.map(skill => [skill.id, skill]))
+  const pluginMap = new Map(aura.plugins.map(plugin => [plugin.id, plugin]))
+
+  const resolvedSkills = Array.from(
+    new Set([
+      ...aura.skills.map(skill => skill.id),
+      ...(settings.enabledSkillIds || []),
+      ...Object.keys(projectOverrides.skills),
+    ]),
+  )
+    .filter(skillId =>
+      resolveCapabilityEnabled(
+        settings.enabledSkillIds.includes(skillId),
+        projectOverrides.skills[skillId],
+      ),
+    )
+    .map(skillId => {
+      const skill = skillMap.get(skillId)
+      return {
+        id: skillId,
+        name: skill?.name || skillId,
+        promptPath: skill?.entryPath || skill?.path || undefined,
+      }
+    })
+
+  const resolvedPlugins = Array.from(
+    new Set([
+      ...aura.plugins.map(plugin => plugin.id),
+      ...(settings.enabledPluginIds || []),
+      ...Object.keys(projectOverrides.plugins),
+    ]),
+  )
+    .filter(pluginId =>
+      resolveCapabilityEnabled(
+        settings.enabledPluginIds.includes(pluginId),
+        projectOverrides.plugins[pluginId],
+      ) && pluginMap.get(pluginId)?.supported !== false,
+    )
+    .map(pluginId => {
+      const plugin = pluginMap.get(pluginId)
+      return {
+        id: pluginId,
+        name: plugin?.name || pluginId,
+        entryPath: plugin?.entryPath || plugin?.path || undefined,
+      }
+    })
+
+  const resolvedMcpServers = settings.mcpServers
+    .filter(server =>
+      resolveCapabilityEnabled(server.enabled, projectOverrides.mcp[server.id]) &&
+      Boolean(server.command.trim()),
+    )
+    .map(server => ({
+      ...server,
+      enabled: true,
+    }))
+
+  return {
+    runtime: {
+      workspaceRoot,
+      resolvedAt,
+      skills: resolvedSkills,
+      plugins: resolvedPlugins,
+      mcpServers: resolvedMcpServers,
+    },
+    usage: {
+      workspaceRoot,
+      resolvedAt,
+      skills: resolvedSkills.map(skill => ({
+        id: skill.id,
+        name: skill.name,
+      })),
+      plugins: resolvedPlugins.map(plugin => ({
+        id: plugin.id,
+        name: plugin.name,
+      })),
+      mcpServers: resolvedMcpServers.map(server => ({
+        id: server.id,
+        name: server.name,
+      })),
+    },
+  }
 }
 
 export async function hydrateStorageFromAuraHome(): Promise<{
