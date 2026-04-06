@@ -207,10 +207,15 @@ function buildSystemPrompt(settings, skillPrompt) {
   ]
 
   const reasoningInstructions = {
+    // 思考程度：关闭。倾向于快速、简明的回答，除非任务明确要求，否则避免进行过多的内部探索与展开。
     off: 'Reasoning intensity: off. Prefer fast, concise answers and avoid extended internal exploration unless the task clearly requires it.',
+    // 思考程度：低。为速度进行优化，并保持思考过程的轻量化。
     low: 'Reasoning intensity: low. Optimize for speed and keep reasoning lightweight.',
+    // 思考程度：中。在响应速度和推理深度之间取得平衡。
     medium: 'Reasoning intensity: medium. Balance speed and reasoning depth.',
+    // 思考程度：高。在采取行动之前投入更多的精力进行分析，特别适用于复杂的任务。
     high: 'Reasoning intensity: high. Spend more effort on analysis before acting, especially for complex tasks.',
+    // 思考程度：最大化。在处理困难任务时使用你力所能及的最深度的推理能力，同时依然要避免无意义的冗余重复。
     max: 'Reasoning intensity: maximum. Use your deepest available reasoning for difficult tasks, while still avoiding unnecessary repetition.',
   }
   sections.push(reasoningInstructions[settings.reasoningEffort] || reasoningInstructions.medium)
