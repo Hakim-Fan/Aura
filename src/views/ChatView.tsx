@@ -13,8 +13,9 @@ import {
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  ArrowDown,
   Bot,
-  BrainCircuit,
+  Brain,
   Check,
   ChevronDown,
   ChevronUp,
@@ -116,12 +117,12 @@ const reasoningEffortOptions: Array<{
   label: string
   description: string
 }> = [
-  { value: 'off', label: '关闭', description: '禁用扩展思考' },
-  { value: 'low', label: '低', description: '快速响应，最少推理' },
-  { value: 'medium', label: '中', description: '平衡速度与推理深度' },
-  { value: 'high', label: '高', description: '深度推理，适合复杂任务' },
-  { value: 'max', label: '超高', description: '最强推理强度，适合最复杂任务' },
-]
+    { value: 'off', label: '关闭', description: '禁用扩展思考' },
+    { value: 'low', label: '低', description: '快速响应，最少推理' },
+    { value: 'medium', label: '中', description: '平衡速度与推理深度' },
+    { value: 'high', label: '高', description: '深度推理，适合复杂任务' },
+    { value: 'max', label: '超高', description: '最强推理强度，适合最复杂任务' },
+  ]
 
 function estimateTokenCount(value: string) {
   const trimmed = value.trim()
@@ -579,7 +580,7 @@ function AssistantMessageCard({
                 onClick={() => onToggleActivity(message.id)}
                 title={activity?.expanded ? '折叠执行详情' : '展开执行详情'}
               >
-                <BrainCircuit size={12} className="opacity-70" />
+                <Brain size={12} className="opacity-70" />
                 <span>{activitySummary}</span>
                 {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
               </button>
@@ -1013,27 +1014,7 @@ export function ChatView({
           >
             {messages.length === 0 ? (
               <div className="max-w-1000px mx-auto px-6 py-20 flex flex-col items-center text-center">
-                <div className="text-11px font-700 text-[var(--text-secondary)] tracking-0.2em uppercase mb-4 opacity-50">
-                  Ready to work
-                </div>
-                <h3 className="text-28px font-600 mb-2">有什么可以帮你的？</h3>
-                <p className="text-[var(--text-secondary)] mb-10 opacity-70">
-                  选择一个示例或输入你的任务开始协作
-                </p>
-                <div className="grid grid-cols-2 gap-4 w-full">
-                  {suggestedPrompts.map(prompt => (
-                    <button
-                      key={prompt}
-                      className="group p-4 text-left border border-[var(--border-subtle)] rounded-xl hover:border-[var(--bg-user-bubble)] hover:shadow-lg hover:shadow-[rgba(0,122,255,0.05)] transition-all bg-white"
-                      onClick={() => onDraftChange(prompt)}
-                    >
-                      <div className="flex items-start gap-3">
-                        <Sparkles size={16} className="mt-0.5 text-[var(--bg-user-bubble)] opacity-60" />
-                        <span className="text-14px leading-relaxed">{prompt}</span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
+                <h3 className="text-28px font-600 mb-2">你好，我是 Aura</h3>
               </div>
             ) : (
               <div className="max-w-980px mx-auto px-8 flex flex-col gap-14">
@@ -1063,9 +1044,23 @@ export function ChatView({
           </div>
 
           {/* Docked Composer */}
-          <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t pointer-events-none">
-            <div className="max-w-1000px mx-auto pointer-events-auto">
-              <div className="bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none relative">
+          <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[var(--bg-app)]/80 to-transparent pointer-events-none flex justify-center">
+            <div className="max-w-1000px w-full flex flex-col items-center">
+              {!autoScrollEnabled && messages.length > 0 && (
+                <button
+                  className="mb-4 flex h-10 w-10 items-center justify-center rounded-full border border-[rgba(0,0,0,0.06)] bg-white/95 shadow-[0_8px_30px_rgb(0,0,0,0.12)] text-[var(--text-secondary)] hover:bg-white hover:scale-110 active:scale-95 transition-all pointer-events-auto backdrop-blur-md group"
+                  onClick={() => {
+                    if (scrollRef.current) {
+                      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+                      setAutoScrollEnabled(true)
+                    }
+                  }}
+                  title="回到最底部"
+                >
+                  <ArrowDown size={18} strokeWidth={2.5} className="text-[var(--text-secondary)] group-hover:text-[var(--accent-soft-strong)] transition-colors" />
+                </button>
+              )}
+              <div className="w-full pointer-events-auto bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none relative">
                 <textarea
                   className="w-full h-120px p-4 text-15px leading-relaxed resize-none !border-none bg-transparent !outline-none !ring-0 !shadow-none"
                   value={draft}

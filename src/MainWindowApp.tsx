@@ -58,7 +58,7 @@ function createSession(settings: AgentSettings): Session {
 
   return {
     id: createId(),
-    title: '新建聊天',
+    title: '新会话',
     providerProfileId: settings.activeProviderProfileId,
     provider: settings.provider,
     model: preferredModel,
@@ -736,12 +736,6 @@ export function MainWindowApp() {
   }, [activeSessionId, sessions])
 
   useEffect(() => {
-    if (!activeSessionId && sessions.length > 0) {
-      setActiveSessionId(sessions[0].id)
-    }
-  }, [activeSessionId, sessions])
-
-  useEffect(() => {
     if (!agentTask?.id || !runningSessionId || !runningMessageId) {
       return
     }
@@ -1169,7 +1163,7 @@ export function MainWindowApp() {
       return
     }
 
-    const requiresConfirm = target.messages.length > 0 || target.title.trim() !== '新建聊天'
+    const requiresConfirm = target.messages.length > 0 || target.title.trim() !== '新会话'
     if (requiresConfirm && !window.confirm(`删除会话“${target.title}”？此操作不可恢复。`)) {
       return
     }
@@ -1204,7 +1198,7 @@ export function MainWindowApp() {
       return session.workspacePath
     }
     if (!session.workspaceRoot.trim()) {
-      throw new Error('请先在设置里配置默认工作目录，或者在新建聊天时手动选择目录。')
+      throw new Error('请先在设置里配置默认工作目录，或者在新会话时手动选择目录。')
     }
 
     const workspacePath = await createSessionWorkspace(session.workspaceRoot, prompt)
@@ -1618,12 +1612,10 @@ export function MainWindowApp() {
             />
           ) : (
             <HomeView
-              sessions={sessions}
               providerConfigured={Boolean(
                 activeProviderProfile?.apiKey.trim() && getFirstEnabledModelId(activeProviderProfile),
               )}
               workspaceConfigured={Boolean(settings.cwd.trim())}
-              onOpenSession={openSession}
               onNewSession={createFreshSession}
               onOpenProviders={() =>
                 void openSettingsWindow('providers').catch(caught => {

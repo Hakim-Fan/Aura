@@ -8,6 +8,11 @@ export type AuraAsset = {
   entryPath?: string | null
   supported: boolean
   supportMessage?: string | null
+  readonly: boolean
+}
+
+export async function deleteAuraAsset(relativePath: string): Promise<void> {
+  await invoke('delete_aura_asset', { relativePath })
 }
 
 export type AuraHomeState = {

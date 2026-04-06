@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { ask, open } from '@tauri-apps/plugin-dialog'
-import { ChevronDown, ChevronUp, FolderOpen, RefreshCw, Search } from 'lucide-react'
+import { ChevronDown, ChevronUp, FolderOpen, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { builtinPlugins, builtinSkills } from './catalog'
 import { inspectMcpServer, type McpInspectResult } from './lib/mcp'
 import { fetchProviderModels, testProviderConnection } from './lib/provider'
-import { ensureAuraHome, type AuraAsset, type AuraHomeState } from './lib/aura'
+import { ensureAuraHome, deleteAuraAsset, type AuraAsset, type AuraHomeState } from './lib/aura'
 import { hydrateStorageFromAuraHome, loadSettings, saveSettings } from './lib/storage'
 import { openPathInDefaultApp, readTextFile } from './lib/workspace'
+import { ConfirmModal } from './components/ConfirmModal'
 import { broadcastSettingsUpdated, closeCurrentWindow, openMcpEditorWindow } from './lib/windows'
 import type { AgentSettings, ProviderMode, ProviderProfile } from './types'
 import { ProvidersView } from './views/ProvidersView'
@@ -70,10 +71,10 @@ export function SettingsWindowApp({ initialTab }: Props) {
   const [isTestingProvider, setIsTestingProvider] = useState(false)
   const [isFetchingModels, setIsFetchingModels] = useState(false)
   const [availableSkills, setAvailableSkills] = useState<AuraAsset[]>(() =>
-    builtinSkills.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '' })),
+    builtinSkills.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '', readonly: true })),
   )
   const [availablePlugins, setAvailablePlugins] = useState<AuraAsset[]>(() =>
-    builtinPlugins.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '' })),
+    builtinPlugins.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '', readonly: true })),
   )
   const [auraHome, setAuraHome] = useState<AuraHomeState | null>(null)
   const [assetSearch, setAssetSearch] = useState({
@@ -96,6 +97,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
       }
     >
   >({})
+  const [assetToDelete, setAssetToDelete] = useState<{ id: string; name: string; kind: 'skills' | 'plugins'; path: string } | null>(null)
+  const [mcpToDelete, setMcpToDelete] = useState<{ id: string; name: string } | null>(null)
 
   const isDirty = useMemo(
     () => JSON.stringify(savedSettings) !== JSON.stringify(draftSettings),
@@ -129,6 +132,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             entryPath: '',
             supported: true,
             supportMessage: '',
+            readonly: true,
           })),
         )
         setAvailablePlugins(
@@ -138,6 +142,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             entryPath: '',
             supported: true,
             supportMessage: '',
+            readonly: true,
           })),
         )
       })
@@ -324,15 +329,50 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   async function refreshAuraAssets(kind?: 'skills' | 'plugins') {
-    setRefreshingAssets(kind || 'skills')
+    if (kind) {
+      setRefreshingAssets(kind)
+    } else {
+      setRefreshingAssets('skills')
+    }
+
     try {
-      const aura = await ensureAuraHome()
-      setAuraHome(aura)
-      setAvailableSkills(mergeAuraAssets(aura.skills, builtinSkills))
-      setAvailablePlugins(mergeAuraAssets(aura.plugins, builtinPlugins))
+      const state = await ensureAuraHome()
+      setAuraHome(state)
+      setAvailableSkills(mergeAuraAssets(state.skills, builtinSkills))
+      setAvailablePlugins(mergeAuraAssets(state.plugins, builtinPlugins))
     } finally {
       setRefreshingAssets('')
     }
+  }
+
+  async function handleDeleteAsset() {
+    if (!assetToDelete || !auraHome) return
+
+    try {
+      // Resolve path relative to aura home
+      let relativePath = assetToDelete.path
+      if (relativePath.startsWith(auraHome.homeDir)) {
+        relativePath = relativePath.slice(auraHome.homeDir.length)
+      }
+
+      await deleteAuraAsset(relativePath)
+      await refreshAuraAssets(assetToDelete.kind)
+    } catch (error) {
+      console.error('Failed to delete asset:', error)
+      alert(`删除失败: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setAssetToDelete(null)
+    }
+  }
+
+  async function handleDeleteMcp() {
+    if (!mcpToDelete) return
+
+    setDraftSettings(current => ({
+      ...current,
+      mcpServers: current.mcpServers.filter(s => s.id !== mcpToDelete.id),
+    }))
+    setMcpToDelete(null)
   }
 
   async function refreshMcpServers() {
@@ -516,7 +556,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <p className="muted">
               {draftSettings.cwd.trim()
                 ? draftSettings.cwd
-                : '新建聊天没有手动选择目录时，会使用这里作为默认根目录。'}
+                : '新会话没有手动选择目录时，会使用这里作为默认根目录。'}
             </p>
             <div className="header-actions">
               <button className="secondary-button" onClick={() => void chooseDefaultWorkspace()}>
@@ -808,6 +848,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   >
                     编辑
                   </button>
+                  {!server.isDefault && (
+                    <button
+                      className="p-2 rounded-xl text-black/40 hover:text-red-500 hover:bg-red-50 transition-all ml-auto"
+                      onClick={() => setMcpToDelete({ id: server.id, name: server.name })}
+                      title="删除 MCP 配置"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  )}
                 </div>
               </article>
             ))
@@ -893,64 +942,76 @@ export function SettingsWindowApp({ initialTab }: Props) {
             const canToggle = kind === 'skills' || item.supported
 
             return (
-            <article key={item.id} className="asset-card asset-card-rich">
-              <div className="asset-card-head">
-                <div>
-                  <strong>{item.name}</strong>
-                  <p>{item.description}</p>
+              <article key={item.id} className="asset-card asset-card-rich">
+                <div className="asset-card-head">
+                  <div>
+                    <strong>{item.name}</strong>
+                    <p>{item.description}</p>
+                  </div>
+                  <label className={`relative flex items-center gap-3 cursor-pointer ${canToggle ? '' : 'opacity-40 cursor-not-allowed'}`}>
+                    <input
+                      checked={isEnabled}
+                      disabled={!canToggle}
+                      onChange={() => onToggle(item.id)}
+                      type="checkbox"
+                      className="peer sr-only"
+                    />
+                    <div className="relative h-5 w-9 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-[var(--bg-user-bubble)] after:absolute after:top-0.5 after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-4" />
+                    <span className="text-13px font-700 text-black/60 peer-checked:text-black/80 transition-colors select-none whitespace-nowrap">
+                      {canToggle
+                        ? isEnabled
+                          ? '启用中'
+                          : '已关闭'
+                        : '当前不兼容'}
+                    </span>
+                  </label>
                 </div>
-                <label className={`relative flex items-center gap-3 cursor-pointer ${canToggle ? '' : 'opacity-40 cursor-not-allowed'}`}>
-                  <input
-                    checked={isEnabled}
-                    disabled={!canToggle}
-                    onChange={() => onToggle(item.id)}
-                    type="checkbox"
-                    className="peer sr-only"
-                  />
-                  <div className="relative h-5 w-9 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-[var(--bg-user-bubble)] after:absolute after:top-0.5 after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-4" />
-                  <span className="text-13px font-700 text-black/60 peer-checked:text-black/80 transition-colors select-none whitespace-nowrap">
-                    {canToggle
-                      ? isEnabled
-                        ? '启用中'
-                        : '已关闭'
-                      : '当前不兼容'}
+                <div className="asset-card-meta">
+                  <span className="micro-pill">{item.id}</span>
+                  <span className={`micro-pill ${item.supported ? 'pill-success' : 'pill-warning'}`}>
+                    {item.supported ? '可用' : '仅发现'}
                   </span>
-                </label>
-              </div>
-              <div className="asset-card-meta">
-                <span className="micro-pill">{item.id}</span>
-                <span className={`micro-pill ${item.supported ? 'pill-success' : 'pill-warning'}`}>
-                  {item.supported ? '可用' : '仅发现'}
-                </span>
-                {item.path ? (
-                  <span className="micro-pill mono-pill">{item.path}</span>
+                  {item.path ? (
+                    <span className="micro-pill mono-pill">{item.path}</span>
+                  ) : null}
+                  {item.entryPath && item.entryPath !== item.path ? (
+                    <span className="micro-pill mono-pill">入口：{item.entryPath}</span>
+                  ) : null}
+                </div>
+                {!item.supported && item.supportMessage ? (
+                  <div className="asset-compat-note">{item.supportMessage}</div>
                 ) : null}
-                {item.entryPath && item.entryPath !== item.path ? (
-                  <span className="micro-pill mono-pill">入口：{item.entryPath}</span>
-                ) : null}
-              </div>
-              {!item.supported && item.supportMessage ? (
-                <div className="asset-compat-note">{item.supportMessage}</div>
-              ) : null}
-              <button
-                className="asset-preview-toggle"
-                onClick={() => void toggleAssetExpanded(item)}
-                type="button"
-              >
-                <span>{expanded ? '隐藏内容' : '查看内容'}</span>
-                {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              </button>
-              {expanded ? (
-                <div className="asset-preview-panel">
-                  {isLoadingPreview ? (
-                    <div className="muted">正在读取内容...</div>
-                  ) : (
-                    <pre>{preview || '暂无可读内容。'}</pre>
+                <div className="flex items-center justify-between">
+                  <button
+                    className="asset-preview-toggle"
+                    onClick={() => void toggleAssetExpanded(item)}
+                    type="button"
+                  >
+                    <span>{expanded ? '隐藏内容' : '查看内容'}</span>
+                    {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                  </button>
+                  {!item.readonly && (
+                    <button
+                      className="p-1.5 rounded-lg text-black/40 hover:text-red-500 hover:bg-red-50 transition-all"
+                      onClick={() => setAssetToDelete({ id: item.id, name: item.name, kind, path: item.path })}
+                      title={`删除${title}`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   )}
                 </div>
-              ) : null}
-            </article>
-          )}) : (
+                {expanded ? (
+                  <div className="asset-preview-panel">
+                    {isLoadingPreview ? (
+                      <div className="muted">正在读取内容...</div>
+                    ) : (
+                      <pre>{preview || '暂无可读内容。'}</pre>
+                    )}
+                  </div>
+                ) : null}
+              </article>
+            )
+          }) : (
             <article className="asset-card empty">
               <strong>没有匹配的{title}</strong>
               <p>你可以尝试清空搜索词，或点击“刷新”重新扫描 Aura 目录。</p>
@@ -1011,6 +1072,26 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </button>
         </div>
       </footer>
+
+      <ConfirmModal
+        isOpen={!!assetToDelete}
+        title={`删除${assetToDelete?.kind === 'skills' ? '技能' : '插件'}`}
+        description={`确定要永久删除“${assetToDelete?.name}”吗？此操作不可撤销。`}
+        confirmText="彻底删除"
+        variant="danger"
+        onConfirm={() => void handleDeleteAsset()}
+        onCancel={() => setAssetToDelete(null)}
+      />
+
+      <ConfirmModal
+        isOpen={!!mcpToDelete}
+        title="删除 MCP 服务"
+        description={`确定要移除“${mcpToDelete?.name}”配置吗？`}
+        confirmText="确认删除"
+        variant="danger"
+        onConfirm={() => void handleDeleteMcp()}
+        onCancel={() => setMcpToDelete(null)}
+      />
     </div>
   )
 }

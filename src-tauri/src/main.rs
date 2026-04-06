@@ -67,6 +67,7 @@ struct AuraAssetMetadata {
     supported: bool,
     #[serde(rename = "supportMessage")]
     support_message: Option<String>,
+    readonly: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -290,15 +291,16 @@ fn resolve_plugin_entry(dir: &Path, manifest_content: Option<&str>) -> (Option<P
     (None, None)
 }
 
-fn scan_aura_assets(dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, String> {
+fn scan_aura_assets<R: Runtime>(app: &tauri::AppHandle<R>, dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, String> {
     let mut assets = Vec::new();
+    let bundled_dir = resolve_default_asset_dir(app, kind).ok();
 
     let entries = fs::read_dir(dir)
         .map_err(|error| format!("Failed to read Aura asset directory {}: {error}", dir.display()))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let (id, name, description, content_path, entry_path, supported, support_message) = if kind == "skills" {
+        let (id, name, description, content_path, entry_path, supported, support_message, readonly) = if kind == "skills" {
             if path.is_file()
                 && path
                     .extension()
@@ -315,7 +317,8 @@ fn scan_aura_assets(dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, St
                 let name = extract_markdown_metadata_field(&content, "name")
                     .unwrap_or_else(|| prettify_asset_name(&id));
                 let description = infer_skill_description(&content);
-                (id, name, description, path.clone(), Some(path.clone()), true, None)
+                let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
+                (id, name, description, path.clone(), Some(path.clone()), true, None, readonly)
             } else if path.is_dir() {
                 let skill_path = path.join("SKILL.md");
                 if !skill_path.exists() {
@@ -330,7 +333,8 @@ fn scan_aura_assets(dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, St
                 let name = extract_markdown_metadata_field(&content, "name")
                     .unwrap_or_else(|| prettify_asset_name(&id));
                 let description = infer_skill_description(&content);
-                (id, name, description, skill_path.clone(), Some(skill_path), true, None)
+                let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
+                (id, name, description, skill_path.clone(), Some(skill_path), true, None, readonly)
             } else {
                 continue;
             }
@@ -355,6 +359,7 @@ fn scan_aura_assets(dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, St
                     .unwrap_or_else(|| prettify_asset_name(&id));
                 let description = infer_plugin_description(&content);
                 let (supported, support_message) = infer_plugin_support(Some(&path), &content);
+                let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
                 (
                     id,
                     name,
@@ -363,6 +368,7 @@ fn scan_aura_assets(dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, St
                     Some(path.clone()),
                     supported,
                     support_message,
+                    readonly,
                 )
             } else if path.is_dir() {
                 let manifest_path = path.join("manifest.json");
@@ -413,6 +419,7 @@ fn scan_aura_assets(dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, St
                     support_message = inferred_message;
                 }
 
+                let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
                 (
                     id,
                     name,
@@ -421,6 +428,7 @@ fn scan_aura_assets(dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, St
                     entry_path,
                     supported,
                     support_message,
+                    readonly,
                 )
             } else {
                 continue;
@@ -439,6 +447,7 @@ fn scan_aura_assets(dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, St
             entry_path: entry_path.map(|value| value.display().to_string()),
             supported,
             support_message,
+            readonly,
         });
     }
 
@@ -541,8 +550,8 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
         settings_path: settings_path.display().to_string(),
         sessions_path: sessions_path.display().to_string(),
         mcp_servers_path: mcp_servers_path.display().to_string(),
-        skills: scan_aura_assets(&skills_dir, "skills")?,
-        plugins: scan_aura_assets(&plugins_dir, "plugins")?,
+        skills: scan_aura_assets(app, &skills_dir, "skills")?,
+        plugins: scan_aura_assets(app, &plugins_dir, "plugins")?,
     })
 }
 
@@ -1200,6 +1209,27 @@ fn write_aura_file<R: Runtime>(
 }
 
 #[tauri::command]
+fn delete_aura_asset<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    relative_path: String,
+) -> Result<(), String> {
+    let target = resolve_aura_relative_path(&app, &relative_path)?;
+    if !target.exists() {
+        return Ok(());
+    }
+
+    if target.is_dir() {
+        fs::remove_dir_all(&target)
+            .map_err(|error| format!("Failed to delete Aura directory {}: {error}", target.display()))?;
+    } else {
+        fs::remove_file(&target)
+            .map_err(|error| format!("Failed to delete Aura file {}: {error}", target.display()))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 fn read_image_preview(file_path: String) -> Result<Option<String>, String> {
     let path = PathBuf::from(&file_path);
     if !path.exists() {
@@ -1451,6 +1481,7 @@ fn main() {
             create_session_workspace,
             import_attachment_from_path,
             write_attachment_bytes,
+            delete_aura_asset,
             quit_app
         ])
         .run(tauri::generate_context!())

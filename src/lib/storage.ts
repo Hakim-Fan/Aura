@@ -150,7 +150,8 @@ function normalizeMcpServers(value: unknown) {
             ? server.cwd
             : '',
         enabled: server.enabled !== false,
-      }
+        isDefault: server.isDefault === true,
+      } as AgentSettings['mcpServers'][number]
     })
     .filter((entry): entry is AgentSettings['mcpServers'][number] => Boolean(entry))
 }

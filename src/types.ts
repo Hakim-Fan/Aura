@@ -154,6 +154,7 @@ export type McpServerConfig = {
   env: string
   cwd: string
   enabled: boolean
+  isDefault?: boolean
 }
 
 export type ExecutionMode = 'bounded' | 'long-task'

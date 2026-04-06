@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { Plus, Search, Settings2, Trash2 } from 'lucide-react'
 import type { Session } from '../types'
+import { ConfirmModal } from './ConfirmModal'
 
 type Props = {
   width: number
@@ -26,6 +28,8 @@ export function AppSidebar({
   onOpenSettings,
   settingsOpen,
 }: Props) {
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{ id: string; title: string } | null>(null)
+
   return (
     <aside
       className="relative h-screen flex flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-subtle)] shrink-0"
@@ -47,12 +51,12 @@ export function AppSidebar({
         </button>
       </div>
 
-      <div className="px-4 mb-4 relative">
-        <div className="absolute left-7 top-1/2 -translate-y-1/2 text-[var(--text-secondary)] pointer-events-none">
+      <div className="px-4 mb-4 relative group">
+        <div className="absolute left-7 top-1/2 -translate-y-1/2 text-[var(--text-secondary)] opacity-50 group-focus-within:opacity-100 group-focus-within:text-[var(--bg-user-bubble)] transition-all pointer-events-none">
           <Search size={14} />
         </div>
         <input
-          className="w-full bg-[rgba(0,0,0,0.03)] border-none rounded-lg py-1.5 pl-9 pr-3 text-13px placeholder:text-[rgba(0,0,0,0.3)] focus:bg-[rgba(0,0,0,0.05)] transition-all"
+          className="w-full bg-[rgba(0,0,0,0.03)] border-none rounded-lg py-1.5 pl-9 pr-3 text-13px placeholder:text-[rgba(0,0,0,0.3)] focus:bg-white focus:shadow-[0_0_0_3px_rgba(79,123,116,0.15)] focus:ring-1 focus:ring-[var(--bg-user-bubble)] outline-none transition-all"
           value={sessionFilter}
           onChange={event => onSessionFilterChange(event.target.value)}
           placeholder="搜索会话..."
@@ -88,7 +92,7 @@ export function AppSidebar({
               title="删除会话"
               onClick={(e) => {
                 e.stopPropagation();
-                onDeleteSession(session.id);
+                setDeleteConfirmation({ id: session.id, title: session.title });
               }}
             >
               <Trash2 size={14} />
@@ -107,6 +111,22 @@ export function AppSidebar({
           <Settings2 size={16} />
         </button>
       </div>
+
+      <ConfirmModal
+        isOpen={!!deleteConfirmation}
+        title="确认删除会话？"
+        description={`确定要删除“${deleteConfirmation?.title}”吗？此操作不可撤销。`}
+        confirmText="彻底删除"
+        cancelText="不删了"
+        variant="danger"
+        onConfirm={() => {
+          if (deleteConfirmation) {
+            onDeleteSession(deleteConfirmation.id);
+            setDeleteConfirmation(null);
+          }
+        }}
+        onCancel={() => setDeleteConfirmation(null)}
+      />
     </aside>
   )
 }
