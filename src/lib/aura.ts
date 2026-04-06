@@ -41,3 +41,7 @@ export async function readAuraFile(relativePath: string): Promise<string | null>
 export async function writeAuraFile(relativePath: string, content: string): Promise<void> {
   await invoke('write_aura_file', { relativePath, content })
 }
+
+export async function resetAuraHome(): Promise<void> {
+  await invoke('reset_aura_home')
+}

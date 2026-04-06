@@ -1230,6 +1230,18 @@ fn delete_aura_asset<R: Runtime>(
 }
 
 #[tauri::command]
+fn reset_aura_home<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let home = resolve_aura_home()?;
+    if home.exists() {
+        fs::remove_dir_all(&home)
+            .map_err(|error| format!("Failed to reset Aura home directory {}: {error}", home.display()))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn read_image_preview(file_path: String) -> Result<Option<String>, String> {
     let path = PathBuf::from(&file_path);
     if !path.exists() {
@@ -1482,6 +1494,7 @@ fn main() {
             import_attachment_from_path,
             write_attachment_bytes,
             delete_aura_asset,
+            reset_aura_home,
             quit_app
         ])
         .run(tauri::generate_context!())

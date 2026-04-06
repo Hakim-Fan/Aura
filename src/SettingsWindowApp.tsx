@@ -5,7 +5,7 @@ import { ChevronDown, ChevronUp, FolderOpen, RefreshCw, Search, Trash2 } from 'l
 import { builtinPlugins, builtinSkills } from './catalog'
 import { inspectMcpServer, type McpInspectResult } from './lib/mcp'
 import { fetchProviderModels, testProviderConnection } from './lib/provider'
-import { ensureAuraHome, deleteAuraAsset, type AuraAsset, type AuraHomeState } from './lib/aura'
+import { ensureAuraHome, deleteAuraAsset, resetAuraHome, type AuraAsset, type AuraHomeState } from './lib/aura'
 import { hydrateStorageFromAuraHome, loadSettings, saveSettings } from './lib/storage'
 import { openPathInDefaultApp, readTextFile } from './lib/workspace'
 import { ConfirmModal } from './components/ConfirmModal'
@@ -99,6 +99,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
   >({})
   const [assetToDelete, setAssetToDelete] = useState<{ id: string; name: string; kind: 'skills' | 'plugins'; path: string } | null>(null)
   const [mcpToDelete, setMcpToDelete] = useState<{ id: string; name: string } | null>(null)
+  const [isResetting, setIsResetting] = useState(false)
 
   const isDirty = useMemo(
     () => JSON.stringify(savedSettings) !== JSON.stringify(draftSettings),
@@ -373,6 +374,19 @@ export function SettingsWindowApp({ initialTab }: Props) {
       mcpServers: current.mcpServers.filter(s => s.id !== mcpToDelete.id),
     }))
     setMcpToDelete(null)
+  }
+
+  async function handleFactoryReset() {
+    try {
+      await resetAuraHome()
+      localStorage.clear()
+      window.location.reload()
+    } catch (error) {
+      console.error('Failed to reset app:', error)
+      alert(`应用重置失败: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setIsResetting(false)
+    }
   }
 
   async function refreshMcpServers() {
@@ -741,6 +755,22 @@ export function SettingsWindowApp({ initialTab }: Props) {
               ))}
             </div>
           </section>
+
+          <section className="dashboard-card !border-red-100/50">
+            <div className="section-title text-red-500">危险区域 (Danger Zone)</div>
+            <p>
+              抹除所有数据和设置会永久删除所有的本地会话记录、MCP 配置、下载的插件和自定义设置。
+              操作完成后，应用将自动重启并恢复到初始状态。
+            </p>
+            <div className="header-actions">
+              <button
+                className="secondary-button !text-red-600 hover:!bg-red-50"
+                onClick={() => setIsResetting(true)}
+              >
+                抹除所有数据和设置
+              </button>
+            </div>
+          </section>
         </div>
       </section>
     )
@@ -1091,6 +1121,16 @@ export function SettingsWindowApp({ initialTab }: Props) {
         variant="danger"
         onConfirm={() => void handleDeleteMcp()}
         onCancel={() => setMcpToDelete(null)}
+      />
+
+      <ConfirmModal
+        isOpen={isResetting}
+        title="确认抹除所有数据和设置？"
+        description="此操作将抹除所有本地数据（会话、配置、插件等）并恢复为默认设置。操作不可撤销。"
+        confirmText="确认抹除"
+        variant="danger"
+        onConfirm={() => void handleFactoryReset()}
+        onCancel={() => setIsResetting(false)}
       />
     </div>
   )
