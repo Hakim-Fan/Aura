@@ -177,6 +177,14 @@ function formatDuration(ms: number) {
   return `${Math.round(ms / 1000)} 秒`
 }
 
+function clampToTwoLines(value: string, maxChars = 68) {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return ''
+  }
+  return normalized.length > maxChars ? `${normalized.slice(0, maxChars).trimEnd()}...` : normalized
+}
+
 function activityStatusLabel(status?: string) {
   switch (status) {
     case 'queued':
@@ -665,7 +673,9 @@ function CapabilityPanel({
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
-                              <strong className="text-13px text-[var(--text-primary)]">{item.name}</strong>
+                              <strong className="max-w-[190px] break-words text-13px text-[var(--text-primary)]">
+                                {clampToTwoLines(item.name, 42)}
+                              </strong>
                               <span className="rounded-full bg-white px-2 py-0.5 text-10px text-[var(--text-secondary)]">
                                 {item.source === 'builtin' ? '内置' : '用户安装'}
                               </span>
@@ -679,11 +689,13 @@ function CapabilityPanel({
                                 {item.effectiveEnabled ? '生效中' : '未生效'}
                               </span>
                             </div>
-                            <p className="mt-1 text-12px leading-relaxed text-[var(--text-secondary)]">
-                              {item.description}
+                            <p className="mt-1 max-w-[240px] text-12px leading-relaxed text-[var(--text-secondary)]">
+                              {clampToTwoLines(item.description, 86)}
                             </p>
                             {item.supportMessage ? (
-                              <p className="mt-1 text-11px text-amber-600">{item.supportMessage}</p>
+                              <p className="mt-1 max-w-[240px] text-11px text-amber-600">
+                                {clampToTwoLines(item.supportMessage, 86)}
+                              </p>
                             ) : null}
                           </div>
                           <label
@@ -1364,7 +1376,7 @@ export function ChatView({
                       </button>
 
                       {capabilityPanelOpen ? (
-                        <div className="absolute bottom-[calc(100%+10px)] left-0 z-20 w-[min(720px,calc(100vw-48px))] max-w-[720px]">
+                        <div className="absolute bottom-[calc(100%+10px)] left-0 z-20 w-[min(440px,calc(100vw-48px))] max-w-[440px]">
                           <CapabilityPanel
                             items={capabilityItems}
                             snapshot={capabilitySnapshot}
