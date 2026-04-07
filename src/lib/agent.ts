@@ -36,6 +36,19 @@ export async function respondToApproval(
   return invoke('respond_to_agent_approval', { taskId, decision })
 }
 
+export async function appendInputToAgentTask(
+  taskId: string,
+  input: {
+    id: string
+    content: string
+    parts: ChatMessage['parts']
+    attachments?: ChatMessage['attachments']
+    createdAt: number
+  },
+): Promise<void> {
+  return invoke('append_input_to_agent_task', { taskId, input })
+}
+
 export async function abortAgentTask(taskId: string): Promise<void> {
   return invoke('abort_agent_task', { taskId })
 }

@@ -86,6 +86,14 @@ function emit(event) {
 
 let pendingApprovalResolve = null
 let started = false
+const appendedInputs = []
+
+function emitAppendedInputs() {
+  emit({
+    type: 'appended_inputs',
+    inputs: appendedInputs,
+  })
+}
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -109,6 +117,30 @@ rl.on('line', line => {
       pendingApprovalResolve(message.decision === 'approve' ? 'approve' : 'deny')
       pendingApprovalResolve = null
     }
+    return
+  }
+
+  if (message.type === 'append_input') {
+    const input = message.input
+    if (!input || typeof input !== 'object') {
+      return
+    }
+
+    appendedInputs.push({
+      id:
+        typeof input.id === 'string' && input.id.trim()
+          ? input.id
+          : `appended-${Date.now()}`,
+      content: typeof input.content === 'string' ? input.content : '',
+      parts: Array.isArray(input.parts) ? input.parts : [],
+      attachments: Array.isArray(input.attachments) ? input.attachments : [],
+      createdAt:
+        typeof input.createdAt === 'number' && Number.isFinite(input.createdAt)
+          ? input.createdAt
+          : Date.now(),
+      status: 'queued',
+    })
+    emitAppendedInputs()
     return
   }
 
@@ -146,6 +178,25 @@ rl.on('line', line => {
       return new Promise(resolve => {
         pendingApprovalResolve = resolve
       })
+    },
+    consumeAppendedInputs() {
+      const queuedInputs = appendedInputs.filter(input => input.status === 'queued')
+      if (queuedInputs.length === 0) {
+        return []
+      }
+
+      for (const input of queuedInputs) {
+        input.status = 'consumed'
+      }
+      emitAppendedInputs()
+      return queuedInputs.map(input => ({
+        id: input.id,
+        role: 'user',
+        content: input.content,
+        parts: Array.isArray(input.parts) ? input.parts : [],
+        attachments: Array.isArray(input.attachments) ? input.attachments : [],
+        createdAt: input.createdAt,
+      }))
     },
   }
 

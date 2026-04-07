@@ -161,6 +161,48 @@ function toGeminiContents(messages) {
   }))
 }
 
+function drainAppendedInputs(hooks) {
+  if (typeof hooks?.consumeAppendedInputs !== 'function') {
+    return []
+  }
+  const consumed = hooks.consumeAppendedInputs()
+  return Array.isArray(consumed) ? consumed : []
+}
+
+function appendQueuedInputsToOpenAiTranscript(transcript, messages, hooks) {
+  const queuedInputs = drainAppendedInputs(hooks)
+  if (queuedInputs.length === 0) {
+    return 0
+  }
+
+  for (const input of queuedInputs) {
+    messages.push(input)
+    transcript.push({
+      role: 'user',
+      content: toOpenAiContent(input),
+    })
+  }
+
+  return queuedInputs.length
+}
+
+function appendQueuedInputsToGeminiTranscript(transcript, messages, hooks) {
+  const queuedInputs = drainAppendedInputs(hooks)
+  if (queuedInputs.length === 0) {
+    return 0
+  }
+
+  for (const input of queuedInputs) {
+    messages.push(input)
+    transcript.push({
+      role: 'user',
+      parts: toGeminiParts(input),
+    })
+  }
+
+  return queuedInputs.length
+}
+
 function buildFinalizerPrompt({ toolEvents, reasoningText, draftMessage }) {
   const toolDigest = toolEvents
     .slice(-8)
@@ -693,7 +735,8 @@ export async function runOpenAiCompatibleAgent({
 }) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
   const registry = new Map(tools.map(tool => [tool.name, tool]))
-  const transcript = toOpenAiTranscript(systemPrompt, messages)
+  const conversationMessages = [...messages]
+  const transcript = toOpenAiTranscript(systemPrompt, conversationMessages)
   let latestUsage
   let providerReasoning = ''
   const providerReasoningBlocks = []
@@ -702,6 +745,7 @@ export async function runOpenAiCompatibleAgent({
 
   try {
     for (let step = 0; step < loopConfig.maxIterations; step += 1) {
+    appendQueuedInputsToOpenAiTranscript(transcript, conversationMessages, hooks)
     const reasoningBlockId = `provider-phase-${step + 1}`
     const reasoningOrder = step * 2
     const toolOrder = reasoningOrder + 1
@@ -806,11 +850,33 @@ export async function runOpenAiCompatibleAgent({
     )
 
     if (finalizedToolCalls.length === 0) {
+      const queuedInputs = drainAppendedInputs(hooks)
+      if (queuedInputs.length > 0) {
+        if (content.trim()) {
+          transcript.push({
+            role: 'assistant',
+            content,
+          })
+          conversationMessages.push({
+            role: 'assistant',
+            content,
+          })
+        }
+        for (const input of queuedInputs) {
+          conversationMessages.push(input)
+          transcript.push({
+            role: 'user',
+            content: toOpenAiContent(input),
+          })
+        }
+        continue
+      }
       return {
         message: content || '模型没有返回文本内容。',
         toolEvents,
         reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
         usage: latestUsage,
+        messages: conversationMessages,
       }
     }
 
@@ -827,6 +893,10 @@ export async function runOpenAiCompatibleAgent({
       role: 'assistant',
       content,
       tool_calls: finalizedToolCalls,
+    })
+    conversationMessages.push({
+      role: 'assistant',
+      content,
     })
 
     for (const toolCall of finalizedToolCalls) {
@@ -886,7 +956,8 @@ export async function runGoogleAgent({
     'https://generativelanguage.googleapis.com/v1beta',
   )
   const registry = new Map(tools.map(tool => [tool.name, tool]))
-  const transcript = toGeminiContents(messages)
+  const conversationMessages = [...messages]
+  const transcript = toGeminiContents(conversationMessages)
   let latestUsage
   let providerReasoning = ''
   const providerReasoningBlocks = []
@@ -895,6 +966,7 @@ export async function runGoogleAgent({
 
   try {
     for (let step = 0; step < loopConfig.maxIterations; step += 1) {
+    appendQueuedInputsToGeminiTranscript(transcript, conversationMessages, hooks)
     const reasoningBlockId = `provider-phase-${step + 1}`
     const reasoningOrder = step * 2
     const toolOrder = reasoningOrder + 1
@@ -985,11 +1057,33 @@ export async function runGoogleAgent({
     }
 
     if (functionCalls.length === 0) {
+      const queuedInputs = drainAppendedInputs(hooks)
+      if (queuedInputs.length > 0) {
+        if (content.trim()) {
+          transcript.push({
+            role: 'model',
+            parts: [{ text: content }],
+          })
+          conversationMessages.push({
+            role: 'assistant',
+            content,
+          })
+        }
+        for (const input of queuedInputs) {
+          conversationMessages.push(input)
+          transcript.push({
+            role: 'user',
+            parts: toGeminiParts(input),
+          })
+        }
+        continue
+      }
       return {
         message: content || '模型没有返回文本内容。',
         toolEvents,
         reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
         usage: latestUsage,
+        messages: conversationMessages,
       }
     }
 
@@ -1013,6 +1107,10 @@ export async function runGoogleAgent({
           },
         })),
       ],
+    })
+    conversationMessages.push({
+      role: 'assistant',
+      content,
     })
 
     const toolResponses = []

@@ -6,7 +6,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { AppSidebar } from './components/AppSidebar'
-import { abortAgentTask, getAgentTask, respondToApproval, startAgentTask } from './lib/agent'
+import {
+  abortAgentTask,
+  appendInputToAgentTask,
+  getAgentTask,
+  respondToApproval,
+  startAgentTask,
+} from './lib/agent'
 import { type AuraHomeState } from './lib/aura'
 import { builtinPlugins, builtinSkills } from './catalog'
 import {
@@ -35,6 +41,7 @@ import {
 import type {
   AgentSettings,
   AgentTaskSnapshot,
+  AppendedInput,
   CapabilityOverrideMode,
   CapabilityPanelItem,
   ChatContentPart,
@@ -374,6 +381,31 @@ async function createDraftAttachmentFromFile(file: File): Promise<DraftAttachmen
   }
 }
 
+async function materializeDraftAttachments(
+  workspacePath: string,
+  attachments: DraftAttachment[],
+): Promise<MessageAttachment[]> {
+  return Promise.all(
+    attachments.map(async attachment => {
+      const path = attachment.path
+        ? await importAttachmentFromPath(workspacePath, attachment.path)
+        : await writeAttachmentBytes(
+            workspacePath,
+            attachment.name,
+            arrayBufferToBase64(await attachment.file!.arrayBuffer()),
+          )
+
+      return {
+        id: attachment.id,
+        name: attachment.name,
+        path,
+        preview: attachment.preview,
+        mimeType: resolveAttachmentMimeType(attachment) || undefined,
+      } satisfies MessageAttachment
+    }),
+  )
+}
+
 function getActiveProviderProfile(settings: AgentSettings) {
   return (
     settings.providerProfiles.find(profile => profile.id === settings.activeProviderProfileId) ||
@@ -532,6 +564,7 @@ function toMessageVariant(message: ChatMessage): ChatMessageVariant {
     steps: message.steps,
     error: message.error,
     errorInfo: message.errorInfo,
+    appendedInputs: message.appendedInputs,
   }
 }
 
@@ -558,6 +591,7 @@ function applyMessageVariant(
     steps: activeVariant.steps,
     error: activeVariant.error,
     errorInfo: activeVariant.errorInfo,
+    appendedInputs: activeVariant.appendedInputs,
     versions: variants,
     activeVersionIndex: safeIndex,
   }
@@ -1039,6 +1073,7 @@ export function MainWindowApp() {
                     snapshot.taskTree,
                     currentVariant.activity?.expanded ?? true,
                   ),
+                  appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
                   error: snapshot.error,
                   errorInfo: snapshot.errorInfo,
                 }))
@@ -1082,6 +1117,8 @@ export function MainWindowApp() {
                                 snapshot.taskTree,
                                 snapshot.status !== 'completed',
                               ),
+                              appendedInputs:
+                                snapshot.appendedInputs || currentVariant.appendedInputs,
                               error:
                                 snapshot.status === 'failed'
                                   ? snapshot.error || 'Agent 执行失败。'
@@ -1497,6 +1534,102 @@ export function MainWindowApp() {
     return workspacePath
   }
 
+  async function appendPromptToRunningTask(
+    rawContent: string,
+    options?: {
+      attachmentsOverride?: MessageAttachment[]
+    },
+  ) {
+    if (!activeSession || !activeRunningTask || !agentTask?.id) {
+      return
+    }
+
+    const content = rawContent.trim()
+    const effectiveAttachmentCount =
+      options?.attachmentsOverride?.length ?? draftAttachments.length
+    if (!content && effectiveAttachmentCount === 0) {
+      return
+    }
+
+    const workspaceHint = content || draftAttachments[0]?.name || activeSession.title
+    const workspacePath = await ensureSessionWorkspace(activeSession, workspaceHint).catch(caught => {
+      setError(caught instanceof Error ? caught.message : '创建会话工作目录失败。')
+      return ''
+    })
+
+    if (!workspacePath) {
+      return
+    }
+
+    const materializedAttachments = options?.attachmentsOverride
+      ? options.attachmentsOverride
+      : await materializeDraftAttachments(workspacePath, draftAttachments).catch(caught => {
+          setError(caught instanceof Error ? caught.message : '导入附件到当前会话失败。')
+          return null
+        })
+
+    if (!materializedAttachments) {
+      return
+    }
+
+    const contentForDisplay =
+      content ||
+      `已补充 ${materializedAttachments.length} 个附件：${materializedAttachments
+        .map(attachment => attachment.name)
+        .join('、')}`
+    const appendedInput: AppendedInput = {
+      id: createId(),
+      content: contentForDisplay,
+      parts: buildUserMessageParts(content, materializedAttachments),
+      attachments: materializedAttachments,
+      createdAt: Date.now(),
+      status: 'queued',
+    }
+
+    try {
+      await appendInputToAgentTask(agentTask.id, {
+        id: appendedInput.id,
+        content: appendedInput.content,
+        parts: appendedInput.parts,
+        attachments: appendedInput.attachments,
+        createdAt: appendedInput.createdAt,
+      })
+
+      setAgentTasksBySession(current => ({
+        ...current,
+        [activeSession.id]: current[activeSession.id]
+          ? {
+              ...current[activeSession.id],
+              appendedInputs: [
+                ...(current[activeSession.id].appendedInputs || []),
+                appendedInput,
+              ],
+            }
+          : current[activeSession.id],
+      }))
+
+      updateSession(activeSession.id, session => ({
+        ...session,
+        messages: session.messages.map(message =>
+          message.id === activeRunningTask.messageId
+            ? updateActiveMessageVariant(message, currentVariant => ({
+                ...currentVariant,
+                appendedInputs: [...(currentVariant.appendedInputs || []), appendedInput],
+              }))
+            : message,
+        ),
+        updatedAt: Date.now(),
+      }))
+
+      if (!options?.attachmentsOverride) {
+        clearComposerState(activeSession.id)
+      }
+      setError('')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '补充输入发送失败。')
+    }
+  }
+
   async function submitPrompt(
     rawContent: string,
     options?: {
@@ -1508,7 +1641,14 @@ export function MainWindowApp() {
   ) {
     const content = rawContent.trim()
     const effectiveAttachmentCount = options?.attachmentsOverride?.length ?? draftAttachments.length
-    if ((!content && effectiveAttachmentCount === 0) || isRunning || !activeSession) {
+    if ((!content && effectiveAttachmentCount === 0) || !activeSession) {
+      return
+    }
+
+    if (isRunning) {
+      await appendPromptToRunningTask(rawContent, {
+        attachmentsOverride: options?.attachmentsOverride,
+      })
       return
     }
 
@@ -1559,25 +1699,7 @@ export function MainWindowApp() {
 
     const materializedAttachments = options?.attachmentsOverride
       ? options.attachmentsOverride
-      : await Promise.all(
-          draftAttachments.map(async attachment => {
-            const path = attachment.path
-              ? await importAttachmentFromPath(workspacePath, attachment.path)
-              : await writeAttachmentBytes(
-                  workspacePath,
-                  attachment.name,
-                  arrayBufferToBase64(await attachment.file!.arrayBuffer()),
-                )
-
-            return {
-              id: attachment.id,
-              name: attachment.name,
-              path,
-              preview: attachment.preview,
-              mimeType: resolveAttachmentMimeType(attachment) || undefined,
-            } satisfies MessageAttachment
-          }),
-        ).catch(caught => {
+      : await materializeDraftAttachments(workspacePath, draftAttachments).catch(caught => {
           setError(caught instanceof Error ? caught.message : '导入附件到当前会话失败。')
           return null
         })
@@ -1998,6 +2120,8 @@ export function MainWindowApp() {
                   summary: '这次回答已被中途停止。',
                   suggestedAction: '如果还需要继续，可以重新发起一次生成。',
                 },
+                appendedInputs:
+                  currentSnapshot?.appendedInputs || currentVariant.appendedInputs,
                 events:
                   currentSnapshot?.toolEvents.map(mapToolEventToMessageEvent) ||
                   currentVariant.events,

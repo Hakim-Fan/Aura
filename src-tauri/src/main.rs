@@ -21,6 +21,8 @@ struct AgentTaskSnapshot {
     message: Option<String>,
     #[serde(rename = "toolEvents")]
     tool_events: Vec<serde_json::Value>,
+    #[serde(rename = "appendedInputs")]
+    appended_inputs: Vec<serde_json::Value>,
     #[serde(rename = "taskTree")]
     task_tree: Vec<serde_json::Value>,
     reasoning: Vec<serde_json::Value>,
@@ -926,6 +928,7 @@ fn spawn_agent_task<R: Runtime>(
         status: "queued".into(),
         message: None,
         tool_events: Vec::new(),
+        appended_inputs: Vec::new(),
         task_tree: Vec::new(),
         reasoning: Vec::new(),
         usage: None,
@@ -1000,6 +1003,9 @@ fn spawn_agent_task<R: Runtime>(
                     if let Some(tool_event) = event.get("event") {
                         merge_tool_event(current, tool_event);
                     }
+                }),
+                Some("appended_inputs") => with_snapshot(&stdout_snapshot, |current| {
+                    current.appended_inputs = extract_array(event.get("inputs"));
                 }),
                 Some("task_tree") => with_snapshot(&stdout_snapshot, |current| {
                     current.task_tree = extract_array(event.get("tree"));
@@ -1235,6 +1241,61 @@ fn respond_to_agent_approval(
             .map_err(|error| format!("Failed to serialize approval payload: {error}"))?
     )
     .map_err(|error| format!("Failed to write approval payload to Node bridge: {error}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn append_input_to_agent_task(
+    state: State<'_, AgentTaskStore>,
+    task_id: String,
+    input: serde_json::Value,
+) -> Result<(), String> {
+    let tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| "Failed to lock task store.".to_string())?;
+    let Some(handle) = tasks.get(&task_id) else {
+        return Err(format!("Agent task not found: {task_id}"));
+    };
+
+    {
+        let mut snapshot = handle
+            .snapshot
+            .lock()
+            .map_err(|_| "Failed to lock task snapshot.".to_string())?;
+        snapshot.appended_inputs.push(serde_json::json!({
+            "id": input.get("id").and_then(|value| value.as_str()).unwrap_or_default(),
+            "content": input.get("content").and_then(|value| value.as_str()).unwrap_or_default(),
+            "parts": input.get("parts").cloned().unwrap_or(serde_json::Value::Array(Vec::new())),
+            "attachments": input
+                .get("attachments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(Vec::new())),
+            "createdAt": input
+                .get("createdAt")
+                .and_then(|value| value.as_i64())
+                .unwrap_or_default(),
+            "status": "queued",
+        }));
+    }
+
+    let append_message = serde_json::json!({
+        "type": "append_input",
+        "input": input,
+    });
+
+    let mut stdin = handle
+        .stdin
+        .lock()
+        .map_err(|_| "Failed to lock Node bridge stdin.".to_string())?;
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::to_string(&append_message)
+            .map_err(|error| format!("Failed to serialize appended input payload: {error}"))?
+    )
+    .map_err(|error| format!("Failed to write appended input payload to Node bridge: {error}"))?;
 
     Ok(())
 }
@@ -1607,6 +1668,7 @@ fn main() {
             get_agent_task,
             abort_agent_task,
             respond_to_agent_approval,
+            append_input_to_agent_task,
             run_provider_action,
             run_mcp_action,
             ensure_aura_home,

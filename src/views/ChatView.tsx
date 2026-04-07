@@ -43,6 +43,7 @@ import { TaskTreeView } from '../components/TaskTreeView'
 import type {
   AgentSettings,
   AgentTaskSnapshot,
+  AppendedInput,
   CapabilityOverrideMode,
   CapabilityPanelItem,
   CapabilityUsageSnapshot,
@@ -242,6 +243,10 @@ function eventStatusLabel(status: MessageEvent['status']) {
     default:
       return '成功'
   }
+}
+
+function appendedInputStatusLabel(status: AppendedInput['status']) {
+  return status === 'consumed' ? '已并入当前任务' : '将在当前步骤后处理'
 }
 
 function prettifyIdentifier(identifier: string) {
@@ -948,6 +953,58 @@ function CapabilityPanel({
   )
 }
 
+function AppendedInputsPanel({
+  inputs,
+}: {
+  inputs: AppendedInput[]
+}) {
+  if (inputs.length === 0) {
+    return null
+  }
+
+  return (
+    <section className="flex flex-col gap-2">
+      {inputs.map(input => (
+        <div
+          key={input.id}
+          className="rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.02)] px-3 py-2.5"
+        >
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-[rgba(15,23,42,0.06)] px-2 py-0.5 text-9px font-700 uppercase tracking-wider text-[var(--text-secondary)]">
+              补充输入
+            </span>
+            <span
+              className={`text-11px ${
+                input.status === 'consumed'
+                  ? 'text-[var(--accent-soft-strong)]'
+                  : 'text-[var(--text-secondary)] opacity-70'
+              }`}
+            >
+              {appendedInputStatusLabel(input.status)}
+            </span>
+          </div>
+          <div className="text-13px leading-relaxed text-[var(--text-primary)]">
+            {input.content}
+          </div>
+          {input.attachments?.length ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {input.attachments.map(attachment => (
+                <span
+                  key={attachment.id}
+                  className="rounded-full border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1 text-11px text-[var(--text-secondary)]"
+                  title={attachment.path}
+                >
+                  {attachment.name}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </section>
+  )
+}
+
 function AssistantMessageCard({
   message,
   onCopyText,
@@ -994,6 +1051,7 @@ function AssistantMessageCard({
     (message.events?.length || 0) > 0 ||
     visibleSteps.length > 0 ||
     visibleReasoning.length > 0
+  const appendedInputs = message.appendedInputs || []
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
   const messageFailureSummary =
     activity?.status === 'failed' || message.error
@@ -1082,6 +1140,8 @@ function AssistantMessageCard({
               {message.error}
             </div>
           ) : null}
+
+          {appendedInputs.length > 0 ? <AppendedInputsPanel inputs={appendedInputs} /> : null}
 
           {message.content ? (
             <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
@@ -1307,6 +1367,9 @@ export function ChatView({
     const reasoningSignal = (lastMessage.reasoning || [])
       .map(entry => `${entry.id}:${entry.content.length}`)
       .join('|')
+    const appendedSignal = (lastMessage.appendedInputs || [])
+      .map(input => `${input.id}:${input.status}:${input.content.length}`)
+      .join('|')
     return [
       messages.length,
       lastMessage.id,
@@ -1314,6 +1377,7 @@ export function ChatView({
       lastMessage.status || '',
       eventSignal,
       reasoningSignal,
+      appendedSignal,
       isRunning ? 'running' : 'idle',
     ].join(':')
   }, [isRunning, messages])
@@ -1368,9 +1432,10 @@ export function ChatView({
   const isMetaEnter = settings.sendShortcut === 'meta-enter'
   const composerMetaHint = settings.cwd
     ? isMetaEnter
-      ? '⌘/Ctrl + Enter 发送'
-      : 'Enter 发送，Shift + Enter 换行'
+      ? `⌘/Ctrl + Enter ${isRunning ? '补充当前任务' : '发送'}`
+      : `Enter ${isRunning ? '补充当前任务' : '发送'}，Shift + Enter 换行`
     : '请设置工作区'
+  const canSubmitComposer = Boolean(draft.trim() || attachments.length > 0)
 
   const hasInspectorContent = true
 
@@ -1856,20 +1921,27 @@ export function ChatView({
 
                   <div className="flex items-center gap-4">
                     <span className="text-11px text-[var(--text-secondary)] opacity-40 hidden sm:inline">{composerMetaHint}</span>
+                    {isRunning ? (
+                      <button
+                        className="flex items-center justify-center p-1.5 rounded-lg text-red-500 border border-red-200 bg-red-50 hover:bg-red-100 transition-all"
+                        title="停止生成"
+                        onClick={onStop}
+                        type="button"
+                      >
+                        <Square size={14} fill="currentColor" strokeWidth={0} />
+                      </button>
+                    ) : null}
                     <button
                       className={`flex items-center justify-center p-1.5 rounded-lg text-white transition-all ${isRunning
-                        ? 'bg-red-500 hover:bg-red-600 shadow-md shadow-red-200'
+                        ? 'bg-[var(--accent-soft-strong)] hover:brightness-110 disabled:opacity-40 disabled:grayscale'
                         : 'bg-[var(--accent-soft-strong)] hover:brightness-110 disabled:opacity-40 disabled:grayscale'
                         }`}
-                      title={isRunning ? '停止生成' : '发送'}
-                      disabled={!isRunning && !draft.trim() && attachments.length === 0}
-                      onClick={isRunning ? onStop : onSubmit}
+                      title={isRunning ? '补充当前任务' : '发送'}
+                      disabled={!canSubmitComposer}
+                      onClick={onSubmit}
+                      type="button"
                     >
-                      {isRunning ? (
-                        <Square size={16} fill="currentColor" strokeWidth={0} />
-                      ) : (
-                        <SendHorizontal size={18} />
-                      )}
+                      <SendHorizontal size={18} />
                     </button>
                   </div>
                 </div>

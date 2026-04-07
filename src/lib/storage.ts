@@ -401,6 +401,39 @@ function normalizeMessageVariant(
       variant.errorInfo && typeof variant.errorInfo === 'object'
         ? variant.errorInfo
         : undefined,
+    appendedInputs: Array.isArray(variant.appendedInputs)
+      ? variant.appendedInputs
+          .map(input => {
+            if (!input || typeof input !== 'object') {
+              return null
+            }
+
+            const entry = input as {
+              id?: unknown
+              content?: unknown
+              parts?: unknown
+              attachments?: unknown
+              createdAt?: unknown
+              status?: unknown
+            }
+            if (typeof entry.id !== 'string' || !entry.id.trim()) {
+              return null
+            }
+
+            return {
+              id: entry.id,
+              content: typeof entry.content === 'string' ? entry.content : '',
+              parts: normalizeMessageParts(entry.parts),
+              attachments: normalizeMessageAttachments(entry.attachments),
+              createdAt:
+                typeof entry.createdAt === 'number' && Number.isFinite(entry.createdAt)
+                  ? entry.createdAt
+                  : fallbackCreatedAt,
+              status: entry.status === 'consumed' ? ('consumed' as const) : ('queued' as const),
+            }
+          })
+          .filter((input): input is NonNullable<typeof input> => Boolean(input))
+      : [],
   }
 }
 
@@ -740,6 +773,7 @@ function parseSessions(raw: string | null): Session[] {
               message.errorInfo && typeof message.errorInfo === 'object'
                 ? message.errorInfo
                 : undefined,
+            appendedInputs: [],
           }
           const normalizedVersions = Array.isArray(message.versions)
             ? message.versions
@@ -774,6 +808,7 @@ function parseSessions(raw: string | null): Session[] {
             steps: activeVariant.steps,
             error: activeVariant.error,
             errorInfo: activeVariant.errorInfo,
+            appendedInputs: activeVariant.appendedInputs,
             versions,
             activeVersionIndex: safeIndex,
           }
@@ -820,6 +855,22 @@ function serializeSessions(sessions: Session[]) {
         ...attachment,
         preview: undefined,
       })),
+      appendedInputs: (message.appendedInputs || []).map(input => ({
+        ...input,
+        parts: (input.parts || []).map(part => {
+          if (part.type === 'image') {
+            return {
+              ...part,
+              dataUrl: undefined,
+            }
+          }
+          return part
+        }),
+        attachments: (input.attachments || []).map(attachment => ({
+          ...attachment,
+          preview: undefined,
+        })),
+      })),
       versions: (message.versions || []).map(variant => ({
         ...variant,
         parts: (variant.parts || []).map(part => {
@@ -834,6 +885,22 @@ function serializeSessions(sessions: Session[]) {
         attachments: (variant.attachments || []).map(attachment => ({
           ...attachment,
           preview: undefined,
+        })),
+        appendedInputs: (variant.appendedInputs || []).map(input => ({
+          ...input,
+          parts: (input.parts || []).map(part => {
+            if (part.type === 'image') {
+              return {
+                ...part,
+                dataUrl: undefined,
+              }
+            }
+            return part
+          }),
+          attachments: (input.attachments || []).map(attachment => ({
+            ...attachment,
+            preview: undefined,
+          })),
         })),
       })),
     })),

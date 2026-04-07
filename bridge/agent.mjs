@@ -306,13 +306,14 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
+      const resolvedMessages = result.messages || messages
 
       if (shouldRunFinalization(result)) {
         try {
           const finalizedMessage = await finalizeGoogleAnswer({
             settings,
             systemPrompt,
-            messages,
+            messages: resolvedMessages,
             toolEvents,
             reasoningText: extractProviderReasoning(result.reasoning || []),
             draftMessage: result.message,
@@ -328,7 +329,11 @@ export async function runAgent(request) {
         }
       }
 
-      const summaryReasoning = summarizeReasoning(messages, toolEvents, result.message)
+      const summaryReasoning = summarizeReasoning(
+        resolvedMessages,
+        toolEvents,
+        result.message,
+      )
       hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
         blockId: summaryReasoning[0].id,
         kind: summaryReasoning[0].kind,
@@ -357,13 +362,14 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
+      const resolvedMessages = result.messages || messages
 
       if (shouldRunFinalization(result)) {
         try {
           const finalizedMessage = await finalizeOpenAiCompatibleAnswer({
             settings,
             systemPrompt,
-            messages,
+            messages: resolvedMessages,
             toolEvents,
             reasoningText: extractProviderReasoning(result.reasoning || []),
             draftMessage: result.message,
@@ -379,7 +385,11 @@ export async function runAgent(request) {
         }
       }
 
-      const summaryReasoning = summarizeReasoning(messages, toolEvents, result.message)
+      const summaryReasoning = summarizeReasoning(
+        resolvedMessages,
+        toolEvents,
+        result.message,
+      )
       hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
         blockId: summaryReasoning[0].id,
         kind: summaryReasoning[0].kind,

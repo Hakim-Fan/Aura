@@ -51,6 +51,17 @@ export type RuntimeErrorInfo = {
   retryable?: boolean
 }
 
+export type AppendedInputStatus = 'queued' | 'consumed'
+
+export type AppendedInput = {
+  id: string
+  content: string
+  parts?: ChatContentPart[]
+  attachments?: MessageAttachment[]
+  createdAt: number
+  status: AppendedInputStatus
+}
+
 export type MessageEvent = {
   id: string
   kind: MessageEventKind
@@ -187,6 +198,7 @@ export type ChatMessageVariant = {
   steps?: TaskNode[]
   error?: string
   errorInfo?: RuntimeErrorInfo
+  appendedInputs?: AppendedInput[]
 }
 
 export type ChatMessage = {
@@ -206,6 +218,7 @@ export type ChatMessage = {
   steps?: TaskNode[]
   error?: string
   errorInfo?: RuntimeErrorInfo
+  appendedInputs?: AppendedInput[]
   versions?: ChatMessageVariant[]
   activeVersionIndex?: number
 }
@@ -328,6 +341,7 @@ export type AgentTaskSnapshot = {
   reasoning?: MessageReasoning[]
   usage?: MessageUsage
   pendingApproval?: ApprovalRequest
+  appendedInputs?: AppendedInput[]
   error?: string
   errorInfo?: RuntimeErrorInfo
   errorCode?: string
