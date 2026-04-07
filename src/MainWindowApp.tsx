@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { TrayIcon } from '@tauri-apps/api/tray'
 import { Menu, MenuItem, Submenu } from '@tauri-apps/api/menu'
@@ -739,6 +739,11 @@ export function MainWindowApp() {
   const [workspaceError, setWorkspaceError] = useState('')
   const [expandedPaths, setExpandedPaths] = useState<string[]>([])
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
+  const runningTasksBySessionRef = useRef<Record<string, RunningTaskBinding>>({})
+
+  useEffect(() => {
+    runningTasksBySessionRef.current = runningTasksBySession
+  }, [runningTasksBySession])
   const [previewContent, setPreviewContent] = useState('')
   const [previewImage, setPreviewImage] = useState('')
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -1021,6 +1026,9 @@ export function MainWindowApp() {
         if (cancelled) {
           return
         }
+        if (runningTasksBySessionRef.current[sessionId]?.taskId !== binding.taskId) {
+          return
+        }
 
         setAgentTasksBySession(current => ({
           ...current,
@@ -1152,6 +1160,9 @@ export function MainWindowApp() {
         }
       } catch (caught) {
         if (cancelled) {
+          return
+        }
+        if (runningTasksBySessionRef.current[sessionId]?.taskId !== binding.taskId) {
           return
         }
 
@@ -1627,6 +1638,212 @@ export function MainWindowApp() {
       setError('')
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '补充输入发送失败。')
+    }
+  }
+
+  async function forceExecuteAppendedInput(messageId: string, inputId: string) {
+    if (!activeSession || !activeRunningTask || !agentTask?.id) {
+      return
+    }
+    if (activeRunningTask.messageId !== messageId) {
+      return
+    }
+
+    const assistantIndex = activeSession.messages.findIndex(
+      message => message.id === messageId && message.role === 'assistant',
+    )
+    if (assistantIndex === -1) {
+      return
+    }
+
+    const assistantMessage = activeSession.messages[assistantIndex]
+    const appendedInputs = assistantMessage.appendedInputs || []
+    const targetInput = appendedInputs.find(input => input.id === inputId)
+    if (!targetInput || targetInput.status !== 'queued') {
+      return
+    }
+
+    let latestSettings = loadSettings()
+    let latestAuraHome = auraHome
+    let latestProjectOverrides = loadProjectCapabilityOverrides()
+
+    try {
+      const [hydrated, hydratedProjectOverrides] = await Promise.all([
+        hydrateStorageFromAuraHome(),
+        hydrateProjectCapabilityOverridesFromAuraHome(),
+      ])
+      latestSettings = hydrated.settings
+      latestAuraHome = hydrated.aura
+      latestProjectOverrides = hydratedProjectOverrides
+      setSettings(hydrated.settings)
+      setAuraHome(hydrated.aura)
+      setProjectCapabilityOverrides(hydratedProjectOverrides)
+    } catch {
+      // Fall back to in-memory state if Aura hydration is temporarily unavailable.
+    }
+
+    const latestProviderProfile = getSessionProviderProfile(latestSettings, activeSession)
+    const latestEffectiveProvider = latestProviderProfile?.provider || latestSettings.provider
+    const latestEffectiveModel =
+      activeSession.model ||
+      resolvePreferredModelId(latestProviderProfile, latestSettings.model) ||
+      latestSettings.model
+
+    const workspacePath = activeSession.workspacePath.trim()
+    if (!workspacePath) {
+      setError('当前会话还没有可用工作目录，暂时无法立即接管。')
+      return
+    }
+
+    const projectWorkspaceRoot =
+      activeSession.workspaceRoot || latestSettings.cwd || workspacePath
+    const resolvedCapabilities = latestAuraHome
+      ? resolveCapabilitiesForWorkspace({
+          workspaceRoot: projectWorkspaceRoot,
+          settings: latestSettings,
+          aura: latestAuraHome,
+          overrides: latestProjectOverrides,
+        })
+      : {
+          runtime: {
+            workspaceRoot: projectWorkspaceRoot,
+            resolvedAt: Date.now(),
+            skills: [],
+            plugins: [],
+            mcpServers: [],
+          },
+          usage: {
+            workspaceRoot: projectWorkspaceRoot,
+            resolvedAt: Date.now(),
+            skills: [],
+            plugins: [],
+            mcpServers: [],
+          },
+        }
+
+    const runtimeSettings: AgentSettings = {
+      ...latestSettings,
+      activeProviderProfileId:
+        latestProviderProfile?.id || latestSettings.activeProviderProfileId,
+      provider: latestEffectiveProvider,
+      apiKey: latestProviderProfile?.apiKey || latestSettings.apiKey,
+      baseUrl: latestProviderProfile?.baseUrl || latestSettings.baseUrl,
+      model: latestEffectiveModel,
+      cwd: workspacePath,
+    }
+
+    const conversationBeforeAssistant = activeSession.messages
+      .slice(0, assistantIndex)
+      .map(message => ({
+        ...message,
+        appendedInputs: [],
+      }))
+    const replayInputs = appendedInputs.map(input => ({
+      id: input.id,
+      role: 'user' as const,
+      content: input.content,
+      parts: input.parts || [],
+      attachments: input.attachments || [],
+      status: 'completed' as const,
+      createdAt: input.createdAt,
+    }))
+    const pendingAssistantVariant: ChatMessageVariant = {
+      ...toMessageVariant(createPendingAssistantMessage()),
+      capabilitySnapshot: resolvedCapabilities.usage,
+      appendedInputs: appendedInputs.map(input => ({
+        ...input,
+        status: 'consumed' as const,
+      })),
+    }
+
+    try {
+      await abortAgentTask(agentTask.id)
+    } catch {
+      // Best effort: the restart below becomes the new source of truth.
+    }
+
+    updateSession(activeSession.id, session => ({
+      ...session,
+      providerProfileId: latestProviderProfile?.id || session.providerProfileId,
+      provider: latestEffectiveProvider,
+      model: latestEffectiveModel,
+      messages: session.messages.map(message => {
+        if (message.id !== assistantMessage.id) {
+          return message
+        }
+        const variants = ensureMessageVariants(message)
+        const activeIndex =
+          typeof message.activeVersionIndex === 'number'
+            ? Math.max(0, Math.min(message.activeVersionIndex, variants.length - 1))
+            : variants.length - 1
+        const nextVariants = [...variants]
+        nextVariants[activeIndex] = {
+          ...nextVariants[activeIndex],
+          status: 'failed',
+          error: '已根据补充要求中断当前执行，并立即重新规划。',
+          errorInfo: {
+            source: 'system',
+            category: 'cancelled',
+            code: 'APPENDED_INPUT_FORCE_REPLAN',
+            summary: '当前执行已被补充要求强制接管。',
+            suggestedAction: 'Aura 正在按最新补充要求重新执行这一轮任务。',
+          },
+          activity: nextVariants[activeIndex]?.activity
+            ? {
+                ...nextVariants[activeIndex].activity!,
+                status: 'failed',
+                finishedAt: Date.now(),
+              }
+            : nextVariants[activeIndex]?.activity,
+        }
+        nextVariants.push(pendingAssistantVariant)
+        return applyMessageVariant(message, nextVariants, nextVariants.length - 1)
+      }),
+      updatedAt: Date.now(),
+    }))
+
+    setRunningTasksBySession(current => {
+      const next = { ...current }
+      delete next[activeSession.id]
+      return next
+    })
+    setAgentTasksBySession(current => {
+      const next = { ...current }
+      delete next[activeSession.id]
+      return next
+    })
+
+    try {
+      const taskId = await startAgentTask(
+        runtimeSettings,
+        [...conversationBeforeAssistant, ...replayInputs],
+        resolvedCapabilities.runtime,
+      )
+
+      setRunningTasksBySession(current => ({
+        ...current,
+        [activeSession.id]: {
+          taskId,
+          messageId: assistantMessage.id,
+        },
+      }))
+      setAgentTasksBySession(current => ({
+        ...current,
+        [activeSession.id]: {
+          id: taskId,
+          status: 'queued',
+          toolEvents: [],
+          taskTree: [],
+          reasoning: [],
+          appendedInputs: appendedInputs.map(input => ({
+            ...input,
+            status: 'consumed' as const,
+          })),
+        },
+      }))
+      setError('')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '立即接管当前补充失败。')
     }
   }
 
@@ -2364,6 +2581,9 @@ export function MainWindowApp() {
               onSelectMessageVersion={selectMessageVersion}
               onRegenerateMessage={messageId => void regenerateFromMessage(messageId)}
               onResendMessage={messageId => void resendUserMessage(messageId)}
+              onForceExecuteAppendedInput={(messageId, inputId) =>
+                void forceExecuteAppendedInput(messageId, inputId)
+              }
               onToggleMessageActivity={toggleMessageActivity}
               onStop={() => void handleStopAgentTask()}
             />

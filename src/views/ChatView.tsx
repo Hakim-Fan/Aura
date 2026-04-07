@@ -125,6 +125,7 @@ type Props = {
   onSelectMessageVersion: (messageId: string, nextIndex: number) => void
   onRegenerateMessage: (messageId: string) => void
   onResendMessage: (messageId: string) => void
+  onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
   onToggleMessageActivity: (messageId: string) => void
   onStop: () => void
 }
@@ -955,8 +956,14 @@ function CapabilityPanel({
 
 function AppendedInputsPanel({
   inputs,
+  messageId,
+  isStreaming,
+  onForceExecute,
 }: {
   inputs: AppendedInput[]
+  messageId: string
+  isStreaming: boolean
+  onForceExecute: (messageId: string, inputId: string) => void
 }) {
   if (inputs.length === 0) {
     return null
@@ -982,6 +989,15 @@ function AppendedInputsPanel({
             >
               {appendedInputStatusLabel(input.status)}
             </span>
+            {isStreaming && input.status === 'queued' ? (
+              <button
+                className="rounded-full border border-[rgba(79,123,116,0.22)] bg-white px-2.5 py-0.5 text-10px font-700 text-[var(--accent-soft-strong)] hover:bg-[rgba(79,123,116,0.06)]"
+                onClick={() => onForceExecute(messageId, input.id)}
+                type="button"
+              >
+                立即处理
+              </button>
+            ) : null}
           </div>
           <div className="text-13px leading-relaxed text-[var(--text-primary)]">
             {input.content}
@@ -1012,6 +1028,7 @@ function AssistantMessageCard({
   onDeleteMessage,
   onSelectMessageVersion,
   onRegenerateMessage,
+  onForceExecuteAppendedInput,
   onHandleApproval,
   onToggleActivity,
 }: {
@@ -1021,6 +1038,7 @@ function AssistantMessageCard({
   onDeleteMessage: (messageId: string) => void
   onSelectMessageVersion: (messageId: string, nextIndex: number) => void
   onRegenerateMessage: (messageId: string) => void
+  onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
   onHandleApproval: (decision: 'approve' | 'deny') => void
   onToggleActivity: (messageId: string) => void
 }) {
@@ -1141,7 +1159,14 @@ function AssistantMessageCard({
             </div>
           ) : null}
 
-          {appendedInputs.length > 0 ? <AppendedInputsPanel inputs={appendedInputs} /> : null}
+          {appendedInputs.length > 0 ? (
+            <AppendedInputsPanel
+              inputs={appendedInputs}
+              messageId={message.id}
+              isStreaming={isStreaming}
+              onForceExecute={onForceExecuteAppendedInput}
+            />
+          ) : null}
 
           {message.content ? (
             <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
@@ -1330,6 +1355,7 @@ export function ChatView({
   onSelectMessageVersion,
   onRegenerateMessage,
   onResendMessage,
+  onForceExecuteAppendedInput,
   onToggleMessageActivity,
   onStop,
 }: Props) {
@@ -1613,6 +1639,7 @@ export function ChatView({
                       onDeleteMessage={onDeleteMessage}
                       onSelectMessageVersion={onSelectMessageVersion}
                       onRegenerateMessage={onRegenerateMessage}
+                      onForceExecuteAppendedInput={onForceExecuteAppendedInput}
                       onHandleApproval={onHandleApproval}
                       onToggleActivity={onToggleMessageActivity}
                     />
