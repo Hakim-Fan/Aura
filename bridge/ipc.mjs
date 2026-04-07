@@ -178,6 +178,14 @@ rl.on('line', line => {
           typeof error.rawMessage === 'string'
             ? error.rawMessage
             : undefined,
+        errorInfo:
+          error &&
+          typeof error === 'object' &&
+          'errorInfo' in error &&
+          error.errorInfo &&
+          typeof error.errorInfo === 'object'
+            ? error.errorInfo
+            : undefined,
       })
       process.exitCode = 1
     })

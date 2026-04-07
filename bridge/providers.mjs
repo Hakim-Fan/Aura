@@ -1,4 +1,5 @@
 import { invokeTool } from './tools.mjs'
+import { createStructuredError } from './runtimeErrors.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
 
 function flattenOpenAiMessageContent(content) {
@@ -190,13 +191,26 @@ async function parseJsonResponse(response) {
   try {
     return JSON.parse(text)
   } catch {
-    throw new Error(`Provider returned invalid JSON\n\n${text}`)
+    throw createStructuredError('模型服务返回了无法解析的数据。', {
+      source: 'provider',
+      category: 'invalid_input',
+      code: 'INVALID_PROVIDER_JSON',
+      detail: `Provider returned invalid JSON\n\n${text}`,
+      suggestedAction: '请稍后重试，或切换到更稳定的模型 / 兼容接口。',
+    })
   }
 }
 
 async function readSseStream(response, onData) {
   if (!response.body) {
-    throw new Error('Provider returned an empty streaming response body.')
+    throw createStructuredError('模型服务没有返回可读取的流式结果。', {
+      source: 'provider',
+      category: 'unavailable',
+      code: 'EMPTY_PROVIDER_STREAM',
+      detail: 'Provider returned an empty streaming response body.',
+      suggestedAction: '请稍后重试，或切换到其他可用模型 / 服务。',
+      retryable: true,
+    })
   }
 
   const decoder = new TextDecoder()
@@ -427,10 +441,47 @@ function presentProviderError(message, messages) {
   return message
 }
 
+function buildProviderHttpError(response, message, messages) {
+  const presented = presentProviderError(message, messages)
+  const status = response.status
+  const category =
+    status === 401 || status === 403
+      ? 'authentication'
+      : status === 429
+        ? 'rate_limit'
+        : status === 502 || status === 503 || status === 504
+          ? 'unavailable'
+          : 'execution_failed'
+
+  return createStructuredError('模型服务请求失败。', {
+    source: 'provider',
+    category,
+    code: `HTTP_${status}`,
+    status,
+    detail: presented,
+    suggestedAction:
+      category === 'authentication'
+        ? '请检查当前 Provider 的 API Key、账号权限或模型访问权限。'
+        : category === 'rate_limit'
+          ? '请稍后重试，或切换到其他可用模型 / 服务。'
+          : category === 'unavailable'
+            ? '请稍后重试，或确认当前 Provider 服务状态正常。'
+            : '请展开详细信息查看原始报错，并确认当前 Provider / 模型配置是否正确。',
+    retryable: category === 'rate_limit' || category === 'unavailable',
+  })
+}
+
 function createClassifiedError(message, extras = {}) {
-  const error = new Error(message)
-  Object.assign(error, extras)
-  return error
+  return createStructuredError(message, {
+    source: extras.source || 'provider',
+    category: extras.category || 'execution_failed',
+    code: extras.code,
+    detail: extras.detail || extras.rawMessage || message,
+    rawMessage: extras.rawMessage,
+    suggestedAction: extras.suggestedAction,
+    retryable: extras.retryable,
+    status: extras.status,
+  })
 }
 
 function maybeNormalizeProviderTermination(error, messages) {
@@ -448,7 +499,10 @@ function maybeNormalizeProviderTermination(error, messages) {
       {
         code: 'provider_terminated',
         source: 'provider',
+        category: 'network',
         rawMessage: presentProviderError(message, messages),
+        suggestedAction: '请稍后重试，或切换到对工具调用支持更稳定的模型 / Provider。',
+        retryable: true,
       },
     )
   }
@@ -556,7 +610,11 @@ export async function finalizeOpenAiCompatibleAnswer({
 
   if (!response.ok) {
     const data = await parseJsonResponse(response)
-    throw new Error(data.error?.message || 'OpenAI-compatible finalization request failed')
+    throw buildProviderHttpError(
+      response,
+      data.error?.message || 'OpenAI-compatible finalization request failed',
+      [],
+    )
   }
 
   const data = await parseJsonResponse(response)
@@ -610,7 +668,11 @@ export async function finalizeGoogleAnswer({
 
   if (!response.ok) {
     const data = await parseJsonResponse(response)
-    throw new Error(data.error?.message || 'Google finalization request failed')
+    throw buildProviderHttpError(
+      response,
+      data.error?.message || 'Google finalization request failed',
+      [],
+    )
   }
 
   const data = await parseJsonResponse(response)
@@ -667,11 +729,10 @@ export async function runOpenAiCompatibleAgent({
 
     if (!response.ok) {
       const data = await parseJsonResponse(response)
-      throw new Error(
-        presentProviderError(
-          data.error?.message || 'OpenAI-compatible request failed',
-          messages,
-        ),
+      throw buildProviderHttpError(
+        response,
+        data.error?.message || 'OpenAI-compatible request failed',
+        messages,
       )
     }
 
@@ -857,8 +918,10 @@ export async function runGoogleAgent({
 
     if (!response.ok) {
       const data = await parseJsonResponse(response)
-      throw new Error(
-        presentProviderError(data.error?.message || 'Google request failed', messages),
+      throw buildProviderHttpError(
+        response,
+        data.error?.message || 'Google request failed',
+        messages,
       )
     }
 

@@ -329,6 +329,31 @@ export function SettingsWindowApp({ initialTab }: Props) {
     handleSettingsChange('enabledPluginIds', next)
   }
 
+  function setAllSkillsEnabled(enabled: boolean) {
+    handleSettingsChange(
+      'enabledSkillIds',
+      enabled ? availableSkills.map(item => item.id) : [],
+    )
+  }
+
+  function setAllPluginsEnabled(enabled: boolean) {
+    handleSettingsChange(
+      'enabledPluginIds',
+      enabled ? availablePlugins.filter(item => item.supported).map(item => item.id) : [],
+    )
+  }
+
+  function setAllMcpEnabled(enabled: boolean) {
+    setDraftSettings(current => ({
+      ...current,
+      mcpServers: current.mcpServers.map(server => ({
+        ...server,
+        enabled,
+      })),
+    }))
+    setSaveState('idle')
+  }
+
   async function refreshAuraAssets(kind?: 'skills' | 'plugins') {
     if (kind) {
       setRefreshingAssets(kind)
@@ -777,6 +802,10 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   function renderMcp() {
+    const allMcpEnabled =
+      draftSettings.mcpServers.length > 0 &&
+      draftSettings.mcpServers.every(server => server.enabled)
+
     return (
       <section className="section-shell settings-panel">
         <header className="section-header">
@@ -785,6 +814,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <h2>MCP 服务器</h2>
           </div>
           <div className="header-actions">
+            <button
+              className="secondary-button"
+              disabled={draftSettings.mcpServers.length === 0}
+              onClick={() => setAllMcpEnabled(!allMcpEnabled)}
+            >
+              {allMcpEnabled ? '全部关闭' : '全部打开'}
+            </button>
             <button
               className="secondary-button"
               onClick={() => void refreshMcpServers()}
@@ -909,6 +945,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
   ) {
     const title = kind === 'skills' ? '技能' : '插件'
     const searchValue = assetSearch[kind]
+    const toggleableItems =
+      kind === 'skills' ? items : items.filter(item => item.supported)
+    const allEnabled =
+      toggleableItems.length > 0 &&
+      toggleableItems.every(item => enabledIds.includes(item.id))
     const normalizedKeyword = searchValue.trim().toLowerCase()
     const filteredItems = items.filter(item =>
       !normalizedKeyword ||
@@ -928,6 +969,17 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </div>
           <div className="header-actions">
             <span className="micro-pill">{items.length} 个可用</span>
+            <button
+              className="secondary-button"
+              disabled={items.length === 0}
+              onClick={() =>
+                kind === 'skills'
+                  ? setAllSkillsEnabled(!allEnabled)
+                  : setAllPluginsEnabled(!allEnabled)
+              }
+            >
+              {allEnabled ? '全部关闭' : '全部打开'}
+            </button>
             <button
               className="secondary-button"
               onClick={() => void refreshAuraAssets(kind)}

@@ -2,6 +2,7 @@ import type {
   AgentSettings,
   CapabilityOverrideMode,
   CapabilityUsageSnapshot,
+  ChatMessageVariant,
   ExecutionMode,
   MemoryMode,
   ProjectCapabilityOverrides,
@@ -227,6 +228,179 @@ function normalizeCapabilityUsageSnapshot(value: unknown): CapabilityUsageSnapsh
     skills: normalizeEntries(snapshot.skills),
     plugins: normalizeEntries(snapshot.plugins),
     mcpServers: normalizeEntries(snapshot.mcpServers),
+  }
+}
+
+function normalizeMessageParts(value: unknown) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map(part => {
+      if (!part || typeof part !== 'object') {
+        return null
+      }
+
+      if (
+        (part as { type?: unknown }).type === 'text' &&
+        typeof (part as { text?: unknown }).text === 'string'
+      ) {
+        return {
+          type: 'text' as const,
+          text: (part as { text: string }).text,
+        }
+      }
+
+      if (
+        (part as { type?: unknown }).type === 'image' &&
+        typeof (part as { name?: unknown }).name === 'string' &&
+        typeof (part as { mimeType?: unknown }).mimeType === 'string'
+      ) {
+        return {
+          type: 'image' as const,
+          name: (part as { name: string }).name,
+          mimeType: (part as { mimeType: string }).mimeType,
+          path:
+            typeof (part as { path?: unknown }).path === 'string'
+              ? (part as { path?: string }).path
+              : undefined,
+          dataUrl:
+            typeof (part as { dataUrl?: unknown }).dataUrl === 'string'
+              ? (part as { dataUrl?: string }).dataUrl
+              : undefined,
+        }
+      }
+
+      if (
+        (part as { type?: unknown }).type === 'file' &&
+        typeof (part as { name?: unknown }).name === 'string' &&
+        typeof (part as { path?: unknown }).path === 'string'
+      ) {
+        return {
+          type: 'file' as const,
+          name: (part as { name: string }).name,
+          path: (part as { path: string }).path,
+          mimeType:
+            typeof (part as { mimeType?: unknown }).mimeType === 'string'
+              ? (part as { mimeType?: string }).mimeType
+              : undefined,
+        }
+      }
+
+      return null
+    })
+    .filter((part): part is NonNullable<typeof part> => Boolean(part))
+}
+
+function normalizeMessageAttachments(value: unknown) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map(attachment => {
+      if (!attachment || typeof attachment !== 'object') {
+        return null
+      }
+      const path = typeof attachment.path === 'string' ? attachment.path : ''
+      if (!path) {
+        return null
+      }
+      return {
+        id:
+          typeof attachment.id === 'string' && attachment.id.trim()
+            ? attachment.id
+            : Math.random().toString(36).slice(2, 10),
+        name:
+          typeof attachment.name === 'string' && attachment.name.trim()
+            ? attachment.name
+            : path.split('/').pop() || '附件',
+        path,
+        preview: typeof attachment.preview === 'string' ? attachment.preview : undefined,
+        mimeType:
+          typeof attachment.mimeType === 'string' ? attachment.mimeType : undefined,
+      }
+    })
+    .filter((attachment): attachment is NonNullable<typeof attachment> => Boolean(attachment))
+}
+
+function normalizeMessageReasoning(value: unknown) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map(reasoning => {
+      if (!reasoning || typeof reasoning !== 'object') {
+        return null
+      }
+      if (typeof reasoning.content !== 'string' || !reasoning.content.trim()) {
+        return null
+      }
+      return {
+        id:
+          typeof reasoning.id === 'string' && reasoning.id.trim()
+            ? reasoning.id
+            : Math.random().toString(36).slice(2, 10),
+        kind: (reasoning.kind === 'summary' ? 'summary' : 'provider') as
+          | 'summary'
+          | 'provider',
+        content: reasoning.content,
+        order: typeof reasoning.order === 'number' ? reasoning.order : undefined,
+      }
+    })
+    .filter((reasoning): reasoning is NonNullable<typeof reasoning> => Boolean(reasoning))
+}
+
+function normalizeMessageVariant(
+  value: unknown,
+  fallbackCreatedAt: number,
+): ChatMessageVariant | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+
+  const variant = value as Partial<ChatMessageVariant>
+  return {
+    content: typeof variant.content === 'string' ? variant.content : '',
+    parts: normalizeMessageParts(variant.parts),
+    status:
+      variant.status === 'pending' ||
+      variant.status === 'streaming' ||
+      variant.status === 'failed'
+        ? variant.status
+        : 'completed',
+    createdAt:
+      typeof variant.createdAt === 'number' ? variant.createdAt : fallbackCreatedAt,
+    attachments: normalizeMessageAttachments(variant.attachments),
+    reasoning: normalizeMessageReasoning(variant.reasoning),
+    usage:
+      variant.usage && typeof variant.usage === 'object'
+        ? {
+            inputTokens:
+              typeof variant.usage.inputTokens === 'number'
+                ? variant.usage.inputTokens
+                : undefined,
+            outputTokens:
+              typeof variant.usage.outputTokens === 'number'
+                ? variant.usage.outputTokens
+                : undefined,
+            contextWindow:
+              typeof variant.usage.contextWindow === 'number'
+                ? variant.usage.contextWindow
+                : undefined,
+          }
+        : undefined,
+    capabilitySnapshot: normalizeCapabilityUsageSnapshot(variant.capabilitySnapshot),
+    activity: variant.activity,
+    events: Array.isArray(variant.events) ? variant.events : [],
+    steps: Array.isArray(variant.steps) ? variant.steps : [],
+    error: typeof variant.error === 'string' ? variant.error : undefined,
+    errorInfo:
+      variant.errorInfo && typeof variant.errorInfo === 'object'
+        ? variant.errorInfo
+        : undefined,
   }
 }
 
@@ -547,152 +721,63 @@ function parseSessions(raw: string | null): Session[] {
         workspacePath: session.workspacePath || '',
         workspaceRoot: session.workspaceRoot || '',
         workspaceMode: session.workspaceMode || 'explicit',
-        messages: (session.messages || []).map(message => ({
-          id: message.id || Math.random().toString(36).slice(2, 10),
-          role: message.role || 'assistant',
-          content: message.content || '',
-          parts: Array.isArray(message.parts)
-            ? message.parts
-              .map(part => {
-                if (!part || typeof part !== 'object') {
-                  return null
-                }
+        messages: (session.messages || []).map(message => {
+          const createdAt = message.createdAt || session.updatedAt || Date.now()
+          const baseVariant = normalizeMessageVariant(message, createdAt) || {
+            content: message.content || '',
+            parts: [],
+            status: message.status || 'completed',
+            createdAt,
+            attachments: [],
+            reasoning: [],
+            usage: undefined,
+            capabilitySnapshot: normalizeCapabilityUsageSnapshot(message.capabilitySnapshot),
+            activity: message.activity,
+            events: message.events || [],
+            steps: message.steps || [],
+            error: message.error,
+            errorInfo:
+              message.errorInfo && typeof message.errorInfo === 'object'
+                ? message.errorInfo
+                : undefined,
+          }
+          const normalizedVersions = Array.isArray(message.versions)
+            ? message.versions
+                .map(variant => normalizeMessageVariant(variant, createdAt))
+                .filter((variant): variant is NonNullable<typeof variant> => Boolean(variant))
+            : []
+          const versions =
+            normalizedVersions.length > 0 ? normalizedVersions : [baseVariant]
+          const safeIndex =
+            typeof message.activeVersionIndex === 'number' &&
+            message.activeVersionIndex >= 0 &&
+            message.activeVersionIndex < versions.length
+              ? message.activeVersionIndex
+              : versions.length - 1
+          const activeVariant = versions[safeIndex] || baseVariant
 
-                if (
-                  (part as { type?: unknown }).type === 'text' &&
-                  typeof (part as { text?: unknown }).text === 'string'
-                ) {
-                  return {
-                    type: 'text' as const,
-                    text: (part as { text: string }).text,
-                  }
-                }
-
-                if (
-                  (part as { type?: unknown }).type === 'image' &&
-                  typeof (part as { name?: unknown }).name === 'string' &&
-                  typeof (part as { mimeType?: unknown }).mimeType === 'string'
-                ) {
-                  return {
-                    type: 'image' as const,
-                    name: (part as { name: string }).name,
-                    mimeType: (part as { mimeType: string }).mimeType,
-                    path:
-                      typeof (part as { path?: unknown }).path === 'string'
-                        ? (part as { path?: string }).path
-                        : undefined,
-                    dataUrl:
-                      typeof (part as { dataUrl?: unknown }).dataUrl === 'string'
-                        ? (part as { dataUrl?: string }).dataUrl
-                        : undefined,
-                  }
-                }
-
-                if (
-                  (part as { type?: unknown }).type === 'file' &&
-                  typeof (part as { name?: unknown }).name === 'string' &&
-                  typeof (part as { path?: unknown }).path === 'string'
-                ) {
-                  return {
-                    type: 'file' as const,
-                    name: (part as { name: string }).name,
-                    path: (part as { path: string }).path,
-                    mimeType:
-                      typeof (part as { mimeType?: unknown }).mimeType === 'string'
-                        ? (part as { mimeType?: string }).mimeType
-                        : undefined,
-                  }
-                }
-
-                return null
-              })
-              .filter((part): part is NonNullable<typeof part> => Boolean(part))
-            : [],
-          status: message.status || 'completed',
-          createdAt: message.createdAt || session.updatedAt || Date.now(),
-          attachments: Array.isArray(message.attachments)
-            ? message.attachments
-              .map(attachment => {
-                if (!attachment || typeof attachment !== 'object') {
-                  return null
-                }
-                const path =
-                  typeof attachment.path === 'string' ? attachment.path : ''
-                if (!path) {
-                  return null
-                }
-                return {
-                  id:
-                    typeof attachment.id === 'string' && attachment.id.trim()
-                      ? attachment.id
-                      : Math.random().toString(36).slice(2, 10),
-                  name:
-                    typeof attachment.name === 'string' && attachment.name.trim()
-                      ? attachment.name
-                      : path.split('/').pop() || '附件',
-                  path,
-                  preview:
-                    typeof attachment.preview === 'string' ? attachment.preview : undefined,
-                  mimeType:
-                    typeof attachment.mimeType === 'string'
-                      ? attachment.mimeType
-                      : undefined,
-                }
-              })
-              .filter(
-                (attachment): attachment is NonNullable<typeof attachment> =>
-                  Boolean(attachment),
-              )
-            : [],
-          reasoning: Array.isArray(message.reasoning)
-            ? message.reasoning
-              .map(reasoning => {
-                if (!reasoning || typeof reasoning !== 'object') {
-                  return null
-                }
-                if (typeof reasoning.content !== 'string' || !reasoning.content.trim()) {
-                  return null
-                }
-                return {
-                  id:
-                    typeof reasoning.id === 'string' && reasoning.id.trim()
-                      ? reasoning.id
-                      : Math.random().toString(36).slice(2, 10),
-                  kind: (reasoning.kind === 'summary' ? 'summary' : 'provider') as
-                    | 'summary'
-                    | 'provider',
-                  content: reasoning.content,
-                  order:
-                    typeof reasoning.order === 'number' ? reasoning.order : undefined,
-                }
-              })
-              .filter((reasoning): reasoning is NonNullable<typeof reasoning> =>
-                Boolean(reasoning),
-              )
-            : [],
-          usage:
-            message.usage && typeof message.usage === 'object'
-              ? {
-                inputTokens:
-                  typeof message.usage.inputTokens === 'number'
-                    ? message.usage.inputTokens
-                    : undefined,
-                outputTokens:
-                  typeof message.usage.outputTokens === 'number'
-                    ? message.usage.outputTokens
-                    : undefined,
-                contextWindow:
-                  typeof message.usage.contextWindow === 'number'
-                    ? message.usage.contextWindow
-                    : undefined,
-              }
-              : undefined,
-          capabilitySnapshot: normalizeCapabilityUsageSnapshot(message.capabilitySnapshot),
-          activity: message.activity,
-          events: message.events || [],
-          steps: message.steps || [],
-          error: message.error,
-        })),
+          return {
+            id: message.id || Math.random().toString(36).slice(2, 10),
+            role: message.role || 'assistant',
+            linkedMessageId:
+              typeof message.linkedMessageId === 'string' ? message.linkedMessageId : undefined,
+            content: activeVariant.content,
+            parts: activeVariant.parts,
+            status: activeVariant.status,
+            createdAt: activeVariant.createdAt,
+            attachments: activeVariant.attachments,
+            reasoning: activeVariant.reasoning,
+            usage: activeVariant.usage,
+            capabilitySnapshot: activeVariant.capabilitySnapshot,
+            activity: activeVariant.activity,
+            events: activeVariant.events,
+            steps: activeVariant.steps,
+            error: activeVariant.error,
+            errorInfo: activeVariant.errorInfo,
+            versions,
+            activeVersionIndex: safeIndex,
+          }
+        }),
         toolEvents: session.toolEvents || [],
         taskTree: session.taskTree || [],
         updatedAt: session.updatedAt || Date.now(),
@@ -734,6 +819,22 @@ function serializeSessions(sessions: Session[]) {
       attachments: (message.attachments || []).map(attachment => ({
         ...attachment,
         preview: undefined,
+      })),
+      versions: (message.versions || []).map(variant => ({
+        ...variant,
+        parts: (variant.parts || []).map(part => {
+          if (part.type === 'image') {
+            return {
+              ...part,
+              dataUrl: undefined,
+            }
+          }
+          return part
+        }),
+        attachments: (variant.attachments || []).map(attachment => ({
+          ...attachment,
+          preview: undefined,
+        })),
       })),
     })),
   }))

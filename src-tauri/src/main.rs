@@ -28,6 +28,8 @@ struct AgentTaskSnapshot {
     #[serde(rename = "pendingApproval")]
     pending_approval: Option<serde_json::Value>,
     error: Option<String>,
+    #[serde(rename = "errorInfo")]
+    error_info: Option<serde_json::Value>,
     #[serde(rename = "errorCode")]
     error_code: Option<String>,
     #[serde(rename = "errorSource")]
@@ -929,6 +931,7 @@ fn spawn_agent_task<R: Runtime>(
         usage: None,
         pending_approval: None,
         error: None,
+        error_info: None,
         error_code: None,
         error_source: None,
         raw_error: None,
@@ -1036,6 +1039,7 @@ fn spawn_agent_task<R: Runtime>(
                         .get("message")
                         .and_then(|value| value.as_str())
                         .map(|value| value.to_string());
+                    current.error_info = extract_object(event.get("errorInfo"));
                     current.error_code = event
                         .get("code")
                         .and_then(|value| value.as_str())

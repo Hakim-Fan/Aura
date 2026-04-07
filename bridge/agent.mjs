@@ -9,6 +9,7 @@ import {
   runGoogleAgent,
   runOpenAiCompatibleAgent,
 } from './providers.mjs'
+import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 import { createBuiltinTools } from './tools.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -92,26 +93,10 @@ function shouldRunFinalization(result) {
 }
 
 function normalizeAgentError(error) {
-  const rawMessage = error instanceof Error ? error.message : String(error)
-  const code =
-    error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
-      ? error.code
-      : 'unknown'
-  const source =
-    error && typeof error === 'object' && 'source' in error && typeof error.source === 'string'
-      ? error.source
-      : 'runtime'
-  const raw =
-    error && typeof error === 'object' && 'rawMessage' in error && typeof error.rawMessage === 'string'
-      ? error.rawMessage
-      : rawMessage
-
-  return {
-    code,
-    source,
-    rawMessage: raw,
-    message: rawMessage,
-  }
+  return normalizeRuntimeError(error, {
+    source: 'system',
+    operationLabel: '本轮任务',
+  })
 }
 
 function createTaskTracker(hooks, rootTitle) {
@@ -248,10 +233,22 @@ function buildSystemPrompt(settings, skillPrompt) {
 export async function runAgent(request) {
   const { settings, messages, runtime = {}, hooks = {}, capabilities } = request
   if (!settings?.apiKey?.trim()) {
-    throw new Error('Missing API key.')
+    throw createStructuredError('模型调用失败，当前缺少 API Key。', {
+      source: 'provider',
+      category: 'authentication',
+      code: 'MISSING_API_KEY',
+      detail: 'Missing API key.',
+      suggestedAction: '请先在设置页填写可用的 Provider API Key。',
+    })
   }
   if (!settings?.cwd?.trim()) {
-    throw new Error('Missing workspace directory.')
+    throw createStructuredError('任务无法开始，当前没有可用的工作区目录。', {
+      source: 'system',
+      category: 'invalid_input',
+      code: 'MISSING_WORKSPACE',
+      detail: 'Missing workspace directory.',
+      suggestedAction: '请先为当前会话设置工作区目录，再重新执行。',
+    })
   }
 
   const toolEvents = []
@@ -396,7 +393,13 @@ export async function runAgent(request) {
         taskTree: taskTracker.getTree(),
       }
     }
-    throw new Error(`Unsupported provider: ${settings.provider}`)
+    throw createStructuredError(`模型调用失败，当前 Provider "${settings.provider}" 不受支持。`, {
+      source: 'provider',
+      category: 'unsupported',
+      code: 'UNSUPPORTED_PROVIDER',
+      detail: `Unsupported provider: ${settings.provider}`,
+      suggestedAction: '请切换到已支持的 Provider 后再试。',
+    })
   } catch (error) {
     const normalized = normalizeAgentError(error)
 
@@ -447,6 +450,7 @@ export async function runAgent(request) {
     enriched.code = normalized.code
     enriched.source = normalized.source
     enriched.rawMessage = normalized.rawMessage
+    enriched.errorInfo = normalized.errorInfo
     throw enriched
   } finally {
     await mcp.close()

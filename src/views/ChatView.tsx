@@ -18,11 +18,14 @@ import {
   Brain,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Copy,
   Eye,
   FolderOpen,
   LayoutGrid,
+  MoreHorizontal,
   Paperclip,
   Pencil,
   RefreshCw,
@@ -31,6 +34,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Square,
+  Trash2,
   Wrench,
   X,
 } from 'lucide-react'
@@ -116,6 +120,8 @@ type Props = {
   onCopyPath: (path: string) => void
   onCopyText: (value: string) => void
   onEditMessage: (messageId: string) => void
+  onDeleteMessage: (messageId: string) => void
+  onSelectMessageVersion: (messageId: string, nextIndex: number) => void
   onRegenerateMessage: (messageId: string) => void
   onResendMessage: (messageId: string) => void
   onToggleMessageActivity: (messageId: string) => void
@@ -183,6 +189,14 @@ function clampToTwoLines(value: string, maxChars = 68) {
     return ''
   }
   return normalized.length > maxChars ? `${normalized.slice(0, maxChars).trimEnd()}...` : normalized
+}
+
+function summarizeFailureReason(value?: string, fallback = '未返回更具体的失败原因。') {
+  const normalized = (value || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return fallback
+  }
+  return normalized.length > 140 ? `${normalized.slice(0, 140).trimEnd()}...` : normalized
 }
 
 function activityStatusLabel(status?: string) {
@@ -460,6 +474,14 @@ function MessageEventCard({
   const isShellLog = event.kind === 'shell'
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
   const isApproval = event.kind === 'approval' && event.status === 'awaiting_approval'
+  const failureSummary =
+    event.status === 'error'
+      ? event.errorInfo?.summary || summarizeFailureReason(event.error || event.output || event.summary)
+      : ''
+  const failureAction =
+    event.status === 'error'
+      ? event.errorInfo?.suggestedAction
+      : ''
 
   return (
     <article className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2">
@@ -477,16 +499,28 @@ function MessageEventCard({
           </span>
           <strong className="text-12px text-[var(--text-primary)] opacity-80 leading-tight">{event.title}</strong>
         </div>
-        <span
-          className={`shrink-0 text-10px font-500 ${event.status === 'error'
-            ? 'text-red-500'
-            : event.status === 'awaiting_approval'
-              ? 'text-amber-600'
-              : 'text-green-600'
-            }`}
-        >
-          {eventStatusLabel(event.status)}
-        </span>
+        <div className="relative shrink-0 group/status">
+          <span
+            className={`shrink-0 text-10px font-500 ${event.status === 'error'
+              ? 'cursor-help text-red-500'
+              : event.status === 'awaiting_approval'
+                ? 'text-amber-600'
+                : 'text-green-600'
+              }`}
+          >
+            {eventStatusLabel(event.status)}
+          </span>
+          {event.status === 'error' ? (
+            <div className="pointer-events-none absolute right-0 top-[calc(100%+8px)] z-20 hidden w-72 rounded-xl border border-red-100 bg-white px-3 py-2 text-left text-12px leading-relaxed text-red-600 shadow-lg shadow-[rgba(15,23,42,0.12)] group-hover/status:block">
+              <div className="font-600">{failureSummary}</div>
+              {failureAction ? (
+                <div className="mt-1 text-[11px] leading-relaxed text-red-500/85">
+                  {failureAction}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       </div>
       <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
       {isApproval ? (
@@ -563,6 +597,106 @@ function MessageEventCard({
         </details>
       )}
     </article>
+  )
+}
+
+function MessageVersionSwitcher({
+  message,
+  align = 'left',
+  onSelectVersion,
+}: {
+  message: ChatMessage
+  align?: 'left' | 'right'
+  onSelectVersion: (messageId: string, nextIndex: number) => void
+}) {
+  const versionCount = message.versions?.length || 1
+  const activeIndex = message.activeVersionIndex || 0
+
+  if (versionCount <= 1) {
+    return null
+  }
+
+  return (
+    <div
+      className={`flex items-center gap-3 text-[var(--text-secondary)] ${align === 'right' ? 'justify-end' : 'justify-start'
+        }`}
+    >
+      <button
+        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-30"
+        disabled={activeIndex <= 0}
+        onClick={() => onSelectVersion(message.id, activeIndex - 1)}
+        title="查看上一版"
+        type="button"
+      >
+        <ChevronLeft size={16} />
+      </button>
+      <span className="min-w-[40px] text-center text-13px font-600 text-[var(--text-primary)]">
+        {activeIndex + 1}/{versionCount}
+      </span>
+      <button
+        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-30"
+        disabled={activeIndex >= versionCount - 1}
+        onClick={() => onSelectVersion(message.id, activeIndex + 1)}
+        title="查看下一版"
+        type="button"
+      >
+        <ChevronRight size={16} />
+      </button>
+    </div>
+  )
+}
+
+function MessageOverflowMenu({
+  messageId,
+  onDeleteMessage,
+}: {
+  messageId: string
+  onDeleteMessage: (messageId: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+
+    function handleClickOutside(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [open])
+
+  return (
+    <div className="relative" ref={menuRef}>
+      <button
+        className="rounded-md p-1.5 text-[var(--text-secondary)] hover:bg-[rgba(0,0,0,0.05)]"
+        onClick={() => setOpen(current => !current)}
+        title="更多操作"
+        type="button"
+      >
+        <MoreHorizontal size={15} />
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-[calc(100%+8px)] z-20 min-w-[170px] overflow-hidden rounded-2xl border border-[rgba(15,23,42,0.08)] bg-white shadow-xl shadow-[rgba(15,23,42,0.12)]">
+          <button
+            className="flex w-full items-center gap-3 px-4 py-3 text-left text-[15px] font-500 text-red-500 hover:bg-red-50"
+            onClick={() => {
+              setOpen(false)
+              onDeleteMessage(messageId)
+            }}
+            type="button"
+          >
+            <Trash2 size={16} />
+            <span>删除消息</span>
+          </button>
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -654,6 +788,31 @@ function CapabilityPanel({
     return nextEffectiveEnabled ? ('on' as const) : ('off' as const)
   }
 
+  function setSectionEnabled(
+    sectionKey: 'skill' | 'plugin' | 'mcp',
+    enabled: boolean,
+  ) {
+    const sectionItems = items.filter(item => item.kind === sectionKey)
+    for (const item of sectionItems) {
+      if (!item.supported) {
+        continue
+      }
+      const settingKey =
+        item.kind === 'skill'
+          ? 'skills'
+          : item.kind === 'plugin'
+            ? 'plugins'
+            : 'mcp'
+      const nextMode =
+        enabled === item.globalEnabled
+          ? ('inherit' as const)
+          : enabled
+            ? ('on' as const)
+            : ('off' as const)
+      onSetCapabilityOverride(settingKey, item.id, nextMode)
+    }
+  }
+
   return (
     <div className="overflow-hidden rounded-xl border border-[rgba(15,23,42,0.08)] bg-white/98 shadow-2xl shadow-[rgba(15,23,42,0.15)] backdrop-blur-xl">
       <div className="border-b border-[rgba(15,23,42,0.05)] px-4 py-3">
@@ -678,6 +837,10 @@ function CapabilityPanel({
       <div className="max-h-[420px] overflow-y-auto custom-scrollbar p-2">
         {sections.map(section => {
           const sectionItems = items.filter(item => item.kind === section.key)
+          const supportedItems = sectionItems.filter(item => item.supported)
+          const allEnabled =
+            supportedItems.length > 0 &&
+            supportedItems.every(item => item.effectiveEnabled)
           const isCollapsed = collapsedGroups.has(section.key)
           return (
             <div key={section.key} className="mb-1 last:mb-0">
@@ -696,6 +859,17 @@ function CapabilityPanel({
                   <ChevronDown size={12} className={`transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
                 </div>
               </button>
+              {!isCollapsed && sectionItems.length > 0 ? (
+                <div className="mb-2 flex items-center justify-end px-3">
+                  <button
+                    className="rounded-md px-2.5 py-1 text-11px font-600 text-[var(--text-secondary)] hover:bg-[rgba(15,23,42,0.05)]"
+                    onClick={() => setSectionEnabled(section.key, !allEnabled)}
+                    type="button"
+                  >
+                    {allEnabled ? '全部关闭' : '全部打开'}
+                  </button>
+                </div>
+              ) : null}
               {!isCollapsed && sectionItems.length > 0 ? (
                 <div className="flex flex-col gap-1">
                   {sectionItems.map(item => {
@@ -778,6 +952,8 @@ function AssistantMessageCard({
   message,
   onCopyText,
   onEditMessage,
+  onDeleteMessage,
+  onSelectMessageVersion,
   onRegenerateMessage,
   onHandleApproval,
   onToggleActivity,
@@ -785,12 +961,23 @@ function AssistantMessageCard({
   message: ChatMessage
   onCopyText: (value: string) => void
   onEditMessage: (messageId: string) => void
+  onDeleteMessage: (messageId: string) => void
+  onSelectMessageVersion: (messageId: string, nextIndex: number) => void
   onRegenerateMessage: (messageId: string) => void
   onHandleApproval: (decision: 'approve' | 'deny') => void
   onToggleActivity: (messageId: string) => void
 }) {
   const activity = message.activity
-  const duration = activity ? (activity.finishedAt || Date.now()) - activity.startedAt : undefined
+  const duration = activity
+    ? (
+      activity.finishedAt ||
+      (activity.status === 'running' ||
+        activity.status === 'queued' ||
+        activity.status === 'awaiting_approval'
+        ? Date.now()
+        : activity.startedAt)
+    ) - activity.startedAt
+    : undefined
   const visibleSteps = sanitizeTaskNodes(message.steps || [], message.content)
   const visibleReasoning = (message.reasoning || []).filter(entry =>
     normalizeComparableText(entry.content),
@@ -808,6 +995,14 @@ function AssistantMessageCard({
     visibleSteps.length > 0 ||
     visibleReasoning.length > 0
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
+  const messageFailureSummary =
+    activity?.status === 'failed' || message.error
+      ? message.errorInfo?.summary || summarizeFailureReason(message.error)
+      : ''
+  const messageFailureAction =
+    activity?.status === 'failed' || message.error
+      ? message.errorInfo?.suggestedAction
+      : ''
   const activitySummary = activity
     ? [
       activityStatusLabel(activity.status),
@@ -831,15 +1026,27 @@ function AssistantMessageCard({
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-12px text-[var(--text-secondary)] opacity-60">
             <span className="font-600 text-[var(--text-primary)] opacity-70">Aura</span>
             {activitySummary ? (
-              <button
-                className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 hover:bg-[rgba(15,23,42,0.04)] transition-colors"
-                onClick={() => onToggleActivity(message.id)}
-                title={activity?.expanded ? '折叠执行详情' : '展开执行详情'}
-              >
-                <Brain size={12} className="opacity-70" />
-                <span>{activitySummary}</span>
-                {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-              </button>
+              <div className="relative group/activity">
+                <button
+                  className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 hover:bg-[rgba(15,23,42,0.04)] transition-colors"
+                  onClick={() => onToggleActivity(message.id)}
+                  title={activity?.expanded ? '折叠执行详情' : '展开执行详情'}
+                >
+                  <Brain size={12} className="opacity-70" />
+                  <span>{activitySummary}</span>
+                  {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                </button>
+                {messageFailureSummary ? (
+                  <div className="pointer-events-none absolute left-0 top-[calc(100%+8px)] z-20 hidden w-80 rounded-xl border border-red-100 bg-white px-3 py-2 text-left text-12px leading-relaxed text-red-600 shadow-lg shadow-[rgba(15,23,42,0.12)] group-hover/activity:block">
+                    <div className="font-600">{messageFailureSummary}</div>
+                    {messageFailureAction ? (
+                      <div className="mt-1 text-[11px] leading-relaxed text-red-500/85">
+                        {messageFailureAction}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
 
@@ -894,30 +1101,41 @@ function AssistantMessageCard({
           )}
 
           <div className="flex items-center justify-end pt-1">
-            <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
-              <button
-                className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
-                title="复制"
-                onClick={() => onCopyText(message.content)}
-              >
-                <Copy size={14} />
-              </button>
-              <button
-                className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
-                title="编辑为新提示"
-                disabled={isStreaming}
-                onClick={() => onEditMessage(message.id)}
-              >
-                <Pencil size={14} />
-              </button>
-              <button
-                className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
-                title="重新生成"
-                disabled={isStreaming}
-                onClick={() => onRegenerateMessage(message.id)}
-              >
-                <RefreshCw size={14} />
-              </button>
+            <div className="flex items-center gap-2">
+              <MessageVersionSwitcher
+                message={message}
+                align="left"
+                onSelectVersion={onSelectMessageVersion}
+              />
+              <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
+                <button
+                  className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+                  title="复制"
+                  onClick={() => onCopyText(message.content)}
+                >
+                  <Copy size={14} />
+                </button>
+                <button
+                  className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+                  title="编辑为新提示"
+                  disabled={isStreaming}
+                  onClick={() => onEditMessage(message.id)}
+                >
+                  <Pencil size={14} />
+                </button>
+                <button
+                  className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+                  title="重新生成"
+                  disabled={isStreaming}
+                  onClick={() => onRegenerateMessage(message.id)}
+                >
+                  <RefreshCw size={14} />
+                </button>
+                <MessageOverflowMenu
+                  messageId={message.id}
+                  onDeleteMessage={onDeleteMessage}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -930,12 +1148,16 @@ function UserMessageCard({
   message,
   onCopyText,
   onEditMessage,
+  onDeleteMessage,
+  onSelectMessageVersion,
   onResend,
   onOpenAttachment,
 }: {
   message: ChatMessage
   onCopyText: (value: string) => void
   onEditMessage: (messageId: string) => void
+  onDeleteMessage: (messageId: string) => void
+  onSelectMessageVersion: (messageId: string, nextIndex: number) => void
   onResend: (messageId: string) => void
   onOpenAttachment: (path: string) => void
 }) {
@@ -971,16 +1193,27 @@ function UserMessageCard({
       <div className="max-w-[78%] bg-[var(--bg-user-bubble)] text-[var(--text-user-bubble)] px-5 py-3 rounded-2xl rounded-tr-8px shadow-[0_10px_30px_rgba(60,87,78,0.10)] text-15px leading-relaxed">
         {message.content}
       </div>
-      <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/90 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
-        <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制" onClick={() => onCopyText(message.content)}>
-          <Copy size={14} />
-        </button>
-        <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="编辑" onClick={() => onEditMessage(message.id)}>
-          <Pencil size={14} />
-        </button>
-        <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="重发" onClick={() => onResend(message.id)}>
-          <RefreshCw size={14} />
-        </button>
+      <div className="flex items-center gap-2">
+        <MessageVersionSwitcher
+          message={message}
+          align="right"
+          onSelectVersion={onSelectMessageVersion}
+        />
+        <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/90 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
+          <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制" onClick={() => onCopyText(message.content)}>
+            <Copy size={14} />
+          </button>
+          <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="编辑" onClick={() => onEditMessage(message.id)}>
+            <Pencil size={14} />
+          </button>
+          <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="重发" onClick={() => onResend(message.id)}>
+            <RefreshCw size={14} />
+          </button>
+          <MessageOverflowMenu
+            messageId={message.id}
+            onDeleteMessage={onDeleteMessage}
+          />
+        </div>
       </div>
     </article>
   )
@@ -1033,6 +1266,8 @@ export function ChatView({
   onCopyPath,
   onCopyText,
   onEditMessage,
+  onDeleteMessage,
+  onSelectMessageVersion,
   onRegenerateMessage,
   onResendMessage,
   onToggleMessageActivity,
@@ -1299,6 +1534,8 @@ export function ChatView({
                       message={message}
                       onCopyText={onCopyText}
                       onEditMessage={onEditMessage}
+                      onDeleteMessage={onDeleteMessage}
+                      onSelectMessageVersion={onSelectMessageVersion}
                       onResend={onResendMessage}
                       onOpenAttachment={onOpenAttachment}
                     />
@@ -1308,6 +1545,8 @@ export function ChatView({
                       message={message}
                       onCopyText={onCopyText}
                       onEditMessage={onEditMessage}
+                      onDeleteMessage={onDeleteMessage}
+                      onSelectMessageVersion={onSelectMessageVersion}
                       onRegenerateMessage={onRegenerateMessage}
                       onHandleApproval={onHandleApproval}
                       onToggleActivity={onToggleMessageActivity}

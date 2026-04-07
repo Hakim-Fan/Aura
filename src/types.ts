@@ -24,6 +24,33 @@ export type MessageEventKind = 'tool' | 'shell' | 'skill' | 'approval' | 'subage
 
 export type MessageEventStatus = 'running' | 'success' | 'error' | 'awaiting_approval'
 
+export type RuntimeErrorCategory =
+  | 'permission'
+  | 'missing_dependency'
+  | 'timeout'
+  | 'network'
+  | 'not_found'
+  | 'invalid_input'
+  | 'authentication'
+  | 'rate_limit'
+  | 'unavailable'
+  | 'cancelled'
+  | 'unsupported'
+  | 'execution_failed'
+  | 'unknown'
+
+export type RuntimeErrorSource = 'tool' | 'plugin' | 'mcp' | 'provider' | 'system'
+
+export type RuntimeErrorInfo = {
+  source: RuntimeErrorSource
+  category: RuntimeErrorCategory
+  code?: string
+  summary: string
+  detail?: string
+  suggestedAction?: string
+  retryable?: boolean
+}
+
 export type MessageEvent = {
   id: string
   kind: MessageEventKind
@@ -35,6 +62,7 @@ export type MessageEvent = {
   input?: string
   output?: string
   error?: string
+  errorInfo?: RuntimeErrorInfo
 }
 
 export type MessageActivity = {
@@ -145,9 +173,7 @@ export type CapabilityPanelItem = {
   effectiveEnabled: boolean
 }
 
-export type ChatMessage = {
-  id: string
-  role: ChatRole
+export type ChatMessageVariant = {
   content: string
   parts?: ChatContentPart[]
   status?: MessageStatus
@@ -160,6 +186,28 @@ export type ChatMessage = {
   events?: MessageEvent[]
   steps?: TaskNode[]
   error?: string
+  errorInfo?: RuntimeErrorInfo
+}
+
+export type ChatMessage = {
+  id: string
+  role: ChatRole
+  linkedMessageId?: string
+  content: string
+  parts?: ChatContentPart[]
+  status?: MessageStatus
+  createdAt?: number
+  attachments?: MessageAttachment[]
+  reasoning?: MessageReasoning[]
+  usage?: MessageUsage
+  capabilitySnapshot?: CapabilityUsageSnapshot
+  activity?: MessageActivity
+  events?: MessageEvent[]
+  steps?: TaskNode[]
+  error?: string
+  errorInfo?: RuntimeErrorInfo
+  versions?: ChatMessageVariant[]
+  activeVersionIndex?: number
 }
 
 export type ToolEvent = {
@@ -172,6 +220,7 @@ export type ToolEvent = {
   input?: string
   output?: string
   error?: string
+  errorInfo?: RuntimeErrorInfo
 }
 
 export type ApprovalCategory =
@@ -280,6 +329,7 @@ export type AgentTaskSnapshot = {
   usage?: MessageUsage
   pendingApproval?: ApprovalRequest
   error?: string
+  errorInfo?: RuntimeErrorInfo
   errorCode?: string
   errorSource?: string
   rawError?: string

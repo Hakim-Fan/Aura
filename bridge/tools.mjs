@@ -8,6 +8,7 @@ import {
   stringifyOutput,
   truncate,
 } from './utils.mjs'
+import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -446,10 +447,23 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     })
 
     if (decision !== 'approve') {
+      const deniedError = createStructuredError('这一步已被用户拒绝执行。', {
+        source:
+          tool.source === 'plugin'
+            ? 'plugin'
+            : tool.source === 'mcp'
+              ? 'mcp'
+              : 'tool',
+        category: 'cancelled',
+        code: 'USER_DENIED',
+        detail: 'Tool execution was denied by the user.',
+        suggestedAction: '如果仍然需要执行，请重新发起并在审批时允许本次操作。',
+      })
       updateEvent({
         summary: `${tool.description} (denied by user)`,
         status: 'error',
-        error: 'Tool execution was denied by the user.',
+        error: deniedError.rawMessage,
+        errorInfo: deniedError.errorInfo,
       })
       return `Tool ${tool.name} was denied by the user.`
     }
@@ -478,10 +492,26 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     return stringifyOutput(output)
   } catch (error) {
     const detail = formatToolError(error)
+    const normalized = normalizeRuntimeError(error, {
+      source:
+        tool.source === 'plugin'
+          ? 'plugin'
+          : tool.source === 'mcp'
+            ? 'mcp'
+            : 'tool',
+      operationLabel: tool.description || tool.name,
+    })
     updateEvent({
       status: 'error',
       error: detail,
+      errorInfo: normalized.errorInfo,
     })
-    return `Tool ${tool.name} failed.\n\n${detail}`
+    return [
+      normalized.errorInfo.summary,
+      normalized.errorInfo.suggestedAction || null,
+      detail ? `原始错误:\n${detail}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n\n')
   }
 }

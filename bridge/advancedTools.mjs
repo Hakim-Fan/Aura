@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { createStructuredError } from './runtimeErrors.mjs'
 import { resolveWorkspacePath, stringifyOutput, truncate } from './utils.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -147,7 +148,24 @@ function buildComputerTools({ settings, context }) {
           `.aura/captures/capture-${Date.now()}.png`
         const target = resolveWorkspacePath(context.cwd, relativePath)
         await fs.mkdir(path.dirname(target), { recursive: true })
-        await runCommand('screencapture', ['-x', target], context.cwd)
+        try {
+          await runCommand('screencapture', ['-x', target], context.cwd)
+        } catch (error) {
+          throw createStructuredError(
+            '截图失败，当前环境没有可用的屏幕画面，或者系统未授予屏幕录制权限。',
+            {
+              source: 'tool',
+              category: 'permission',
+              code:
+                error && typeof error === 'object' && typeof error.code === 'string'
+                  ? error.code
+                  : 'SCREEN_CAPTURE_FAILED',
+              detail: error instanceof Error ? error.stack || error.message : String(error),
+              suggestedAction:
+                '请确认应用运行在可见桌面会话中，并在系统设置中允许屏幕录制后再试。',
+            },
+          )
+        }
         return `Saved screenshot to ${target}`
       },
     },
