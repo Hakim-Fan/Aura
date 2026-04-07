@@ -1738,15 +1738,7 @@ export function ChatView({
                       <button
                         className="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-12px text-[var(--text-secondary)] transition-colors group"
                         onClick={() => {
-                          setModelMenuOpen(current => {
-                            const next = !current
-                            if (next) {
-                              setCollapsedModelGroups(
-                                new Set(modelGroups.map(group => group.profileId)),
-                              )
-                            }
-                            return next
-                          })
+                          setModelMenuOpen(current => !current)
                           setModelSearchTerm('')
                         }}
                         title="切换模型"

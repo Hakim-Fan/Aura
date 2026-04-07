@@ -2149,6 +2149,7 @@ export function MainWindowApp() {
           sessionFilter={sessionFilter}
           onSessionFilterChange={setSessionFilter}
           sessions={filteredSessions}
+          runningSessionIds={Object.keys(runningTasksBySession)}
           activeSessionId={activeSession?.id || null}
           onOpenSession={openSession}
           onCreateSession={createFreshSession}

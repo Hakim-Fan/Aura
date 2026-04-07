@@ -8,6 +8,7 @@ type Props = {
   sessionFilter: string
   onSessionFilterChange: (value: string) => void
   sessions: Session[]
+  runningSessionIds: string[]
   activeSessionId: string | null
   onOpenSession: (sessionId: string) => void
   onCreateSession: () => void
@@ -21,6 +22,7 @@ export function AppSidebar({
   sessionFilter,
   onSessionFilterChange,
   sessions,
+  runningSessionIds,
   activeSessionId,
   onOpenSession,
   onCreateSession,
@@ -29,6 +31,7 @@ export function AppSidebar({
   settingsOpen,
 }: Props) {
   const [deleteConfirmation, setDeleteConfirmation] = useState<{ id: string; title: string } | null>(null)
+  const runningSessionIdSet = new Set(runningSessionIds)
 
   return (
     <aside
@@ -78,11 +81,17 @@ export function AppSidebar({
               onClick={() => onOpenSession(session.id)}
               title={session.title}
             >
-              <div className="w-full text-14px font-500 text-[var(--text-primary)] truncate mb-0.5">
+              <div className="w-full truncate text-14px font-500 text-[var(--text-primary)] mb-0.5">
                 {session.title}
               </div>
-              <div className="text-11px text-[var(--text-secondary)] opacity-70">
-                {new Date(session.updatedAt).toLocaleDateString()}
+              <div className="flex w-full items-center gap-2 text-11px text-[var(--text-secondary)] opacity-70">
+                <span>{new Date(session.updatedAt).toLocaleDateString()}</span>
+                {runningSessionIdSet.has(session.id) ? (
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full bg-[var(--accent-soft-strong)] animate-pulse"
+                    title="当前会话正在执行任务"
+                  />
+                ) : null}
               </div>
             </button>
 
