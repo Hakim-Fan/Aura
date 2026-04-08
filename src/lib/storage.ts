@@ -401,6 +401,24 @@ function normalizeMessageVariant(
       variant.errorInfo && typeof variant.errorInfo === 'object'
         ? variant.errorInfo
         : undefined,
+    modelInfo:
+      variant.modelInfo &&
+      typeof variant.modelInfo === 'object' &&
+      typeof variant.modelInfo.providerProfileId === 'string' &&
+      typeof variant.modelInfo.providerProfileName === 'string' &&
+      (variant.modelInfo.provider === 'openai' ||
+        variant.modelInfo.provider === 'google' ||
+        variant.modelInfo.provider === 'custom') &&
+      typeof variant.modelInfo.modelId === 'string' &&
+      typeof variant.modelInfo.label === 'string'
+        ? {
+            providerProfileId: variant.modelInfo.providerProfileId,
+            providerProfileName: variant.modelInfo.providerProfileName,
+            provider: variant.modelInfo.provider,
+            modelId: variant.modelInfo.modelId,
+            label: variant.modelInfo.label,
+          }
+        : undefined,
     appendedInputs: Array.isArray(variant.appendedInputs)
       ? variant.appendedInputs
           .map(input => {
@@ -773,6 +791,24 @@ function parseSessions(raw: string | null): Session[] {
               message.errorInfo && typeof message.errorInfo === 'object'
                 ? message.errorInfo
                 : undefined,
+            modelInfo:
+              message.modelInfo &&
+              typeof message.modelInfo === 'object' &&
+              typeof message.modelInfo.providerProfileId === 'string' &&
+              typeof message.modelInfo.providerProfileName === 'string' &&
+              (message.modelInfo.provider === 'openai' ||
+                message.modelInfo.provider === 'google' ||
+                message.modelInfo.provider === 'custom') &&
+              typeof message.modelInfo.modelId === 'string' &&
+              typeof message.modelInfo.label === 'string'
+                ? {
+                    providerProfileId: message.modelInfo.providerProfileId,
+                    providerProfileName: message.modelInfo.providerProfileName,
+                    provider: message.modelInfo.provider,
+                    modelId: message.modelInfo.modelId,
+                    label: message.modelInfo.label,
+                  }
+                : undefined,
             appendedInputs: [],
           }
           const normalizedVersions = Array.isArray(message.versions)
@@ -809,6 +845,7 @@ function parseSessions(raw: string | null): Session[] {
             error: activeVariant.error,
             errorInfo: activeVariant.errorInfo,
             appendedInputs: activeVariant.appendedInputs,
+            modelInfo: activeVariant.modelInfo,
             versions,
             activeVersionIndex: safeIndex,
           }

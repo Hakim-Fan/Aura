@@ -37,6 +37,7 @@ import {
   readImagePreview,
   readTextFile,
   readWorkspaceTree,
+  deleteWorkspaceDirectory,
   writeAttachmentBytes,
 } from './lib/workspace'
 import type {
@@ -51,6 +52,7 @@ import type {
   MessageAttachment,
   MessageActivity,
   MessageEvent,
+  MessageModelInfo,
   ProjectCapabilityOverrides,
   ProviderProfile,
   ReasoningEffort,
@@ -64,6 +66,36 @@ import { HomeView } from './views/HomeView'
 
 function createId() {
   return Math.random().toString(36).slice(2, 10)
+}
+
+function getErrorMessage(caught: unknown, fallback: string) {
+  if (caught instanceof Error && caught.message.trim()) {
+    return caught.message
+  }
+  if (typeof caught === 'string' && caught.trim()) {
+    return caught
+  }
+  if (
+    caught &&
+    typeof caught === 'object' &&
+    'message' in caught &&
+    typeof (caught as { message?: unknown }).message === 'string' &&
+    (caught as { message: string }).message.trim()
+  ) {
+    return (caught as { message: string }).message
+  }
+  if (caught !== undefined && caught !== null) {
+    try {
+      const serialized = JSON.stringify(caught)
+      if (serialized && serialized !== '{}' && serialized !== 'null') {
+        return serialized
+      }
+    } catch {
+      return String(caught)
+    }
+    return String(caught)
+  }
+  return fallback
 }
 
 function createSession(settings: AgentSettings): Session {
@@ -83,7 +115,7 @@ function createSession(settings: AgentSettings): Session {
     provider: settings.provider,
     model: preferredModel,
     workspacePath: '',
-    workspaceRoot: settings.cwd,
+    workspaceRoot: '',
     workspaceMode: 'default',
     messages: [],
     toolEvents: [],
@@ -300,6 +332,7 @@ type DraftAttachment = {
   path?: string
   preview?: string
   mimeType?: string
+  bytesBase64?: string
   file?: File
 }
 
@@ -311,6 +344,7 @@ type ComposerState = {
 type RunningTaskBinding = {
   taskId: string
   messageId: string
+  variantIndex: number
 }
 
 function createEmptyComposerState(): ComposerState {
@@ -362,22 +396,17 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
 
 async function createDraftAttachmentFromFile(file: File): Promise<DraftAttachment> {
   const name = guessAttachmentName(file, `pasted-${Date.now()}`)
-  let preview = ''
-
-  if (file.type.startsWith('image/')) {
-    preview = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
-      reader.onerror = () => reject(reader.error)
-      reader.readAsDataURL(file)
-    })
-  }
+  const bytesBase64 = arrayBufferToBase64(await file.arrayBuffer())
+  const preview = file.type.startsWith('image/')
+    ? `data:${file.type || 'application/octet-stream'};base64,${bytesBase64}`
+    : ''
 
   return {
     id: createId(),
     name,
     preview,
     mimeType: file.type || undefined,
+    bytesBase64,
     file,
   }
 }
@@ -390,11 +419,21 @@ async function materializeDraftAttachments(
     attachments.map(async attachment => {
       const path = attachment.path
         ? await importAttachmentFromPath(workspacePath, attachment.path)
-        : await writeAttachmentBytes(
-            workspacePath,
-            attachment.name,
-            arrayBufferToBase64(await attachment.file!.arrayBuffer()),
-          )
+        : attachment.bytesBase64
+          ? await writeAttachmentBytes(
+              workspacePath,
+              attachment.name,
+              attachment.bytesBase64,
+            )
+          : attachment.file
+            ? await writeAttachmentBytes(
+                workspacePath,
+                attachment.name,
+                arrayBufferToBase64(await attachment.file.arrayBuffer()),
+              )
+            : await Promise.reject(
+                new Error(`附件“${attachment.name}”缺少可写入的数据，请重新添加后再试。`),
+              )
 
       return {
         id: attachment.id,
@@ -433,6 +472,23 @@ function resolvePreferredModelId(profile: ProviderProfile | null, preferredModel
     return preferredModelId
   }
   return getFirstEnabledModelId(profile)
+}
+
+function buildMessageModelInfo(
+  profile: ProviderProfile | null,
+  modelId: string,
+): MessageModelInfo | undefined {
+  if (!profile || !modelId.trim()) {
+    return undefined
+  }
+
+  return {
+    providerProfileId: profile.id,
+    providerProfileName: profile.name,
+    provider: profile.provider,
+    modelId,
+    label: modelId.split('/').filter(Boolean).at(-1) || modelId,
+  }
 }
 
 function getSessionProviderProfile(settings: AgentSettings, session: Session | null) {
@@ -566,6 +622,7 @@ function toMessageVariant(message: ChatMessage): ChatMessageVariant {
     error: message.error,
     errorInfo: message.errorInfo,
     appendedInputs: message.appendedInputs,
+    modelInfo: message.modelInfo,
   }
 }
 
@@ -593,6 +650,7 @@ function applyMessageVariant(
     error: activeVariant.error,
     errorInfo: activeVariant.errorInfo,
     appendedInputs: activeVariant.appendedInputs,
+    modelInfo: activeVariant.modelInfo,
     versions: variants,
     activeVersionIndex: safeIndex,
   }
@@ -624,6 +682,22 @@ function updateActiveMessageVariant(
       : variants.length - 1
   const nextVariants = [...variants]
   nextVariants[activeIndex] = updater(nextVariants[activeIndex] || toMessageVariant(message))
+  return applyMessageVariant(message, nextVariants, activeIndex)
+}
+
+function updateMessageVariantAtIndex(
+  message: ChatMessage,
+  targetIndex: number,
+  updater: (variant: ChatMessageVariant) => ChatMessageVariant,
+): ChatMessage {
+  const variants = ensureMessageVariants(message)
+  const safeTargetIndex = Math.max(0, Math.min(targetIndex, variants.length - 1))
+  const activeIndex =
+    typeof message.activeVersionIndex === 'number'
+      ? Math.max(0, Math.min(message.activeVersionIndex, variants.length - 1))
+      : variants.length - 1
+  const nextVariants = [...variants]
+  nextVariants[safeTargetIndex] = updater(nextVariants[safeTargetIndex] || toMessageVariant(message))
   return applyMessageVariant(message, nextVariants, activeIndex)
 }
 
@@ -1033,53 +1107,53 @@ export function MainWindowApp() {
         updateSession(sessionId, session => ({
           ...session,
           messages: session.messages.map(message =>
-            message.id === binding.messageId
-              ? updateActiveMessageVariant(message, currentVariant => ({
-                  ...currentVariant,
-                  content:
-                    snapshot.message ||
-                    (snapshot.status === 'awaiting_approval'
-                      ? '等待你的审批后继续执行。'
-                      : currentVariant.content),
-                  reasoning: snapshot.reasoning || currentVariant.reasoning,
-                  usage: snapshot.usage || currentVariant.usage,
-                  status:
-                    snapshot.status === 'failed'
-                      ? ('failed' as const)
-                      : snapshot.status === 'completed'
-                        ? ('completed' as const)
-                        : ('streaming' as const),
-                  events: [
-                    ...snapshot.toolEvents.map(mapToolEventToMessageEvent),
-                    ...(snapshot.pendingApproval
-                      ? [
-                          {
-                            id: snapshot.pendingApproval.id,
-                            kind: 'approval' as const,
-                            title: snapshot.pendingApproval.toolName,
-                            summary: snapshot.pendingApproval.summary,
-                            order:
-                              (snapshot.toolEvents
-                                .map(event => event.order || 0)
-                                .reduce((max, value) => Math.max(max, value), 0) || 0) + 1,
-                            status: 'awaiting_approval' as const,
-                            input: snapshot.pendingApproval.input,
-                          },
-                        ]
-                      : []),
-                  ],
-                  steps: snapshot.taskTree,
-                  activity: buildMessageActivity(
-                    snapshot.status,
-                    currentVariant.createdAt || Date.now(),
-                    snapshot.toolEvents,
-                    snapshot.taskTree,
-                    currentVariant.activity?.expanded ?? true,
-                  ),
-                  appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
-                  error: snapshot.error,
-                  errorInfo: snapshot.errorInfo,
-                }))
+                message.id === binding.messageId
+                  ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
+                ...currentVariant,
+                content:
+                  snapshot.message ||
+                  (snapshot.status === 'awaiting_approval'
+                    ? '等待你的审批后继续执行。'
+                    : currentVariant.content),
+                reasoning: snapshot.reasoning || currentVariant.reasoning,
+                usage: snapshot.usage || currentVariant.usage,
+                status:
+                  snapshot.status === 'failed'
+                    ? ('failed' as const)
+                    : snapshot.status === 'completed'
+                      ? ('completed' as const)
+                      : ('streaming' as const),
+                events: [
+                  ...snapshot.toolEvents.map(mapToolEventToMessageEvent),
+                  ...(snapshot.pendingApproval
+                    ? [
+                      {
+                        id: snapshot.pendingApproval.id,
+                        kind: 'approval' as const,
+                        title: snapshot.pendingApproval.toolName,
+                        summary: snapshot.pendingApproval.summary,
+                        order:
+                          (snapshot.toolEvents
+                            .map(event => event.order || 0)
+                            .reduce((max, value) => Math.max(max, value), 0) || 0) + 1,
+                        status: 'awaiting_approval' as const,
+                        input: snapshot.pendingApproval.input,
+                      },
+                    ]
+                    : []),
+                ],
+                steps: snapshot.taskTree,
+                activity: buildMessageActivity(
+                  snapshot.status,
+                  currentVariant.createdAt || Date.now(),
+                  snapshot.toolEvents,
+                  snapshot.taskTree,
+                  currentVariant.activity?.expanded ?? true,
+                ),
+                appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
+                error: snapshot.error,
+                errorInfo: snapshot.errorInfo,
+              }))
               : message,
           ),
           toolEvents: snapshot.toolEvents,
@@ -1096,47 +1170,47 @@ export function MainWindowApp() {
               .map(session =>
                 session.id === sessionId
                   ? {
-                      ...session,
-                      messages: session.messages.map(message =>
-                        message.id === binding.messageId
-                          ? updateActiveMessageVariant(message, currentVariant => ({
-                              ...currentVariant,
-                              content:
-                                snapshot.status === 'completed'
-                                  ? snapshot.message || ''
-                                  : snapshot.message || currentVariant.content,
-                              reasoning: snapshot.reasoning || currentVariant.reasoning,
-                              usage: snapshot.usage || currentVariant.usage,
-                              status:
-                                snapshot.status === 'completed'
-                                  ? ('completed' as const)
-                                  : ('failed' as const),
-                              events: snapshot.toolEvents.map(mapToolEventToMessageEvent),
-                              steps: snapshot.taskTree,
-                              activity: buildMessageActivity(
-                                snapshot.status,
-                                currentVariant.createdAt || Date.now(),
-                                snapshot.toolEvents,
-                                snapshot.taskTree,
-                                snapshot.status !== 'completed',
-                              ),
-                              appendedInputs:
-                                snapshot.appendedInputs || currentVariant.appendedInputs,
-                              error:
-                                snapshot.status === 'failed'
-                                  ? snapshot.error || 'Agent 执行失败。'
-                                  : undefined,
-                              errorInfo:
-                                snapshot.status === 'failed'
-                                  ? snapshot.errorInfo
-                                  : undefined,
-                            }))
-                          : message,
-                      ),
-                      toolEvents: snapshot.toolEvents,
-                      taskTree: snapshot.taskTree,
-                      updatedAt: Date.now(),
-                    }
+                    ...session,
+                    messages: session.messages.map(message =>
+                      message.id === binding.messageId
+                        ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
+                          ...currentVariant,
+                          content:
+                            snapshot.status === 'completed'
+                              ? snapshot.message || ''
+                              : snapshot.message || currentVariant.content,
+                          reasoning: snapshot.reasoning || currentVariant.reasoning,
+                          usage: snapshot.usage || currentVariant.usage,
+                          status:
+                            snapshot.status === 'completed'
+                              ? ('completed' as const)
+                              : ('failed' as const),
+                          events: snapshot.toolEvents.map(mapToolEventToMessageEvent),
+                          steps: snapshot.taskTree,
+                          activity: buildMessageActivity(
+                            snapshot.status,
+                            currentVariant.createdAt || Date.now(),
+                            snapshot.toolEvents,
+                            snapshot.taskTree,
+                            snapshot.status !== 'completed',
+                          ),
+                          appendedInputs:
+                            snapshot.appendedInputs || currentVariant.appendedInputs,
+                          error:
+                            snapshot.status === 'failed'
+                              ? snapshot.error || 'Agent 执行失败。'
+                              : undefined,
+                          errorInfo:
+                            snapshot.status === 'failed'
+                              ? snapshot.errorInfo
+                              : undefined,
+                        }))
+                        : message,
+                    ),
+                    toolEvents: snapshot.toolEvents,
+                    taskTree: snapshot.taskTree,
+                    updatedAt: Date.now(),
+                  }
                   : session,
               )
               .sort((a, b) => b.updatedAt - a.updatedAt),
@@ -1167,19 +1241,19 @@ export function MainWindowApp() {
           ...session,
           messages: session.messages.map(entry =>
             entry.id === binding.messageId
-              ? updateActiveMessageVariant(entry, currentVariant => ({
-                  ...currentVariant,
-                  status: 'failed' as const,
-                  error: message,
-                  errorInfo: undefined,
-                  activity: currentVariant.activity
-                    ? {
-                        ...currentVariant.activity,
-                        status: 'failed',
-                        finishedAt: Date.now(),
-                      }
-                    : currentVariant.activity,
-                }))
+              ? updateMessageVariantAtIndex(entry, binding.variantIndex, currentVariant => ({
+                ...currentVariant,
+                status: 'failed' as const,
+                error: message,
+                errorInfo: undefined,
+                activity: currentVariant.activity
+                  ? {
+                    ...currentVariant.activity,
+                    status: 'failed',
+                    finishedAt: Date.now(),
+                  }
+                  : currentVariant.activity,
+              }))
               : entry,
           ),
           updatedAt: Date.now(),
@@ -1395,7 +1469,7 @@ export function MainWindowApp() {
 
     const nextAttachments = await Promise.all(files.map(file => createDraftAttachmentFromFile(file))).catch(
       caught => {
-        setError(caught instanceof Error ? caught.message : '读取剪贴板附件失败。')
+        setError(getErrorMessage(caught, '读取剪贴板附件失败。'))
         return null
       },
     )
@@ -1468,7 +1542,19 @@ export function MainWindowApp() {
     setError('')
   }
 
-  function deleteSession(sessionId: string) {
+  function renameSession(sessionId: string, title: string) {
+    const nextTitle = title.trim()
+    if (!nextTitle) {
+      return
+    }
+
+    updateSession(sessionId, session => ({
+      ...session,
+      title: nextTitle,
+    }))
+  }
+
+  async function deleteSession(sessionId: string, deleteWorkspace = false) {
     if (runningTasksBySession[sessionId]) {
       setError('当前会话仍在执行中，请等待完成后再删除。')
       return
@@ -1477,6 +1563,15 @@ export function MainWindowApp() {
     const target = sessions.find(session => session.id === sessionId)
     if (!target) {
       return
+    }
+
+    if (deleteWorkspace && target.workspacePath.trim()) {
+      try {
+        await deleteWorkspaceDirectory(target.workspacePath)
+      } catch (caught) {
+        setError(getErrorMessage(caught, '删除会话工作区失败。'))
+        return
+      }
     }
 
     const remaining = sessions.filter(session => session.id !== sessionId)
@@ -1521,19 +1616,24 @@ export function MainWindowApp() {
     }))
   }
 
-  async function ensureSessionWorkspace(session: Session, prompt: string) {
+  async function ensureSessionWorkspace(
+    session: Session,
+    prompt: string,
+    fallbackWorkspaceRoot = '',
+  ) {
     if (session.workspacePath.trim()) {
       return session.workspacePath
     }
-    if (!session.workspaceRoot.trim()) {
+    const workspaceRoot = session.workspaceRoot.trim() || fallbackWorkspaceRoot.trim()
+    if (!workspaceRoot) {
       throw new Error('请先在设置里配置默认工作目录，或者在新会话时手动选择目录。')
     }
 
-    const workspacePath = await createSessionWorkspace(session.workspaceRoot, prompt)
+    const workspacePath = await createSessionWorkspace(workspaceRoot, prompt)
     updateSession(session.id, current => ({
       ...current,
       workspacePath,
-      workspaceRoot: current.workspaceRoot || session.workspaceRoot,
+      workspaceRoot: current.workspaceRoot || workspaceRoot,
       workspaceMode: 'default',
       updatedAt: Date.now(),
     }))
@@ -1558,8 +1658,12 @@ export function MainWindowApp() {
     }
 
     const workspaceHint = content || draftAttachments[0]?.name || activeSession.title
-    const workspacePath = await ensureSessionWorkspace(activeSession, workspaceHint).catch(caught => {
-      setError(caught instanceof Error ? caught.message : '创建会话工作目录失败。')
+    const workspacePath = await ensureSessionWorkspace(
+      activeSession,
+      workspaceHint,
+      settings.cwd,
+    ).catch(caught => {
+      setError(getErrorMessage(caught, '创建会话工作目录失败。'))
       return ''
     })
 
@@ -1570,7 +1674,7 @@ export function MainWindowApp() {
     const materializedAttachments = options?.attachmentsOverride
       ? options.attachmentsOverride
       : await materializeDraftAttachments(workspacePath, draftAttachments).catch(caught => {
-          setError(caught instanceof Error ? caught.message : '导入附件到当前会话失败。')
+          setError(getErrorMessage(caught, '导入附件到当前会话失败。'))
           return null
         })
 
@@ -1605,12 +1709,12 @@ export function MainWindowApp() {
         ...current,
         [activeSession.id]: current[activeSession.id]
           ? {
-              ...current[activeSession.id],
-              appendedInputs: [
-                ...(current[activeSession.id].appendedInputs || []),
-                appendedInput,
-              ],
-            }
+            ...current[activeSession.id],
+            appendedInputs: [
+              ...(current[activeSession.id].appendedInputs || []),
+              appendedInput,
+            ],
+          }
           : current[activeSession.id],
       }))
 
@@ -1619,9 +1723,9 @@ export function MainWindowApp() {
         messages: session.messages.map(message =>
           message.id === activeRunningTask.messageId
             ? updateActiveMessageVariant(message, currentVariant => ({
-                ...currentVariant,
-                appendedInputs: [...(currentVariant.appendedInputs || []), appendedInput],
-              }))
+              ...currentVariant,
+              appendedInputs: [...(currentVariant.appendedInputs || []), appendedInput],
+            }))
             : message,
         ),
         updatedAt: Date.now(),
@@ -1632,7 +1736,7 @@ export function MainWindowApp() {
       }
       setError('')
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : '补充输入发送失败。')
+      setError(getErrorMessage(caught, '补充输入发送失败。'))
     }
   }
 
@@ -1694,27 +1798,27 @@ export function MainWindowApp() {
       activeSession.workspaceRoot || latestSettings.cwd || workspacePath
     const resolvedCapabilities = latestAuraHome
       ? resolveCapabilitiesForWorkspace({
-          workspaceRoot: projectWorkspaceRoot,
-          settings: latestSettings,
-          aura: latestAuraHome,
-          overrides: latestProjectOverrides,
-        })
+        workspaceRoot: projectWorkspaceRoot,
+        settings: latestSettings,
+        aura: latestAuraHome,
+        overrides: latestProjectOverrides,
+      })
       : {
-          runtime: {
-            workspaceRoot: projectWorkspaceRoot,
-            resolvedAt: Date.now(),
-            skills: [],
-            plugins: [],
-            mcpServers: [],
-          },
-          usage: {
-            workspaceRoot: projectWorkspaceRoot,
-            resolvedAt: Date.now(),
-            skills: [],
-            plugins: [],
-            mcpServers: [],
-          },
-        }
+        runtime: {
+          workspaceRoot: projectWorkspaceRoot,
+          resolvedAt: Date.now(),
+          skills: [],
+          plugins: [],
+          mcpServers: [],
+        },
+        usage: {
+          workspaceRoot: projectWorkspaceRoot,
+          resolvedAt: Date.now(),
+          skills: [],
+          plugins: [],
+          mcpServers: [],
+        },
+      }
 
     const runtimeSettings: AgentSettings = {
       ...latestSettings,
@@ -1745,6 +1849,7 @@ export function MainWindowApp() {
     const pendingAssistantVariant: ChatMessageVariant = {
       ...toMessageVariant(createPendingAssistantMessage()),
       capabilitySnapshot: resolvedCapabilities.usage,
+      modelInfo: buildMessageModelInfo(latestProviderProfile, latestEffectiveModel),
       appendedInputs: appendedInputs.map(input => ({
         ...input,
         status: 'consumed' as const,
@@ -1785,10 +1890,10 @@ export function MainWindowApp() {
           },
           activity: nextVariants[activeIndex]?.activity
             ? {
-                ...nextVariants[activeIndex].activity!,
-                status: 'failed',
-                finishedAt: Date.now(),
-              }
+              ...nextVariants[activeIndex].activity!,
+              status: 'failed',
+              finishedAt: Date.now(),
+            }
             : nextVariants[activeIndex]?.activity,
         }
         nextVariants.push(pendingAssistantVariant)
@@ -1820,6 +1925,7 @@ export function MainWindowApp() {
         [activeSession.id]: {
           taskId,
           messageId: assistantMessage.id,
+          variantIndex: ensureMessageVariants(assistantMessage).length,
         },
       }))
       setAgentTasksBySession(current => ({
@@ -1849,6 +1955,8 @@ export function MainWindowApp() {
       targetAssistantMessageId?: string
       attachmentsOverride?: MessageAttachment[]
       appendUserVersion?: boolean
+      providerProfileIdOverride?: string
+      modelOverride?: string
     },
   ) {
     const content = rawContent.trim()
@@ -1883,9 +1991,14 @@ export function MainWindowApp() {
       // Fall back to the latest cached state if hydration is temporarily unavailable.
     }
 
-    const latestProviderProfile = getSessionProviderProfile(latestSettings, activeSession)
+    const latestProviderProfile =
+      latestSettings.providerProfiles.find(
+        profile => profile.id === options?.providerProfileIdOverride,
+      ) || getSessionProviderProfile(latestSettings, activeSession)
     const latestEffectiveProvider = latestProviderProfile?.provider || latestSettings.provider
     const latestEffectiveModel =
+      resolvePreferredModelId(latestProviderProfile, options?.modelOverride) ||
+      options?.modelOverride ||
       activeSession.model ||
       resolvePreferredModelId(latestProviderProfile, latestSettings.model) ||
       latestSettings.model
@@ -1900,8 +2013,12 @@ export function MainWindowApp() {
 
     const workspaceHint =
       content || draftAttachments[0]?.name || activeSession.title
-    const workspacePath = await ensureSessionWorkspace(activeSession, workspaceHint).catch(caught => {
-      setError(caught instanceof Error ? caught.message : '创建会话工作目录失败。')
+    const workspacePath = await ensureSessionWorkspace(
+      activeSession,
+      workspaceHint,
+      latestSettings.cwd,
+    ).catch(caught => {
+      setError(getErrorMessage(caught, '创建会话工作目录失败。'))
       return ''
     })
 
@@ -1912,9 +2029,9 @@ export function MainWindowApp() {
     const materializedAttachments = options?.attachmentsOverride
       ? options.attachmentsOverride
       : await materializeDraftAttachments(workspacePath, draftAttachments).catch(caught => {
-          setError(caught instanceof Error ? caught.message : '导入附件到当前会话失败。')
-          return null
-        })
+        setError(getErrorMessage(caught, '导入附件到当前会话失败。'))
+        return null
+      })
 
     if (!materializedAttachments) {
       return
@@ -1963,6 +2080,7 @@ export function MainWindowApp() {
     const pendingAssistantVariant: ChatMessageVariant = {
       ...toMessageVariant(createPendingAssistantMessage()),
       capabilitySnapshot: resolvedCapabilities.usage,
+      modelInfo: buildMessageModelInfo(latestProviderProfile, latestEffectiveModel),
     }
 
     const runtimeSettings: AgentSettings = {
@@ -2023,9 +2141,9 @@ export function MainWindowApp() {
       const updatedUserMessage =
         options?.appendUserVersion === false
           ? {
-              ...targetUserMessage,
-              linkedMessageId: targetAssistantMessage?.id || pendingAssistantMessageId,
-            }
+            ...targetUserMessage,
+            linkedMessageId: targetAssistantMessage?.id || pendingAssistantMessageId,
+          }
           : appendMessageVariant(targetUserMessage, userMessageVariant)
       nextMessages[userIndex] = updatedUserMessage
 
@@ -2033,10 +2151,26 @@ export function MainWindowApp() {
         const assistantIndex = nextMessages.findIndex(message => message.id === targetAssistantMessage.id)
         if (assistantIndex !== -1) {
           nextMessages[assistantIndex] = appendMessageVariant(
-            {
-              ...targetAssistantMessage,
-              linkedMessageId: updatedUserMessage.id,
-            },
+            updateActiveMessageVariant(
+              {
+                ...targetAssistantMessage,
+                linkedMessageId: updatedUserMessage.id,
+              },
+              currentVariant =>
+                currentVariant.activity &&
+                (currentVariant.activity.status === 'running' ||
+                  currentVariant.activity.status === 'queued' ||
+                  currentVariant.activity.status === 'awaiting_approval')
+                  ? {
+                      ...currentVariant,
+                      activity: {
+                        ...currentVariant.activity,
+                        status: 'failed',
+                        finishedAt: Date.now(),
+                      },
+                    }
+                  : currentVariant,
+            ),
             pendingAssistantVariant,
           )
         }
@@ -2057,16 +2191,30 @@ export function MainWindowApp() {
       return nextMessages.map(message =>
         message.id === updatedUserMessage.id
           ? {
-              ...message,
-              linkedMessageId: targetAssistantMessage?.id || pendingAssistantMessageId,
-            }
+            ...message,
+            linkedMessageId: targetAssistantMessage?.id || pendingAssistantMessageId,
+          }
           : message.id === (targetAssistantMessage?.id || pendingAssistantMessageId)
             ? {
-                ...message,
-                linkedMessageId: updatedUserMessage.id,
-              }
+              ...message,
+              linkedMessageId: updatedUserMessage.id,
+            }
             : message,
       )
+    })()
+
+    const pendingAssistantBindingMessageId = targetAssistantMessage?.id || pendingAssistantMessageId
+    const pendingAssistantBindingVariantIndex = (() => {
+      const pendingMessage = updatedMessages.find(
+        message => message.id === pendingAssistantBindingMessageId,
+      )
+      if (!pendingMessage) {
+        return 0
+      }
+      const variants = ensureMessageVariants(pendingMessage)
+      return typeof pendingMessage.activeVersionIndex === 'number'
+        ? Math.max(0, Math.min(pendingMessage.activeVersionIndex, variants.length - 1))
+        : variants.length - 1
     })()
 
     updateSession(sessionId, session => ({
@@ -2096,7 +2244,8 @@ export function MainWindowApp() {
         ...current,
         [sessionId]: {
           taskId,
-          messageId: targetAssistantMessage?.id || pendingAssistantMessageId,
+          messageId: pendingAssistantBindingMessageId,
+          variantIndex: pendingAssistantBindingVariantIndex,
         },
       }))
       setAgentTasksBySession(current => ({
@@ -2150,10 +2299,10 @@ export function MainWindowApp() {
       ...current,
       [activeSession.id]: current[activeSession.id]
         ? {
-            ...current[activeSession.id],
-            status: 'running',
-            pendingApproval: undefined,
-          }
+          ...current[activeSession.id],
+          status: 'running',
+          pendingApproval: undefined,
+        }
         : current[activeSession.id],
     }))
   }
@@ -2200,21 +2349,27 @@ export function MainWindowApp() {
       messages: session.messages.map(message =>
         message.id === messageId && message.activity
           ? updateActiveMessageVariant(message, currentVariant => ({
-              ...currentVariant,
-              activity: currentVariant.activity
-                ? {
-                    ...currentVariant.activity,
-                    expanded: !currentVariant.activity.expanded,
-                  }
-                : currentVariant.activity,
-            }))
+            ...currentVariant,
+            activity: currentVariant.activity
+              ? {
+                ...currentVariant.activity,
+                expanded: !currentVariant.activity.expanded,
+              }
+              : currentVariant.activity,
+          }))
           : message,
       ),
       updatedAt: Date.now(),
     }))
   }
 
-  async function regenerateFromMessage(messageId: string) {
+  async function regenerateFromMessage(
+    messageId: string,
+    options?: {
+      providerProfileId?: string
+      modelId?: string
+    },
+  ) {
     if (!activeSession || runningTasksBySession[activeSession.id]) {
       return
     }
@@ -2236,7 +2391,7 @@ export function MainWindowApp() {
           message =>
             message.role === 'user' &&
             activeSession.messages.findIndex(entry => entry.id === message.id) <
-              activeSession.messages.findIndex(entry => entry.id === assistantMessage.id),
+            activeSession.messages.findIndex(entry => entry.id === assistantMessage.id),
         )
 
     if (!sourceUserMessage || sourceUserMessage.role !== 'user') {
@@ -2249,6 +2404,8 @@ export function MainWindowApp() {
       targetAssistantMessageId: assistantMessage.id,
       attachmentsOverride: sourceUserMessage.attachments || [],
       appendUserVersion: false,
+      providerProfileIdOverride: options?.providerProfileId,
+      modelOverride: options?.modelId,
     })
   }
 
@@ -2276,6 +2433,17 @@ export function MainWindowApp() {
     })
   }
 
+  async function regenerateFromMessageWithModel(
+    messageId: string,
+    profileId: string,
+    modelId: string,
+  ) {
+    await regenerateFromMessage(messageId, {
+      providerProfileId: profileId,
+      modelId,
+    })
+  }
+
   function deleteMessage(messageId: string) {
     if (!activeSession) {
       return
@@ -2293,9 +2461,9 @@ export function MainWindowApp() {
         .map(message =>
           message.linkedMessageId === messageId
             ? {
-                ...message,
-                linkedMessageId: undefined,
-              }
+              ...message,
+              linkedMessageId: undefined,
+            }
             : message,
         ),
       updatedAt: Date.now(),
@@ -2332,31 +2500,31 @@ export function MainWindowApp() {
         ...session,
         messages: session.messages.map(message =>
           message.id === activeRunningTask.messageId
-            ? updateActiveMessageVariant(message, currentVariant => ({
-                ...currentVariant,
-                status: 'failed' as const,
-                error: '已停止本次回答。',
-                errorInfo: {
-                  source: 'system',
-                  category: 'cancelled',
-                  code: 'USER_ABORTED',
-                  summary: '这次回答已被中途停止。',
-                  suggestedAction: '如果还需要继续，可以重新发起一次生成。',
-                },
-                appendedInputs:
-                  currentSnapshot?.appendedInputs || currentVariant.appendedInputs,
-                events:
-                  currentSnapshot?.toolEvents.map(mapToolEventToMessageEvent) ||
-                  currentVariant.events,
-                steps: currentSnapshot?.taskTree || currentVariant.steps,
-                activity: currentVariant.activity
-                  ? {
-                      ...currentVariant.activity,
-                      status: 'failed',
-                      finishedAt: stoppedAt,
-                    }
-                  : currentVariant.activity,
-              }))
+            ? updateMessageVariantAtIndex(message, activeRunningTask.variantIndex, currentVariant => ({
+              ...currentVariant,
+              status: 'failed' as const,
+              error: '已停止本次回答。',
+              errorInfo: {
+                source: 'system',
+                category: 'cancelled',
+                code: 'USER_ABORTED',
+                summary: '这次回答已被中途停止。',
+                suggestedAction: '如果还需要继续，可以重新发起一次生成。',
+              },
+              appendedInputs:
+                currentSnapshot?.appendedInputs || currentVariant.appendedInputs,
+              events:
+                currentSnapshot?.toolEvents.map(mapToolEventToMessageEvent) ||
+                currentVariant.events,
+              steps: currentSnapshot?.taskTree || currentVariant.steps,
+              activity: currentVariant.activity
+                ? {
+                  ...currentVariant.activity,
+                  status: 'failed',
+                  finishedAt: stoppedAt,
+                }
+                : currentVariant.activity,
+            }))
             : message,
         ),
         toolEvents: currentSnapshot?.toolEvents || session.toolEvents,
@@ -2500,7 +2668,10 @@ export function MainWindowApp() {
           activeSessionId={activeSession?.id || null}
           onOpenSession={openSession}
           onCreateSession={createFreshSession}
-          onDeleteSession={deleteSession}
+          onRenameSession={renameSession}
+          onDeleteSession={(sessionId, deleteWorkspace) =>
+            void deleteSession(sessionId, deleteWorkspace)
+          }
           onOpenSettings={() =>
             void openSettingsWindow('general').catch(caught => {
               setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')
@@ -2586,6 +2757,9 @@ export function MainWindowApp() {
               onDeleteMessage={deleteMessage}
               onSelectMessageVersion={selectMessageVersion}
               onRegenerateMessage={messageId => void regenerateFromMessage(messageId)}
+              onRegenerateMessageWithModel={(messageId, profileId, modelId) =>
+                void regenerateFromMessageWithModel(messageId, profileId, modelId)
+              }
               onResendMessage={messageId => void resendUserMessage(messageId)}
               onForceExecuteAppendedInput={(messageId, inputId) =>
                 void forceExecuteAppendedInput(messageId, inputId)

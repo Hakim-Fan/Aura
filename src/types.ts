@@ -184,6 +184,14 @@ export type CapabilityPanelItem = {
   effectiveEnabled: boolean
 }
 
+export type MessageModelInfo = {
+  providerProfileId: string
+  providerProfileName: string
+  provider: ProviderMode
+  modelId: string
+  label: string
+}
+
 export type ChatMessageVariant = {
   content: string
   parts?: ChatContentPart[]
@@ -199,6 +207,7 @@ export type ChatMessageVariant = {
   error?: string
   errorInfo?: RuntimeErrorInfo
   appendedInputs?: AppendedInput[]
+  modelInfo?: MessageModelInfo
 }
 
 export type ChatMessage = {
@@ -219,6 +228,7 @@ export type ChatMessage = {
   error?: string
   errorInfo?: RuntimeErrorInfo
   appendedInputs?: AppendedInput[]
+  modelInfo?: MessageModelInfo
   versions?: ChatMessageVariant[]
   activeVersionIndex?: number
 }

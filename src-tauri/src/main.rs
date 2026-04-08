@@ -1672,6 +1672,30 @@ async fn write_attachment_bytes(
 }
 
 #[tauri::command]
+fn delete_workspace_directory(workspace_path: String) -> Result<(), String> {
+    let target = PathBuf::from(&workspace_path);
+    if workspace_path.trim().is_empty() {
+        return Ok(());
+    }
+    if !target.exists() {
+        return Ok(());
+    }
+    if !target.is_dir() {
+        return Err(format!(
+            "Workspace path is not a directory: {}",
+            target.display()
+        ));
+    }
+
+    fs::remove_dir_all(&target).map_err(|error| {
+        format!(
+            "Failed to delete workspace directory {}: {error}",
+            target.display()
+        )
+    })
+}
+
+#[tauri::command]
 fn quit_app(app_handle: tauri::AppHandle) {
     app_handle.exit(0);
 }
@@ -1714,6 +1738,7 @@ fn main() {
             create_session_workspace,
             import_attachment_from_path,
             write_attachment_bytes,
+            delete_workspace_directory,
             delete_aura_asset,
             reset_aura_home,
             quit_app

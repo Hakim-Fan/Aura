@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, Search, Settings2, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Search, Settings2, Trash2 } from 'lucide-react'
 import type { Session } from '../types'
 import { ConfirmModal } from './ConfirmModal'
 
@@ -12,7 +12,8 @@ type Props = {
   activeSessionId: string | null
   onOpenSession: (sessionId: string) => void
   onCreateSession: () => void
-  onDeleteSession: (sessionId: string) => void
+  onDeleteSession: (sessionId: string, deleteWorkspace: boolean) => void
+  onRenameSession: (sessionId: string, title: string) => void
   onOpenSettings: () => void
   settingsOpen: boolean
 }
@@ -27,11 +28,39 @@ export function AppSidebar({
   onOpenSession,
   onCreateSession,
   onDeleteSession,
+  onRenameSession,
   onOpenSettings,
   settingsOpen,
 }: Props) {
-  const [deleteConfirmation, setDeleteConfirmation] = useState<{ id: string; title: string } | null>(null)
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{
+    id: string
+    title: string
+    workspacePath: string
+  } | null>(null)
+  const [deleteWorkspace, setDeleteWorkspace] = useState(false)
+  const [renameSession, setRenameSession] = useState<{ id: string; title: string } | null>(null)
+  const [editingTitle, setEditingTitle] = useState('')
   const runningSessionIdSet = new Set(runningSessionIds)
+
+  function startRename(session: Session) {
+    setRenameSession({ id: session.id, title: session.title })
+    setEditingTitle(session.title)
+  }
+
+  function cancelRename() {
+    setRenameSession(null)
+    setEditingTitle('')
+  }
+
+  function confirmRename(sessionId: string) {
+    const nextTitle = editingTitle.trim()
+    if (!nextTitle) {
+      cancelRename()
+      return
+    }
+    onRenameSession(sessionId, nextTitle)
+    cancelRename()
+  }
 
   return (
     <aside
@@ -77,7 +106,7 @@ export function AppSidebar({
               <div className="absolute left-0 w-1 h-full bg-[var(--bg-user-bubble)]" />
             )}
             <button
-              className="flex-1 flex flex-col items-start py-3 px-4 text-left overflow-hidden"
+              className="flex-1 flex flex-col items-start py-3 px-4 pr-18 text-left overflow-hidden"
               onClick={() => onOpenSession(session.id)}
               title={session.title}
             >
@@ -95,17 +124,37 @@ export function AppSidebar({
               </div>
             </button>
 
-            <button
-              className="absolute right-2 p-1.5 rounded-md opacity-0 group-hover:opacity-100 hover:bg-[rgba(255,0,0,0.05)] hover:text-red-500 text-[var(--text-secondary)] transition-all"
-              aria-label={`删除会话 ${session.title}`}
-              title="删除会话"
-              onClick={(e) => {
-                e.stopPropagation();
-                setDeleteConfirmation({ id: session.id, title: session.title });
-              }}
-            >
-              <Trash2 size={14} />
-            </button>
+            <div className="absolute right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+              <button
+                className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+                aria-label={`重命名会话 ${session.title}`}
+                title="重命名会话"
+                onClick={e => {
+                  e.stopPropagation()
+                  startRename(session)
+                }}
+                type="button"
+              >
+                <Pencil size={14} />
+              </button>
+              <button
+                className="p-1.5 rounded-md hover:bg-[rgba(255,0,0,0.05)] hover:text-red-500 text-[var(--text-secondary)]"
+                aria-label={`删除会话 ${session.title}`}
+                title="删除会话"
+                onClick={e => {
+                  e.stopPropagation()
+                  setDeleteWorkspace(false)
+                  setDeleteConfirmation({
+                    id: session.id,
+                    title: session.title,
+                    workspacePath: session.workspacePath || '',
+                  })
+                }}
+                type="button"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
           </div>
         ))}
       </div>
@@ -122,6 +171,39 @@ export function AppSidebar({
       </div>
 
       <ConfirmModal
+        isOpen={!!renameSession}
+        title="编辑会话名称"
+        description="修改后会立即应用到当前会话列表。"
+        confirmText="保存"
+        cancelText="取消"
+        variant="info"
+        onConfirm={() => {
+          if (renameSession) {
+            confirmRename(renameSession.id)
+          }
+        }}
+        onCancel={cancelRename}
+      >
+        <textarea
+          autoFocus
+          value={editingTitle}
+          onChange={event => setEditingTitle(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && !event.shiftKey && renameSession) {
+              event.preventDefault()
+              confirmRename(renameSession.id)
+            } else if (event.key === 'Escape') {
+              event.preventDefault()
+              cancelRename()
+            }
+          }}
+          rows={3}
+          className="w-full resize-none rounded-2xl border border-solid border-[#4f7b7466] bg-white px-4 py-3 text-15px leading-relaxed text-[var(--text-primary)] shadow-[rgba(15,23,42,0.05)] outline-none ring-4 ring-[rgba(79,123,116,0.08)] transition-all focus:ring-[rgba(79,123,116,0.14)]"
+          placeholder="输入会话名称"
+        />
+      </ConfirmModal>
+
+      <ConfirmModal
         isOpen={!!deleteConfirmation}
         title="确认删除会话？"
         description={`确定要删除“${deleteConfirmation?.title}”吗？此操作不可撤销。`}
@@ -130,12 +212,35 @@ export function AppSidebar({
         variant="danger"
         onConfirm={() => {
           if (deleteConfirmation) {
-            onDeleteSession(deleteConfirmation.id);
+            onDeleteSession(deleteConfirmation.id, deleteWorkspace);
             setDeleteConfirmation(null);
+            setDeleteWorkspace(false)
           }
         }}
-        onCancel={() => setDeleteConfirmation(null)}
-      />
+        onCancel={() => {
+          setDeleteConfirmation(null)
+          setDeleteWorkspace(false)
+        }}
+      >
+        {deleteConfirmation?.workspacePath.trim() ? (
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-3 py-3">
+            <input
+              type="checkbox"
+              className="mt-1 h-4 w-4 rounded border-gray-300 text-red-500 focus:ring-red-200"
+              checked={deleteWorkspace}
+              onChange={event => setDeleteWorkspace(event.target.checked)}
+            />
+            <div className="min-w-0">
+              <div className="text-13px font-600 text-[var(--text-primary)]">
+                同时删除工作区
+              </div>
+              <div className="mt-1 break-all text-12px leading-relaxed text-[var(--text-secondary)] opacity-80">
+                {deleteConfirmation.workspacePath}
+              </div>
+            </div>
+          </label>
+        ) : null}
+      </ConfirmModal>
     </aside>
   )
 }

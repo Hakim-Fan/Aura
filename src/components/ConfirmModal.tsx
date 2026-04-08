@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { AlertCircle, X } from 'lucide-react'
 
 type Props = {
@@ -9,6 +10,7 @@ type Props = {
   onConfirm: () => void
   onCancel: () => void
   variant?: 'danger' | 'warning' | 'info'
+  children?: ReactNode
 }
 
 export function ConfirmModal({
@@ -20,6 +22,7 @@ export function ConfirmModal({
   onConfirm,
   onCancel,
   variant = 'info',
+  children,
 }: Props) {
   if (!isOpen) return null
 
@@ -79,6 +82,7 @@ export function ConfirmModal({
               <p className="text-14px text-[var(--text-secondary)] leading-relaxed opacity-80">
                 {description}
               </p>
+              {children ? <div className="mt-4">{children}</div> : null}
             </div>
             <button 
               onClick={onCancel}

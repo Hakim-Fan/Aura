@@ -28,7 +28,10 @@ export async function importAttachmentFromPath(
   workspacePath: string,
   sourcePath: string,
 ): Promise<string> {
-  return invoke<string>('import_attachment_from_path', { workspacePath, sourcePath })
+  return invoke<string>('import_attachment_from_path', {
+    workspaceDir: workspacePath,
+    filePath: sourcePath,
+  })
 }
 
 export async function writeAttachmentBytes(
@@ -37,8 +40,12 @@ export async function writeAttachmentBytes(
   bytesBase64: string,
 ): Promise<string> {
   return invoke<string>('write_attachment_bytes', {
-    workspacePath,
+    workspaceDir: workspacePath,
     fileName,
     bytesBase64,
   })
+}
+
+export async function deleteWorkspaceDirectory(workspacePath: string): Promise<void> {
+  return invoke('delete_workspace_directory', { workspacePath })
 }

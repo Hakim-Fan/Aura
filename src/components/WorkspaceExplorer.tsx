@@ -11,9 +11,8 @@ type Props = {
   previewLoading: boolean
   previewError: string
   expandedPaths: string[]
-  canChooseWorkspace: boolean
   onRefresh: () => void
-  onChooseWorkspace: () => void
+  onOpenRootPath: () => void
   onToggle: (path: string) => void
   onSelectFile: (path: string) => void
   onInsertReference: (path: string) => void
@@ -89,9 +88,8 @@ export function WorkspaceExplorer({
   previewLoading,
   previewError,
   expandedPaths,
-  canChooseWorkspace,
   onRefresh,
-  onChooseWorkspace,
+  onOpenRootPath,
   onToggle,
   onSelectFile,
   onInsertReference,
@@ -102,13 +100,19 @@ export function WorkspaceExplorer({
       <div className="workspace-card">
         <div className="section-title">项目上下文</div>
         <div className="workspace-toolbar">
-          <div className="workspace-root">{rootPath || '未设置工作目录'}</div>
+          {rootPath ? (
+            <button
+              className="workspace-root text-left hover:text-[var(--accent-soft-strong)] transition-colors"
+              onClick={onOpenRootPath}
+              title="在系统文件管理器中打开此目录"
+              type="button"
+            >
+              {rootPath}
+            </button>
+          ) : (
+            <div className="workspace-root">未设置工作目录</div>
+          )}
           <div className="header-actions">
-            {canChooseWorkspace ? (
-              <button className="mini-button" onClick={onChooseWorkspace}>
-                更换
-              </button>
-            ) : null}
             <button className="mini-button" onClick={onRefresh}>
               刷新
             </button>
