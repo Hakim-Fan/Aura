@@ -84,7 +84,7 @@ export function AppSidebar({
               <div className="w-full truncate text-14px font-500 text-[var(--text-primary)] mb-0.5">
                 {session.title}
               </div>
-              <div className="flex w-full items-center gap-2 text-11px text-[var(--text-secondary)] opacity-70">
+              <div className="flex w-full items-center justify-between gap-2 text-11px text-[var(--text-secondary)] opacity-70">
                 <span>{new Date(session.updatedAt).toLocaleDateString()}</span>
                 {runningSessionIdSet.has(session.id) ? (
                   <span

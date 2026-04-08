@@ -1301,6 +1301,38 @@ fn append_input_to_agent_task(
 }
 
 #[tauri::command]
+fn cancel_agent_task_step(
+    state: State<'_, AgentTaskStore>,
+    task_id: String,
+) -> Result<(), String> {
+    let tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| "Failed to lock task store.".to_string())?;
+    let Some(handle) = tasks.get(&task_id) else {
+        return Err(format!("Agent task not found: {task_id}"));
+    };
+
+    let cancel_message = serde_json::json!({
+        "type": "cancel_current_step",
+    });
+
+    let mut stdin = handle
+        .stdin
+        .lock()
+        .map_err(|_| "Failed to lock Node bridge stdin.".to_string())?;
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::to_string(&cancel_message)
+            .map_err(|error| format!("Failed to serialize step cancel payload: {error}"))?
+    )
+    .map_err(|error| format!("Failed to write step cancel payload to Node bridge: {error}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
 fn abort_agent_task(
     state: State<'_, AgentTaskStore>,
     task_id: String,
@@ -1669,6 +1701,7 @@ fn main() {
             abort_agent_task,
             respond_to_agent_approval,
             append_input_to_agent_task,
+            cancel_agent_task_step,
             run_provider_action,
             run_mcp_action,
             ensure_aura_home,

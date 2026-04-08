@@ -19,11 +19,12 @@ function escapeAppleScriptString(value) {
     .replace(/"/g, '\\"')
 }
 
-async function runAppleScript(lines, featureName = 'Desktop automation') {
+async function runAppleScript(lines, featureName = 'Desktop automation', signal) {
   const args = lines.flatMap(line => ['-e', line])
   try {
     const { stdout } = await execFileAsync('osascript', args, {
       maxBuffer: 1024 * 1024,
+      signal,
     })
     return stdout.trim()
   } catch (error) {
@@ -34,10 +35,11 @@ async function runAppleScript(lines, featureName = 'Desktop automation') {
   }
 }
 
-async function runCommand(file, args, cwd) {
+async function runCommand(file, args, cwd, signal) {
   const { stdout, stderr } = await execFileAsync(file, args, {
     cwd,
     maxBuffer: 1024 * 1024,
+    signal,
   })
   return truncate([stdout.trim(), stderr.trim()].filter(Boolean).join('\n\n'))
 }
@@ -75,14 +77,15 @@ function buildComputerTools({ settings, context }) {
         type: 'object',
         properties: {},
       },
-      async run() {
+      async run(args, runtime = {}) {
         ensureMacOs('Computer use')
+        runtime.throwIfAborted?.()
         return runAppleScript([
           'tell application "System Events"',
           'set appNames to name of every application process whose background only is false',
           'return appNames as string',
           'end tell',
-        ], 'Computer use')
+        ], 'Computer use', runtime.signal)
       },
     },
     {
@@ -94,13 +97,14 @@ function buildComputerTools({ settings, context }) {
         type: 'object',
         properties: {},
       },
-      async run() {
+      async run(args, runtime = {}) {
         ensureMacOs('Computer use')
+        runtime.throwIfAborted?.()
         return runAppleScript([
           'tell application "System Events"',
           'return name of first application process whose frontmost is true',
           'end tell',
-        ], 'Computer use')
+        ], 'Computer use', runtime.signal)
       },
     },
     {
@@ -118,12 +122,13 @@ function buildComputerTools({ settings, context }) {
         },
         required: ['appName'],
       },
-      async run(args) {
+      async run(args, runtime = {}) {
         ensureMacOs('Computer use')
+        runtime.throwIfAborted?.()
         const appName = escapeAppleScriptString(args.appName)
         await runAppleScript([
           `tell application "${appName}" to activate`,
-        ], 'Computer use')
+        ], 'Computer use', runtime.signal)
         return `Activated ${args.appName}`
       },
     },
@@ -141,15 +146,16 @@ function buildComputerTools({ settings, context }) {
           },
         },
       },
-      async run(args) {
+      async run(args, runtime = {}) {
         ensureMacOs('Computer use')
+        runtime.throwIfAborted?.()
         const relativePath =
           args.relativePath ||
           `.aura/captures/capture-${Date.now()}.png`
         const target = resolveWorkspacePath(context.cwd, relativePath)
         await fs.mkdir(path.dirname(target), { recursive: true })
         try {
-          await runCommand('screencapture', ['-x', target], context.cwd)
+          await runCommand('screencapture', ['-x', target], context.cwd, runtime.signal)
         } catch (error) {
           throw createStructuredError(
             '截图失败，当前环境没有可用的屏幕画面，或者系统未授予屏幕录制权限。',
@@ -184,14 +190,15 @@ function buildComputerTools({ settings, context }) {
         },
         required: ['text'],
       },
-      async run(args) {
+      async run(args, runtime = {}) {
         ensureMacOs('Computer use')
+        runtime.throwIfAborted?.()
         const text = escapeAppleScriptString(args.text)
         await runAppleScript([
           'tell application "System Events"',
           `keystroke "${text}"`,
           'end tell',
-        ], 'Computer use')
+        ], 'Computer use', runtime.signal)
         return `Typed ${args.text.length} characters into the frontmost app.`
       },
     },
@@ -218,15 +225,16 @@ function buildComputerTools({ settings, context }) {
         },
         required: ['key'],
       },
-      async run(args) {
+      async run(args, runtime = {}) {
         ensureMacOs('Computer use')
+        runtime.throwIfAborted?.()
         const key = escapeAppleScriptString(args.key)
         const usingClause = formatModifiers(args.modifiers)
         await runAppleScript([
           'tell application "System Events"',
           `keystroke "${key}"${usingClause}`,
           'end tell',
-        ], 'Computer use')
+        ], 'Computer use', runtime.signal)
         return `Sent shortcut ${[...(args.modifiers || []), args.key].join('+')}`
       },
     },

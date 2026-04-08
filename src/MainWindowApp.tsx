@@ -9,6 +9,7 @@ import { AppSidebar } from './components/AppSidebar'
 import {
   abortAgentTask,
   appendInputToAgentTask,
+  cancelAgentTaskStep,
   getAgentTask,
   respondToApproval,
   startAgentTask,
@@ -877,8 +878,7 @@ export function MainWindowApp() {
   useEffect(() => {
     if (!storageReady) return
 
-    let cancelled = false;
-    let currentMenu: Menu | null = null;
+    let cancelled = false
 
     async function updateTray() {
       try {
@@ -949,7 +949,6 @@ export function MainWindowApp() {
         })
 
         if (cancelled) return
-        currentMenu = menu
 
         const existingTray = await TrayIcon.getById('main-tray')
         if (existingTray) {
@@ -972,10 +971,6 @@ export function MainWindowApp() {
 
     return () => {
       cancelled = true
-      // Tauri 2 beta doesn't strictly require menu closing in garbage collected envs, but good practice.
-      if (currentMenu && typeof currentMenu.close === 'function') {
-        currentMenu.close().catch(console.error)
-      }
     }
   }, [sessions, settings, storageReady])
 
@@ -2163,6 +2158,17 @@ export function MainWindowApp() {
     }))
   }
 
+  async function handleCancelCurrentStep() {
+    if (!activeSession || !agentTask?.id) {
+      return
+    }
+    try {
+      await cancelAgentTaskStep(agentTask.id)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '停止当前步骤失败。')
+    }
+  }
+
   async function copyText(value: string) {
     try {
       await navigator.clipboard.writeText(value)
@@ -2584,6 +2590,7 @@ export function MainWindowApp() {
               onForceExecuteAppendedInput={(messageId, inputId) =>
                 void forceExecuteAppendedInput(messageId, inputId)
               }
+              onCancelCurrentStep={() => void handleCancelCurrentStep()}
               onToggleMessageActivity={toggleMessageActivity}
               onStop={() => void handleStopAgentTask()}
             />

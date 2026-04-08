@@ -49,6 +49,10 @@ export async function appendInputToAgentTask(
   return invoke('append_input_to_agent_task', { taskId, input })
 }
 
+export async function cancelAgentTaskStep(taskId: string): Promise<void> {
+  return invoke('cancel_agent_task_step', { taskId })
+}
+
 export async function abortAgentTask(taskId: string): Promise<void> {
   return invoke('abort_agent_task', { taskId })
 }

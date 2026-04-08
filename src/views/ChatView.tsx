@@ -126,6 +126,7 @@ type Props = {
   onRegenerateMessage: (messageId: string) => void
   onResendMessage: (messageId: string) => void
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
+  onCancelCurrentStep: () => void
   onToggleMessageActivity: (messageId: string) => void
   onStop: () => void
 }
@@ -473,9 +474,11 @@ function ReasoningPhaseCard({
 function MessageEventCard({
   event,
   onHandleApproval,
+  onCancelCurrentStep,
 }: {
   event: MessageEvent
   onHandleApproval?: (decision: 'approve' | 'deny') => void
+  onCancelCurrentStep?: () => void
 }) {
   const isShellLog = event.kind === 'shell'
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
@@ -506,16 +509,28 @@ function MessageEventCard({
           <strong className="text-12px text-[var(--text-primary)] opacity-80 leading-tight">{event.title}</strong>
         </div>
         <div className="relative shrink-0 group/status">
-          <span
-            className={`shrink-0 text-10px font-500 ${event.status === 'error'
-              ? 'cursor-help text-red-500'
-              : event.status === 'awaiting_approval'
-                ? 'text-amber-600'
-                : 'text-green-600'
-              }`}
-          >
-            {eventStatusLabel(event.status)}
-          </span>
+          <div className="flex items-center gap-2">
+            {event.status === 'running' ? (
+              <button
+                className="flex items-center justify-center p-1 rounded-lg text-red-500 border border-red-200 bg-red-50 hover:bg-red-100 transition-all"
+                title="停止当前步骤"
+                onClick={onCancelCurrentStep}
+                type="button"
+              >
+                <Square size={10} fill="currentColor" strokeWidth={0} />
+              </button>
+            ) : null}
+            <span
+              className={`shrink-0 text-10px font-500 ${event.status === 'error'
+                ? 'cursor-help text-red-500'
+                : event.status === 'awaiting_approval'
+                  ? 'text-amber-600'
+                  : 'text-green-600'
+                }`}
+            >
+              {eventStatusLabel(event.status)}
+            </span>
+          </div>
           {event.status === 'error' ? (
             <div className="pointer-events-none absolute right-0 top-[calc(100%+8px)] z-20 hidden w-72 rounded-xl border border-red-100 bg-white px-3 py-2 text-left text-12px leading-relaxed text-red-600 shadow-lg shadow-[rgba(15,23,42,0.12)] group-hover/status:block">
               <div className="font-600">{failureSummary}</div>
@@ -624,29 +639,29 @@ function MessageVersionSwitcher({
 
   return (
     <div
-      className={`flex items-center gap-3 text-[var(--text-secondary)] ${align === 'right' ? 'justify-end' : 'justify-start'
+      className={`flex items-center gap-1 text-[var(--text-secondary)] ${align === 'right' ? 'justify-end' : 'justify-start'
         }`}
     >
       <button
-        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-30"
+        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-60"
         disabled={activeIndex <= 0}
         onClick={() => onSelectVersion(message.id, activeIndex - 1)}
         title="查看上一版"
         type="button"
       >
-        <ChevronLeft size={16} />
+        <ChevronLeft size={12} />
       </button>
-      <span className="min-w-[40px] text-center text-13px font-600 text-[var(--text-primary)]">
+      <span className="min-w-[30px] text-center text-12px font-500 text-[var(--text-secondary)]">
         {activeIndex + 1}/{versionCount}
       </span>
       <button
-        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-30"
+        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-60"
         disabled={activeIndex >= versionCount - 1}
         onClick={() => onSelectVersion(message.id, activeIndex + 1)}
         title="查看下一版"
         type="button"
       >
-        <ChevronRight size={16} />
+        <ChevronRight size={12} />
       </button>
     </div>
   )
@@ -981,11 +996,10 @@ function AppendedInputsPanel({
               补充输入
             </span>
             <span
-              className={`text-11px ${
-                input.status === 'consumed'
-                  ? 'text-[var(--accent-soft-strong)]'
-                  : 'text-[var(--text-secondary)] opacity-70'
-              }`}
+              className={`text-11px ${input.status === 'consumed'
+                ? 'text-[var(--accent-soft-strong)]'
+                : 'text-[var(--text-secondary)] opacity-70'
+                }`}
             >
               {appendedInputStatusLabel(input.status)}
             </span>
@@ -1029,6 +1043,7 @@ function AssistantMessageCard({
   onSelectMessageVersion,
   onRegenerateMessage,
   onForceExecuteAppendedInput,
+  onCancelCurrentStep,
   onHandleApproval,
   onToggleActivity,
 }: {
@@ -1039,6 +1054,7 @@ function AssistantMessageCard({
   onSelectMessageVersion: (messageId: string, nextIndex: number) => void
   onRegenerateMessage: (messageId: string) => void
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
+  onCancelCurrentStep: () => void
   onHandleApproval: (decision: 'approve' | 'deny') => void
   onToggleActivity: (messageId: string) => void
 }) {
@@ -1141,6 +1157,7 @@ function AssistantMessageCard({
                       key={item.key}
                       event={item.event}
                       onHandleApproval={onHandleApproval}
+                      onCancelCurrentStep={onCancelCurrentStep}
                     />
                   ),
                 )}
@@ -1187,11 +1204,6 @@ function AssistantMessageCard({
 
           <div className="flex items-center justify-end pt-1">
             <div className="flex items-center gap-2">
-              <MessageVersionSwitcher
-                message={message}
-                align="left"
-                onSelectVersion={onSelectMessageVersion}
-              />
               <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
                 <button
                   className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
@@ -1219,6 +1231,11 @@ function AssistantMessageCard({
                 <MessageOverflowMenu
                   messageId={message.id}
                   onDeleteMessage={onDeleteMessage}
+                />
+                <MessageVersionSwitcher
+                  message={message}
+                  align="left"
+                  onSelectVersion={onSelectMessageVersion}
                 />
               </div>
             </div>
@@ -1279,11 +1296,6 @@ function UserMessageCard({
         {message.content}
       </div>
       <div className="flex items-center gap-2">
-        <MessageVersionSwitcher
-          message={message}
-          align="right"
-          onSelectVersion={onSelectMessageVersion}
-        />
         <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/90 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
           <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制" onClick={() => onCopyText(message.content)}>
             <Copy size={14} />
@@ -1297,6 +1309,11 @@ function UserMessageCard({
           <MessageOverflowMenu
             messageId={message.id}
             onDeleteMessage={onDeleteMessage}
+          />
+          <MessageVersionSwitcher
+            message={message}
+            align="right"
+            onSelectVersion={onSelectMessageVersion}
           />
         </div>
       </div>
@@ -1356,6 +1373,7 @@ export function ChatView({
   onRegenerateMessage,
   onResendMessage,
   onForceExecuteAppendedInput,
+  onCancelCurrentStep,
   onToggleMessageActivity,
   onStop,
 }: Props) {
@@ -1640,6 +1658,7 @@ export function ChatView({
                       onSelectMessageVersion={onSelectMessageVersion}
                       onRegenerateMessage={onRegenerateMessage}
                       onForceExecuteAppendedInput={onForceExecuteAppendedInput}
+                      onCancelCurrentStep={onCancelCurrentStep}
                       onHandleApproval={onHandleApproval}
                       onToggleActivity={onToggleMessageActivity}
                     />

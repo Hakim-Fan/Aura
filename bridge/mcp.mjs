@@ -57,11 +57,13 @@ export async function connectMcpTools(servers) {
           type: 'object',
           properties: {},
         },
-        async run(args) {
+        async run(args, runtime = {}) {
+          runtime.throwIfAborted?.()
           const result = await client.callTool({
             name: tool.name,
             arguments: args,
           })
+          runtime.throwIfAborted?.()
           return stringifyOutput(result.content ?? result)
         },
       })

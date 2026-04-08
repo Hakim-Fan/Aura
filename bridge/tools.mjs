@@ -46,13 +46,66 @@ async function runShell(command, cwd, timeoutMs = 60_000) {
   return runShellStreaming(command, cwd, timeoutMs)
 }
 
+function buildStepCancelledError(tool) {
+  return createStructuredError('这一步已被用户主动停止。', {
+    source:
+      tool?.source === 'plugin'
+        ? 'plugin'
+        : tool?.source === 'mcp'
+          ? 'mcp'
+          : 'tool',
+    category: 'cancelled',
+    code: 'STEP_CANCELLED',
+    detail: `Tool step cancelled: ${tool?.name || 'unknown'}`,
+    suggestedAction: 'Aura 已停止当前步骤，你可以继续补充要求或等待下一步规划。',
+  })
+}
+
+function throwIfAborted(signal, tool) {
+  if (!signal?.aborted) {
+    return
+  }
+  throw buildStepCancelledError(tool)
+}
+
+function waitForAbort(signal, tool) {
+  if (!signal) {
+    return new Promise(() => {})
+  }
+
+  if (signal.aborted) {
+    return Promise.reject(buildStepCancelledError(tool))
+  }
+
+  return new Promise((_, reject) => {
+    signal.addEventListener(
+      'abort',
+      () => reject(buildStepCancelledError(tool)),
+      { once: true },
+    )
+  })
+}
+
+async function runAbortable(promise, signal, tool) {
+  if (!signal) {
+    return promise
+  }
+  return Promise.race([promise, waitForAbort(signal, tool)])
+}
+
 async function runShellStreaming(
   command,
   cwd,
   timeoutMs = 60_000,
   onUpdate,
+  signal,
 ) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(buildStepCancelledError({ source: 'builtin', name: 'run_shell' }))
+      return
+    }
+
     const child = spawn('/bin/zsh', ['-lc', command], {
       cwd,
       env: process.env,
@@ -85,6 +138,16 @@ async function runShellStreaming(
       reject(new Error(`Shell command timed out after ${timeoutMs}ms`))
     }, timeoutMs)
 
+    const handleAbort = () => {
+      clearTimeout(timer)
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer)
+      }
+      child.kill('SIGTERM')
+      reject(buildStepCancelledError({ source: 'builtin', name: 'run_shell' }))
+    }
+    signal?.addEventListener('abort', handleAbort, { once: true })
+
     child.stdout.on('data', chunk => {
       stdout += chunk.toString()
       scheduleFlush()
@@ -101,6 +164,7 @@ async function runShellStreaming(
       if (flushTimer !== null) {
         clearTimeout(flushTimer)
       }
+      signal?.removeEventListener('abort', handleAbort)
       flush()
       if (code === 0) {
         resolve(
@@ -171,7 +235,10 @@ function summarizeBinaryFile(target, buffer) {
   return details.join('\n')
 }
 
-async function collectSearchMatches(rootPath, query, baseCwd, matches = []) {
+async function collectSearchMatches(rootPath, query, baseCwd, matches = [], signal) {
+  if (signal?.aborted) {
+    throw buildStepCancelledError({ source: 'builtin', name: 'search_code' })
+  }
   const entries = await fs.readdir(rootPath, { withFileTypes: true })
 
   for (const entry of entries) {
@@ -181,7 +248,7 @@ async function collectSearchMatches(rootPath, query, baseCwd, matches = []) {
 
     const entryPath = path.join(rootPath, entry.name)
     if (entry.isDirectory()) {
-      await collectSearchMatches(entryPath, query, baseCwd, matches)
+      await collectSearchMatches(entryPath, query, baseCwd, matches, signal)
       continue
     }
 
@@ -218,7 +285,7 @@ async function collectSearchMatches(rootPath, query, baseCwd, matches = []) {
   return matches
 }
 
-async function searchWorkspace(query, target, cwd) {
+async function searchWorkspace(query, target, cwd, signal) {
   try {
     const { stdout } = await execFileAsync(
       'rg',
@@ -235,6 +302,7 @@ async function searchWorkspace(query, target, cwd) {
       {
         cwd,
         maxBuffer: 1024 * 1024,
+        signal,
       },
     )
     return truncate(stdout || 'No matches found')
@@ -245,7 +313,7 @@ async function searchWorkspace(query, target, cwd) {
       'code' in error &&
       error.code === 'ENOENT'
     ) {
-      const matches = await collectSearchMatches(target, query, cwd)
+      const matches = await collectSearchMatches(target, query, cwd, [], signal)
       return truncate(matches.join('\n') || 'No matches found')
     }
     throw error
@@ -271,7 +339,8 @@ export function createBuiltinTools(context) {
           },
         },
       },
-      async run(args) {
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path || '.')
         const lines = await walkDirectory(target, Math.min(args.depth ?? 2, 4))
         return truncate(lines.join('\n') || '(empty directory)')
@@ -291,7 +360,8 @@ export function createBuiltinTools(context) {
         },
         required: ['path'],
       },
-      async run(args) {
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path)
         const content = await fs.readFile(target)
         if (detectBinary(content)) {
@@ -320,7 +390,8 @@ export function createBuiltinTools(context) {
         },
         required: ['path', 'content'],
       },
-      async run(args) {
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path)
         await fs.mkdir(path.dirname(target), { recursive: true })
         await fs.writeFile(target, args.content, 'utf8')
@@ -346,9 +417,10 @@ export function createBuiltinTools(context) {
         },
         required: ['query'],
       },
-      async run(args) {
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path || '.')
-        return searchWorkspace(args.query, target, context.cwd)
+        return searchWorkspace(args.query, target, context.cwd, runtime.signal)
       },
     },
     {
@@ -378,6 +450,7 @@ export function createBuiltinTools(context) {
           context.cwd,
           args.timeoutMs ?? 60_000,
           output => runtime.onUpdate?.(output),
+          runtime.signal,
         )
       },
     },
@@ -469,21 +542,33 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     }
   }
 
+  const abortController = hooks.createCurrentStepAbortController?.()
   try {
-    if (tool.liveUpdates) {
-      updateEvent({
-        status: 'running',
-        output: '',
-      })
-    }
-    const output = await tool.run(args, {
-      onUpdate(nextOutput) {
-        updateEvent({
-          status: 'running',
-          output: stringifyOutput(nextOutput),
-        })
-      },
+    updateEvent({
+      status: 'running',
+      output: '',
+      error: undefined,
+      errorInfo: undefined,
     })
+    throwIfAborted(abortController?.signal, tool)
+    const output = await runAbortable(
+      Promise.resolve(
+        tool.run(args, {
+          signal: abortController?.signal,
+          throwIfAborted() {
+            throwIfAborted(abortController?.signal, tool)
+          },
+          onUpdate(nextOutput) {
+            updateEvent({
+              status: 'running',
+              output: stringifyOutput(nextOutput),
+            })
+          },
+        }),
+      ),
+      abortController?.signal,
+      tool,
+    )
     updateEvent({
       status: 'success',
       output: stringifyOutput(output),
@@ -513,5 +598,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     ]
       .filter(Boolean)
       .join('\n\n')
+  } finally {
+    hooks.releaseCurrentStepAbortController?.(abortController)
   }
 }
