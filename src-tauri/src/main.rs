@@ -1743,6 +1743,15 @@ fn main() {
             reset_aura_home,
             quit_app
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Aura desktop app")
+        .build(tauri::generate_context!())
+        .expect("error while building Aura desktop app")
+        .run(|app_handle, event| {
+            // macOS: 点击程序坞图标时重新显示并激活窗口
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
 }
