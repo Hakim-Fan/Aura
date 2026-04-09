@@ -26,7 +26,7 @@ export function HomeView({
   return (
     <section className="hero-shell custom-scrollbar">
       {/* Top drag region spacer */}
-      <div className="h-10 w-full shrink-0" data-tauri-drag-region />
+      <div className="absolute top-0 h-10 w-full shrink-0 bg-red" data-tauri-drag-region />
 
       <div className="hero-card modern">
         <div className="hero-badge">Aura Beta</div>
