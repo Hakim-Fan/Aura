@@ -87,6 +87,7 @@ function emit(event) {
 let pendingApprovalResolve = null
 let started = false
 const appendedInputs = []
+let currentStepAbortController = null
 
 function emitAppendedInputs() {
   emit({
@@ -144,6 +145,15 @@ rl.on('line', line => {
     return
   }
 
+  if (message.type === 'cancel_current_step') {
+    if (currentStepAbortController && !currentStepAbortController.signal.aborted) {
+      currentStepAbortController.abort(
+        new Error('Current step cancelled by the user.'),
+      )
+    }
+    return
+  }
+
   if (message.type !== 'start' || started) {
     return
   }
@@ -197,6 +207,15 @@ rl.on('line', line => {
         attachments: Array.isArray(input.attachments) ? input.attachments : [],
         createdAt: input.createdAt,
       }))
+    },
+    createCurrentStepAbortController() {
+      currentStepAbortController = new AbortController()
+      return currentStepAbortController
+    },
+    releaseCurrentStepAbortController(controller) {
+      if (currentStepAbortController === controller) {
+        currentStepAbortController = null
+      }
     },
   }
 

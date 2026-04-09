@@ -141,10 +141,12 @@ export async function loadPluginTools(appRoot, enabledPlugins, context) {
           type: 'object',
           properties: {},
         },
-        async run(args) {
+        async run(args, runtime = {}) {
           const result = await tool.handler({
             args,
             context,
+            signal: runtime.signal,
+            throwIfAborted: runtime.throwIfAborted,
           })
           return stringifyOutput(result)
         },

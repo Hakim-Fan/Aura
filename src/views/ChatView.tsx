@@ -124,8 +124,10 @@ type Props = {
   onDeleteMessage: (messageId: string) => void
   onSelectMessageVersion: (messageId: string, nextIndex: number) => void
   onRegenerateMessage: (messageId: string) => void
+  onRegenerateMessageWithModel: (messageId: string, profileId: string, modelId: string) => void
   onResendMessage: (messageId: string) => void
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
+  onCancelCurrentStep: () => void
   onToggleMessageActivity: (messageId: string) => void
   onStop: () => void
 }
@@ -473,9 +475,11 @@ function ReasoningPhaseCard({
 function MessageEventCard({
   event,
   onHandleApproval,
+  onCancelCurrentStep,
 }: {
   event: MessageEvent
   onHandleApproval?: (decision: 'approve' | 'deny') => void
+  onCancelCurrentStep?: () => void
 }) {
   const isShellLog = event.kind === 'shell'
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
@@ -506,16 +510,28 @@ function MessageEventCard({
           <strong className="text-12px text-[var(--text-primary)] opacity-80 leading-tight">{event.title}</strong>
         </div>
         <div className="relative shrink-0 group/status">
-          <span
-            className={`shrink-0 text-10px font-500 ${event.status === 'error'
-              ? 'cursor-help text-red-500'
-              : event.status === 'awaiting_approval'
-                ? 'text-amber-600'
-                : 'text-green-600'
-              }`}
-          >
-            {eventStatusLabel(event.status)}
-          </span>
+          <div className="flex items-center gap-2">
+            {event.status === 'running' ? (
+              <button
+                className="flex items-center justify-center p-1 rounded-lg text-red-500 border border-red-200 bg-red-50 hover:bg-red-100 transition-all"
+                title="停止当前步骤"
+                onClick={onCancelCurrentStep}
+                type="button"
+              >
+                <Square size={10} fill="currentColor" strokeWidth={0} />
+              </button>
+            ) : null}
+            <span
+              className={`shrink-0 text-10px font-500 ${event.status === 'error'
+                ? 'cursor-help text-red-500'
+                : event.status === 'awaiting_approval'
+                  ? 'text-amber-600'
+                  : 'text-green-600'
+                }`}
+            >
+              {eventStatusLabel(event.status)}
+            </span>
+          </div>
           {event.status === 'error' ? (
             <div className="pointer-events-none absolute right-0 top-[calc(100%+8px)] z-20 hidden w-72 rounded-xl border border-red-100 bg-white px-3 py-2 text-left text-12px leading-relaxed text-red-600 shadow-lg shadow-[rgba(15,23,42,0.12)] group-hover/status:block">
               <div className="font-600">{failureSummary}</div>
@@ -624,29 +640,29 @@ function MessageVersionSwitcher({
 
   return (
     <div
-      className={`flex items-center gap-3 text-[var(--text-secondary)] ${align === 'right' ? 'justify-end' : 'justify-start'
+      className={`flex items-center gap-1 text-[var(--text-secondary)] ${align === 'right' ? 'justify-end' : 'justify-start'
         }`}
     >
       <button
-        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-30"
+        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-60"
         disabled={activeIndex <= 0}
         onClick={() => onSelectVersion(message.id, activeIndex - 1)}
         title="查看上一版"
         type="button"
       >
-        <ChevronLeft size={16} />
+        <ChevronLeft size={12} />
       </button>
-      <span className="min-w-[40px] text-center text-13px font-600 text-[var(--text-primary)]">
+      <span className="min-w-[30px] text-center text-12px font-500 text-[var(--text-secondary)]">
         {activeIndex + 1}/{versionCount}
       </span>
       <button
-        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-30"
+        className="rounded-md p-1 hover:bg-[rgba(15,23,42,0.05)] disabled:opacity-60"
         disabled={activeIndex >= versionCount - 1}
         onClick={() => onSelectVersion(message.id, activeIndex + 1)}
         title="查看下一版"
         type="button"
       >
-        <ChevronRight size={16} />
+        <ChevronRight size={12} />
       </button>
     </div>
   )
@@ -655,12 +671,22 @@ function MessageVersionSwitcher({
 function MessageOverflowMenu({
   messageId,
   onDeleteMessage,
+  extraActions = [],
 }: {
   messageId: string
   onDeleteMessage: (messageId: string) => void
+  extraActions?: Array<{
+    key: string
+    label: string
+    icon: typeof LayoutGrid
+    onClick: () => void
+    disabled?: boolean
+  }>
 }) {
   const [open, setOpen] = useState(false)
+  const [placement, setPlacement] = useState<'top' | 'bottom'>('bottom')
   const menuRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!open) {
@@ -677,6 +703,53 @@ function MessageOverflowMenu({
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [open])
 
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+
+    function updatePlacement() {
+      const anchorRect = menuRef.current?.getBoundingClientRect()
+      const panelRect = panelRef.current?.getBoundingClientRect()
+      if (!anchorRect || !panelRect) {
+        return
+      }
+
+      const gap = 8
+      const composerRect = document
+        .querySelector('[data-chat-composer-root="true"]')
+        ?.getBoundingClientRect()
+      const lowerBoundary =
+        composerRect && composerRect.top > anchorRect.top
+          ? Math.min(window.innerHeight, composerRect.top)
+          : window.innerHeight
+      const spaceBelow = lowerBoundary - anchorRect.bottom
+      const spaceAbove = anchorRect.top
+      const requiredHeight = panelRect.height + gap
+
+      if (spaceBelow >= requiredHeight) {
+        setPlacement('bottom')
+        return
+      }
+
+      if (spaceAbove >= requiredHeight) {
+        setPlacement('top')
+        return
+      }
+
+      setPlacement(spaceAbove > spaceBelow ? 'top' : 'bottom')
+    }
+
+    const rafId = window.requestAnimationFrame(updatePlacement)
+    window.addEventListener('resize', updatePlacement)
+    window.addEventListener('scroll', updatePlacement, true)
+    return () => {
+      window.cancelAnimationFrame(rafId)
+      window.removeEventListener('resize', updatePlacement)
+      window.removeEventListener('scroll', updatePlacement, true)
+    }
+  }, [open])
+
   return (
     <div className="relative" ref={menuRef}>
       <button
@@ -688,7 +761,28 @@ function MessageOverflowMenu({
         <MoreHorizontal size={15} />
       </button>
       {open ? (
-        <div className="absolute right-0 top-[calc(100%+8px)] z-20 min-w-[170px] overflow-hidden rounded-2xl border border-[rgba(15,23,42,0.08)] bg-white shadow-xl shadow-[rgba(15,23,42,0.12)]">
+        <div
+          ref={panelRef}
+          className={`absolute right-0 z-20 min-w-[190px] overflow-hidden rounded-2xl border border-[rgba(15,23,42,0.08)] bg-white shadow-xl shadow-[rgba(15,23,42,0.12)] ${placement === 'top' ? 'bottom-[calc(100%+8px)]' : 'top-[calc(100%+8px)]'}`}
+        >
+          {extraActions.map(action => {
+            const Icon = action.icon
+            return (
+              <button
+                key={action.key}
+                className="flex w-full items-center gap-3 px-4 py-3 text-left text-[15px] font-500 text-[var(--text-primary)] hover:bg-[rgba(15,23,42,0.04)] disabled:cursor-not-allowed disabled:opacity-45"
+                disabled={action.disabled}
+                onClick={() => {
+                  setOpen(false)
+                  action.onClick()
+                }}
+                type="button"
+              >
+                <Icon size={16} />
+                <span>{action.label}</span>
+              </button>
+            )
+          })}
           <button
             className="flex w-full items-center gap-3 px-4 py-3 text-left text-[15px] font-500 text-red-500 hover:bg-red-50"
             onClick={() => {
@@ -702,6 +796,172 @@ function MessageOverflowMenu({
           </button>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+function ModelPickerDialog({
+  title,
+  description,
+  modelGroups,
+  activeProfileId,
+  activeModelId,
+  onClose,
+  onSelect,
+}: {
+  title: string
+  description: string
+  modelGroups: ModelGroup[]
+  activeProfileId: string
+  activeModelId: string
+  onClose: () => void
+  onSelect: (profileId: string, modelId: string) => void
+}) {
+  const [searchTerm, setSearchTerm] = useState('')
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const dialogRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose()
+      }
+    }
+
+    function handleMouseDown(event: MouseEvent) {
+      if (dialogRef.current && !dialogRef.current.contains(event.target as Node)) {
+        onClose()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('mousedown', handleMouseDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('mousedown', handleMouseDown)
+    }
+  }, [onClose])
+
+  const filteredGroups = modelGroups
+    .map(group => ({
+      ...group,
+      models: group.models.filter(
+        model =>
+          model.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          group.profileName.toLowerCase().includes(searchTerm.toLowerCase()),
+      ),
+    }))
+    .filter(group => group.models.length > 0)
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(15,23,42,0.16)] px-4 py-6 backdrop-blur-sm">
+      <div
+        ref={dialogRef}
+        className="flex max-h-[78vh] w-full max-w-[540px] flex-col overflow-hidden rounded-[24px] border border-[rgba(15,23,42,0.08)] bg-white shadow-2xl shadow-[rgba(15,23,42,0.18)]"
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-[rgba(15,23,42,0.05)] px-5 py-4">
+          <div className="min-w-0">
+            <strong className="block text-16px font-700 text-[var(--text-primary)]">{title}</strong>
+            <p className="mt-1 text-13px leading-relaxed text-[var(--text-secondary)]">
+              {description}
+            </p>
+          </div>
+          <button
+            className="rounded-lg p-2 text-[var(--text-secondary)] hover:bg-[rgba(15,23,42,0.04)]"
+            onClick={onClose}
+            type="button"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="border-b border-[rgba(15,23,42,0.05)] px-4 py-3">
+          <div className="flex items-center gap-2.5 rounded-xl border border-[rgba(15,23,42,0.08)] bg-white px-3 shadow-sm focus-within:border-[var(--bg-user-bubble)]/60 focus-within:ring-4 focus-within:ring-[var(--bg-user-bubble)]/5 transition-all">
+            <Search size={14} className="text-[var(--text-secondary)] opacity-30" />
+            <input
+              autoFocus
+              className="h-11 flex-1 !border-none !outline-none !ring-0 !shadow-none !bg-transparent appearance-none p-0 text-13px font-medium placeholder:opacity-30 placeholder:text-[var(--text-secondary)]"
+              placeholder="搜索模型或 Provider..."
+              value={searchTerm}
+              onChange={event => setSearchTerm(event.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="min-h-[260px] max-h-[52vh] overflow-y-auto custom-scrollbar px-2 py-2">
+          {filteredGroups.length > 0 ? (
+            filteredGroups.map(group => {
+              const isCollapsed = collapsedGroups.has(group.profileId)
+              return (
+                <div key={group.profileId} className="mb-1 last:mb-0">
+                  <button
+                    className="sticky top-0 z-10 flex w-full items-center justify-between rounded-lg bg-white px-3 py-2 text-left text-10px font-800 uppercase tracking-widest text-[rgba(15,23,42,0.42)] hover:bg-[rgba(15,23,42,0.02)]"
+                    onClick={() => {
+                      setCollapsedGroups(current => {
+                        const next = new Set(current)
+                        if (next.has(group.profileId)) next.delete(group.profileId)
+                        else next.add(group.profileId)
+                        return next
+                      })
+                    }}
+                    type="button"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span>{group.profileName}</span>
+                      <span className="normal-case font-500 tracking-normal opacity-45">
+                        {group.models.length} items
+                      </span>
+                    </div>
+                    <ChevronDown
+                      size={12}
+                      className={`transition-transform ${isCollapsed ? '-rotate-90' : ''}`}
+                    />
+                  </button>
+
+                  {!isCollapsed ? (
+                    <div className="mt-1 flex flex-col gap-0.5">
+                      {group.models.map(model => {
+                        const isActive =
+                          group.profileId === activeProfileId && model.id === activeModelId
+                        const shortName =
+                          model.id.split('/').filter(Boolean).at(-1) || model.id
+
+                        return (
+                          <button
+                            key={`${group.profileId}:${model.id}`}
+                            className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition-colors ${isActive
+                              ? 'bg-[rgba(79,123,116,0.08)]'
+                              : 'hover:bg-[rgba(15,23,42,0.04)]'
+                              }`}
+                            onClick={() => onSelect(group.profileId, model.id)}
+                            type="button"
+                          >
+                            <div className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${isActive ? 'border-[var(--accent-soft-strong)] bg-[var(--accent-soft-strong)] text-white' : 'border-[rgba(15,23,42,0.12)] bg-white text-transparent'}`}>
+                              <Check size={12} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-14px font-700 text-[var(--text-primary)]">
+                                {shortName}
+                              </div>
+                              <div className="truncate text-12px text-[var(--text-secondary)]">
+                                {model.id}
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              )
+            })
+          ) : (
+            <div className="px-3 py-8 text-center text-13px text-[var(--text-secondary)]">
+              没有匹配到可用模型。
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -981,11 +1241,10 @@ function AppendedInputsPanel({
               补充输入
             </span>
             <span
-              className={`text-11px ${
-                input.status === 'consumed'
-                  ? 'text-[var(--accent-soft-strong)]'
-                  : 'text-[var(--text-secondary)] opacity-70'
-              }`}
+              className={`text-11px ${input.status === 'consumed'
+                ? 'text-[var(--accent-soft-strong)]'
+                : 'text-[var(--text-secondary)] opacity-70'
+                }`}
             >
               {appendedInputStatusLabel(input.status)}
             </span>
@@ -1023,25 +1282,36 @@ function AppendedInputsPanel({
 
 function AssistantMessageCard({
   message,
+  modelGroups,
+  activeModelProfileId,
+  activeModelId,
   onCopyText,
   onEditMessage,
   onDeleteMessage,
   onSelectMessageVersion,
   onRegenerateMessage,
+  onRegenerateMessageWithModel,
   onForceExecuteAppendedInput,
+  onCancelCurrentStep,
   onHandleApproval,
   onToggleActivity,
 }: {
   message: ChatMessage
+  modelGroups: ModelGroup[]
+  activeModelProfileId: string
+  activeModelId: string
   onCopyText: (value: string) => void
   onEditMessage: (messageId: string) => void
   onDeleteMessage: (messageId: string) => void
   onSelectMessageVersion: (messageId: string, nextIndex: number) => void
   onRegenerateMessage: (messageId: string) => void
+  onRegenerateMessageWithModel: (messageId: string, profileId: string, modelId: string) => void
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
+  onCancelCurrentStep: () => void
   onHandleApproval: (decision: 'approve' | 'deny') => void
   onToggleActivity: (messageId: string) => void
 }) {
+  const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const activity = message.activity
   const duration = activity
     ? (
@@ -1090,6 +1360,11 @@ function AssistantMessageCard({
       .filter(Boolean)
       .join(' · ')
     : null
+  const messageModelLabel =
+    message.modelInfo?.label ||
+    (activeModelId.split('/').filter(Boolean).at(-1) || activeModelId || '未记录模型')
+  const messageModelProfileId = message.modelInfo?.providerProfileId || activeModelProfileId
+  const messageModelId = message.modelInfo?.modelId || activeModelId
 
   return (
     <article className="group relative flex flex-col gap-3">
@@ -1109,6 +1384,16 @@ function AssistantMessageCard({
                   title={activity?.expanded ? '折叠执行详情' : '展开执行详情'}
                 >
                   <Brain size={12} className="opacity-70" />
+                  <span
+                    className="rounded-full border border-[rgba(15,23,42,0.06)] bg-white px-0 py-0.5 text-11px font-600 text-[var(--text-secondary)] opacity-90"
+                    title={
+                      message.modelInfo
+                        ? `${message.modelInfo.providerProfileName} · ${message.modelInfo.modelId}`
+                        : messageModelLabel
+                    }
+                  >
+                    {messageModelLabel}
+                  </span>
                   <span>{activitySummary}</span>
                   {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </button>
@@ -1141,6 +1426,7 @@ function AssistantMessageCard({
                       key={item.key}
                       event={item.event}
                       onHandleApproval={onHandleApproval}
+                      onCancelCurrentStep={onCancelCurrentStep}
                     />
                   ),
                 )}
@@ -1187,11 +1473,6 @@ function AssistantMessageCard({
 
           <div className="flex items-center justify-end pt-1">
             <div className="flex items-center gap-2">
-              <MessageVersionSwitcher
-                message={message}
-                align="left"
-                onSelectVersion={onSelectMessageVersion}
-              />
               <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
                 <button
                   className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
@@ -1219,12 +1500,40 @@ function AssistantMessageCard({
                 <MessageOverflowMenu
                   messageId={message.id}
                   onDeleteMessage={onDeleteMessage}
+                  extraActions={[
+                    {
+                      key: 'switch-model-regenerate',
+                      label: '切换模型重新回答',
+                      icon: LayoutGrid,
+                      disabled: isStreaming,
+                      onClick: () => setModelDialogOpen(true),
+                    },
+                  ]}
+                />
+                <MessageVersionSwitcher
+                  message={message}
+                  align="left"
+                  onSelectVersion={onSelectMessageVersion}
                 />
               </div>
             </div>
           </div>
         </div>
       </div>
+      {modelDialogOpen ? (
+        <ModelPickerDialog
+          title="切换模型重新回答"
+          description="选择一个模型后，Aura 会基于同一条用户问题重新生成这一版回答。"
+          modelGroups={modelGroups}
+          activeProfileId={messageModelProfileId}
+          activeModelId={messageModelId}
+          onClose={() => setModelDialogOpen(false)}
+          onSelect={(profileId, modelId) => {
+            setModelDialogOpen(false)
+            onRegenerateMessageWithModel(message.id, profileId, modelId)
+          }}
+        />
+      ) : null}
     </article>
   )
 }
@@ -1279,11 +1588,6 @@ function UserMessageCard({
         {message.content}
       </div>
       <div className="flex items-center gap-2">
-        <MessageVersionSwitcher
-          message={message}
-          align="right"
-          onSelectVersion={onSelectMessageVersion}
-        />
         <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/90 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
           <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制" onClick={() => onCopyText(message.content)}>
             <Copy size={14} />
@@ -1297,6 +1601,11 @@ function UserMessageCard({
           <MessageOverflowMenu
             messageId={message.id}
             onDeleteMessage={onDeleteMessage}
+          />
+          <MessageVersionSwitcher
+            message={message}
+            align="right"
+            onSelectVersion={onSelectMessageVersion}
           />
         </div>
       </div>
@@ -1354,8 +1663,10 @@ export function ChatView({
   onDeleteMessage,
   onSelectMessageVersion,
   onRegenerateMessage,
+  onRegenerateMessageWithModel,
   onResendMessage,
   onForceExecuteAppendedInput,
+  onCancelCurrentStep,
   onToggleMessageActivity,
   onStop,
 }: Props) {
@@ -1615,6 +1926,24 @@ export function ChatView({
             {messages.length === 0 ? (
               <div className="max-w-1000px mx-auto px-6 py-20 flex flex-col items-center text-center">
                 <h3 className="text-28px font-600 mb-2">你好，我是 Aura</h3>
+                <p className="max-w-560px text-14px leading-relaxed text-[var(--text-secondary)] opacity-80">
+                  你可以先选择当前会话的工作区，也可以直接发出第一条消息，Aura 会在默认工作目录下自动创建本会话的工作区。
+                </p>
+                <div className="mt-6 flex items-center gap-3">
+                  <button
+                    className="inline-flex items-center gap-2 rounded-xl border border-[rgba(79,123,116,0.18)] bg-white px-4 py-2.5 text-14px font-600 text-[var(--accent-soft-strong)] shadow-sm hover:bg-[rgba(79,123,116,0.05)]"
+                    onClick={onChooseWorkspace}
+                    type="button"
+                  >
+                    <FolderOpen size={16} />
+                    <span>选择工作区</span>
+                  </button>
+                  {workspaceRootPath.trim() ? (
+                    <div className="max-w-280px truncate rounded-full bg-[rgba(15,23,42,0.04)] px-3 py-1.5 text-12px text-[var(--text-secondary)]">
+                      当前: {summarizePath(workspaceRootPath)}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             ) : (
               <div className="max-w-980px mx-auto px-8 flex flex-col gap-14">
@@ -1634,12 +1963,17 @@ export function ChatView({
                     <AssistantMessageCard
                       key={message.id}
                       message={message}
+                      modelGroups={modelGroups}
+                      activeModelProfileId={activeModelProfileId}
+                      activeModelId={settings.model}
                       onCopyText={onCopyText}
                       onEditMessage={onEditMessage}
                       onDeleteMessage={onDeleteMessage}
                       onSelectMessageVersion={onSelectMessageVersion}
                       onRegenerateMessage={onRegenerateMessage}
+                      onRegenerateMessageWithModel={onRegenerateMessageWithModel}
                       onForceExecuteAppendedInput={onForceExecuteAppendedInput}
+                      onCancelCurrentStep={onCancelCurrentStep}
                       onHandleApproval={onHandleApproval}
                       onToggleActivity={onToggleMessageActivity}
                     />
@@ -1650,7 +1984,10 @@ export function ChatView({
           </div>
 
           {/* Docked Composer */}
-          <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[var(--bg-app)]/80 to-transparent pointer-events-none flex justify-center">
+          <div
+            className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[var(--bg-app)]/80 to-transparent pointer-events-none flex justify-center"
+            data-chat-composer-root="true"
+          >
             <div className="max-w-1000px w-full flex flex-col items-center">
               {!autoScrollEnabled && messages.length > 0 && (
                 <button
@@ -1666,6 +2003,11 @@ export function ChatView({
                   <ArrowDown size={18} strokeWidth={2.5} className="text-[var(--text-secondary)] group-hover:text-[var(--accent-soft-strong)] transition-colors" />
                 </button>
               )}
+              {error ? (
+                <div className="mb-4 w-full rounded-2xl border border-red-100 bg-red-50/95 px-4 py-3 text-13px leading-relaxed text-red-600 shadow-sm">
+                  {error}
+                </div>
+              ) : null}
               <div className="w-full pointer-events-auto bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none relative">
                 <textarea
                   className="w-full h-120px p-4 text-15px leading-relaxed resize-none !border-none bg-transparent !outline-none !ring-0 !shadow-none"
@@ -2004,9 +2346,12 @@ export function ChatView({
                 previewLoading={previewLoading}
                 previewError={previewError}
                 expandedPaths={expandedPaths}
-                canChooseWorkspace={canChangeWorkspace}
                 onRefresh={onRefreshWorkspace}
-                onChooseWorkspace={onChooseWorkspace}
+                onOpenRootPath={() => {
+                  if (workspaceRootPath.trim()) {
+                    onOpenAttachment(workspaceRootPath)
+                  }
+                }}
                 onToggle={onToggleWorkspacePath}
                 onSelectFile={onSelectWorkspaceFile}
                 onInsertReference={onInsertFileReference}
