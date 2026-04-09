@@ -16,15 +16,8 @@ export const builtinSkills = [
   },
 ]
 
-export const builtinPlugins = [
-  {
-    id: 'workspace-inspector',
-    name: 'Workspace Inspector',
-    description: '让 Agent 可以快速获取工作区快照。',
-  },
-  {
-    id: 'git-helper',
-    name: 'Git Helper',
-    description: '为 Agent 提供只读 Git 状态能力。',
-  },
-]
+export const builtinPlugins: Array<{
+  id: string
+  name: string
+  description: string
+}> = []

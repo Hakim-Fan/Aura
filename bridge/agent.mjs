@@ -1,7 +1,8 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { selectTurnCapabilities } from './capabilitySelector.mjs'
 import { createAdvancedTools } from './advancedTools.mjs'
-import { loadPluginTools, loadSkillPrompt } from './extensions.mjs'
+import { buildSkillPrompt, loadPluginTools, loadSkillCatalog } from './extensions.mjs'
 import { connectMcpTools } from './mcp.mjs'
 import {
   finalizeGoogleAnswer,
@@ -74,6 +75,102 @@ function extractProviderReasoning(reasoning = []) {
 
 function normalizeFinalAnswer(message) {
   return (message || '').trim()
+}
+
+function latestUserIntent(messages) {
+  return [...messages]
+    .reverse()
+    .find(message => message.role === 'user')
+    ?.content?.toLowerCase() || ''
+}
+
+function taskNeedsExecution(messages) {
+  const intent = latestUserIntent(messages)
+  if (!intent) {
+    return false
+  }
+
+  return [
+    'install',
+    'configure',
+    'setup',
+    'set up',
+    'download',
+    'create',
+    'update',
+    'modify',
+    'edit',
+    'write',
+    'fix',
+    'enable',
+    'disable',
+    'remove',
+    'delete',
+    'add',
+    'run',
+    'repair',
+    '安装',
+    '配置',
+    '接入',
+    '下载',
+    '创建',
+    '修改',
+    '编辑',
+    '写入',
+    '修复',
+    '启用',
+    '关闭',
+    '删除',
+    '增加',
+    '运行',
+    '新增',
+  ].some(keyword => intent.includes(keyword))
+}
+
+function resultClaimsExecution(message) {
+  const normalized = normalizeFinalAnswer(message).toLowerCase()
+  if (!normalized) {
+    return false
+  }
+
+  return [
+    'done',
+    'completed',
+    'installed',
+    'configured',
+    'created',
+    'updated',
+    'downloaded',
+    'enabled',
+    'wrote',
+    'fixed',
+    '完成',
+    '已经',
+    '已为你',
+    '已帮你',
+    '装好了',
+    '配置好了',
+    '创建了',
+    '写入了',
+    '修复了',
+    '启用了',
+  ].some(keyword => normalized.includes(keyword))
+}
+
+function enforceEvidencePolicy(messages, result, toolEvents) {
+  if (!taskNeedsExecution(messages) || toolEvents.length > 0) {
+    return result
+  }
+
+  if (!resultClaimsExecution(result.message)) {
+    return result
+  }
+
+  return {
+    ...result,
+    message:
+      '我还没有执行任何工具，所以现在不能确认这项实际操作已经完成。要完成这类任务，我需要先运行相应工具并验证结果，然后再向你确认完成。',
+  }
 }
 
 function shouldRunFinalization(result) {
@@ -181,12 +278,31 @@ function createTaskTracker(hooks, rootTitle) {
   }
 }
 
-function buildSystemPrompt(settings, skillPrompt) {
+function buildCapabilityExposureNote(snapshot) {
+  const lines = ['Only task-relevant optional capabilities are exposed for this turn.']
+  const items = [
+    snapshot?.skills?.length ? `skills ${snapshot.skills.length}` : null,
+    snapshot?.plugins?.length ? `plugins ${snapshot.plugins.length}` : null,
+    snapshot?.mcpServers?.length ? `mcp ${snapshot.mcpServers.length}` : null,
+  ]
+    .filter(Boolean)
+    .join(', ')
+
+  if (items) {
+    lines.push(`Selected optional capabilities: ${items}.`)
+  }
+
+  return lines.join('\n')
+}
+
+function buildSystemPrompt(settings, skillPrompt, exposureNote) {
   const sections = [
     'You are Aura, a local-first desktop coding agent.',
     `The active workspace is: ${settings.cwd}`,
     'Use tools when they reduce uncertainty or let you act directly inside the workspace.',
     'Prefer concrete changes and verification steps over abstract advice.',
+    'If the user asks for any real-world action such as editing files, changing configuration, installing capabilities, or downloading assets, you must use tools and verify the result before claiming success.',
+    'Do not say that something is done, installed, configured, created, or fixed unless tool output in this run gives direct evidence.',
     'Do not access paths outside the configured workspace root.',
     'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
   ]
@@ -224,7 +340,11 @@ function buildSystemPrompt(settings, skillPrompt) {
   }
 
   if (skillPrompt.trim()) {
-    sections.push('Enabled skills:\n' + skillPrompt)
+    sections.push('Selected skill summaries:\n' + skillPrompt)
+  }
+
+  if (exposureNote?.trim()) {
+    sections.push(exposureNote)
   }
 
   return sections.join('\n\n')
@@ -254,13 +374,15 @@ export async function runAgent(request) {
   const toolEvents = []
   const context = {
     cwd: settings.cwd,
+    appControl: hooks.appControl,
+    todoState: runtime.todoState || { items: [] },
   }
   const taskTracker =
     runtime.taskTracker || createTaskTracker(hooks, summarizeMessages(messages))
   const currentTaskId = runtime.currentTaskId || taskTracker.rootId
   taskTracker.setStatus(currentTaskId, 'running')
 
-  const skillPrompt = await loadSkillPrompt(
+  const skillCatalog = await loadSkillCatalog(
     appRoot,
     capabilities?.skills || settings.enabledSkillIds || [],
   )
@@ -283,13 +405,25 @@ export async function runAgent(request) {
     context,
   )
   const mcp = await connectMcpTools(capabilities?.mcpServers || settings.mcpServers || [])
-  const allTools = [
+  const availableTools = [
     ...builtinTools,
     ...advancedTools,
     ...pluginTools,
     ...mcp.tools,
   ]
-  const systemPrompt = buildSystemPrompt(settings, skillPrompt)
+  const selectedCapabilities = selectTurnCapabilities({
+    messages,
+    runtimeCapabilities: capabilities,
+    skillEntries: skillCatalog,
+    tools: availableTools,
+  })
+  const skillPrompt = buildSkillPrompt(selectedCapabilities.selectedSkills)
+  const systemPrompt = buildSystemPrompt(
+    settings,
+    skillPrompt,
+    buildCapabilityExposureNote(selectedCapabilities.capabilitySnapshot),
+  )
+  const allTools = selectedCapabilities.selectedTools
 
   try {
     if (settings.provider === 'google') {
@@ -306,6 +440,7 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
+      result = enforceEvidencePolicy(messages, result, toolEvents)
       const resolvedMessages = result.messages || messages
 
       if (shouldRunFinalization(result)) {
@@ -342,6 +477,7 @@ export async function runAgent(request) {
       taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
+        capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
         reasoning,
         status: 'completed',
         taskTree: taskTracker.getTree(),
@@ -362,6 +498,7 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
+      result = enforceEvidencePolicy(messages, result, toolEvents)
       const resolvedMessages = result.messages || messages
 
       if (shouldRunFinalization(result)) {
@@ -398,6 +535,7 @@ export async function runAgent(request) {
       taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
+        capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
         reasoning,
         status: 'completed',
         taskTree: taskTracker.getTree(),
@@ -444,6 +582,7 @@ export async function runAgent(request) {
           return {
             message: recoveredMessage,
             toolEvents,
+            capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
             reasoning: summaryReasoning,
             usage: undefined,
             status: 'completed',

@@ -13,39 +13,21 @@ import type {
   Session,
   WorkspaceCapabilityOverrides,
 } from '../types'
-import { ensureAuraHome, readAuraFile, writeAuraFile, type AuraHomeState } from './aura'
-
-const SETTINGS_KEY = 'aura-settings-cache-v1'
-const SESSIONS_KEY = 'aura-sessions-cache-v1'
-const PROJECT_CAPABILITIES_KEY = 'aura-project-capability-overrides-v1'
-const LEGACY_SETTINGS_KEY = 'desk-agent-settings-v2'
-const LEGACY_SESSIONS_KEY = 'desk-agent-sessions-v2'
-const SETTINGS_FILE_PATH = 'config/settings.json'
-const SESSIONS_FILE_PATH = 'config/sessions.json'
-const MCP_FILE_PATH = 'mcp/servers.json'
-const PROJECT_CAPABILITIES_FILE_PATH = 'config/project-capabilities.json'
+import { ensureAuraHome, type AuraHomeState } from './aura'
+import {
+  deletePersistedMessage,
+  deletePersistedMessageVersion,
+  deletePersistedSession,
+  loadPersistedAppState,
+  savePersistedProjectCapabilityOverrides,
+  savePersistedSettings,
+  upsertPersistedMessage,
+  upsertPersistedMessageVersion,
+  upsertPersistedSession,
+} from './persistence'
 
 function createProfileId(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`
-}
-
-function readCachedValue(primaryKey: string, legacyKey: string) {
-  const primary = localStorage.getItem(primaryKey)
-  if (primary) {
-    return primary
-  }
-
-  const legacy = localStorage.getItem(legacyKey)
-  if (legacy) {
-    localStorage.setItem(primaryKey, legacy)
-    return legacy
-  }
-
-  return null
-}
-
-function readLocalStorageValue(key: string) {
-  return localStorage.getItem(key)
 }
 
 function baseUrlForProvider(provider: ProviderMode) {
@@ -114,7 +96,7 @@ export const defaultSettings: AgentSettings = {
   autoApproveComputerUse: false,
   autoApproveChromeAutomation: false,
   enabledSkillIds: ['repair-planner', 'desktop-operator'],
-  enabledPluginIds: ['workspace-inspector'],
+  enabledPluginIds: [],
   mcpServers: [],
   sendShortcut: 'meta-enter',
 }
@@ -866,12 +848,8 @@ function parseSessions(raw: string | null): Session[] {
   }
 }
 
-export function loadSettings(): AgentSettings {
-  return parseSettings(readCachedValue(SETTINGS_KEY, LEGACY_SETTINGS_KEY))
-}
-
-export function loadSessions(): Session[] {
-  return parseSessions(readCachedValue(SESSIONS_KEY, LEGACY_SESSIONS_KEY))
+function cloneValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
 }
 
 function serializeSessions(sessions: Session[]) {
@@ -944,103 +922,244 @@ function serializeSessions(sessions: Session[]) {
   }))
 }
 
-function writeSessionCache(serializedSessions: ReturnType<typeof serializeSessions>) {
-  try {
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(serializedSessions))
-  } catch (error) {
-    if (
-      error instanceof DOMException &&
-      (error.name === 'QuotaExceededError' || error.code === 22)
-    ) {
-      try {
-        localStorage.removeItem(SESSIONS_KEY)
-        localStorage.setItem(SESSIONS_KEY, JSON.stringify(serializedSessions))
-      } catch {
-        // Swallow storage quota failures to keep the UI responsive.
-      }
-      return
+type PersistedSessionRecord = ReturnType<typeof serializeSessions>[number]
+
+let cachedSettings: AgentSettings = cloneValue(defaultSettings)
+let cachedSessions: Session[] = []
+let cachedProjectCapabilityOverrides: ProjectCapabilityOverrides = {}
+let persistedSessionSnapshots = new Map<string, PersistedSessionRecord>()
+let sessionPersistenceQueue = Promise.resolve()
+
+function parsePersistedJson(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null
+  }
+  return JSON.stringify(value)
+}
+
+function hasRunningStatus(status?: string) {
+  return status === 'pending' || status === 'streaming'
+}
+
+function sessionHasPendingPersistence(session: PersistedSessionRecord) {
+  return session.messages.some(message => {
+    const variants =
+      Array.isArray(message.versions) && message.versions.length > 0
+        ? message.versions
+        : [
+            {
+              content: message.content || '',
+              parts: message.parts || [],
+              status: message.status || 'completed',
+              createdAt: message.createdAt || session.updatedAt || Date.now(),
+              attachments: message.attachments || [],
+              reasoning: message.reasoning || [],
+              usage: message.usage,
+              capabilitySnapshot: message.capabilitySnapshot,
+              activity: message.activity,
+              events: message.events || [],
+              steps: message.steps || [],
+              error: message.error,
+              errorInfo: message.errorInfo,
+              appendedInputs: message.appendedInputs || [],
+              modelInfo: message.modelInfo,
+            },
+          ]
+    const activeIndex =
+      typeof message.activeVersionIndex === 'number'
+        ? Math.max(0, Math.min(message.activeVersionIndex, variants.length - 1))
+        : variants.length - 1
+    const activeVariant = variants[activeIndex]
+    const activityStatus = activeVariant?.activity?.status
+    return (
+      hasRunningStatus(activeVariant?.status) ||
+      activityStatus === 'queued' ||
+      activityStatus === 'running' ||
+      activityStatus === 'awaiting_approval'
+    )
+  })
+}
+
+function persistedMessageVersions(message: PersistedSessionRecord['messages'][number]) {
+  if (Array.isArray(message.versions) && message.versions.length > 0) {
+    return message.versions
+  }
+
+  return [
+    {
+      content: message.content || '',
+      parts: message.parts || [],
+      status: message.status || 'completed',
+      createdAt: message.createdAt || Date.now(),
+      attachments: message.attachments || [],
+      reasoning: message.reasoning || [],
+      usage: message.usage,
+      capabilitySnapshot: message.capabilitySnapshot,
+      activity: message.activity,
+      events: message.events || [],
+      steps: message.steps || [],
+      error: message.error,
+      errorInfo: message.errorInfo,
+      appendedInputs: message.appendedInputs || [],
+      modelInfo: message.modelInfo,
+    },
+  ]
+}
+
+function messageShellSignature(
+  message: PersistedSessionRecord['messages'][number],
+  sortIndex: number,
+) {
+  return JSON.stringify({
+    id: message.id,
+    role: message.role,
+    linkedMessageId: message.linkedMessageId || null,
+    sortIndex,
+    activeVersionIndex:
+      typeof message.activeVersionIndex === 'number' ? message.activeVersionIndex : 0,
+    createdAt: message.createdAt || 0,
+  })
+}
+
+async function syncPersistedSession(
+  session: PersistedSessionRecord,
+  previous?: PersistedSessionRecord,
+) {
+  await upsertPersistedSession(session as Session)
+
+  const previousMessages = new Map((previous?.messages || []).map(message => [message.id, message]))
+  const nextMessages = new Map(session.messages.map(message => [message.id, message]))
+
+  for (const previousMessageId of previousMessages.keys()) {
+    if (!nextMessages.has(previousMessageId)) {
+      await deletePersistedMessage(previousMessageId)
     }
-    throw error
+  }
+
+  for (const [sortIndex, message] of session.messages.entries()) {
+    const previousMessage = previousMessages.get(message.id)
+    if (!previousMessage || messageShellSignature(previousMessage, sortIndex) !== messageShellSignature(message, sortIndex)) {
+      await upsertPersistedMessage(session.id, message as Session['messages'][number], sortIndex)
+    }
+
+    const nextVersions = persistedMessageVersions(message)
+    const previousVersions = previousMessage ? persistedMessageVersions(previousMessage) : []
+    const maxVersionCount = Math.max(nextVersions.length, previousVersions.length)
+
+    for (let versionIndex = 0; versionIndex < maxVersionCount; versionIndex += 1) {
+      const nextVersion = nextVersions[versionIndex]
+      const previousVersion = previousVersions[versionIndex]
+
+      if (!nextVersion && previousVersion) {
+        await deletePersistedMessageVersion(message.id, versionIndex)
+        continue
+      }
+
+      if (
+        nextVersion &&
+        (!previousVersion || JSON.stringify(nextVersion) !== JSON.stringify(previousVersion))
+      ) {
+        await upsertPersistedMessageVersion(
+          message.id,
+          nextVersion as ChatMessageVariant,
+          versionIndex,
+        )
+      }
+    }
   }
 }
 
-async function writeSettingsToAuraHome(settings: AgentSettings) {
-  const serialized = JSON.stringify(
-    {
-      ...syncLegacyFields(settings),
-      mcpServers: [],
-    },
-    null,
-    2,
-  )
-  await writeAuraFile(
-    SETTINGS_FILE_PATH,
-    serialized,
-  )
+async function persistSessions(sessions: Session[]) {
+  const serializedSessions = serializeSessions(sessions)
+  const nextSessionIds = new Set(serializedSessions.map(session => session.id))
+
+  for (const sessionId of Array.from(persistedSessionSnapshots.keys())) {
+    if (!nextSessionIds.has(sessionId)) {
+      await deletePersistedSession(sessionId)
+      persistedSessionSnapshots.delete(sessionId)
+    }
+  }
+
+  for (const session of serializedSessions) {
+    if (sessionHasPendingPersistence(session)) {
+      continue
+    }
+
+    const previous = persistedSessionSnapshots.get(session.id)
+    await syncPersistedSession(session, previous)
+    persistedSessionSnapshots.set(session.id, cloneValue(session))
+  }
 }
 
-async function writeSessionsToAuraHome(sessions: Session[]) {
-  await writeAuraFile(
-    SESSIONS_FILE_PATH,
-    JSON.stringify(serializeSessions(sessions), null, 2),
+async function readPersistedState() {
+  const aura = await ensureAuraHome()
+  const persisted = await loadPersistedAppState()
+  let settings = parseSettings(parsePersistedJson(persisted.settings))
+  if (!settings.cwd.trim()) {
+    settings = syncLegacyFields({
+      ...settings,
+      cwd: aura.workspaceDir,
+    })
+  }
+  const sessions = parseSessions(parsePersistedJson(persisted.sessions || []))
+  const overrides = parseProjectCapabilityOverrides(
+    parsePersistedJson(persisted.projectCapabilityOverrides),
   )
+
+  cachedSettings = cloneValue(settings)
+  cachedSessions = cloneValue(sessions)
+  cachedProjectCapabilityOverrides = cloneValue(overrides)
+  persistedSessionSnapshots = new Map(
+    serializeSessions(sessions).map(session => [session.id, cloneValue(session)]),
+  )
+
+  return {
+    aura,
+    settings: cloneValue(settings),
+    sessions: cloneValue(sessions),
+    overrides: cloneValue(overrides),
+  }
 }
 
-async function writeMcpServersToAuraHome(settings: AgentSettings) {
-  await writeAuraFile(
-    MCP_FILE_PATH,
-    JSON.stringify(settings.mcpServers || [], null, 2),
-  )
+export function loadSettings(): AgentSettings {
+  return cloneValue(cachedSettings)
 }
 
-async function writeProjectCapabilitiesToAuraHome(overrides: ProjectCapabilityOverrides) {
-  await writeAuraFile(
-    PROJECT_CAPABILITIES_FILE_PATH,
-    JSON.stringify(overrides, null, 2),
-  )
+export function loadSessions(): Session[] {
+  return cloneValue(cachedSessions)
 }
 
 export function saveSettings(settings: AgentSettings) {
   const normalized = syncLegacyFields(settings)
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalized))
-  void writeSettingsToAuraHome(normalized).catch(() => {
-    // Keep the UI responsive even if Aura file persistence fails.
-  })
-  void writeMcpServersToAuraHome(normalized).catch(() => {
-    // Keep the UI responsive even if Aura file persistence fails.
+  cachedSettings = cloneValue(normalized)
+  void savePersistedSettings(normalized).catch(() => {
+    // Keep the UI responsive even if SQLite persistence fails.
   })
 }
 
 export function saveSessions(sessions: Session[]) {
-  const serialized = serializeSessions(sessions)
-  writeSessionCache(serialized)
-  void writeSessionsToAuraHome(sessions).catch(() => {
-    // Keep the UI responsive even if Aura file persistence fails.
-  })
+  cachedSessions = cloneValue(sessions)
+  const nextSessions = cloneValue(sessions)
+  sessionPersistenceQueue = sessionPersistenceQueue
+    .then(() => persistSessions(nextSessions))
+    .catch(() => {
+      // Keep the UI responsive even if SQLite persistence fails.
+    })
 }
 
 export function loadProjectCapabilityOverrides(): ProjectCapabilityOverrides {
-  return parseProjectCapabilityOverrides(readLocalStorageValue(PROJECT_CAPABILITIES_KEY))
+  return cloneValue(cachedProjectCapabilityOverrides)
 }
 
 export function saveProjectCapabilityOverrides(overrides: ProjectCapabilityOverrides) {
-  localStorage.setItem(PROJECT_CAPABILITIES_KEY, JSON.stringify(overrides))
-  void writeProjectCapabilitiesToAuraHome(overrides).catch(() => {
-    // Keep the UI responsive even if Aura file persistence fails.
+  cachedProjectCapabilityOverrides = cloneValue(overrides)
+  void savePersistedProjectCapabilityOverrides(overrides).catch(() => {
+    // Keep the UI responsive even if SQLite persistence fails.
   })
 }
 
 export async function hydrateProjectCapabilityOverridesFromAuraHome(): Promise<ProjectCapabilityOverrides> {
-  const cachedRaw = readLocalStorageValue(PROJECT_CAPABILITIES_KEY)
-  const diskRaw = await readAuraFile(PROJECT_CAPABILITIES_FILE_PATH)
-  const overrides = parseProjectCapabilityOverrides(diskRaw || cachedRaw)
-  const serialized = JSON.stringify(overrides, null, 2)
-
-  localStorage.setItem(PROJECT_CAPABILITIES_KEY, JSON.stringify(overrides))
-  if (diskRaw !== serialized) {
-    await writeProjectCapabilitiesToAuraHome(overrides)
-  }
-
+  const { overrides } = await readPersistedState()
   return overrides
 }
 
@@ -1193,58 +1312,7 @@ export async function hydrateStorageFromAuraHome(): Promise<{
   settings: AgentSettings
   sessions: Session[]
 }> {
-  const aura = await ensureAuraHome()
-  const cachedSettingsRaw = readCachedValue(SETTINGS_KEY, LEGACY_SETTINGS_KEY)
-  const cachedSessionsRaw = readCachedValue(SESSIONS_KEY, LEGACY_SESSIONS_KEY)
-  const diskSettingsRaw = await readAuraFile(SETTINGS_FILE_PATH)
-  const diskSessionsRaw = await readAuraFile(SESSIONS_FILE_PATH)
-  const diskMcpRaw = await readAuraFile(MCP_FILE_PATH)
-
-  let settings = parseSettings(diskSettingsRaw || cachedSettingsRaw)
-  if (diskMcpRaw) {
-    try {
-      const parsedMcp = JSON.parse(diskMcpRaw)
-      if (Array.isArray(parsedMcp)) {
-        settings = {
-          ...settings,
-          mcpServers: normalizeMcpServers(parsedMcp),
-        }
-      }
-    } catch {
-      // Ignore invalid MCP persistence and keep the last valid in-memory settings.
-    }
-  }
-  if (!settings.cwd.trim()) {
-    settings = syncLegacyFields({
-      ...settings,
-      cwd: aura.workspaceDir,
-    })
-  }
-
-  const sessions = parseSessions(diskSessionsRaw || cachedSessionsRaw)
-  const serializedSettings = JSON.stringify(
-    {
-      ...syncLegacyFields(settings),
-      mcpServers: [],
-    },
-    null,
-    2,
-  )
-  const serializedMcp = JSON.stringify(settings.mcpServers || [], null, 2)
-  const serializedSessions = JSON.stringify(serializeSessions(sessions), null, 2)
-
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
-  writeSessionCache(serializeSessions(sessions))
-
-  if (diskSettingsRaw !== serializedSettings) {
-    await writeSettingsToAuraHome(settings)
-  }
-  if (diskMcpRaw !== serializedMcp) {
-    await writeMcpServersToAuraHome(settings)
-  }
-  if (diskSessionsRaw !== serializedSessions) {
-    await writeSessionsToAuraHome(sessions)
-  }
+  const { aura, settings, sessions } = await readPersistedState()
 
   return {
     aura,

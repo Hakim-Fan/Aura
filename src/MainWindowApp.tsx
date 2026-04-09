@@ -521,7 +521,7 @@ function collectEnabledModelsByProfile(settings: AgentSettings) {
 function presentToolEventTitle(event: ToolEvent) {
   const rawName = event.name?.trim()
   if (!rawName) {
-    return event.source === 'plugin' ? '技能' : '工具'
+    return event.source === 'plugin' ? '插件' : '工具'
   }
   if (event.source === 'plugin') {
     const tail = rawName.split('__').filter(Boolean).at(-1) || rawName
@@ -538,9 +538,7 @@ function presentToolEventTitle(event: ToolEvent) {
 
 function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
   const kind =
-    event.source === 'plugin'
-      ? 'skill'
-      : event.source === 'subagent'
+    event.source === 'subagent'
         ? 'subagent'
         : event.name.toLowerCase().includes('shell')
           ? 'shell'
@@ -577,8 +575,8 @@ function buildMessageActivity(
     status,
     startedAt,
     finishedAt: status === 'completed' || status === 'failed' ? Date.now() : undefined,
-    toolCount: toolEvents.filter(event => event.source !== 'plugin').length,
-    skillCount: toolEvents.filter(event => event.source === 'plugin').length,
+    toolCount: toolEvents.length,
+    skillCount: 0,
     stepCount: countTaskNodes(taskTree),
     expanded,
   }
@@ -1117,6 +1115,8 @@ export function MainWindowApp() {
                     : currentVariant.content),
                 reasoning: snapshot.reasoning || currentVariant.reasoning,
                 usage: snapshot.usage || currentVariant.usage,
+                capabilitySnapshot:
+                  snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
                 status:
                   snapshot.status === 'failed'
                     ? ('failed' as const)
@@ -1181,6 +1181,8 @@ export function MainWindowApp() {
                               : snapshot.message || currentVariant.content,
                           reasoning: snapshot.reasoning || currentVariant.reasoning,
                           usage: snapshot.usage || currentVariant.usage,
+                          capabilitySnapshot:
+                            snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
                           status:
                             snapshot.status === 'completed'
                               ? ('completed' as const)

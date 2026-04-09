@@ -340,6 +340,7 @@ export type AgentResponse = {
   taskTree: TaskNode[]
   reasoning?: MessageReasoning[]
   usage?: MessageUsage
+  capabilitySnapshot?: CapabilityUsageSnapshot
 }
 
 export type AgentTaskSnapshot = {
@@ -350,6 +351,7 @@ export type AgentTaskSnapshot = {
   taskTree: TaskNode[]
   reasoning?: MessageReasoning[]
   usage?: MessageUsage
+  capabilitySnapshot?: CapabilityUsageSnapshot
   pendingApproval?: ApprovalRequest
   appendedInputs?: AppendedInput[]
   error?: string

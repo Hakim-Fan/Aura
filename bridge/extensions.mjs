@@ -81,27 +81,115 @@ async function resolveBundledPluginModulePath(appRoot, id) {
   return null
 }
 
-export async function loadSkillPrompt(appRoot, enabledSkills) {
-  const sections = []
+function prettifyIdentifier(value) {
+  return String(value || '')
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+function stripMarkdown(value) {
+  return String(value || '')
+    .replace(/^#{1,6}\s+/gmu, '')
+    .replace(/^\s*[-*+]\s+/gmu, '')
+    .replace(/`([^`]+)`/gu, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/gu, '$1')
+    .replace(/\*\*([^*]+)\*\*/gu, '$1')
+    .replace(/\*([^*]+)\*/gu, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function summarizeSkillContent(skillId, content) {
+  const lines = String(content || '')
+    .split(/\r?\n/u)
+    .map(line => line.trim())
+    .filter(Boolean)
+  const heading = lines.find(line => line.startsWith('#'))
+  const title = stripMarkdown(heading || '') || prettifyIdentifier(skillId)
+  const bullets = lines
+    .filter(line => /^[-*+]\s+/u.test(line))
+    .map(line => stripMarkdown(line))
+    .filter(Boolean)
+  const paragraph = lines
+    .filter(line => !line.startsWith('#') && !/^[-*+]\s+/u.test(line))
+    .map(line => stripMarkdown(line))
+    .find(Boolean)
+
+  const summary = [paragraph, ...bullets]
+    .filter(Boolean)
+    .join('；')
+    .slice(0, 420)
+
+  return {
+    title,
+    summary: summary || 'Use this skill when it is directly relevant to the task.',
+    keywords: [title, paragraph, ...bullets].filter(Boolean),
+  }
+}
+
+async function resolveSkillFilePath(appRoot, entry) {
+  const skillId = typeof entry === 'string' ? entry : entry?.id
+  const explicitPath = typeof entry === 'object' ? entry?.promptPath : ''
+  if (!skillId) {
+    return null
+  }
+
+  return (
+    explicitPath ||
+    (await resolveAuraAssetPath('skills', skillId, 'md')) ||
+    path.join(appRoot, 'skills', `${skillId}.md`)
+  )
+}
+
+export async function loadSkillCatalog(appRoot, enabledSkills) {
+  const entries = []
+
   for (const entry of enabledSkills) {
     const skillId = typeof entry === 'string' ? entry : entry?.id
-    const explicitPath = typeof entry === 'object' ? entry?.promptPath : ''
     if (!skillId) {
       continue
     }
-    const filePath =
-      explicitPath ||
-      (await resolveAuraAssetPath('skills', skillId, 'md')) ||
-      path.join(appRoot, 'skills', `${skillId}.md`)
+
+    const filePath = await resolveSkillFilePath(appRoot, entry)
     try {
       const content = await fs.readFile(filePath, 'utf8')
-      sections.push(content.trim())
+      const metadata = summarizeSkillContent(skillId, content)
+      entries.push({
+        id: skillId,
+        name: metadata.title,
+        filePath,
+        content: content.trim(),
+        summary: metadata.summary,
+        keywords: metadata.keywords,
+      })
     } catch {
-      sections.push(`# Missing Skill: ${skillId}\n\nThis skill file was not found.`)
+      entries.push({
+        id: skillId,
+        name: prettifyIdentifier(skillId),
+        filePath,
+        content: '',
+        summary: 'This skill file was not found.',
+        keywords: [skillId],
+      })
     }
   }
 
-  return sections.join('\n\n')
+  return entries
+}
+
+export function buildSkillPrompt(skillEntries) {
+  if (!Array.isArray(skillEntries) || skillEntries.length === 0) {
+    return ''
+  }
+
+  return skillEntries
+    .map(
+      skill =>
+        `- ${skill.name}: ${skill.summary}`,
+    )
+    .join('\n')
 }
 
 export async function loadPluginTools(appRoot, enabledPlugins, context) {
@@ -135,6 +223,9 @@ export async function loadPluginTools(appRoot, enabledPlugins, context) {
     for (const tool of plugin.tools) {
       tools.push({
         source: 'plugin',
+        capabilityId: plugin.id,
+        capabilityName: plugin.name,
+        capabilityDescription: plugin.description || '',
         name: `plugin__${plugin.id}__${tool.name}`,
         description: `[Plugin:${plugin.name}] ${tool.description}`,
         inputSchema: tool.inputSchema ?? {

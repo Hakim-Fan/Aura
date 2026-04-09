@@ -263,7 +263,7 @@ function prettifyIdentifier(identifier: string) {
 function presentToolEventTitle(event: Pick<ToolEvent, 'name' | 'source'>) {
   const rawName = event.name?.trim()
   if (!rawName) {
-    return event.source === 'plugin' ? '技能' : '工具'
+    return event.source === 'plugin' ? '插件' : '工具'
   }
   if (event.source === 'plugin') {
     const tail = rawName.split('__').filter(Boolean).at(-1) || rawName
@@ -968,9 +968,35 @@ function ModelPickerDialog({
 
 function CapabilitySnapshotCard({
   snapshot,
+  events = [],
 }: {
   snapshot: CapabilityUsageSnapshot
+  events?: MessageEvent[]
 }) {
+  const usedTools = Array.from(
+    new Set(
+      events
+        .filter(event => event.kind !== 'approval')
+        .filter(event => event.source === 'builtin' || event.source === 'subagent')
+        .map(event => event.title),
+    ),
+  )
+  const usedPlugins = Array.from(
+    new Set(
+      events
+        .filter(event => event.kind !== 'approval')
+        .filter(event => event.source === 'plugin')
+        .map(event => event.title),
+    ),
+  )
+  const usedMcp = Array.from(
+    new Set(
+      events
+        .filter(event => event.kind !== 'approval')
+        .filter(event => event.source === 'mcp')
+        .map(event => event.title),
+    ),
+  )
   const sections = [
     { key: 'skills', label: 'Skills', items: snapshot.skills },
     { key: 'plugins', label: 'Plugins', items: snapshot.plugins },
@@ -989,6 +1015,9 @@ function CapabilitySnapshotCard({
               snapshot.skills.length > 0 ? `Skills ${snapshot.skills.length}` : null,
               snapshot.plugins.length > 0 ? `Plugins ${snapshot.plugins.length}` : null,
               snapshot.mcpServers.length > 0 ? `MCP ${snapshot.mcpServers.length}` : null,
+              usedTools.length + usedPlugins.length + usedMcp.length > 0
+                ? `调用 ${usedTools.length + usedPlugins.length + usedMcp.length}`
+                : null,
             ]
               .filter(Boolean)
               .join(' · ') || '本轮未启用额外能力'}
@@ -1000,7 +1029,7 @@ function CapabilitySnapshotCard({
         {sections.map(section => (
           <div key={section.key}>
             <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--text-secondary)] opacity-55">
-              {section.label}
+              已暴露 {section.label}
             </div>
             {section.items.length > 0 ? (
               <div className="flex flex-wrap gap-2">
@@ -1018,6 +1047,43 @@ function CapabilitySnapshotCard({
             )}
           </div>
         ))}
+        <div>
+          <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--text-secondary)] opacity-55">
+            实际调用
+          </div>
+          {usedTools.length + usedPlugins.length + usedMcp.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {usedTools.map(name => (
+                <span
+                  key={`used-tool-${name}`}
+                  className="rounded-full border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1 text-11px text-[var(--text-primary)]"
+                >
+                  Tool · {name}
+                </span>
+              ))}
+              {usedPlugins.map(name => (
+                <span
+                  key={`used-plugin-${name}`}
+                  className="rounded-full border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1 text-11px text-[var(--text-primary)]"
+                >
+                  Plugin · {name}
+                </span>
+              ))}
+              {usedMcp.map(name => (
+                <span
+                  key={`used-mcp-${name}`}
+                  className="rounded-full border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1 text-11px text-[var(--text-primary)]"
+                >
+                  MCP · {name}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="text-12px text-[var(--text-secondary)] opacity-60">
+              本轮没有实际调用额外工具。
+            </div>
+          )}
+        </div>
       </div>
     </details>
   )
@@ -1471,6 +1537,13 @@ function AssistantMessageCard({
             </div>
           )}
 
+          {message.capabilitySnapshot ? (
+            <CapabilitySnapshotCard
+              snapshot={message.capabilitySnapshot}
+              events={message.events || []}
+            />
+          ) : null}
+
           <div className="flex items-center justify-end pt-1">
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
@@ -1810,21 +1883,63 @@ export function ChatView({
           ((message.usage?.inputTokens || 0) > 0 || (message.usage?.outputTokens || 0) > 0),
       )?.usage
   }, [messages])
+  const latestAssistantUsageEntry = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (
+        message.role === 'assistant' &&
+        ((message.usage?.inputTokens || 0) > 0 || (message.usage?.outputTokens || 0) > 0)
+      ) {
+        return {
+          index,
+          message,
+        }
+      }
+    }
+    return null
+  }, [messages])
 
-  const usageLabel = latestUsage
-    ? [
-      latestUsage.inputTokens ? `输入 ${formatTokenCount(latestUsage.inputTokens)}` : null,
-      latestUsage.outputTokens ? `输出 ${formatTokenCount(latestUsage.outputTokens)}` : null,
-      latestUsage.contextWindow && latestUsage.inputTokens
-        ? `${Math.min(
-          100,
-          Math.round((latestUsage.inputTokens / latestUsage.contextWindow) * 100),
-        )}%`
-        : null,
-    ]
-      .filter(Boolean)
-      .join(' · ')
-    : `${formatTokenCount(currentContextTokenCount)} tok 估算`
+  const rollingContextEstimate = useMemo(() => {
+    const attachmentTokens = attachments.reduce(
+      (total, attachment) => total + estimateTokenCount(attachment.name),
+      0,
+    )
+
+    if (!latestAssistantUsageEntry?.message.usage?.inputTokens) {
+      return currentContextTokenCount
+    }
+
+    const tailTokens = messages
+      .slice(latestAssistantUsageEntry.index)
+      .reduce((total, message) => total + estimateTokenCount(message.content), 0)
+
+    return (
+      latestAssistantUsageEntry.message.usage.inputTokens +
+      tailTokens +
+      estimateTokenCount(draft) +
+      attachmentTokens
+    )
+  }, [attachments, currentContextTokenCount, draft, latestAssistantUsageEntry, messages])
+
+  const usageLabel = [
+    latestUsage
+      ? [
+        latestUsage.inputTokens ? `上轮输入 ${formatTokenCount(latestUsage.inputTokens)}` : null,
+        latestUsage.outputTokens ? `输出 ${formatTokenCount(latestUsage.outputTokens)}` : null,
+        latestUsage.contextWindow && latestUsage.inputTokens
+          ? `窗口 ${Math.min(
+            100,
+            Math.round((latestUsage.inputTokens / latestUsage.contextWindow) * 100),
+          )}%`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+      : null,
+    `本轮估算 ${formatTokenCount(rollingContextEstimate)} tok`,
+  ]
+    .filter(Boolean)
+    .join(' · ')
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isMetaEnter) {

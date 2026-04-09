@@ -51,6 +51,9 @@ export async function connectMcpTools(servers) {
     for (const tool of response.tools || []) {
       tools.push({
         source: 'mcp',
+        capabilityId: server.id,
+        capabilityName: server.name,
+        capabilityDescription: server.description || '',
         name: `mcp__${server.name}__${tool.name}`,
         description: `[MCP:${server.name}] ${tool.description || tool.name}`,
         inputSchema: tool.inputSchema || {

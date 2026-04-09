@@ -85,6 +85,7 @@ function emit(event) {
 }
 
 let pendingApprovalResolve = null
+const pendingAppActionRequests = new Map()
 let started = false
 const appendedInputs = []
 let currentStepAbortController = null
@@ -118,6 +119,25 @@ rl.on('line', line => {
       pendingApprovalResolve(message.decision === 'approve' ? 'approve' : 'deny')
       pendingApprovalResolve = null
     }
+    return
+  }
+
+  if (message.type === 'app_action_result') {
+    const requestId =
+      typeof message.requestId === 'string' ? message.requestId : ''
+    if (!requestId) {
+      return
+    }
+    const pending = pendingAppActionRequests.get(requestId)
+    if (!pending) {
+      return
+    }
+    pendingAppActionRequests.delete(requestId)
+    if (message.ok === false) {
+      pending.reject(new Error(typeof message.error === 'string' ? message.error : 'App action failed'))
+      return
+    }
+    pending.resolve(message.result)
     return
   }
 
@@ -187,6 +207,18 @@ rl.on('line', line => {
       emit({ type: 'approval_required', request })
       return new Promise(resolve => {
         pendingApprovalResolve = resolve
+      })
+    },
+    appControl(action, payload = {}) {
+      const requestId = `app-action-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      emit({
+        type: 'app_action_request',
+        requestId,
+        action,
+        payload,
+      })
+      return new Promise((resolve, reject) => {
+        pendingAppActionRequests.set(requestId, { resolve, reject })
       })
     },
     consumeAppendedInputs() {
