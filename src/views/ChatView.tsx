@@ -1574,7 +1574,7 @@ export function ChatView({
         className="relative h-12 border-b border-[var(--border-subtle)] px-4 flex items-center justify-center shrink-0"
         data-tauri-drag-region
       >
-        <div className="absolute inset-x-0 top-0 h-7" data-tauri-drag-region />
+        <div className="absolute inset-0" data-tauri-drag-region />
         <div className="flex items-center gap-2 text-12px text-[var(--text-secondary)] opacity-60">
           <span>{messages.length} 条消息</span>
           <span>·</span>
