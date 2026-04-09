@@ -39,8 +39,7 @@
     ],
     "resources": [
       "../bridge",
-      "../skills",
-      "../plugins"
+      "../skills"
     ],
     "macOS": {
       "entitlements": "Entitlements-macOS.plist"
