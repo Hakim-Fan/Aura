@@ -13,6 +13,7 @@ import type {
   Session,
   WorkspaceCapabilityOverrides,
 } from '../types'
+import { builtinSkills } from '../catalog'
 import { ensureAuraHome, type AuraHomeState } from './aura'
 import {
   deletePersistedMessage,
@@ -95,11 +96,13 @@ export const defaultSettings: AgentSettings = {
   autoApproveFileWrite: false,
   autoApproveComputerUse: false,
   autoApproveChromeAutomation: false,
-  enabledSkillIds: ['repair-planner', 'desktop-operator'],
+  enabledSkillIds: [],
   enabledPluginIds: [],
   mcpServers: [],
   sendShortcut: 'meta-enter',
 }
+
+const builtinSkillIds = new Set(builtinSkills.map(skill => skill.id))
 
 function createEmptyWorkspaceCapabilityOverrides(): WorkspaceCapabilityOverrides {
   return {
@@ -689,6 +692,13 @@ function resolvePreferredModelId(profile: ProviderProfile | null, preferredModel
     return preferredModelId
   }
 
+  if (
+    profile.defaultModel &&
+    profile.models.some(model => model.enabled && model.id === profile.defaultModel)
+  ) {
+    return profile.defaultModel
+  }
+
   return firstEnabledModelId(profile)
 }
 
@@ -1101,6 +1111,27 @@ async function readPersistedState() {
       cwd: aura.workspaceDir,
     })
   }
+  const supportedSkillIds = new Set(
+    aura.skills.filter(skill => skill.supported !== false).map(skill => skill.id),
+  )
+  const supportedPluginIds = new Set(
+    aura.plugins.filter(plugin => plugin.supported !== false).map(plugin => plugin.id),
+  )
+  const normalizedSettings = syncLegacyFields({
+    ...settings,
+    enabledSkillIds: settings.enabledSkillIds.filter(
+      id => supportedSkillIds.has(id) && !builtinSkillIds.has(id),
+    ),
+    enabledPluginIds: settings.enabledPluginIds.filter(id => supportedPluginIds.has(id)),
+  })
+  if (JSON.stringify(normalizedSettings) !== JSON.stringify(settings)) {
+    settings = normalizedSettings
+    void savePersistedSettings(settings).catch(() => {
+      // Keep startup resilient even if settings cleanup cannot be persisted.
+    })
+  } else {
+    settings = normalizedSettings
+  }
   const sessions = parseSessions(parsePersistedJson(persisted.sessions || []))
   const overrides = parseProjectCapabilityOverrides(
     parsePersistedJson(persisted.projectCapabilityOverrides),
@@ -1228,16 +1259,19 @@ export function resolveCapabilitiesForWorkspace(args: {
 
   const resolvedSkills = Array.from(
     new Set([
+      ...builtinSkills.map(skill => skill.id),
       ...aura.skills.map(skill => skill.id),
       ...(settings.enabledSkillIds || []),
       ...Object.keys(projectOverrides.skills),
     ]),
   )
     .filter(skillId =>
-      resolveCapabilityEnabled(
-        settings.enabledSkillIds.includes(skillId),
-        projectOverrides.skills[skillId],
-      ),
+      (builtinSkillIds.has(skillId) ||
+        resolveCapabilityEnabled(
+          settings.enabledSkillIds.includes(skillId),
+          projectOverrides.skills[skillId],
+        )) &&
+      skillMap.get(skillId)?.supported !== false,
     )
     .map(skillId => {
       const skill = skillMap.get(skillId)

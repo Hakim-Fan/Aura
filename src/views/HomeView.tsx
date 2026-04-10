@@ -2,7 +2,7 @@
  * @Author: Haki fanhuaze_1114@126.com
  * @Date: 2026-04-05 00:15:25
  * @LastEditors: Haki fanhuaze_1114@126.com
- * @LastEditTime: 2026-04-06 12:11:42
+ * @LastEditTime: 2026-04-10 22:49:19
  * @FilePath: /desk-agent/src/views/HomeView.tsx
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -26,7 +26,7 @@ export function HomeView({
   return (
     <section className="hero-shell custom-scrollbar">
       {/* Top drag region spacer */}
-      <div className="absolute top-0 h-10 w-full shrink-0 bg-red" data-tauri-drag-region />
+      <div className="absolute top-0 h-10 w-full shrink-0" data-tauri-drag-region />
 
       <div className="hero-card modern">
         <div className="hero-badge">Aura Beta</div>

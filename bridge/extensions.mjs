@@ -101,13 +101,117 @@ function stripMarkdown(value) {
     .trim()
 }
 
+function splitFrontmatter(content) {
+  const normalized = String(content || '').replace(/^\uFEFF/u, '')
+  if (!normalized.startsWith('---\n')) {
+    return {
+      frontmatter: '',
+      body: normalized,
+    }
+  }
+
+  const remainder = normalized.slice(4)
+  const endIndex = remainder.indexOf('\n---\n')
+  if (endIndex < 0) {
+    return {
+      frontmatter: '',
+      body: normalized,
+    }
+  }
+
+  return {
+    frontmatter: remainder.slice(0, endIndex),
+    body: remainder.slice(endIndex + 5),
+  }
+}
+
+function extractMetadataField(frontmatter, fieldName) {
+  const lines = String(frontmatter || '').split(/\r?\n/u)
+  const needle = `${fieldName}:`
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed.toLowerCase().startsWith(needle.toLowerCase())) {
+      continue
+    }
+    const value = trimmed
+      .slice(needle.length)
+      .trim()
+      .replace(/^['"]|['"]$/gu, '')
+      .trim()
+    if (value) {
+      return value
+    }
+  }
+
+  return ''
+}
+
+function extractListMetadataField(frontmatter, fieldName) {
+  const lines = String(frontmatter || '').split(/\r?\n/u)
+  const needle = `${fieldName}:`
+  const items = []
+  let collecting = false
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!collecting) {
+      if (!trimmed.toLowerCase().startsWith(needle.toLowerCase())) {
+        continue
+      }
+
+      const inlineValue = trimmed.slice(needle.length).trim()
+      if (inlineValue.startsWith('[') && inlineValue.endsWith(']')) {
+        return inlineValue
+          .slice(1, -1)
+          .split(',')
+          .map(entry => entry.trim().replace(/^['"]|['"]$/gu, ''))
+          .filter(Boolean)
+      }
+
+      collecting = true
+      continue
+    }
+
+    if (!trimmed) {
+      if (items.length > 0) {
+        break
+      }
+      continue
+    }
+
+    if (!trimmed.startsWith('- ')) {
+      break
+    }
+
+    const value = trimmed.slice(2).trim().replace(/^['"]|['"]$/gu, '')
+    if (value) {
+      items.push(value)
+    }
+  }
+
+  return items
+}
+
+function normalizeSkillBody(content) {
+  return String(content || '')
+    .split(/\r?\n/u)
+    .map(line => line.replace(/\s+$/u, ''))
+    .join('\n')
+    .trim()
+}
+
 function summarizeSkillContent(skillId, content) {
-  const lines = String(content || '')
+  const { frontmatter, body } = splitFrontmatter(content)
+  const lines = normalizeSkillBody(body)
     .split(/\r?\n/u)
     .map(line => line.trim())
     .filter(Boolean)
   const heading = lines.find(line => line.startsWith('#'))
-  const title = stripMarkdown(heading || '') || prettifyIdentifier(skillId)
+  const title =
+    extractMetadataField(frontmatter, 'name') ||
+    stripMarkdown(heading || '') ||
+    prettifyIdentifier(skillId)
   const bullets = lines
     .filter(line => /^[-*+]\s+/u.test(line))
     .map(line => stripMarkdown(line))
@@ -124,8 +228,11 @@ function summarizeSkillContent(skillId, content) {
 
   return {
     title,
+    description: extractMetadataField(frontmatter, 'description') || paragraph || '',
     summary: summary || 'Use this skill when it is directly relevant to the task.',
     keywords: [title, paragraph, ...bullets].filter(Boolean),
+    allowedTools: extractListMetadataField(frontmatter, 'allowed-tools'),
+    body: normalizeSkillBody(body),
   }
 }
 
@@ -160,9 +267,12 @@ export async function loadSkillCatalog(appRoot, enabledSkills) {
         id: skillId,
         name: metadata.title,
         filePath,
-        content: content.trim(),
+        content: normalizeSkillBody(content),
+        body: metadata.body,
+        description: metadata.description,
         summary: metadata.summary,
         keywords: metadata.keywords,
+        allowedTools: metadata.allowedTools,
       })
     } catch {
       entries.push({
@@ -170,8 +280,11 @@ export async function loadSkillCatalog(appRoot, enabledSkills) {
         name: prettifyIdentifier(skillId),
         filePath,
         content: '',
+        body: '',
+        description: '',
         summary: 'This skill file was not found.',
         keywords: [skillId],
+        allowedTools: [],
       })
     }
   }
@@ -185,10 +298,14 @@ export function buildSkillPrompt(skillEntries) {
   }
 
   return skillEntries
-    .map(
-      skill =>
-        `- ${skill.name}: ${skill.summary}`,
-    )
+    .map(skill => {
+      const details = [skill.description || skill.summary]
+      if (Array.isArray(skill.allowedTools) && skill.allowedTools.length > 0) {
+        details.push(`preferred tools: ${skill.allowedTools.join(', ')}`)
+      }
+      details.push('read the full skill file only if you decide to use it.')
+      return `- ${skill.name}: ${details.filter(Boolean).join('; ')}`
+    })
     .join('\n')
 }
 

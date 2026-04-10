@@ -13,6 +13,11 @@ import {
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 
 const execFileAsync = promisify(execFile)
+const ALWAYS_ON_SKILL_IDS = new Set([
+  'desktop-operator',
+  'repair-planner',
+  'repo-reviewer',
+])
 
 async function walkDirectory(dirPath, maxDepth, currentDepth = 0) {
   const entries = await fs.readdir(dirPath, { withFileTypes: true })
@@ -712,6 +717,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'list_files',
+      aliases: ['listfiles', 'ls', 'files'],
       description: 'List files and directories inside the current workspace.',
       inputSchema: {
         type: 'object',
@@ -736,6 +742,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'glob_files',
+      aliases: ['glob', 'findfiles'],
       description:
         'Find workspace files by glob pattern. Useful for locating likely files before reading or editing.',
       inputSchema: {
@@ -761,6 +768,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'read_file',
+      aliases: ['read', 'readfile', 'cat'],
       description: 'Read a text file from inside the workspace.',
       inputSchema: {
         type: 'object',
@@ -785,6 +793,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'write_file',
+      aliases: ['write', 'writefile'],
       approvalCategory: 'file_write',
       description:
         'Write a text file inside the workspace. Overwrites the file if it already exists.',
@@ -813,6 +822,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'edit_file',
+      aliases: ['edit', 'replace'],
       approvalCategory: 'file_write',
       description:
         'Edit a file by replacing an exact text block. Prefer this over rewriting the whole file.',
@@ -858,6 +868,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'multi_edit_file',
+      aliases: ['multiedit', 'editmany'],
       approvalCategory: 'file_write',
       description:
         'Apply multiple exact text replacements to one file in sequence.',
@@ -912,6 +923,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'search_code',
+      aliases: ['search', 'grep', 'ripgrep'],
       description:
         'Search the workspace using ripgrep. Good for finding symbols, text, or patterns.',
       inputSchema: {
@@ -937,6 +949,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'todo_write',
+      aliases: ['todo', 'plan', 'tasklist'],
       description:
         'Track the current plan as a structured todo list. Use it for multi-step or stateful work.',
       inputSchema: {
@@ -970,6 +983,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'run_shell',
+      aliases: ['bash', 'shell', 'terminal', 'command'],
       approvalCategory: 'shell',
       description:
         'Run a shell command inside the workspace. Use carefully and keep commands focused.',
@@ -1001,6 +1015,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'aura_list_capabilities',
+      aliases: ['listcapabilities', 'capabilities'],
       description:
         'Inspect installed and enabled Aura skills, plugins, and MCP servers.',
       inputSchema: {
@@ -1018,8 +1033,12 @@ export function createBuiltinTools(context) {
           skills: (aura.skills || []).map(skill => ({
             id: skill.id,
             name: skill.name,
-            enabled: normalizeStringArray(settings.enabledSkillIds).includes(skill.id),
+            enabled:
+              ALWAYS_ON_SKILL_IDS.has(skill.id) ||
+              normalizeStringArray(settings.enabledSkillIds).includes(skill.id),
             readonly: skill.readonly === true,
+            supported: skill.supported !== false,
+            supportMessage: skill.supportMessage || '',
           })),
           plugins: (aura.plugins || []).map(plugin => ({
             id: plugin.id,
@@ -1039,7 +1058,45 @@ export function createBuiltinTools(context) {
     },
     {
       source: 'builtin',
+      name: 'aura_read_skill',
+      aliases: ['readskill', 'skillfile', 'openskill'],
+      description:
+        'Read the full content of an installed Aura skill by id. Use this only when a selected skill is relevant and you need its detailed instructions.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          skillId: {
+            type: 'string',
+            description: 'Installed skill id to inspect.',
+          },
+        },
+        required: ['skillId'],
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const aura = await getAuraState(context)
+        const skill = (aura.skills || []).find(entry => entry.id === args.skillId)
+        if (!skill) {
+          throw new Error(`Skill not found: ${args.skillId}`)
+        }
+        const skillPath = skill.entryPath || skill.path
+        if (!skillPath) {
+          throw new Error(`Skill file path is unavailable for: ${args.skillId}`)
+        }
+        const content = await fs.readFile(skillPath, 'utf8')
+        return stringifyOutput({
+          skillId: skill.id,
+          name: skill.name,
+          description: skill.description,
+          path: skillPath,
+          content,
+        })
+      },
+    },
+    {
+      source: 'builtin',
       name: 'aura_enable_skill',
+      aliases: ['enableskill', 'disableskill'],
       approvalCategory: 'file_write',
       description:
         'Enable or disable an installed Aura skill in the desktop app settings.',
@@ -1078,6 +1135,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'aura_enable_plugin',
+      aliases: ['enableplugin', 'disableplugin'],
       approvalCategory: 'file_write',
       description:
         'Enable or disable an installed Aura plugin in the desktop app settings.',
@@ -1116,6 +1174,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'aura_import_skill',
+      aliases: ['importskill', 'installskill'],
       approvalCategory: 'file_write',
       description:
         'Copy a skill file or skill directory into Aura and optionally enable it immediately.',
@@ -1164,6 +1223,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'aura_import_plugin',
+      aliases: ['importplugin', 'installplugin'],
       approvalCategory: 'file_write',
       description:
         'Copy a plugin file or plugin directory into Aura and optionally enable it immediately.',
@@ -1212,6 +1272,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'aura_upsert_mcp_server',
+      aliases: ['savemcp', 'upsertmcp'],
       approvalCategory: 'file_write',
       description:
         'Create or update an MCP server entry in Aura settings and optionally enable it.',
@@ -1269,6 +1330,7 @@ export function createBuiltinTools(context) {
     {
       source: 'builtin',
       name: 'aura_remove_mcp_server',
+      aliases: ['removemcp', 'deletemcp'],
       approvalCategory: 'file_write',
       description:
         'Remove an MCP server entry from Aura settings.',

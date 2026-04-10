@@ -966,128 +966,7 @@ function ModelPickerDialog({
   )
 }
 
-function CapabilitySnapshotCard({
-  snapshot,
-  events = [],
-}: {
-  snapshot: CapabilityUsageSnapshot
-  events?: MessageEvent[]
-}) {
-  const usedTools = Array.from(
-    new Set(
-      events
-        .filter(event => event.kind !== 'approval')
-        .filter(event => event.source === 'builtin' || event.source === 'subagent')
-        .map(event => event.title),
-    ),
-  )
-  const usedPlugins = Array.from(
-    new Set(
-      events
-        .filter(event => event.kind !== 'approval')
-        .filter(event => event.source === 'plugin')
-        .map(event => event.title),
-    ),
-  )
-  const usedMcp = Array.from(
-    new Set(
-      events
-        .filter(event => event.kind !== 'approval')
-        .filter(event => event.source === 'mcp')
-        .map(event => event.title),
-    ),
-  )
-  const sections = [
-    { key: 'skills', label: 'Skills', items: snapshot.skills },
-    { key: 'plugins', label: 'Plugins', items: snapshot.plugins },
-    { key: 'mcp', label: 'MCP', items: snapshot.mcpServers },
-  ]
 
-  return (
-    <details className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2">
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="rounded-full bg-[rgba(79,123,116,0.10)] px-2 py-0.5 text-9px font-700 uppercase tracking-wider text-[var(--accent-soft-strong)]">
-            能力
-          </span>
-          <span className="text-12px text-[var(--text-secondary)]">
-            {[
-              snapshot.skills.length > 0 ? `Skills ${snapshot.skills.length}` : null,
-              snapshot.plugins.length > 0 ? `Plugins ${snapshot.plugins.length}` : null,
-              snapshot.mcpServers.length > 0 ? `MCP ${snapshot.mcpServers.length}` : null,
-              usedTools.length + usedPlugins.length + usedMcp.length > 0
-                ? `调用 ${usedTools.length + usedPlugins.length + usedMcp.length}`
-                : null,
-            ]
-              .filter(Boolean)
-              .join(' · ') || '本轮未启用额外能力'}
-          </span>
-        </div>
-        <ChevronDown size={14} className="text-[var(--text-secondary)] opacity-60" />
-      </summary>
-      <div className="mt-3 flex flex-col gap-3">
-        {sections.map(section => (
-          <div key={section.key}>
-            <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--text-secondary)] opacity-55">
-              已暴露 {section.label}
-            </div>
-            {section.items.length > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {section.items.map(item => (
-                  <span
-                    key={`${section.key}-${item.id}`}
-                    className="rounded-full border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1 text-11px text-[var(--text-primary)]"
-                  >
-                    {item.name}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <div className="text-12px text-[var(--text-secondary)] opacity-60">未启用</div>
-            )}
-          </div>
-        ))}
-        <div>
-          <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--text-secondary)] opacity-55">
-            实际调用
-          </div>
-          {usedTools.length + usedPlugins.length + usedMcp.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {usedTools.map(name => (
-                <span
-                  key={`used-tool-${name}`}
-                  className="rounded-full border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1 text-11px text-[var(--text-primary)]"
-                >
-                  Tool · {name}
-                </span>
-              ))}
-              {usedPlugins.map(name => (
-                <span
-                  key={`used-plugin-${name}`}
-                  className="rounded-full border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1 text-11px text-[var(--text-primary)]"
-                >
-                  Plugin · {name}
-                </span>
-              ))}
-              {usedMcp.map(name => (
-                <span
-                  key={`used-mcp-${name}`}
-                  className="rounded-full border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1 text-11px text-[var(--text-primary)]"
-                >
-                  MCP · {name}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <div className="text-12px text-[var(--text-secondary)] opacity-60">
-              本轮没有实际调用额外工具。
-            </div>
-          )}
-        </div>
-      </div>
-    </details>
-  )
-}
 
 function CapabilityPanel({
   items,
@@ -1111,6 +990,7 @@ function CapabilityPanel({
     { key: 'plugin', label: 'Plugins' },
     { key: 'mcp', label: 'MCP' },
   ]
+  const manageableEnabledCount = items.filter(item => item.effectiveEnabled).length
 
   function resolveNextOverrideMode(item: CapabilityPanelItem) {
     const nextEffectiveEnabled = !item.effectiveEnabled
@@ -1160,7 +1040,7 @@ function CapabilityPanel({
           </div>
           {snapshot ? (
             <div className="shrink-0 rounded-full bg-[rgba(79,123,116,0.08)] px-3 py-1 text-11px font-600 text-[var(--accent-soft-strong)]">
-              生效 {snapshot.skills.length + snapshot.plugins.length + snapshot.mcpServers.length}
+              生效 {manageableEnabledCount}
             </div>
           ) : null}
         </div>
@@ -1432,6 +1312,39 @@ function AssistantMessageCard({
   const messageModelProfileId = message.modelInfo?.providerProfileId || activeModelProfileId
   const messageModelId = message.modelInfo?.modelId || activeModelId
 
+  const usedTools = Array.from(
+    new Set(
+      (message.events || [])
+        .filter(event => event.kind !== 'approval')
+        .filter(event => event.source === 'builtin' || event.source === 'subagent')
+        .map(event => event.title),
+    ),
+  )
+  const usedPlugins = Array.from(
+    new Set(
+      (message.events || [])
+        .filter(event => event.kind !== 'approval')
+        .filter(event => event.source === 'plugin')
+        .map(event => event.title),
+    ),
+  )
+  const usedMcp = Array.from(
+    new Set(
+      (message.events || [])
+        .filter(event => event.kind !== 'approval')
+        .filter(event => event.source === 'mcp')
+        .map(event => event.title),
+    ),
+  )
+  const invokedCount = usedTools.length + usedPlugins.length + usedMcp.length;
+  const hasUsedCapabilities = invokedCount > 0;
+  
+  const invokedToolsGroups = [
+    { label: 'Built-in Tools', items: usedTools, type: 'Tool' },
+    { label: 'Plugins', items: usedPlugins, type: 'Plug' },
+    { label: 'MCP Servers', items: usedMcp, type: 'MCP' },
+  ].filter(g => g.items.length > 0);
+
   return (
     <article className="group relative flex flex-col gap-3">
       <div className="flex items-start gap-4">
@@ -1440,14 +1353,14 @@ function AssistantMessageCard({
         </div>
 
         <div className="min-w-0 flex-1 flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-12px text-[var(--text-secondary)] opacity-60">
-            <span className="font-600 text-[var(--text-primary)] opacity-70">Aura</span>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-12px text-[var(--text-secondary)]">
+            <span className="font-600 text-[var(--text-primary)] opacity-40">Aura</span>
             {activitySummary ? (
               <div className="relative group/activity">
                 <button
-                  className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 hover:bg-[rgba(15,23,42,0.04)] transition-colors"
+                  className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 hover:bg-[rgba(15,23,42,0.04)] transition-opacity opacity-60 hover:opacity-100"
                   onClick={() => onToggleActivity(message.id)}
-                  title={activity?.expanded ? '折叠执行详情' : '展开执行详情'}
+                // title={activity?.expanded ? '折叠执行详情' : '展开执行详情'}
                 >
                   <Brain size={12} className="opacity-70" />
                   <span
@@ -1464,13 +1377,52 @@ function AssistantMessageCard({
                   {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </button>
                 {messageFailureSummary ? (
-                  <div className="pointer-events-none absolute left-0 top-[calc(100%+8px)] z-20 hidden w-80 rounded-xl border border-red-100 bg-white px-3 py-2 text-left text-12px leading-relaxed text-red-600 shadow-lg shadow-[rgba(15,23,42,0.12)] group-hover/activity:block">
+                  <div className="pointer-events-none absolute left-0 top-[calc(100%+8px)] z-20 w-80 rounded-xl border border-red-100 bg-white px-3 py-2 text-left text-12px leading-relaxed text-red-600 shadow-lg shadow-[rgba(15,23,42,0.12)] opacity-0 invisible translate-y-1 group-hover/activity:opacity-100 group-hover/activity:visible group-hover/activity:translate-y-0 transition-all duration-200">
                     <div className="font-600">{messageFailureSummary}</div>
                     {messageFailureAction ? (
                       <div className="mt-1 text-[11px] leading-relaxed text-red-500/85">
                         {messageFailureAction}
                       </div>
                     ) : null}
+                  </div>
+                ) : hasUsedCapabilities ? (
+                  <div className="absolute left-0 top-full pt-2 z-30 w-max min-w-[14rem] max-w-[20rem] opacity-0 invisible -translate-y-1.5 group-hover/activity:opacity-100 group-hover/activity:visible group-hover/activity:translate-y-0 transition-all duration-200 ease-out origin-top-left">
+                    <div className="relative rounded-[16px] border border-[rgba(15,23,42,0.08)] bg-white px-4 py-3.5 text-left shadow-[0_16px_40px_-8px_rgba(0,0,0,0.15)] ring-1 ring-black/[0.03]">
+                      <svg className="absolute left-5 -top-[5.5px] text-white drop-shadow-[0_-1px_1px_rgba(15,23,42,0.06)]" width="12" height="6" viewBox="0 0 12 6" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M6 0L12 6H0L6 0Z" />
+                      </svg>
+                      <div className="mb-2.5 flex items-center justify-between gap-1.5 border-b border-[rgba(15,23,42,0.06)] pb-2">
+                        <div className="text-[10px] font-800 uppercase tracking-[0.1em] text-[var(--accent-soft-strong)] opacity-90">
+                          执行明细
+                        </div>
+                        <span className="rounded-full bg-[rgba(15,23,42,0.04)] px-1.5 py-[1px] text-[9px] font-700 text-[var(--text-secondary)] opacity-70">
+                          {invokedCount} 项
+                        </span>
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        {invokedToolsGroups.map(group => (
+                          <details key={group.label} open className="group/details">
+                            <summary className="cursor-pointer list-none flex items-center justify-between mb-1.5 opacity-80 hover:opacity-100 transition-opacity">
+                              <span className="text-[10px] font-700 uppercase tracking-widest text-[var(--text-secondary)]">
+                                {group.label}
+                              </span>
+                              <ChevronDown size={12} className="text-[var(--text-secondary)] transition-transform group-open/details:rotate-180" />
+                            </summary>
+                            <div className="flex flex-wrap gap-1.5 mb-1 last:mb-0">
+                              {group.items.map(name => (
+                                <span
+                                  key={`${group.type}-${name}`}
+                                  className="inline-flex items-center gap-1.5 rounded-lg bg-[rgba(15,23,42,0.025)] border border-[rgba(15,23,42,0.05)] px-2.5 py-1 text-[11px] font-500 text-[var(--text-primary)]"
+                                >
+                                  <span className="text-[9px] font-600 text-[var(--text-secondary)] opacity-60 uppercase tracking-wider">{group.type}</span>
+                                  {name}
+                                </span>
+                              ))}
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -1537,12 +1489,7 @@ function AssistantMessageCard({
             </div>
           )}
 
-          {message.capabilitySnapshot ? (
-            <CapabilitySnapshotCard
-              snapshot={message.capabilitySnapshot}
-              events={message.events || []}
-            />
-          ) : null}
+
 
           <div className="flex items-center justify-end pt-1">
             <div className="flex items-center gap-2">
@@ -1864,6 +1811,17 @@ export function ChatView({
       )
     }))
     .filter(group => group.models.length > 0)
+
+  const enabledSkillSummary = useMemo(() => {
+    if (!capabilitySnapshot || capabilitySnapshot.skills.length === 0) {
+      return ''
+    }
+    return capabilitySnapshot.skills.map(skill => skill.name).join(' · ')
+  }, [capabilitySnapshot])
+  const manageableCapabilityCount = useMemo(
+    () => capabilityItems.filter(item => item.effectiveEnabled).length,
+    [capabilityItems],
+  )
 
   const currentContextTokenCount = useMemo(() => {
     const messageTokens = messages.reduce((total, message) => total + estimateTokenCount(message.content), 0)
@@ -2210,9 +2168,9 @@ export function ChatView({
                         <span className="text-12px font-600">
                           工具
                         </span>
-                        {capabilitySnapshot ? (
+                        {manageableCapabilityCount > 0 ? (
                           <span className="rounded-full bg-white px-1.5 py-0.5 text-10px text-[var(--text-secondary)]">
-                            {capabilitySnapshot.skills.length + capabilitySnapshot.plugins.length + capabilitySnapshot.mcpServers.length}
+                            {manageableCapabilityCount}
                           </span>
                         ) : null}
                         <ChevronDown size={12} className="opacity-40" />
@@ -2429,6 +2387,20 @@ export function ChatView({
                     </button>
                   </div>
                 </div>
+                {capabilitySnapshot ? (
+                  <div className="flex flex-wrap items-center gap-2 border-t border-[rgba(15,23,42,0.05)] px-3 py-2 text-11px text-[var(--text-secondary)]">
+                    <span className="rounded-full bg-[rgba(15,23,42,0.05)] px-2 py-0.5 font-700">
+                      Skills {capabilitySnapshot.skills.length}
+                    </span>
+                    {enabledSkillSummary ? (
+                      <span className="min-w-0 flex-1 truncate" title={enabledSkillSummary}>
+                        {enabledSkillSummary}
+                      </span>
+                    ) : (
+                      <span className="opacity-60">当前项目没有启用 skill</span>
+                    )}
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>

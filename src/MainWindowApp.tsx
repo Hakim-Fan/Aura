@@ -471,6 +471,12 @@ function resolvePreferredModelId(profile: ProviderProfile | null, preferredModel
   ) {
     return preferredModelId
   }
+  if (
+    profile.defaultModel &&
+    profile.models.some(model => model.enabled && model.id === profile.defaultModel)
+  ) {
+    return profile.defaultModel
+  }
   return getFirstEnabledModelId(profile)
 }
 
@@ -742,7 +748,7 @@ function buildCapabilityPanelItems(
         : workspaceOverrides.skills[skill.id] === 'off'
           ? false
           : settings.enabledSkillIds.includes(skill.id),
-  }))
+  })).filter(skill => !builtinSkillIds.has(skill.id))
 
   const pluginItems = (aura?.plugins || []).map(plugin => ({
     id: plugin.id,
@@ -1999,9 +2005,9 @@ export function MainWindowApp() {
       ) || getSessionProviderProfile(latestSettings, activeSession)
     const latestEffectiveProvider = latestProviderProfile?.provider || latestSettings.provider
     const latestEffectiveModel =
-      resolvePreferredModelId(latestProviderProfile, options?.modelOverride) ||
       options?.modelOverride ||
       activeSession.model ||
+      resolvePreferredModelId(latestProviderProfile, options?.modelOverride) ||
       resolvePreferredModelId(latestProviderProfile, latestSettings.model) ||
       latestSettings.model
 
@@ -2582,6 +2588,14 @@ export function MainWindowApp() {
     const nextSettings: AgentSettings = {
       ...settings,
       activeProviderProfileId: profile.id,
+      providerProfiles: settings.providerProfiles.map(entry =>
+        entry.id === profile.id
+          ? {
+            ...entry,
+            defaultModel: modelId,
+          }
+          : entry,
+      ),
       provider: profile.provider,
       apiKey: profile.apiKey,
       baseUrl: profile.baseUrl,

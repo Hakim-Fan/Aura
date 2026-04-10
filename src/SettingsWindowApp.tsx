@@ -21,6 +21,7 @@ const PROVIDER_BASE_URLS: Record<ProviderMode, string> = {
 }
 
 const STEP_PRESETS = [8, 16, 32, 64] as const
+const builtinSkillIdSet = new Set(builtinSkills.map(item => item.id))
 
 function cloneSettings(settings: AgentSettings): AgentSettings {
   return JSON.parse(JSON.stringify(settings)) as AgentSettings
@@ -208,6 +209,19 @@ export function SettingsWindowApp({ initialTab }: Props) {
           }
         }
 
+        if (key === 'models') {
+          const models = value as ProviderProfile['models']
+          const nextDefaultModel =
+            models.some(model => model.enabled && model.id === profile.defaultModel)
+              ? profile.defaultModel
+              : models.find(model => model.enabled)?.id || ''
+          return {
+            ...profile,
+            models,
+            defaultModel: nextDefaultModel,
+          }
+        }
+
         return {
           ...profile,
           [key]: value,
@@ -282,22 +296,57 @@ export function SettingsWindowApp({ initialTab }: Props) {
   function toggleProfileModel(profileId: string, modelId: string) {
     setDraftSettings(current => ({
       ...current,
-      providerProfiles: current.providerProfiles.map(profile =>
-        profile.id === profileId
-          ? {
-            ...profile,
-            models: profile.models.map(model =>
-              model.id === modelId ? { ...model, enabled: !model.enabled } : model,
-            ),
-          }
-          : profile,
-      ),
+      providerProfiles: current.providerProfiles.map(profile => {
+        if (profile.id !== profileId) {
+          return profile
+        }
+
+        const models = profile.models.map(model =>
+          model.id === modelId ? { ...model, enabled: !model.enabled } : model,
+        )
+        const toggledModel = models.find(model => model.id === modelId)
+        const nextDefaultModel =
+          toggledModel?.enabled
+            ? modelId
+            : models.some(model => model.enabled && model.id === profile.defaultModel)
+              ? profile.defaultModel
+              : models.find(model => model.enabled)?.id || ''
+
+        return {
+          ...profile,
+          models,
+          defaultModel: nextDefaultModel,
+        }
+      }),
     }))
     setSaveState('idle')
   }
 
   function getPrimaryModelId(profile: ProviderProfile) {
+    if (profile.models.some(model => model.enabled && model.id === profile.defaultModel)) {
+      return profile.defaultModel
+    }
     return profile.models.find(model => model.enabled)?.id || ''
+  }
+
+  function activateProviderProfile(profileId: string) {
+    const profile =
+      draftSettings.providerProfiles.find(entry => entry.id === profileId) || null
+    setSelectedProviderProfileId(profileId)
+    if (!profile) {
+      return
+    }
+
+    const preferredModel = getPrimaryModelId(profile)
+    setDraftSettings(current => ({
+      ...current,
+      activeProviderProfileId: profile.id,
+      provider: profile.provider,
+      apiKey: profile.apiKey,
+      baseUrl: profile.baseUrl,
+      model: preferredModel,
+    }))
+    setSaveState('idle')
   }
 
   function buildProviderRequestSettings(profile: ProviderProfile): AgentSettings {
@@ -312,6 +361,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   function toggleSkill(skillId: string) {
+    if (builtinSkillIdSet.has(skillId)) {
+      return
+    }
+    const target = availableSkills.find(item => item.id === skillId)
+    if (target && !target.supported) {
+      return
+    }
     const next = draftSettings.enabledSkillIds.includes(skillId)
       ? draftSettings.enabledSkillIds.filter(id => id !== skillId)
       : [...draftSettings.enabledSkillIds, skillId]
@@ -332,7 +388,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
   function setAllSkillsEnabled(enabled: boolean) {
     handleSettingsChange(
       'enabledSkillIds',
-      enabled ? availableSkills.map(item => item.id) : [],
+      enabled
+        ? availableSkills
+          .filter(item => item.supported && !builtinSkillIdSet.has(item.id))
+          .map(item => item.id)
+        : [],
     )
   }
 
@@ -945,13 +1005,17 @@ export function SettingsWindowApp({ initialTab }: Props) {
   ) {
     const title = kind === 'skills' ? '技能' : '插件'
     const searchValue = assetSearch[kind]
+    const visibleItems =
+      kind === 'skills'
+        ? items.filter(item => !builtinSkillIdSet.has(item.id))
+        : items
     const toggleableItems =
-      kind === 'skills' ? items : items.filter(item => item.supported)
+      visibleItems.filter(item => item.supported)
     const allEnabled =
       toggleableItems.length > 0 &&
       toggleableItems.every(item => enabledIds.includes(item.id))
     const normalizedKeyword = searchValue.trim().toLowerCase()
-    const filteredItems = items.filter(item =>
+    const filteredItems = visibleItems.filter(item =>
       !normalizedKeyword ||
       `${item.name} ${item.description} ${item.id} ${item.path || ''} ${item.entryPath || ''} ${item.supportMessage || ''}`
         .toLowerCase()
@@ -966,12 +1030,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
           <div>
             <div className="eyebrow">{title}</div>
             <h2>{title}</h2>
+            {kind === 'skills' ? (
+              <p className="muted mt-2">内置核心 skills 始终开启，这里只展示可管理的用户 skills。</p>
+            ) : null}
           </div>
           <div className="header-actions">
-            <span className="micro-pill">{items.length} 个可用</span>
+            <span className="micro-pill">{visibleItems.length} 个可用</span>
             <button
               className="secondary-button"
-              disabled={items.length === 0}
+              disabled={visibleItems.length === 0}
               onClick={() =>
                 kind === 'skills'
                   ? setAllSkillsEnabled(!allEnabled)
@@ -1021,7 +1088,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             const preview = item.path ? assetPreviewCache[item.path] : ''
             const isLoadingPreview = item.path === loadingPreviewPath
             const isEnabled = enabledIds.includes(item.id)
-            const canToggle = kind === 'skills' || item.supported
+            const canToggle = item.supported
 
             return (
               <article key={item.id} className="asset-card asset-card-rich">
@@ -1115,7 +1182,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             providerStatus={providerStatus}
             isTesting={isTestingProvider}
             isFetchingModels={isFetchingModels}
-            onSelectProfile={setSelectedProviderProfileId}
+            onSelectProfile={activateProviderProfile}
             onCreateProfile={createProfile}
             onDeleteProfile={deleteProfile}
             onProfileChange={updateProviderProfile}

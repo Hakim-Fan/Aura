@@ -6,6 +6,12 @@ function normalizeText(value) {
     .trim()
 }
 
+function normalizeIdentifier(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/gu, '')
+}
+
 function unique(values) {
   return Array.from(new Set(values.filter(Boolean)))
 }
@@ -349,6 +355,31 @@ function scoreToolGroup(group, context) {
   return score
 }
 
+function buildToolSelectionKeys(tool) {
+  return unique([
+    tool.name,
+    ...(Array.isArray(tool.aliases) ? tool.aliases : []),
+  ]).map(entry => normalizeIdentifier(entry))
+}
+
+function pickAllowedTools(selectedSkills, tools) {
+  const wanted = new Set(
+    selectedSkills.flatMap(skill =>
+      (Array.isArray(skill.allowedTools) ? skill.allowedTools : []).map(entry =>
+        normalizeIdentifier(entry),
+      ),
+    ),
+  )
+
+  if (wanted.size === 0) {
+    return []
+  }
+
+  return tools.filter(tool =>
+    buildToolSelectionKeys(tool).some(key => wanted.has(key)),
+  )
+}
+
 function buildCapabilitySnapshot({ workspaceRoot, resolvedAt, selectedSkills, selectedTools }) {
   const plugins = []
   const mcpServers = []
@@ -418,15 +449,17 @@ export function selectTurnCapabilities({
   }
 
   const selectedTools = tools.filter(tool => selectedGroupIds.has(getToolGroup(tool).id))
+  const allowedTools = pickAllowedTools(selectedSkills, tools)
+  const mergedTools = unique([...selectedTools, ...allowedTools])
 
   return {
     selectedSkills,
-    selectedTools,
+    selectedTools: mergedTools,
     capabilitySnapshot: buildCapabilitySnapshot({
       workspaceRoot: runtimeCapabilities?.workspaceRoot || '',
       resolvedAt: Date.now(),
       selectedSkills,
-      selectedTools,
+      selectedTools: mergedTools,
     }),
   }
 }

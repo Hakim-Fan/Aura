@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -180,6 +180,165 @@ fn extract_markdown_metadata_field(content: &str, field_name: &str) -> Option<St
     extract_metadata_field(content, field_name)
 }
 
+fn extract_markdown_list_field(content: &str, field_name: &str) -> Vec<String> {
+    let (frontmatter, _) = split_frontmatter(content);
+    let Some(frontmatter) = frontmatter else {
+        return Vec::new();
+    };
+
+    let mut values = Vec::new();
+    let mut collecting = false;
+    let needle = format!("{field_name}:");
+
+    for line in frontmatter.lines() {
+        let trimmed = line.trim();
+
+        if !collecting {
+            if !trimmed
+                .to_ascii_lowercase()
+                .starts_with(&needle.to_ascii_lowercase())
+            {
+                continue;
+            }
+
+            let inline_value = trimmed[needle.len()..].trim();
+            if inline_value.starts_with('[') && inline_value.ends_with(']') {
+                return inline_value[1..inline_value.len() - 1]
+                    .split(',')
+                    .map(|value| value.trim().trim_matches('"').trim_matches('\'').to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect();
+            }
+
+            collecting = true;
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if !values.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if !trimmed.starts_with("- ") {
+            break;
+        }
+
+        let value = trimmed[2..].trim().trim_matches('"').trim_matches('\'').trim();
+        if !value.is_empty() {
+            values.push(value.to_string());
+        }
+    }
+
+    values
+}
+
+fn normalize_tool_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|value| value.is_ascii_alphanumeric())
+        .flat_map(|value| value.to_lowercase())
+        .collect()
+}
+
+fn infer_skill_support(content: &str) -> (bool, Option<String>) {
+    let allowed_tools = extract_markdown_list_field(content, "allowed-tools");
+    if allowed_tools.is_empty() {
+        return (true, None);
+    }
+
+    let supported_aliases: HashSet<String> = [
+        "bash",
+        "shell",
+        "terminal",
+        "command",
+        "runshell",
+        "listfiles",
+        "ls",
+        "files",
+        "glob",
+        "findfiles",
+        "read",
+        "readfile",
+        "cat",
+        "write",
+        "writefile",
+        "edit",
+        "editfile",
+        "replace",
+        "multiedit",
+        "multieditfile",
+        "editmany",
+        "search",
+        "grep",
+        "ripgrep",
+        "searchcode",
+        "todo",
+        "plan",
+        "tasklist",
+        "todowrite",
+        "capabilities",
+        "listcapabilities",
+        "auralistcapabilities",
+        "readskill",
+        "skillfile",
+        "openskill",
+        "aurareadskill",
+        "enableskill",
+        "disableskill",
+        "auraenableskill",
+        "enableplugin",
+        "disableplugin",
+        "auraenableplugin",
+        "importskill",
+        "installskill",
+        "auraimportskill",
+        "importplugin",
+        "installplugin",
+        "auraimportplugin",
+        "savemcp",
+        "upsertmcp",
+        "auraupsertmcpserver",
+        "removemcp",
+        "deletemcp",
+        "auraremovemcpserver",
+        "computerlistapps",
+        "computergetfrontmostapp",
+        "computeropenapp",
+        "computercapturescreen",
+        "computertypetext",
+        "computerpressshortcut",
+        "chromeopenurl",
+        "chromegetactivetab",
+        "chromerunjavascript",
+        "spawnsubagent",
+        "subagent",
+        "delegate",
+    ]
+    .into_iter()
+    .map(normalize_tool_name)
+    .collect();
+
+    let missing_tools = allowed_tools
+        .iter()
+        .filter(|tool| !supported_aliases.contains(&normalize_tool_name(tool)))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if missing_tools.is_empty() {
+        (true, None)
+    } else {
+        (
+            false,
+            Some(format!(
+                "该 skill 依赖 Aura 当前未提供的工具: {}。它会被发现，但运行时不会真的拿到这些工具。",
+                missing_tools.join(", ")
+            )),
+        )
+    }
+}
+
 fn infer_skill_description(content: &str) -> String {
     if let Some(description) = extract_markdown_metadata_field(content, "description") {
         return description;
@@ -324,8 +483,9 @@ fn scan_aura_assets<R: Runtime>(app: &tauri::AppHandle<R>, dir: &Path, kind: &st
                 let name = extract_markdown_metadata_field(&content, "name")
                     .unwrap_or_else(|| prettify_asset_name(&id));
                 let description = infer_skill_description(&content);
+                let (supported, support_message) = infer_skill_support(&content);
                 let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
-                (id, name, description, path.clone(), Some(path.clone()), true, None, readonly)
+                (id, name, description, path.clone(), Some(path.clone()), supported, support_message, readonly)
             } else if path.is_dir() {
                 let skill_path = path.join("SKILL.md");
                 if !skill_path.exists() {
@@ -340,8 +500,9 @@ fn scan_aura_assets<R: Runtime>(app: &tauri::AppHandle<R>, dir: &Path, kind: &st
                 let name = extract_markdown_metadata_field(&content, "name")
                     .unwrap_or_else(|| prettify_asset_name(&id));
                 let description = infer_skill_description(&content);
+                let (supported, support_message) = infer_skill_support(&content);
                 let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
-                (id, name, description, skill_path.clone(), Some(skill_path), true, None, readonly)
+                (id, name, description, skill_path.clone(), Some(skill_path), supported, support_message, readonly)
             } else {
                 continue;
             }
@@ -484,33 +645,63 @@ fn resolve_default_asset_dir<R: Runtime>(
     Err(format!("Unable to locate bundled {dir_name} directory."))
 }
 
+fn copy_path_recursively(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(source_path)
+        .map_err(|error| format!("Failed to read asset metadata {}: {error}", source_path.display()))?;
+
+    if metadata.is_dir() {
+        ensure_directory(target_path)?;
+        let entries = fs::read_dir(source_path)
+            .map_err(|error| format!("Failed to read bundled asset directory {}: {error}", source_path.display()))?;
+
+        for entry in entries.flatten() {
+            let child_source = entry.path();
+            let Some(file_name) = child_source.file_name() else {
+                continue;
+            };
+            let child_target = target_path.join(file_name);
+            copy_path_recursively(&child_source, &child_target)?;
+        }
+
+        return Ok(());
+    }
+
+    if let Some(parent) = target_path.parent() {
+        ensure_directory(parent)?;
+    }
+
+    fs::copy(source_path, target_path).map_err(|error| {
+        format!(
+            "Failed to sync bundled asset {} into {}: {error}",
+            source_path.display(),
+            target_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
 fn seed_directory_from_defaults<R: Runtime>(
     app: &tauri::AppHandle<R>,
     dir_name: &str,
     target_dir: &Path,
 ) -> Result<(), String> {
     ensure_directory(target_dir)?;
-    let source_dir = resolve_default_asset_dir(app, dir_name)?;
+    let source_dir = match resolve_default_asset_dir(app, dir_name) {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
     let entries = fs::read_dir(&source_dir)
         .map_err(|error| format!("Failed to read bundled {dir_name} directory {}: {error}", source_dir.display()))?;
 
     for entry in entries.flatten() {
         let source_path = entry.path();
-        if !source_path.is_file() {
-            continue;
-        }
         let Some(file_name) = source_path.file_name() else {
             continue;
         };
         let target_path = target_dir.join(file_name);
-        if target_path.exists() {
-            continue;
-        }
-        fs::copy(&source_path, &target_path).map_err(|error| {
-            format!(
-                "Failed to seed Aura {dir_name} asset {}: {error}",
-                source_path.display()
-            )
+        copy_path_recursively(&source_path, &target_path).map_err(|error| {
+            format!("Failed to seed Aura {dir_name} asset {}: {error}", source_path.display())
         })?;
     }
 

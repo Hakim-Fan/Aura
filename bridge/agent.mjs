@@ -341,6 +341,9 @@ function buildSystemPrompt(settings, skillPrompt, exposureNote) {
 
   if (skillPrompt.trim()) {
     sections.push('Selected skill summaries:\n' + skillPrompt)
+    sections.push(
+      'If one of these selected skills is relevant and you need its exact instructions, read it on demand with aura_read_skill instead of guessing from the summary.',
+    )
   }
 
   if (exposureNote?.trim()) {
