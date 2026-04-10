@@ -1,3 +1,4 @@
+import { RefreshCw } from 'lucide-react'
 import type { WorkspaceNode } from '../types'
 
 type Props = {
@@ -98,7 +99,16 @@ export function WorkspaceExplorer({
   return (
     <section className="workspace-column">
       <div className="workspace-card">
-        <div className="section-title">项目上下文</div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-14px font-700 text-[var(--text-primary)]">项目上下文</div>
+          <button
+            onClick={onRefresh}
+            title="刷新项目上下文"
+            type="button"
+          >
+            <RefreshCw size={14} />
+          </button>
+        </div>
         <div className="workspace-toolbar">
           {rootPath ? (
             <button
@@ -112,11 +122,6 @@ export function WorkspaceExplorer({
           ) : (
             <div className="workspace-root">未设置工作目录</div>
           )}
-          <div className="header-actions">
-            <button className="mini-button" onClick={onRefresh}>
-              刷新
-            </button>
-          </div>
         </div>
         {loading ? <p className="muted">正在读取工作区结构...</p> : null}
         {error ? <div className="error-banner">{error}</div> : null}

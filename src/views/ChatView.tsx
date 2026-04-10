@@ -9,6 +9,7 @@ import {
   type ClipboardEvent,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -714,14 +715,23 @@ function MessageOverflowMenu({
     key: string
     label: string
     icon: typeof LayoutGrid
-    onClick: () => void
+    onClick?: () => void
     disabled?: boolean
+    closeMenuOnClick?: boolean
+    panel?: ReactNode
   }>
 }) {
   const [open, setOpen] = useState(false)
+  const [activePanelKey, setActivePanelKey] = useState<string | null>(null)
   const [placement, setPlacement] = useState<'top' | 'bottom'>('bottom')
   const menuRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) {
+      setActivePanelKey(null)
+    }
+  }, [open])
 
   useEffect(() => {
     if (!open) {
@@ -789,7 +799,14 @@ function MessageOverflowMenu({
     <div className="relative" ref={menuRef}>
       <button
         className="rounded-md p-1.5 text-[var(--text-secondary)] hover:bg-[rgba(0,0,0,0.05)]"
-        onClick={() => setOpen(current => !current)}
+        onClick={() =>
+          setOpen(current => {
+            if (current) {
+              setActivePanelKey(null)
+            }
+            return !current
+          })
+        }
         title="更多操作"
         type="button"
       >
@@ -797,108 +814,90 @@ function MessageOverflowMenu({
       </button>
       {open ? (
         <div
-          ref={panelRef}
-          className={`absolute right-0 z-20 min-w-[190px] overflow-hidden rounded-2xl border border-[rgba(15,23,42,0.08)] bg-white shadow-xl shadow-[rgba(15,23,42,0.12)] ${placement === 'top' ? 'bottom-[calc(100%+8px)]' : 'top-[calc(100%+8px)]'}`}
+          className={`absolute right-0 z-20 ${placement === 'top' ? 'bottom-[calc(100%+8px)]' : 'top-[calc(100%+8px)]'}`}
         >
-          {extraActions.map(action => {
-            const Icon = action.icon
-            return (
-              <button
-                key={action.key}
-                className="flex w-full items-center gap-3 px-4 py-3 text-left text-[15px] font-500 text-[var(--text-primary)] hover:bg-[rgba(15,23,42,0.04)] disabled:cursor-not-allowed disabled:opacity-45"
-                disabled={action.disabled}
-                onClick={() => {
-                  setOpen(false)
-                  action.onClick()
-                }}
-                type="button"
-              >
-                <Icon size={16} />
-                <span>{action.label}</span>
-              </button>
-            )
-          })}
-          <button
-            className="flex w-full items-center gap-3 px-4 py-3 text-left text-[15px] font-500 text-red-500 hover:bg-red-50"
-            onClick={() => {
-              setOpen(false)
-              onDeleteMessage(messageId)
-            }}
-            type="button"
+          <div
+            ref={panelRef}
+            className="min-w-[190px] overflow-hidden rounded-2xl border border-[rgba(15,23,42,0.08)] bg-white shadow-xl shadow-[rgba(15,23,42,0.12)]"
           >
-            <Trash2 size={16} />
-            <span>删除消息</span>
-          </button>
+            {extraActions.map(action => {
+              const Icon = action.icon
+              const hasPanel = Boolean(action.panel)
+              const isPanelOpen = activePanelKey === action.key
+
+              return (
+                <button
+                  key={action.key}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left text-[15px] font-500 text-[var(--text-primary)] hover:bg-[rgba(15,23,42,0.04)] disabled:cursor-not-allowed disabled:opacity-45"
+                  disabled={action.disabled}
+                  onClick={() => {
+                    if (hasPanel) {
+                      setActivePanelKey(current => (current === action.key ? null : action.key))
+                    }
+                    if (action.closeMenuOnClick !== false && !hasPanel) {
+                      setOpen(false)
+                      setActivePanelKey(null)
+                    }
+                    action.onClick?.()
+                  }}
+                  type="button"
+                >
+                  <Icon size={16} />
+                  <span className="flex-1">{action.label}</span>
+                  {hasPanel ? (
+                    <ChevronLeft
+                      size={14}
+                      className={`text-[var(--text-secondary)] opacity-55 transition-transform ${isPanelOpen ? 'rotate-180' : ''}`}
+                    />
+                  ) : null}
+                </button>
+              )
+            })}
+            <button
+              className="flex w-full items-center gap-3 px-4 py-3 text-left text-[15px] font-500 text-red-500 hover:bg-red-50"
+              onClick={() => {
+                setOpen(false)
+                setActivePanelKey(null)
+                onDeleteMessage(messageId)
+              }}
+              type="button"
+            >
+              <Trash2 size={16} />
+              <span>删除消息</span>
+            </button>
+          </div>
+          {activePanelKey ? (
+            <div className="absolute right-[calc(100%+8px)] top-0">
+              {extraActions.find(action => action.key === activePanelKey)?.panel || null}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
   )
 }
 
-function MessageUsageDialog({
-  usage,
-  onClose,
-}: {
-  usage?: MessageUsage
-  onClose: () => void
-}) {
-  const dialogRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === 'Escape') {
-        onClose()
-      }
-    }
-
-    function handleMouseDown(event: MouseEvent) {
-      if (dialogRef.current && !dialogRef.current.contains(event.target as Node)) {
-        onClose()
-      }
-    }
-
-    document.addEventListener('keydown', handleKeyDown)
-    document.addEventListener('mousedown', handleMouseDown)
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-      document.removeEventListener('mousedown', handleMouseDown)
-    }
-  }, [onClose])
-
+function MessageUsagePopover({ usage }: { usage?: MessageUsage }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(15,23,42,0.18)] px-4 backdrop-blur-sm">
-      <div
-        ref={dialogRef}
-        className="w-full max-w-[320px] rounded-[28px] border border-[rgba(15,23,42,0.08)] bg-white px-6 py-5 shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
-      >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <div>
-            <strong className="block text-[26px] font-700 tracking-tight text-[var(--text-primary)]">
-              用量
-            </strong>
-            <p className="mt-1 text-12px text-[var(--text-secondary)] opacity-75">
-              当前回答这一版的模型用量
-            </p>
-          </div>
-          <button
-            className="rounded-lg p-1.5 text-[var(--text-secondary)] hover:bg-[rgba(15,23,42,0.05)]"
-            onClick={onClose}
-            type="button"
-          >
-            <X size={16} />
-          </button>
-        </div>
+    <div className="w-[280px] rounded-[24px] border border-[rgba(15,23,42,0.08)] bg-white px-5 py-4 shadow-[0_18px_50px_rgba(15,23,42,0.16)]">
+      <div className="mb-3">
+        <strong className="block text-[20px] font-700 tracking-tight text-[var(--text-primary)]">
+          用量
+        </strong>
+        <p className="mt-1 text-11px text-[var(--text-secondary)] opacity-75">
+          当前回答这一版的模型用量
+        </p>
+      </div>
 
-        <div className="flex flex-col gap-3">
-          {usageRows(usage).map(row => (
-            <div key={row.label} className="flex items-center justify-between gap-4">
-              <span className="text-[18px] font-500 text-[#6B7FA0]">{row.label}</span>
-              <span className="text-[18px] font-700 tracking-[0.02em] text-[var(--text-primary)]">
-                {row.value}
-              </span>
-            </div>
-          ))}
-        </div>
+      <div className="flex flex-col gap-2.5">
+        {usageRows(usage).map(row => (
+          <div key={row.label} className="flex items-center justify-between gap-4">
+            <span className="text-[15px] font-500 text-[#6B7FA0]">{row.label}</span>
+            <span className="text-[16px] font-700 tracking-[0.02em] text-[var(--text-primary)]">
+              {row.value}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   )
@@ -1362,7 +1361,6 @@ function AssistantMessageCard({
   onToggleActivity: (messageId: string) => void
 }) {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
-  const [usageDialogOpen, setUsageDialogOpen] = useState(false)
   const activity = message.activity
   const duration = activity
     ? (
@@ -1639,7 +1637,8 @@ function AssistantMessageCard({
                       label: '用量',
                       icon: Sparkles,
                       disabled: !hasUsage,
-                      onClick: () => setUsageDialogOpen(true),
+                      closeMenuOnClick: false,
+                      panel: <MessageUsagePopover usage={message.usage} />,
                     },
                   ]}
                 />
@@ -1666,9 +1665,6 @@ function AssistantMessageCard({
             onRegenerateMessageWithModel(message.id, profileId, modelId)
           }}
         />
-      ) : null}
-      {usageDialogOpen ? (
-        <MessageUsageDialog usage={message.usage} onClose={() => setUsageDialogOpen(false)} />
       ) : null}
     </article>
   )
