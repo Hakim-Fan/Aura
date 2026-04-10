@@ -570,6 +570,21 @@ function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
   }
 }
 
+function approvalCategoryLabel(category?: string) {
+  switch (category) {
+    case 'shell':
+      return 'Shell 命令'
+    case 'file_write':
+      return '文件写入'
+    case 'computer_use':
+      return 'Computer Use'
+    case 'chrome_automation':
+      return 'Chrome 自动化'
+    default:
+      return '工具执行'
+  }
+}
+
 function buildMessageActivity(
   status: AgentTaskSnapshot['status'],
   startedAt: number,
@@ -1137,7 +1152,7 @@ export function MainWindowApp() {
                         id: snapshot.pendingApproval.id,
                         kind: 'approval' as const,
                         title: snapshot.pendingApproval.toolName,
-                        summary: snapshot.pendingApproval.summary,
+                        summary: `${approvalCategoryLabel(snapshot.pendingApproval.category)} · ${snapshot.pendingApproval.summary}`,
                         order:
                           (snapshot.toolEvents
                             .map(event => event.order || 0)

@@ -6,7 +6,11 @@ import { builtinPlugins, builtinSkills } from './catalog'
 import { inspectMcpServer, type McpInspectResult } from './lib/mcp'
 import { fetchProviderModels, testProviderConnection } from './lib/provider'
 import { ensureAuraHome, deleteAuraAsset, resetAuraHome, type AuraAsset, type AuraHomeState } from './lib/aura'
-import { hydrateStorageFromAuraHome, loadSettings, saveSettings } from './lib/storage'
+import {
+  hydrateStorageFromAuraHome,
+  loadSettings,
+  saveSettingsAndAwaitPersistence,
+} from './lib/storage'
 import { openPathInDefaultApp, readTextFile } from './lib/workspace'
 import { ConfirmModal } from './components/ConfirmModal'
 import { broadcastSettingsUpdated, closeCurrentWindow, openMcpEditorWindow } from './lib/windows'
@@ -184,6 +188,21 @@ export function SettingsWindowApp({ initialTab }: Props) {
       [key]: value,
     }))
     setSaveState('idle')
+  }
+
+  async function handleApprovalSettingChange<K extends keyof AgentSettings>(
+    key: K,
+    value: AgentSettings[K],
+  ) {
+    const nextSettings = {
+      ...draftSettings,
+      [key]: value,
+    }
+    setDraftSettings(nextSettings)
+    setSavedSettings(cloneSettings(nextSettings))
+    setSaveState('saved')
+    await saveSettingsAndAwaitPersistence(nextSettings)
+    await broadcastSettingsUpdated()
   }
 
   function updateProviderProfile<K extends keyof ProviderProfile>(
@@ -585,7 +604,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   async function saveDraftSettings() {
-    saveSettings(draftSettings)
+    await saveSettingsAndAwaitPersistence(draftSettings)
     setSavedSettings(cloneSettings(draftSettings))
     setSaveState('saved')
     await broadcastSettingsUpdated()
@@ -827,7 +846,10 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   <input
                     checked={draftSettings[item.key as keyof AgentSettings] as boolean}
                     onChange={event =>
-                      handleSettingsChange(item.key as keyof AgentSettings, event.target.checked)
+                      void handleApprovalSettingChange(
+                        item.key as keyof AgentSettings,
+                        event.target.checked,
+                      )
                     }
                     type="checkbox"
                     className="peer sr-only"
@@ -839,6 +861,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 </label>
               ))}
             </div>
+            <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-70">
+              这组开关会立即生效并同步到主窗口。注意: `Shell` 只覆盖命令执行，文件写入、桌面交互和 Chrome 自动化仍按各自开关审批。
+            </p>
           </section>
 
           <section className="dashboard-card !border-red-100/50">

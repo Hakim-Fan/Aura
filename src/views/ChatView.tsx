@@ -48,9 +48,11 @@ import type {
   CapabilityPanelItem,
   CapabilityUsageSnapshot,
   ChatMessage,
+  ChatMessageVariant,
   MessageAttachment,
   MessageEvent,
   MessageReasoning,
+  MessageUsage,
   ProviderMode,
   ReasoningEffort,
   TaskNode,
@@ -144,19 +146,52 @@ const reasoningEffortOptions: Array<{
     { value: 'max', label: '超高', description: '最强推理强度，适合最复杂任务' },
   ]
 
-function estimateTokenCount(value: string) {
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return 0
-  }
-  return Math.ceil(trimmed.length / 2.2)
-}
-
 function formatTokenCount(value: number) {
   if (value >= 1000) {
     return `${(value / 1000).toFixed(1)}k`
   }
   return String(value)
+}
+
+function mergeUsageTotals(
+  current: { inputTokens: number; outputTokens: number },
+  usage?: MessageUsage,
+) {
+  current.inputTokens += usage?.inputTokens || 0
+  current.outputTokens += usage?.outputTokens || 0
+  return current
+}
+
+function collectMessageUsage(message: ChatMessage) {
+  const variants =
+    Array.isArray(message.versions) && message.versions.length > 0
+      ? message.versions
+      : [message as ChatMessageVariant]
+
+  return variants.reduce(
+    (total, variant) => mergeUsageTotals(total, variant.usage),
+    { inputTokens: 0, outputTokens: 0 },
+  )
+}
+
+function collectSessionUsage(messages: ChatMessage[]) {
+  return messages.reduce((total, message) => {
+    const messageUsage = collectMessageUsage(message)
+    total.inputTokens += messageUsage.inputTokens
+    total.outputTokens += messageUsage.outputTokens
+    return total
+  }, { inputTokens: 0, outputTokens: 0 })
+}
+
+function usageRows(usage?: MessageUsage) {
+  const inputTokens = usage?.inputTokens || 0
+  const outputTokens = usage?.outputTokens || 0
+
+  return [
+    { label: '输入 Token', value: formatTokenCount(inputTokens) },
+    { label: '输出 Token', value: formatTokenCount(outputTokens) },
+    { label: '总 Token', value: formatTokenCount(inputTokens + outputTokens) },
+  ]
 }
 
 const suggestedPrompts = [
@@ -800,6 +835,75 @@ function MessageOverflowMenu({
   )
 }
 
+function MessageUsageDialog({
+  usage,
+  onClose,
+}: {
+  usage?: MessageUsage
+  onClose: () => void
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose()
+      }
+    }
+
+    function handleMouseDown(event: MouseEvent) {
+      if (dialogRef.current && !dialogRef.current.contains(event.target as Node)) {
+        onClose()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('mousedown', handleMouseDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('mousedown', handleMouseDown)
+    }
+  }, [onClose])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(15,23,42,0.18)] px-4 backdrop-blur-sm">
+      <div
+        ref={dialogRef}
+        className="w-full max-w-[320px] rounded-[28px] border border-[rgba(15,23,42,0.08)] bg-white px-6 py-5 shadow-[0_24px_80px_rgba(15,23,42,0.18)]"
+      >
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <strong className="block text-[26px] font-700 tracking-tight text-[var(--text-primary)]">
+              用量
+            </strong>
+            <p className="mt-1 text-12px text-[var(--text-secondary)] opacity-75">
+              当前回答这一版的模型用量
+            </p>
+          </div>
+          <button
+            className="rounded-lg p-1.5 text-[var(--text-secondary)] hover:bg-[rgba(15,23,42,0.05)]"
+            onClick={onClose}
+            type="button"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          {usageRows(usage).map(row => (
+            <div key={row.label} className="flex items-center justify-between gap-4">
+              <span className="text-[18px] font-500 text-[#6B7FA0]">{row.label}</span>
+              <span className="text-[18px] font-700 tracking-[0.02em] text-[var(--text-primary)]">
+                {row.value}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ModelPickerDialog({
   title,
   description,
@@ -1258,6 +1362,7 @@ function AssistantMessageCard({
   onToggleActivity: (messageId: string) => void
 }) {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
+  const [usageDialogOpen, setUsageDialogOpen] = useState(false)
   const activity = message.activity
   const duration = activity
     ? (
@@ -1311,6 +1416,8 @@ function AssistantMessageCard({
     (activeModelId.split('/').filter(Boolean).at(-1) || activeModelId || '未记录模型')
   const messageModelProfileId = message.modelInfo?.providerProfileId || activeModelProfileId
   const messageModelId = message.modelInfo?.modelId || activeModelId
+  const hasUsage =
+    (message.usage?.inputTokens || 0) > 0 || (message.usage?.outputTokens || 0) > 0
 
   const usedTools = Array.from(
     new Set(
@@ -1332,18 +1439,17 @@ function AssistantMessageCard({
     new Set(
       (message.events || [])
         .filter(event => event.kind !== 'approval')
-        .filter(event => event.source === 'mcp')
-        .map(event => event.title),
+      .filter(event => event.source === 'mcp')
+      .map(event => event.title),
     ),
   )
-  const invokedCount = usedTools.length + usedPlugins.length + usedMcp.length;
-  const hasUsedCapabilities = invokedCount > 0;
-  
+  const invokedCount = usedTools.length + usedPlugins.length + usedMcp.length
+  const hasUsedCapabilities = invokedCount > 0
   const invokedToolsGroups = [
     { label: 'Built-in Tools', items: usedTools, type: 'Tool' },
     { label: 'Plugins', items: usedPlugins, type: 'Plug' },
     { label: 'MCP Servers', items: usedMcp, type: 'MCP' },
-  ].filter(g => g.items.length > 0);
+  ].filter(group => group.items.length > 0)
 
   return (
     <article className="group relative flex flex-col gap-3">
@@ -1528,6 +1634,13 @@ function AssistantMessageCard({
                       disabled: isStreaming,
                       onClick: () => setModelDialogOpen(true),
                     },
+                    {
+                      key: 'message-usage',
+                      label: '用量',
+                      icon: Sparkles,
+                      disabled: !hasUsage,
+                      onClick: () => setUsageDialogOpen(true),
+                    },
                   ]}
                 />
                 <MessageVersionSwitcher
@@ -1553,6 +1666,9 @@ function AssistantMessageCard({
             onRegenerateMessageWithModel(message.id, profileId, modelId)
           }}
         />
+      ) : null}
+      {usageDialogOpen ? (
+        <MessageUsageDialog usage={message.usage} onClose={() => setUsageDialogOpen(false)} />
       ) : null}
     </article>
   )
@@ -1823,81 +1939,9 @@ export function ChatView({
     [capabilityItems],
   )
 
-  const currentContextTokenCount = useMemo(() => {
-    const messageTokens = messages.reduce((total, message) => total + estimateTokenCount(message.content), 0)
-    const attachmentTokens = attachments.reduce(
-      (total, attachment) => total + estimateTokenCount(attachment.name),
-      0,
-    )
-    return messageTokens + attachmentTokens + estimateTokenCount(draft)
-  }, [attachments, draft, messages])
-
-  const latestUsage = useMemo(() => {
-    return [...messages]
-      .reverse()
-      .find(
-        message =>
-          message.role === 'assistant' &&
-          ((message.usage?.inputTokens || 0) > 0 || (message.usage?.outputTokens || 0) > 0),
-      )?.usage
-  }, [messages])
-  const latestAssistantUsageEntry = useMemo(() => {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index]
-      if (
-        message.role === 'assistant' &&
-        ((message.usage?.inputTokens || 0) > 0 || (message.usage?.outputTokens || 0) > 0)
-      ) {
-        return {
-          index,
-          message,
-        }
-      }
-    }
-    return null
-  }, [messages])
-
-  const rollingContextEstimate = useMemo(() => {
-    const attachmentTokens = attachments.reduce(
-      (total, attachment) => total + estimateTokenCount(attachment.name),
-      0,
-    )
-
-    if (!latestAssistantUsageEntry?.message.usage?.inputTokens) {
-      return currentContextTokenCount
-    }
-
-    const tailTokens = messages
-      .slice(latestAssistantUsageEntry.index)
-      .reduce((total, message) => total + estimateTokenCount(message.content), 0)
-
-    return (
-      latestAssistantUsageEntry.message.usage.inputTokens +
-      tailTokens +
-      estimateTokenCount(draft) +
-      attachmentTokens
-    )
-  }, [attachments, currentContextTokenCount, draft, latestAssistantUsageEntry, messages])
-
-  const usageLabel = [
-    latestUsage
-      ? [
-        latestUsage.inputTokens ? `上轮输入 ${formatTokenCount(latestUsage.inputTokens)}` : null,
-        latestUsage.outputTokens ? `输出 ${formatTokenCount(latestUsage.outputTokens)}` : null,
-        latestUsage.contextWindow && latestUsage.inputTokens
-          ? `窗口 ${Math.min(
-            100,
-            Math.round((latestUsage.inputTokens / latestUsage.contextWindow) * 100),
-          )}%`
-          : null,
-      ]
-        .filter(Boolean)
-        .join(' · ')
-      : null,
-    `本轮估算 ${formatTokenCount(rollingContextEstimate)} tok`,
-  ]
-    .filter(Boolean)
-    .join(' · ')
+  const sessionUsage = useMemo(() => collectSessionUsage(messages), [messages])
+  const sessionTotalTokens = sessionUsage.inputTokens + sessionUsage.outputTokens
+  const usageLabel = `会话总 Token ${formatTokenCount(sessionTotalTokens)}`
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isMetaEnter) {
@@ -2081,6 +2125,7 @@ export function ChatView({
                   {error}
                 </div>
               ) : null}
+
               <div className="w-full pointer-events-auto bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none relative">
                 <textarea
                   className="w-full h-120px p-4 text-15px leading-relaxed resize-none !border-none bg-transparent !outline-none !ring-0 !shadow-none"

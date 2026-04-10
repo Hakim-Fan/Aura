@@ -1168,6 +1168,12 @@ export function saveSettings(settings: AgentSettings) {
   })
 }
 
+export async function saveSettingsAndAwaitPersistence(settings: AgentSettings) {
+  const normalized = syncLegacyFields(settings)
+  cachedSettings = cloneValue(normalized)
+  await savePersistedSettings(normalized)
+}
+
 export function saveSessions(sessions: Session[]) {
   cachedSessions = cloneValue(sessions)
   const nextSessions = cloneValue(sessions)
