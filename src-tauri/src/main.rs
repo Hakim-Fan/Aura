@@ -20,6 +20,8 @@ struct AgentTaskSnapshot {
     id: String,
     status: String,
     message: Option<String>,
+    #[serde(rename = "phaseOutputs")]
+    phase_outputs: Vec<serde_json::Value>,
     #[serde(rename = "toolEvents")]
     tool_events: Vec<serde_json::Value>,
     #[serde(rename = "appendedInputs")]
@@ -1264,6 +1266,54 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
     }));
 }
 
+fn append_phase_output_delta(current: &mut AgentTaskSnapshot, event: &serde_json::Value) {
+    let delta = event
+        .get("delta")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if delta.is_empty() {
+        return;
+    }
+
+    let block_id = event
+        .get("blockId")
+        .and_then(|value| value.as_str())
+        .unwrap_or("provider");
+    let order = event.get("order").and_then(|value| value.as_u64());
+    let output_id = format!("phase-{block_id}");
+
+    if let Some(existing) = current.phase_outputs.iter_mut().find(|output| {
+        output
+            .get("blockId")
+            .and_then(|value| value.as_str())
+            .map(|value| value == block_id)
+            .unwrap_or(false)
+    }) {
+        let next_content = format!(
+            "{}{}",
+            existing
+                .get("content")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
+            delta
+        );
+        *existing = serde_json::json!({
+            "id": output_id,
+            "blockId": block_id,
+            "content": next_content,
+            "order": order,
+        });
+        return;
+    }
+
+    current.phase_outputs.push(serde_json::json!({
+        "id": output_id,
+        "blockId": block_id,
+        "content": delta,
+        "order": order,
+    }));
+}
+
 fn merge_tool_event(current: &mut AgentTaskSnapshot, tool_event: &serde_json::Value) {
     let event_id = tool_event
         .get("id")
@@ -1329,6 +1379,7 @@ fn spawn_agent_task<R: Runtime>(
         id: task_id.clone(),
         status: "queued".into(),
         message: None,
+        phase_outputs: Vec::new(),
         tool_events: Vec::new(),
         appended_inputs: Vec::new(),
         task_tree: Vec::new(),
@@ -1393,10 +1444,14 @@ fn spawn_agent_task<R: Runtime>(
                     if delta.is_empty() {
                         return;
                     }
-
-                    let mut next_message = current.message.clone().unwrap_or_default();
-                    next_message.push_str(delta);
-                    current.message = Some(next_message);
+                    match event.get("target").and_then(|value| value.as_str()) {
+                        Some("phase") => append_phase_output_delta(current, &event),
+                        _ => {
+                            let mut next_message = current.message.clone().unwrap_or_default();
+                            next_message.push_str(delta);
+                            current.message = Some(next_message);
+                        }
+                    }
                 }),
                 Some("reasoning_delta") => with_snapshot(&stdout_snapshot, |current| {
                     append_reasoning_delta(current, &event);

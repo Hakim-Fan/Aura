@@ -786,7 +786,6 @@ export async function runOpenAiCompatibleAgent({
     const streamParser = createThinkStreamParser({
       onContent(text) {
         content += text
-        hooks?.onTextDelta?.(text)
       },
       onReasoning(text) {
         providerReasoning += text
@@ -853,6 +852,11 @@ export async function runOpenAiCompatibleAgent({
       const queuedInputs = drainAppendedInputs(hooks)
       if (queuedInputs.length > 0) {
         if (content.trim()) {
+          hooks?.onTextDelta?.(content, {
+            blockId: reasoningBlockId,
+            order: reasoningOrder,
+            target: 'phase',
+          })
           transcript.push({
             role: 'assistant',
             content,
@@ -898,6 +902,14 @@ export async function runOpenAiCompatibleAgent({
       role: 'assistant',
       content,
     })
+
+    if (content.trim()) {
+      hooks?.onTextDelta?.(content, {
+        blockId: reasoningBlockId,
+        order: reasoningOrder,
+        target: 'phase',
+      })
+    }
 
     for (const toolCall of finalizedToolCalls) {
       const tool = registry.get(toolCall.function.name)
@@ -1003,7 +1015,6 @@ export async function runGoogleAgent({
     const streamParser = createThinkStreamParser({
       onContent(text) {
         content += text
-        hooks?.onTextDelta?.(text)
       },
       onReasoning(text) {
         providerReasoning += text
@@ -1060,6 +1071,11 @@ export async function runGoogleAgent({
       const queuedInputs = drainAppendedInputs(hooks)
       if (queuedInputs.length > 0) {
         if (content.trim()) {
+          hooks?.onTextDelta?.(content, {
+            blockId: reasoningBlockId,
+            order: reasoningOrder,
+            target: 'phase',
+          })
           transcript.push({
             role: 'model',
             parts: [{ text: content }],
@@ -1112,6 +1128,14 @@ export async function runGoogleAgent({
       role: 'assistant',
       content,
     })
+
+    if (content.trim()) {
+      hooks?.onTextDelta?.(content, {
+        blockId: reasoningBlockId,
+        order: reasoningOrder,
+        target: 'phase',
+      })
+    }
 
     const toolResponses = []
     for (const entry of functionCalls) {

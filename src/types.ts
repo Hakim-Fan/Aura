@@ -120,6 +120,13 @@ export type MessageReasoning = {
   order?: number
 }
 
+export type MessagePhaseOutput = {
+  id: string
+  blockId: string
+  content: string
+  order?: number
+}
+
 export type MessageUsage = {
   inputTokens?: number
   outputTokens?: number
@@ -199,6 +206,7 @@ export type ChatMessageVariant = {
   createdAt?: number
   attachments?: MessageAttachment[]
   reasoning?: MessageReasoning[]
+  phaseOutputs?: MessagePhaseOutput[]
   usage?: MessageUsage
   capabilitySnapshot?: CapabilityUsageSnapshot
   activity?: MessageActivity
@@ -220,6 +228,7 @@ export type ChatMessage = {
   createdAt?: number
   attachments?: MessageAttachment[]
   reasoning?: MessageReasoning[]
+  phaseOutputs?: MessagePhaseOutput[]
   usage?: MessageUsage
   capabilitySnapshot?: CapabilityUsageSnapshot
   activity?: MessageActivity
@@ -350,6 +359,7 @@ export type AgentTaskSnapshot = {
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]
   reasoning?: MessageReasoning[]
+  phaseOutputs?: MessagePhaseOutput[]
   usage?: MessageUsage
   capabilitySnapshot?: CapabilityUsageSnapshot
   pendingApproval?: ApprovalRequest

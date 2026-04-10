@@ -184,8 +184,12 @@ rl.on('line', line => {
   const emitReasoningDelta = createDeltaEmitter('reasoning_delta')
 
   const hooks = {
-    onTextDelta(delta) {
-      emitTextDelta(delta)
+    onTextDelta(delta, meta = {}) {
+      emitTextDelta(delta, {
+        blockId: meta.blockId,
+        order: meta.order,
+        target: meta.target,
+      })
     },
     onReasoningDelta(delta, meta = {}) {
       emitReasoningDelta(delta, {

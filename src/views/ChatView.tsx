@@ -52,6 +52,7 @@ import type {
   ChatMessageVariant,
   MessageAttachment,
   MessageEvent,
+  MessagePhaseOutput,
   MessageReasoning,
   MessageUsage,
   ProviderMode,
@@ -418,6 +419,7 @@ function summarizeReasoningPreview(content: string) {
 
 function buildExecutionTimeline(
   reasoningEntries: MessageReasoning[],
+  phaseOutputs: MessagePhaseOutput[],
   events: MessageEvent[],
 ) {
   const reasoningTimeline = reasoningEntries.map((entry, index) => ({
@@ -429,6 +431,18 @@ function buildExecutionTimeline(
     entry,
   }))
 
+  const standalonePhaseOutputs = phaseOutputs.filter(
+    output => !reasoningEntries.some(entry => entry.id === output.blockId),
+  )
+
+  const phaseOutputTimeline = standalonePhaseOutputs.map((output, index) => ({
+    key: `phase-output-${output.id}`,
+    kind: 'phase_output' as const,
+    order: typeof output.order === 'number' ? output.order : index * 2,
+    originalIndex: index,
+    output,
+  }))
+
   const eventTimeline = events.map((event, index) => ({
     key: `event-${event.id}`,
     kind: 'event' as const,
@@ -437,12 +451,17 @@ function buildExecutionTimeline(
     event,
   }))
 
-  return [...reasoningTimeline, ...eventTimeline].sort((left, right) => {
+  return [...reasoningTimeline, ...phaseOutputTimeline, ...eventTimeline].sort((left, right) => {
     if (left.order !== right.order) {
       return left.order - right.order
     }
     if (left.kind !== right.kind) {
-      return left.kind === 'reasoning' ? -1 : 1
+      const priority = {
+        reasoning: 0,
+        phase_output: 1,
+        event: 2,
+      } as const
+      return priority[left.kind] - priority[right.kind]
     }
     return left.originalIndex - right.originalIndex
   })
@@ -450,9 +469,11 @@ function buildExecutionTimeline(
 
 function ReasoningPhaseCard({
   content,
+  outputContent,
   isActive,
 }: {
   content: string
+  outputContent?: string
   isActive: boolean
 }) {
   const [expanded, setExpanded] = useState(isActive)
@@ -504,6 +525,29 @@ function ReasoningPhaseCard({
           {remainingContent}
         </div>
       ) : null}
+      {outputContent?.trim() ? (
+        <div className="mt-2 rounded-lg border border-[rgba(79,123,116,0.10)] bg-white/70 px-3 py-2">
+          <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--accent-soft-strong)] opacity-75">
+            阶段输出
+          </div>
+          <div className="text-12px leading-relaxed whitespace-pre-wrap text-[var(--text-primary)] opacity-80">
+            {outputContent.trim()}
+          </div>
+        </div>
+      ) : null}
+    </article>
+  )
+}
+
+function PhaseOutputCard({ content }: { content: string }) {
+  return (
+    <article className="rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.04)] px-3 py-2.5">
+      <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--accent-soft-strong)] opacity-80">
+        阶段输出
+      </div>
+      <div className="text-12px leading-relaxed whitespace-pre-wrap text-[var(--text-primary)] opacity-80">
+        {content.trim()}
+      </div>
     </article>
   )
 }
@@ -1376,18 +1420,29 @@ function AssistantMessageCard({
   const visibleReasoning = (message.reasoning || []).filter(entry =>
     normalizeComparableText(entry.content),
   )
+  const visiblePhaseOutputs = (message.phaseOutputs || []).filter(output =>
+    normalizeComparableText(output.content),
+  )
   const providerReasoning = visibleReasoning.filter(entry => entry.kind === 'provider')
   const displayReasoning =
     providerReasoning.length > 0
       ? providerReasoning
       : visibleReasoning.filter(entry => entry.kind === 'summary')
-  const executionTimeline = buildExecutionTimeline(displayReasoning, message.events || [])
+  const phaseOutputByBlockId = new Map(
+    visiblePhaseOutputs.map(output => [output.blockId, output.content]),
+  )
+  const executionTimeline = buildExecutionTimeline(
+    displayReasoning,
+    visiblePhaseOutputs,
+    message.events || [],
+  )
   const latestReasoningId = displayReasoning.at(-1)?.id || ''
   const hasExecution =
     Boolean(activity) ||
     (message.events?.length || 0) > 0 ||
     visibleSteps.length > 0 ||
-    visibleReasoning.length > 0
+    visibleReasoning.length > 0 ||
+    visiblePhaseOutputs.length > 0
   const appendedInputs = message.appendedInputs || []
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
   const messageFailureSummary =
@@ -1437,8 +1492,8 @@ function AssistantMessageCard({
     new Set(
       (message.events || [])
         .filter(event => event.kind !== 'approval')
-      .filter(event => event.source === 'mcp')
-      .map(event => event.title),
+        .filter(event => event.source === 'mcp')
+        .map(event => event.title),
     ),
   )
   const invokedCount = usedTools.length + usedPlugins.length + usedMcp.length
@@ -1468,7 +1523,7 @@ function AssistantMessageCard({
                 >
                   <Brain size={12} className="opacity-70" />
                   <span
-                    className="rounded-full border border-[rgba(15,23,42,0.06)] bg-white px-0 py-0.5 text-11px font-600 text-[var(--text-secondary)] opacity-90"
+                    className="rounded-full border border-[rgba(15,23,42,0.06)] px-0 py-0.5 text-11px font-600 text-[var(--text-secondary)] opacity-90"
                     title={
                       message.modelInfo
                         ? `${message.modelInfo.providerProfileName} · ${message.modelInfo.modelId}`
@@ -1541,8 +1596,11 @@ function AssistantMessageCard({
                     <ReasoningPhaseCard
                       key={item.key}
                       content={item.entry.content}
+                      outputContent={phaseOutputByBlockId.get(item.entry.id)}
                       isActive={isStreaming && item.entry.id === latestReasoningId}
                     />
+                  ) : item.kind === 'phase_output' ? (
+                    <PhaseOutputCard key={item.key} content={item.output.content} />
                   ) : (
                     <MessageEventCard
                       key={item.key}
@@ -1836,6 +1894,9 @@ export function ChatView({
     const reasoningSignal = (lastMessage.reasoning || [])
       .map(entry => `${entry.id}:${entry.content.length}`)
       .join('|')
+    const phaseOutputSignal = (lastMessage.phaseOutputs || [])
+      .map(output => `${output.id}:${output.content.length}`)
+      .join('|')
     const appendedSignal = (lastMessage.appendedInputs || [])
       .map(input => `${input.id}:${input.status}:${input.content.length}`)
       .join('|')
@@ -1846,6 +1907,7 @@ export function ChatView({
       lastMessage.status || '',
       eventSignal,
       reasoningSignal,
+      phaseOutputSignal,
       appendedSignal,
       isRunning ? 'running' : 'idle',
     ].join(':')
@@ -2116,11 +2178,6 @@ export function ChatView({
                   <ArrowDown size={18} strokeWidth={2.5} className="text-[var(--text-secondary)] group-hover:text-[var(--accent-soft-strong)] transition-colors" />
                 </button>
               )}
-              {error ? (
-                <div className="mb-4 w-full rounded-2xl border border-red-100 bg-red-50/95 px-4 py-3 text-13px leading-relaxed text-red-600 shadow-sm">
-                  {error}
-                </div>
-              ) : null}
 
               <div className="w-full pointer-events-auto bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none relative">
                 <textarea
@@ -2428,20 +2485,6 @@ export function ChatView({
                     </button>
                   </div>
                 </div>
-                {capabilitySnapshot ? (
-                  <div className="flex flex-wrap items-center gap-2 border-t border-[rgba(15,23,42,0.05)] px-3 py-2 text-11px text-[var(--text-secondary)]">
-                    <span className="rounded-full bg-[rgba(15,23,42,0.05)] px-2 py-0.5 font-700">
-                      Skills {capabilitySnapshot.skills.length}
-                    </span>
-                    {enabledSkillSummary ? (
-                      <span className="min-w-0 flex-1 truncate" title={enabledSkillSummary}>
-                        {enabledSkillSummary}
-                      </span>
-                    ) : (
-                      <span className="opacity-60">当前项目没有启用 skill</span>
-                    )}
-                  </div>
-                ) : null}
               </div>
             </div>
           </div>

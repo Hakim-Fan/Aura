@@ -610,6 +610,7 @@ function createPendingAssistantMessage(): ChatMessage {
     role: 'assistant',
     content: '',
     reasoning: [],
+    phaseOutputs: [],
     status: 'streaming',
     createdAt: startedAt,
     events: [],
@@ -633,6 +634,7 @@ function toMessageVariant(message: ChatMessage): ChatMessageVariant {
     createdAt: message.createdAt,
     attachments: message.attachments,
     reasoning: message.reasoning,
+    phaseOutputs: message.phaseOutputs,
     usage: message.usage,
     capabilitySnapshot: message.capabilitySnapshot,
     activity: message.activity,
@@ -661,6 +663,7 @@ function applyMessageVariant(
     createdAt: activeVariant.createdAt,
     attachments: activeVariant.attachments,
     reasoning: activeVariant.reasoning,
+    phaseOutputs: activeVariant.phaseOutputs,
     usage: activeVariant.usage,
     capabilitySnapshot: activeVariant.capabilitySnapshot,
     activity: activeVariant.activity,
@@ -1135,6 +1138,7 @@ export function MainWindowApp() {
                     ? '等待你的审批后继续执行。'
                     : currentVariant.content),
                 reasoning: snapshot.reasoning || currentVariant.reasoning,
+                phaseOutputs: snapshot.phaseOutputs || currentVariant.phaseOutputs,
                 usage: snapshot.usage || currentVariant.usage,
                 capabilitySnapshot:
                   snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
@@ -1201,6 +1205,7 @@ export function MainWindowApp() {
                               ? snapshot.message || ''
                               : snapshot.message || currentVariant.content,
                           reasoning: snapshot.reasoning || currentVariant.reasoning,
+                          phaseOutputs: snapshot.phaseOutputs || currentVariant.phaseOutputs,
                           usage: snapshot.usage || currentVariant.usage,
                           capabilitySnapshot:
                             snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
@@ -1959,6 +1964,7 @@ export function MainWindowApp() {
           toolEvents: [],
           taskTree: [],
           reasoning: [],
+          phaseOutputs: [],
           appendedInputs: appendedInputs.map(input => ({
             ...input,
             status: 'consumed' as const,
@@ -2279,6 +2285,7 @@ export function MainWindowApp() {
           toolEvents: [],
           taskTree: [],
           reasoning: [],
+          phaseOutputs: [],
         },
       }))
     } catch (caught) {
@@ -2536,6 +2543,8 @@ export function MainWindowApp() {
               },
               appendedInputs:
                 currentSnapshot?.appendedInputs || currentVariant.appendedInputs,
+              phaseOutputs:
+                currentSnapshot?.phaseOutputs || currentVariant.phaseOutputs,
               events:
                 currentSnapshot?.toolEvents.map(mapToolEventToMessageEvent) ||
                 currentVariant.events,

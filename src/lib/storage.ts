@@ -338,6 +338,36 @@ function normalizeMessageReasoning(value: unknown) {
     .filter((reasoning): reasoning is NonNullable<typeof reasoning> => Boolean(reasoning))
 }
 
+function normalizeMessagePhaseOutputs(value: unknown) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map(output => {
+      if (!output || typeof output !== 'object') {
+        return null
+      }
+      if (typeof output.content !== 'string' || !output.content.trim()) {
+        return null
+      }
+      if (typeof output.blockId !== 'string' || !output.blockId.trim()) {
+        return null
+      }
+
+      return {
+        id:
+          typeof output.id === 'string' && output.id.trim()
+            ? output.id
+            : `phase-${output.blockId}`,
+        blockId: output.blockId,
+        content: output.content,
+        order: typeof output.order === 'number' ? output.order : undefined,
+      }
+    })
+    .filter((output): output is NonNullable<typeof output> => Boolean(output))
+}
+
 function normalizeMessageVariant(
   value: unknown,
   fallbackCreatedAt: number,
@@ -360,6 +390,7 @@ function normalizeMessageVariant(
       typeof variant.createdAt === 'number' ? variant.createdAt : fallbackCreatedAt,
     attachments: normalizeMessageAttachments(variant.attachments),
     reasoning: normalizeMessageReasoning(variant.reasoning),
+    phaseOutputs: normalizeMessagePhaseOutputs(variant.phaseOutputs),
     usage:
       variant.usage && typeof variant.usage === 'object'
         ? {
@@ -778,6 +809,7 @@ function parseSessions(raw: string | null): Session[] {
             activity: message.activity,
             events: message.events || [],
             steps: message.steps || [],
+            phaseOutputs: normalizeMessagePhaseOutputs(message.phaseOutputs),
             error: message.error,
             errorInfo:
               message.errorInfo && typeof message.errorInfo === 'object'
@@ -829,6 +861,7 @@ function parseSessions(raw: string | null): Session[] {
             createdAt: activeVariant.createdAt,
             attachments: activeVariant.attachments,
             reasoning: activeVariant.reasoning,
+            phaseOutputs: activeVariant.phaseOutputs,
             usage: activeVariant.usage,
             capabilitySnapshot: activeVariant.capabilitySnapshot,
             activity: activeVariant.activity,
@@ -1003,6 +1036,7 @@ function persistedMessageVersions(message: PersistedSessionRecord['messages'][nu
       createdAt: message.createdAt || Date.now(),
       attachments: message.attachments || [],
       reasoning: message.reasoning || [],
+      phaseOutputs: message.phaseOutputs || [],
       usage: message.usage,
       capabilitySnapshot: message.capabilitySnapshot,
       activity: message.activity,
