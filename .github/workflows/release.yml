@@ -35,12 +35,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      - name: Install Apple certificates
+      - name: Install Apple certificates (optional)
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        if: env.APPLE_CERTIFICATE != ''
+        if: env.APPLE_CERTIFICATE != '' && env.APPLE_CERTIFICATE != null
         run: |
           echo "$APPLE_CERTIFICATE" | base64 -d > certificate.p12
           security create-keychain -p "actions" build.keychain

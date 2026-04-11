@@ -42,7 +42,8 @@
       "../skills"
     ],
     "macOS": {
-      "entitlements": "Entitlements-macOS.plist"
+      "entitlements": "Entitlements-macOS.plist",
+      "signingIdentity": "-"
     }
   }
 }
