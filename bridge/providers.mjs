@@ -483,17 +483,29 @@ function presentProviderError(message, messages) {
   return message
 }
 
+function classifyProviderHttpCategory(status) {
+  if (status === 401 || status === 403) {
+    return 'authentication'
+  }
+  if (status === 429) {
+    return 'rate_limit'
+  }
+  if (
+    status === 408 ||
+    status === 409 ||
+    status === 425 ||
+    status === 499 ||
+    (status >= 500 && status <= 599)
+  ) {
+    return 'unavailable'
+  }
+  return 'execution_failed'
+}
+
 function buildProviderHttpError(response, message, messages) {
   const presented = presentProviderError(message, messages)
   const status = response.status
-  const category =
-    status === 401 || status === 403
-      ? 'authentication'
-      : status === 429
-        ? 'rate_limit'
-        : status === 502 || status === 503 || status === 504
-          ? 'unavailable'
-          : 'execution_failed'
+  const category = classifyProviderHttpCategory(status)
 
   return createStructuredError('模型服务请求失败。', {
     source: 'provider',
@@ -526,6 +538,181 @@ function createClassifiedError(message, extras = {}) {
   })
 }
 
+function isRetryableProviderError(error) {
+  return error?.errorInfo?.retryable === true
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function getProviderFailureRecoveryMaxAttempts(settings) {
+  if (settings?.enableProviderFailureRecovery === false) {
+    return 1
+  }
+
+  const configured = Number(settings?.providerFailureRecoveryMaxAttempts)
+  if (!Number.isFinite(configured)) {
+    return 3
+  }
+
+  return Math.max(1, Math.min(5, Math.round(configured)))
+}
+
+function buildProviderRetryInfo(retryCount, maxAttempts, extras = {}) {
+  if (retryCount <= 0) {
+    return undefined
+  }
+
+  return {
+    attemptedRetries: retryCount,
+    configuredMaxAttempts: maxAttempts,
+    recovered: extras.recovered === true,
+  }
+}
+
+function mergeProviderRetryInfo(...entries) {
+  const validEntries = entries.filter(
+    entry =>
+      entry &&
+      typeof entry.attemptedRetries === 'number' &&
+      Number.isFinite(entry.attemptedRetries) &&
+      entry.attemptedRetries > 0,
+  )
+
+  if (validEntries.length === 0) {
+    return undefined
+  }
+
+  return {
+    attemptedRetries: validEntries.reduce((sum, entry) => sum + entry.attemptedRetries, 0),
+    configuredMaxAttempts: validEntries.reduce(
+      (max, entry) => Math.max(max, entry.configuredMaxAttempts || 0),
+      0,
+    ),
+    recovered: validEntries.some(entry => entry.recovered === true),
+  }
+}
+
+function extractProviderRetryInfo(value) {
+  if (!value || typeof value !== 'object' || !value.retryInfo || typeof value.retryInfo !== 'object') {
+    return undefined
+  }
+
+  const retryInfo = value.retryInfo
+  if (
+    typeof retryInfo.attemptedRetries !== 'number' ||
+    !Number.isFinite(retryInfo.attemptedRetries) ||
+    retryInfo.attemptedRetries <= 0 ||
+    typeof retryInfo.configuredMaxAttempts !== 'number' ||
+    !Number.isFinite(retryInfo.configuredMaxAttempts) ||
+    retryInfo.configuredMaxAttempts <= 0
+  ) {
+    return undefined
+  }
+
+  return {
+    attemptedRetries: Math.round(retryInfo.attemptedRetries),
+    configuredMaxAttempts: Math.round(retryInfo.configuredMaxAttempts),
+    recovered: retryInfo.recovered === true,
+  }
+}
+
+function scorePartialProviderState(partialState) {
+  if (!partialState) {
+    return 0
+  }
+
+  const messageLength = (partialState.partialMessage || '').trim().length
+  const reasoningLength = (partialState.partialReasoning || '').trim().length
+  return messageLength * 4 + reasoningLength
+}
+
+function hasPartialProviderState(partialState) {
+  return scorePartialProviderState(partialState) > 0
+}
+
+function pickPreferredPartialProviderState(currentState, nextState) {
+  if (!hasPartialProviderState(nextState)) {
+    return currentState
+  }
+  if (!hasPartialProviderState(currentState)) {
+    return nextState
+  }
+  return scorePartialProviderState(nextState) >= scorePartialProviderState(currentState)
+    ? nextState
+    : currentState
+}
+
+function attachPartialProviderState(error, partialState) {
+  if (!hasPartialProviderState(partialState)) {
+    return error
+  }
+
+  const target = error instanceof Error ? error : new Error(String(error))
+  const nextErrorInfo =
+    target.errorInfo && typeof target.errorInfo === 'object'
+      ? { ...target.errorInfo }
+      : {}
+
+  nextErrorInfo.partialMessage = partialState.partialMessage || ''
+  nextErrorInfo.partialReasoning = partialState.partialReasoning || ''
+  target.errorInfo = nextErrorInfo
+  return target
+}
+
+function attachProviderRetryInfo(error, retryInfo) {
+  if (!retryInfo) {
+    return error
+  }
+
+  const target = error instanceof Error ? error : new Error(String(error))
+  const existing = extractProviderRetryInfo(target)
+  target.retryInfo = mergeProviderRetryInfo(existing, retryInfo) || retryInfo
+  return target
+}
+
+async function runProviderOperationWithRetry(operation, { messages, maxAttempts = 3, baseDelayMs = 800 }) {
+  let lastError
+  let bestPartialState = null
+  let retryCount = 0
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptState = {
+      receivedOutput: false,
+      partialMessage: '',
+      partialReasoning: '',
+    }
+
+    try {
+      const value = await operation(attemptState, attempt)
+      return {
+        value,
+        retryCount,
+        attemptsUsed: retryCount + 1,
+      }
+    } catch (error) {
+      let normalized = maybeNormalizeProviderTermination(error, messages)
+      bestPartialState = pickPreferredPartialProviderState(bestPartialState, attemptState)
+      normalized = attachPartialProviderState(normalized, bestPartialState)
+      normalized = attachProviderRetryInfo(
+        normalized,
+        buildProviderRetryInfo(retryCount, maxAttempts),
+      )
+      lastError = normalized
+
+      if (attempt >= maxAttempts || !isRetryableProviderError(normalized)) {
+        throw normalized
+      }
+
+      retryCount += 1
+      await wait(baseDelayMs * attempt)
+    }
+  }
+
+  throw lastError
+}
+
 function maybeNormalizeProviderTermination(error, messages) {
   const message = error instanceof Error ? error.message : String(error)
   const normalized = message.trim().toLowerCase()
@@ -534,7 +721,16 @@ function maybeNormalizeProviderTermination(error, messages) {
     normalized.includes('terminated') ||
     normalized.includes('socket hang up') ||
     normalized.includes('eof') ||
-    normalized.includes('aborted')
+    normalized.includes('aborted') ||
+    normalized.includes('fetch failed') ||
+    normalized.includes('network error') ||
+    normalized.includes('networkerror') ||
+    normalized.includes('timeout') ||
+    normalized.includes('timed out') ||
+    normalized.includes('econnreset') ||
+    normalized.includes('econnrefused') ||
+    normalized.includes('enotfound') ||
+    normalized.includes('eai_again')
   ) {
     return createClassifiedError(
       '模型连接在生成过程中被中断。可能是 Provider 侧超时、连接断开，或当前模型/兼容接口对工具调用支持不稳定。',
@@ -616,52 +812,62 @@ export async function finalizeOpenAiCompatibleAnswer({
   reasoningText,
   draftMessage,
 }) {
-  const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
-  const transcript = toOpenAiTranscript(systemPrompt, [
-    ...messages,
-    ...(draftMessage?.trim()
-      ? [
-          {
-            role: 'assistant',
-            content: draftMessage,
-          },
-        ]
-      : []),
-    {
-      role: 'user',
-      content: buildFinalizerPrompt({
-        toolEvents,
-        reasoningText,
-        draftMessage,
+  const maxAttempts = getProviderFailureRecoveryMaxAttempts(settings)
+  const attemptResult = await runProviderOperationWithRetry(async () => {
+    const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
+    const transcript = toOpenAiTranscript(systemPrompt, [
+      ...messages,
+      ...(draftMessage?.trim()
+        ? [
+            {
+              role: 'assistant',
+              content: draftMessage,
+            },
+          ]
+        : []),
+      {
+        role: 'user',
+        content: buildFinalizerPrompt({
+          toolEvents,
+          reasoningText,
+          draftMessage,
+        }),
+      },
+    ])
+
+    const response = await fetch(`${apiBase}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${settings.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: settings.model,
+        messages: transcript,
+        stream: false,
       }),
-    },
-  ])
+    })
 
-  const response = await fetch(`${apiBase}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${settings.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: settings.model,
-      messages: transcript,
-      stream: false,
-    }),
-  })
+    if (!response.ok) {
+      const data = await parseJsonResponse(response)
+      throw buildProviderHttpError(
+        response,
+        data.error?.message || 'OpenAI-compatible finalization request failed',
+        messages,
+      )
+    }
 
-  if (!response.ok) {
     const data = await parseJsonResponse(response)
-    throw buildProviderHttpError(
-      response,
-      data.error?.message || 'OpenAI-compatible finalization request failed',
-      [],
-    )
+    const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content)
+    return content.trim()
+  }, {
+    messages,
+    maxAttempts,
+  })
+  return {
+    message: attemptResult.value,
+    retryInfo: buildProviderRetryInfo(attemptResult.retryCount, maxAttempts),
   }
-
-  const data = await parseJsonResponse(response)
-  const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content)
-  return content.trim()
 }
 
 export async function finalizeGoogleAnswer({
@@ -672,57 +878,67 @@ export async function finalizeGoogleAnswer({
   reasoningText,
   draftMessage,
 }) {
-  const apiBase = normalizeBaseUrl(
-    settings.baseUrl,
-    'https://generativelanguage.googleapis.com/v1beta',
-  )
-  const response = await fetch(`${apiBase}/models/${settings.model}:generateContent`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-goog-api-key': settings.apiKey,
-    },
-    body: JSON.stringify({
-      system_instruction: {
-        parts: [{ text: systemPrompt }],
-      },
-      contents: toGeminiContents([
-        ...messages,
-        ...(draftMessage?.trim()
-          ? [
-              {
-                role: 'assistant',
-                content: draftMessage,
-              },
-            ]
-          : []),
-        {
-          role: 'user',
-          content: buildFinalizerPrompt({
-            toolEvents,
-            reasoningText,
-            draftMessage,
-          }),
-        },
-      ]),
-    }),
-  })
-
-  if (!response.ok) {
-    const data = await parseJsonResponse(response)
-    throw buildProviderHttpError(
-      response,
-      data.error?.message || 'Google finalization request failed',
-      [],
+  const maxAttempts = getProviderFailureRecoveryMaxAttempts(settings)
+  const attemptResult = await runProviderOperationWithRetry(async () => {
+    const apiBase = normalizeBaseUrl(
+      settings.baseUrl,
+      'https://generativelanguage.googleapis.com/v1beta',
     )
-  }
+    const response = await fetch(`${apiBase}/models/${settings.model}:generateContent`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': settings.apiKey,
+      },
+      body: JSON.stringify({
+        system_instruction: {
+          parts: [{ text: systemPrompt }],
+        },
+        contents: toGeminiContents([
+          ...messages,
+          ...(draftMessage?.trim()
+            ? [
+                {
+                  role: 'assistant',
+                  content: draftMessage,
+                },
+              ]
+            : []),
+          {
+            role: 'user',
+            content: buildFinalizerPrompt({
+              toolEvents,
+              reasoningText,
+              draftMessage,
+            }),
+          },
+        ]),
+      }),
+    })
 
-  const data = await parseJsonResponse(response)
-  const parts = data.candidates?.[0]?.content?.parts || []
-  return parts
-    .map(part => (typeof part.text === 'string' ? part.text : ''))
-    .join('\n')
-    .trim()
+    if (!response.ok) {
+      const data = await parseJsonResponse(response)
+      throw buildProviderHttpError(
+        response,
+        data.error?.message || 'Google finalization request failed',
+        messages,
+      )
+    }
+
+    const data = await parseJsonResponse(response)
+    const parts = data.candidates?.[0]?.content?.parts || []
+    return parts
+      .map(part => (typeof part.text === 'string' ? part.text : ''))
+      .join('\n')
+      .trim()
+  }, {
+    messages,
+    maxAttempts,
+  })
+  return {
+    message: attemptResult.value,
+    retryInfo: buildProviderRetryInfo(attemptResult.retryCount, maxAttempts),
+  }
 }
 
 export async function runOpenAiCompatibleAgent({
@@ -738,117 +954,140 @@ export async function runOpenAiCompatibleAgent({
   const conversationMessages = [...messages]
   const transcript = toOpenAiTranscript(systemPrompt, conversationMessages)
   let latestUsage
+  let providerRetryCount = 0
   let providerReasoning = ''
   const providerReasoningBlocks = []
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
+  const maxAttempts = getProviderFailureRecoveryMaxAttempts(settings)
 
   try {
     for (let step = 0; step < loopConfig.maxIterations; step += 1) {
-    appendQueuedInputsToOpenAiTranscript(transcript, conversationMessages, hooks)
-    const reasoningBlockId = `provider-phase-${step + 1}`
-    const reasoningOrder = step * 2
-    const toolOrder = reasoningOrder + 1
-    const response = await fetch(`${apiBase}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${settings.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: settings.model,
-        messages: transcript,
-        tools: openAiToolDefs(tools),
-        tool_choice: 'auto',
-        stream: true,
-        ...(settings.provider === 'openai'
-          ? {
-              stream_options: {
-                include_usage: true,
-              },
-            }
-          : {}),
-      }),
-    })
+      appendQueuedInputsToOpenAiTranscript(transcript, conversationMessages, hooks)
+      const reasoningBlockId = `provider-phase-${step + 1}`
+      const reasoningOrder = step * 2
+      const toolOrder = reasoningOrder + 1
 
-    if (!response.ok) {
-      const data = await parseJsonResponse(response)
-      throw buildProviderHttpError(
-        response,
-        data.error?.message || 'OpenAI-compatible request failed',
-        messages,
-      )
-    }
-
-    let content = ''
-    let phaseReasoning = ''
-    const toolCalls = []
-    const streamParser = createThinkStreamParser({
-      onContent(text) {
-        content += text
-      },
-      onReasoning(text) {
-        providerReasoning += text
-        phaseReasoning += text
-        hooks?.onReasoningDelta?.(text, {
-          blockId: reasoningBlockId,
-          kind: 'provider',
-          order: reasoningOrder,
+      const attemptResult = await runProviderOperationWithRetry(async attemptState => {
+        const response = await fetch(`${apiBase}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${settings.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: settings.model,
+            messages: transcript,
+            tools: openAiToolDefs(tools),
+            tool_choice: 'auto',
+            stream: true,
+            ...(settings.provider === 'openai'
+              ? {
+                  stream_options: {
+                    include_usage: true,
+                  },
+                }
+              : {}),
+          }),
         })
-      },
-    })
 
-    await readSseStream(response, async payload => {
-      const data = JSON.parse(payload)
-      const usage = data.usage
-        ? {
-            inputTokens: data.usage.prompt_tokens,
-            outputTokens: data.usage.completion_tokens,
+        if (!response.ok) {
+          const data = await parseJsonResponse(response)
+          throw buildProviderHttpError(
+            response,
+            data.error?.message || 'OpenAI-compatible request failed',
+            messages,
+          )
+        }
+
+        let content = ''
+        let phaseReasoning = ''
+        const toolCalls = []
+        let usageForAttempt
+        const streamParser = createThinkStreamParser({
+          onContent(text) {
+            content += text
+            attemptState.receivedOutput = true
+            attemptState.partialMessage += text
+          },
+          onReasoning(text) {
+            providerReasoning += text
+            phaseReasoning += text
+            attemptState.receivedOutput = true
+            attemptState.partialReasoning += text
+            hooks?.onReasoningDelta?.(text, {
+              blockId: reasoningBlockId,
+              kind: 'provider',
+              order: reasoningOrder,
+            })
+          },
+        })
+
+        await readSseStream(response, async payload => {
+          const data = JSON.parse(payload)
+          const usage = data.usage
+            ? {
+                inputTokens: data.usage.prompt_tokens,
+                outputTokens: data.usage.completion_tokens,
+              }
+            : undefined
+          if (usage) {
+            usageForAttempt = usage
           }
-        : undefined
-      if (usage) {
-        latestUsage = usage
-        pushUsage(hooks, usage)
+
+          const choice = data.choices?.[0]
+          if (!choice) {
+            return
+          }
+
+          const reasoningDelta =
+            choice.delta?.reasoning ||
+            choice.delta?.reasoning_content ||
+            choice.delta?.thinking
+          if (typeof reasoningDelta === 'string' && reasoningDelta) {
+            streamParser.consume(`<think>${reasoningDelta}</think>`)
+          }
+
+          if (typeof choice.delta?.content === 'string' && choice.delta.content) {
+            streamParser.consume(choice.delta.content)
+          }
+
+          if (Array.isArray(choice.delta?.tool_calls) && choice.delta.tool_calls.length > 0) {
+            attemptState.receivedOutput = true
+            mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
+          }
+        })
+
+        streamParser.flush()
+        return {
+          content,
+          phaseReasoning,
+          finalizedToolCalls: toolCalls.filter(toolCall => toolCall?.function?.name?.trim()),
+          usage: usageForAttempt,
+        }
+      }, {
+        messages: conversationMessages,
+        maxAttempts,
+      })
+      const stepResult = attemptResult.value
+      providerRetryCount += attemptResult.retryCount
+
+      if (stepResult.usage) {
+        latestUsage = stepResult.usage
+        pushUsage(hooks, stepResult.usage)
       }
 
-      const choice = data.choices?.[0]
-      if (!choice) {
-        return
-      }
-
-      const reasoningDelta =
-        choice.delta?.reasoning ||
-        choice.delta?.reasoning_content ||
-        choice.delta?.thinking
-      if (typeof reasoningDelta === 'string' && reasoningDelta) {
-        streamParser.consume(`<think>${reasoningDelta}</think>`)
-      }
-
-      if (typeof choice.delta?.content === 'string' && choice.delta.content) {
-        streamParser.consume(choice.delta.content)
-      }
-
-      if (Array.isArray(choice.delta?.tool_calls)) {
-        mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
-      }
-    })
-
-    streamParser.flush()
-
-    if (phaseReasoning.trim()) {
+      if (stepResult.phaseReasoning.trim()) {
       providerReasoningBlocks.push({
         id: reasoningBlockId,
         kind: 'provider',
-        content: phaseReasoning,
+        content: stepResult.phaseReasoning,
         order: reasoningOrder,
       })
-    }
+      }
 
-    const finalizedToolCalls = toolCalls.filter(
-      toolCall => toolCall?.function?.name?.trim(),
-    )
-
-    if (finalizedToolCalls.length === 0) {
+      const { content, finalizedToolCalls } = stepResult
+      if (finalizedToolCalls.length === 0) {
       const queuedInputs = drainAppendedInputs(hooks)
       if (queuedInputs.length > 0) {
         if (content.trim()) {
@@ -881,57 +1120,63 @@ export async function runOpenAiCompatibleAgent({
         reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
         usage: latestUsage,
         messages: conversationMessages,
+        retryInfo: buildProviderRetryInfo(providerRetryCount, maxAttempts),
       }
-    }
+      }
 
-    loopGuard.record(
-      JSON.stringify(
-        finalizedToolCalls.map(toolCall => ({
-          name: toolCall.function.name,
-          args: toolCall.function.arguments || '{}',
-        })),
-      ),
-    )
-
-    transcript.push({
-      role: 'assistant',
-      content,
-      tool_calls: finalizedToolCalls,
-    })
-    conversationMessages.push({
-      role: 'assistant',
-      content,
-    })
-
-    if (content.trim()) {
-      hooks?.onTextDelta?.(content, {
-        blockId: reasoningBlockId,
-        order: reasoningOrder,
-        target: 'phase',
-      })
-    }
-
-    for (const toolCall of finalizedToolCalls) {
-      const tool = registry.get(toolCall.function.name)
-      const args = parseToolArguments(toolCall.function.arguments || '{}')
-      const result = tool
-        ? await invokeTool(tool, args, toolEvents, {
-            ...hooks,
-            timelineOrder: toolOrder,
-          })
-        : `Tool not found: ${toolCall.function.name}`
+      loopGuard.record(
+        JSON.stringify(
+          finalizedToolCalls.map(toolCall => ({
+            name: toolCall.function.name,
+            args: toolCall.function.arguments || '{}',
+          })),
+        ),
+      )
 
       transcript.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        content: result,
+        role: 'assistant',
+        content,
+        tool_calls: finalizedToolCalls,
       })
-    }
+      conversationMessages.push({
+        role: 'assistant',
+        content,
+      })
+
+      if (content.trim()) {
+        hooks?.onTextDelta?.(content, {
+          blockId: reasoningBlockId,
+          order: reasoningOrder,
+          target: 'phase',
+        })
+      }
+
+      for (const toolCall of finalizedToolCalls) {
+        const tool = registry.get(toolCall.function.name)
+        const args = parseToolArguments(toolCall.function.arguments || '{}')
+        const result = tool
+          ? await invokeTool(tool, args, toolEvents, {
+              ...hooks,
+              timelineOrder: toolOrder,
+            })
+          : `Tool not found: ${toolCall.function.name}`
+
+        transcript.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: result,
+        })
+      }
     }
 
     throw new Error(loopConfig.limitMessage)
   } catch (error) {
-    throw maybeNormalizeProviderTermination(error, messages)
+    const normalized = maybeNormalizeProviderTermination(error, conversationMessages)
+    const aggregateRetryInfo = mergeProviderRetryInfo(
+      buildProviderRetryInfo(providerRetryCount, maxAttempts),
+      extractProviderRetryInfo(error),
+    )
+    throw attachProviderRetryInfo(normalized, aggregateRetryInfo)
   }
 }
 
@@ -971,103 +1216,132 @@ export async function runGoogleAgent({
   const conversationMessages = [...messages]
   const transcript = toGeminiContents(conversationMessages)
   let latestUsage
+  let providerRetryCount = 0
   let providerReasoning = ''
   const providerReasoningBlocks = []
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
+  const maxAttempts = getProviderFailureRecoveryMaxAttempts(settings)
 
   try {
     for (let step = 0; step < loopConfig.maxIterations; step += 1) {
-    appendQueuedInputsToGeminiTranscript(transcript, conversationMessages, hooks)
-    const reasoningBlockId = `provider-phase-${step + 1}`
-    const reasoningOrder = step * 2
-    const toolOrder = reasoningOrder + 1
-    const response = await fetch(
-      `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-goog-api-key': settings.apiKey,
-        },
-        body: JSON.stringify({
-          system_instruction: {
-            parts: [{ text: systemPrompt }],
+      appendQueuedInputsToGeminiTranscript(transcript, conversationMessages, hooks)
+      const reasoningBlockId = `provider-phase-${step + 1}`
+      const reasoningOrder = step * 2
+      const toolOrder = reasoningOrder + 1
+
+      const attemptResult = await runProviderOperationWithRetry(async attemptState => {
+        const response = await fetch(
+          `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-goog-api-key': settings.apiKey,
+            },
+            body: JSON.stringify({
+              system_instruction: {
+                parts: [{ text: systemPrompt }],
+              },
+              contents: transcript,
+              tools: geminiToolDefs(tools),
+            }),
           },
-          contents: transcript,
-          tools: geminiToolDefs(tools),
-        }),
-      },
-    )
+        )
 
-    if (!response.ok) {
-      const data = await parseJsonResponse(response)
-      throw buildProviderHttpError(
-        response,
-        data.error?.message || 'Google request failed',
-        messages,
-      )
-    }
+        if (!response.ok) {
+          const data = await parseJsonResponse(response)
+          throw buildProviderHttpError(
+            response,
+            data.error?.message || 'Google request failed',
+            messages,
+          )
+        }
 
-    let content = ''
-    let phaseReasoning = ''
-    const functionCalls = []
-    const streamParser = createThinkStreamParser({
-      onContent(text) {
-        content += text
-      },
-      onReasoning(text) {
-        providerReasoning += text
-        phaseReasoning += text
-        hooks?.onReasoningDelta?.(text, {
-          blockId: reasoningBlockId,
-          kind: 'provider',
-          order: reasoningOrder,
+        let content = ''
+        let phaseReasoning = ''
+        const functionCalls = []
+        let usageForAttempt
+        const streamParser = createThinkStreamParser({
+          onContent(text) {
+            content += text
+            attemptState.receivedOutput = true
+            attemptState.partialMessage += text
+          },
+          onReasoning(text) {
+            providerReasoning += text
+            phaseReasoning += text
+            attemptState.receivedOutput = true
+            attemptState.partialReasoning += text
+            hooks?.onReasoningDelta?.(text, {
+              blockId: reasoningBlockId,
+              kind: 'provider',
+              order: reasoningOrder,
+            })
+          },
         })
-      },
-    })
 
-    await readSseStream(response, async payload => {
-      const data = JSON.parse(payload)
-      const usage = data.usageMetadata
-        ? {
-            inputTokens: data.usageMetadata.promptTokenCount,
-            outputTokens: data.usageMetadata.candidatesTokenCount,
+        await readSseStream(response, async payload => {
+          const data = JSON.parse(payload)
+          const usage = data.usageMetadata
+            ? {
+                inputTokens: data.usageMetadata.promptTokenCount,
+                outputTokens: data.usageMetadata.candidatesTokenCount,
+              }
+            : undefined
+          if (usage) {
+            usageForAttempt = usage
           }
-        : undefined
-      if (usage) {
-        latestUsage = usage
-        pushUsage(hooks, usage)
+
+          const candidate = data.candidates?.[0]
+          const parts = candidate?.content?.parts || []
+
+          for (const part of parts) {
+            if (typeof part.text === 'string' && part.text && part.thought) {
+              streamParser.consume(`<think>${part.text}</think>`)
+              continue
+            }
+            if (typeof part.text === 'string' && part.text) {
+              streamParser.consume(part.text)
+            }
+          }
+
+          if (parts.length > 0) {
+            attemptState.receivedOutput = true
+          }
+          collectGeminiFunctionCalls(functionCalls, parts)
+        })
+
+        streamParser.flush()
+        return {
+          content,
+          phaseReasoning,
+          functionCalls,
+          usage: usageForAttempt,
+        }
+      }, {
+        messages: conversationMessages,
+        maxAttempts,
+      })
+      const stepResult = attemptResult.value
+      providerRetryCount += attemptResult.retryCount
+
+      if (stepResult.usage) {
+        latestUsage = stepResult.usage
+        pushUsage(hooks, stepResult.usage)
       }
 
-      const candidate = data.candidates?.[0]
-      const parts = candidate?.content?.parts || []
-
-      for (const part of parts) {
-        if (typeof part.text === 'string' && part.text && part.thought) {
-          streamParser.consume(`<think>${part.text}</think>`)
-          continue
-        }
-        if (typeof part.text === 'string' && part.text) {
-          streamParser.consume(part.text)
-        }
-      }
-
-      collectGeminiFunctionCalls(functionCalls, parts)
-    })
-
-    streamParser.flush()
-
-    if (phaseReasoning.trim()) {
+      if (stepResult.phaseReasoning.trim()) {
       providerReasoningBlocks.push({
         id: reasoningBlockId,
         kind: 'provider',
-        content: phaseReasoning,
+        content: stepResult.phaseReasoning,
         order: reasoningOrder,
       })
-    }
+      }
 
-    if (functionCalls.length === 0) {
+      const { content, functionCalls } = stepResult
+      if (functionCalls.length === 0) {
       const queuedInputs = drainAppendedInputs(hooks)
       if (queuedInputs.length > 0) {
         if (content.trim()) {
@@ -1100,71 +1374,77 @@ export async function runGoogleAgent({
         reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
         usage: latestUsage,
         messages: conversationMessages,
+        retryInfo: buildProviderRetryInfo(providerRetryCount, maxAttempts),
       }
-    }
+      }
 
-    loopGuard.record(
-      JSON.stringify(
-        functionCalls.map(entry => ({
-          name: entry.name,
-          args: entry.args || {},
-        })),
-      ),
-    )
-
-    transcript.push({
-      role: 'model',
-      parts: [
-        ...(content ? [{ text: content }] : []),
-        ...functionCalls.map(entry => ({
-          functionCall: {
+      loopGuard.record(
+        JSON.stringify(
+          functionCalls.map(entry => ({
             name: entry.name,
-            args: entry.args,
-          },
-        })),
-      ],
-    })
-    conversationMessages.push({
-      role: 'assistant',
-      content,
-    })
+            args: entry.args || {},
+          })),
+        ),
+      )
 
-    if (content.trim()) {
-      hooks?.onTextDelta?.(content, {
-        blockId: reasoningBlockId,
-        order: reasoningOrder,
-        target: 'phase',
+      transcript.push({
+        role: 'model',
+        parts: [
+          ...(content ? [{ text: content }] : []),
+          ...functionCalls.map(entry => ({
+            functionCall: {
+              name: entry.name,
+              args: entry.args,
+            },
+          })),
+        ],
       })
-    }
-
-    const toolResponses = []
-    for (const entry of functionCalls) {
-      const tool = registry.get(entry.name)
-      const result = tool
-        ? await invokeTool(tool, entry.args || {}, toolEvents, {
-            ...hooks,
-            timelineOrder: toolOrder,
-          })
-        : `Tool not found: ${entry.name}`
-
-      toolResponses.push({
-        functionResponse: {
-          name: entry.name,
-          response: {
-            output: result,
-          },
-        },
+      conversationMessages.push({
+        role: 'assistant',
+        content,
       })
-    }
 
-    transcript.push({
-      role: 'user',
-      parts: toolResponses,
-    })
+      if (content.trim()) {
+        hooks?.onTextDelta?.(content, {
+          blockId: reasoningBlockId,
+          order: reasoningOrder,
+          target: 'phase',
+        })
+      }
+
+      const toolResponses = []
+      for (const entry of functionCalls) {
+        const tool = registry.get(entry.name)
+        const result = tool
+          ? await invokeTool(tool, entry.args || {}, toolEvents, {
+              ...hooks,
+              timelineOrder: toolOrder,
+            })
+          : `Tool not found: ${entry.name}`
+
+        toolResponses.push({
+          functionResponse: {
+            name: entry.name,
+            response: {
+              output: result,
+            },
+          },
+        })
+      }
+
+      transcript.push({
+        role: 'user',
+        parts: toolResponses,
+      })
     }
 
     throw new Error(loopConfig.limitMessage)
   } catch (error) {
-    throw maybeNormalizeProviderTermination(error, messages)
+    const normalized = maybeNormalizeProviderTermination(error, conversationMessages)
+    const aggregateRetryInfo = mergeProviderRetryInfo(
+      buildProviderRetryInfo(providerRetryCount, maxAttempts),
+      extractProviderRetryInfo(error),
+    )
+    throw attachProviderRetryInfo(normalized, aggregateRetryInfo)
   }
 }

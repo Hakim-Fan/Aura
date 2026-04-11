@@ -642,6 +642,7 @@ function toMessageVariant(message: ChatMessage): ChatMessageVariant {
     steps: message.steps,
     error: message.error,
     errorInfo: message.errorInfo,
+    retryInfo: message.retryInfo,
     appendedInputs: message.appendedInputs,
     modelInfo: message.modelInfo,
   }
@@ -671,6 +672,7 @@ function applyMessageVariant(
     steps: activeVariant.steps,
     error: activeVariant.error,
     errorInfo: activeVariant.errorInfo,
+    retryInfo: activeVariant.retryInfo,
     appendedInputs: activeVariant.appendedInputs,
     modelInfo: activeVariant.modelInfo,
     versions: variants,
@@ -1178,6 +1180,7 @@ export function MainWindowApp() {
                 appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
                 error: snapshot.error,
                 errorInfo: snapshot.errorInfo,
+                retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
               }))
               : message,
           ),
@@ -1232,6 +1235,7 @@ export function MainWindowApp() {
                             snapshot.status === 'failed'
                               ? snapshot.errorInfo
                               : undefined,
+                          retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
                         }))
                         : message,
                     ),
@@ -1274,6 +1278,7 @@ export function MainWindowApp() {
                 status: 'failed' as const,
                 error: message,
                 errorInfo: undefined,
+                retryInfo: currentVariant.retryInfo,
                 activity: currentVariant.activity
                   ? {
                     ...currentVariant.activity,

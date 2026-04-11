@@ -4,6 +4,8 @@ import { ask, open } from '@tauri-apps/plugin-dialog'
 import { ChevronDown, ChevronUp, FolderOpen, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { builtinPlugins, builtinSkills } from './catalog'
 import {
+  BROWSER_INSTALL_PROGRESS_EVENT,
+  cancelManagedBrowserInstall,
   clearAuraSiteCookies,
   detectBrowserRuntime,
   discoverChromeImportSources,
@@ -11,6 +13,8 @@ import {
   importChromeSiteCookies,
   installManagedBrowser,
   isBrowserRuntimeSourceAvailable,
+  resetAuraBrowserProfile,
+  resetAuraSiteSessions,
   resolveAuraBrowserProfilePath,
   uninstallManagedBrowser,
   validateCustomSearchTemplate,
@@ -29,6 +33,7 @@ import { broadcastSettingsUpdated, closeCurrentWindow, openMcpEditorWindow } fro
 import type {
   AgentSettings,
   BrowserRuntimeSource,
+  ManagedBrowserInstallProgress,
   ProviderMode,
   ProviderProfile,
 } from './types'
@@ -88,7 +93,7 @@ const browserRuntimeOptions: Array<{
   {
     id: 'managed-chrome',
     label: 'Aura 托管浏览器',
-    description: '后续可一键安装和卸载，和系统浏览器隔离更彻底。',
+    description: '支持一键安装和卸载，和系统浏览器隔离更彻底。',
   },
   {
     id: 'custom-executable',
@@ -121,6 +126,37 @@ function formatBytes(value?: number) {
   return `${size.toFixed(size >= 100 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
 }
 
+function formatProgressPercent(value?: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '进行中'
+  }
+
+  return `${Math.max(0, Math.min(100, Math.round(value * 100)))}%`
+}
+
+function getManagedBrowserStageLabel(stage?: ManagedBrowserInstallProgress['stage']) {
+  switch (stage) {
+    case 'preparing':
+      return '准备环境'
+    case 'resolving-download':
+      return '获取版本'
+    case 'downloading':
+      return '下载安装包'
+    case 'extracting':
+      return '解压文件'
+    case 'verifying':
+      return '校验安装'
+    case 'cancelled':
+      return '已取消'
+    case 'completed':
+      return '安装完成'
+    case 'failed':
+      return '安装失败'
+    default:
+      return '等待开始'
+  }
+}
+
 type Props = {
   initialTab: SettingsTab
 }
@@ -142,9 +178,14 @@ export function SettingsWindowApp({ initialTab }: Props) {
   const [isRefreshingBrowserRuntime, setIsRefreshingBrowserRuntime] = useState(false)
   const [isInstallingManagedBrowser, setIsInstallingManagedBrowser] = useState(false)
   const [isUninstallingManagedBrowser, setIsUninstallingManagedBrowser] = useState(false)
+  const [isCancellingManagedBrowserInstall, setIsCancellingManagedBrowserInstall] = useState(false)
+  const [managedBrowserInstallProgress, setManagedBrowserInstallProgress] =
+    useState<ManagedBrowserInstallProgress | null>(null)
   const [isDiscoveringChromeProfiles, setIsDiscoveringChromeProfiles] = useState(false)
   const [isImportingChromeSite, setIsImportingChromeSite] = useState(false)
+  const [isBrowserAdvancedOpen, setIsBrowserAdvancedOpen] = useState(false)
   const [siteActionKey, setSiteActionKey] = useState('')
+  const [profileActionKey, setProfileActionKey] = useState('')
   const [selectedChromeImportSourceId, setSelectedChromeImportSourceId] = useState('')
   const [chromeImportDomainInput, setChromeImportDomainInput] = useState('')
   const [availableSkills, setAvailableSkills] = useState<AuraAsset[]>(() =>
@@ -213,6 +254,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
   useEffect(() => {
     let unlistenOpenTab: (() => void) | undefined
     let unlistenSettingsUpdated: (() => void) | undefined
+    let unlistenBrowserInstallProgress: (() => void) | undefined
 
     void (async () => {
       try {
@@ -264,11 +306,26 @@ export function SettingsWindowApp({ initialTab }: Props) {
           // Ignore background browser detection refresh errors.
         })
       })
+
+      unlistenBrowserInstallProgress = await listen<ManagedBrowserInstallProgress>(
+        BROWSER_INSTALL_PROGRESS_EVENT,
+        event => {
+          setManagedBrowserInstallProgress(event.payload)
+          if (
+            event.payload.stage === 'completed' ||
+            event.payload.stage === 'cancelled' ||
+            event.payload.stage === 'failed'
+          ) {
+            setIsCancellingManagedBrowserInstall(false)
+          }
+        },
+      )
     })()
 
     return () => {
       unlistenOpenTab?.()
       unlistenSettingsUpdated?.()
+      unlistenBrowserInstallProgress?.()
     }
   }, [])
 
@@ -279,6 +336,27 @@ export function SettingsWindowApp({ initialTab }: Props) {
     const timer = window.setTimeout(() => setSaveState('idle'), 1800)
     return () => window.clearTimeout(timer)
   }, [saveState])
+
+  useEffect(() => {
+    if (browserStatus?.tone !== 'success') {
+      return
+    }
+
+    const timer = window.setTimeout(() => setBrowserStatus(null), 2200)
+    return () => window.clearTimeout(timer)
+  }, [browserStatus])
+
+  useEffect(() => {
+    if (
+      managedBrowserInstallProgress?.stage !== 'completed' &&
+      managedBrowserInstallProgress?.stage !== 'cancelled'
+    ) {
+      return
+    }
+
+    const timer = window.setTimeout(() => setManagedBrowserInstallProgress(null), 1600)
+    return () => window.clearTimeout(timer)
+  }, [managedBrowserInstallProgress])
 
   useEffect(() => {
     if (
@@ -863,9 +941,98 @@ export function SettingsWindowApp({ initialTab }: Props) {
     await openPathInDefaultApp(resolveAuraBrowserProfilePath(nextAura, draftSettings.browser))
   }
 
+  async function handleResetAuraBrowserProfile() {
+    const confirmed = await ask(
+      '确认清空 Aura 浏览器 Profile？这会删除 Aura 浏览器中的 Cookie、本地存储和缓存，并清空待应用的导入 Cookie 队列。',
+      {
+        title: '清空 Aura 浏览器 Profile',
+        kind: 'warning',
+      },
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setProfileActionKey('clear-profile')
+    setBrowserStatus(null)
+
+    try {
+      const result = await resetAuraBrowserProfile({
+        settings: draftSettings.browser,
+      })
+      setDraftSettings(current => ({
+        ...current,
+        importedChromeSites: [],
+      }))
+      setBrowserStatus({
+        tone: 'success',
+        message: result.clearedProfile
+          ? `Aura 浏览器 Profile 已清空，待应用 Cookie 队列里还清掉了 ${result.pendingRemovedCount} 条记录。`
+          : `Aura 浏览器 Profile 原本就是空的，待应用 Cookie 队列里清掉了 ${result.pendingRemovedCount} 条记录。`,
+      })
+      setSaveState('idle')
+    } catch (caught) {
+      setBrowserStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '清空 Aura 浏览器 Profile 失败。',
+      })
+    } finally {
+      setProfileActionKey('')
+    }
+  }
+
+  async function handleResetAuraSiteSessions() {
+    const confirmed = await ask(
+      '确认重置全部站点会话？这会清空 Aura 浏览器中所有站点 Cookie，并删除待应用的导入 Cookie 队列，但会保留 Profile 目录本身。',
+      {
+        title: '重置全部站点会话',
+        kind: 'warning',
+      },
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setProfileActionKey('reset-site-sessions')
+    setBrowserStatus(null)
+
+    try {
+      const result = await resetAuraSiteSessions({
+        settings: draftSettings.browser,
+      })
+      setDraftSettings(current => ({
+        ...current,
+        importedChromeSites: current.importedChromeSites.map(site => ({
+          ...site,
+          cookieCount: 0,
+        })),
+      }))
+      setBrowserStatus({
+        tone: 'success',
+        message: `已重置 Aura 浏览器里的全部站点会话，移除了 ${result.removedCount} 条 Cookie，待应用队列里还清掉了 ${result.pendingRemovedCount} 条。`,
+      })
+      setSaveState('idle')
+    } catch (caught) {
+      setBrowserStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '重置 Aura 站点会话失败。',
+      })
+    } finally {
+      setProfileActionKey('')
+    }
+  }
+
   async function handleInstallManagedBrowser() {
     setIsInstallingManagedBrowser(true)
+    setIsCancellingManagedBrowserInstall(false)
     setBrowserStatus(null)
+    setManagedBrowserInstallProgress({
+      stage: 'preparing',
+      message: '正在准备 Aura 托管浏览器安装环境…',
+      progress: 0.01,
+    })
 
     try {
       const status = await installManagedBrowser()
@@ -877,18 +1044,57 @@ export function SettingsWindowApp({ initialTab }: Props) {
         },
         browserRuntimeStatus: status,
       }))
+      setManagedBrowserInstallProgress({
+        stage: 'completed',
+        message: 'Aura 托管浏览器安装完成。',
+        progress: 1,
+      })
       setBrowserStatus({
         tone: 'success',
         message: 'Aura 托管浏览器安装完成。',
       })
       setSaveState('idle')
     } catch (caught) {
+      const message = caught instanceof Error ? caught.message : '托管浏览器安装失败。'
+      const wasCancelled = message.includes('已取消')
+
+      setManagedBrowserInstallProgress({
+        stage: wasCancelled ? 'cancelled' : 'failed',
+        message,
+      })
       setBrowserStatus({
-        tone: 'error',
-        message: caught instanceof Error ? caught.message : '托管浏览器安装失败。',
+        tone: wasCancelled ? 'success' : 'error',
+        message,
       })
     } finally {
       setIsInstallingManagedBrowser(false)
+      setIsCancellingManagedBrowserInstall(false)
+    }
+  }
+
+  async function handleCancelManagedBrowserInstall() {
+    if (!isInstallingManagedBrowser || isCancellingManagedBrowserInstall) {
+      return
+    }
+
+    setIsCancellingManagedBrowserInstall(true)
+    setManagedBrowserInstallProgress(current =>
+      current
+        ? {
+            ...current,
+            message: '正在取消 Aura 托管浏览器安装…',
+          }
+        : current,
+    )
+
+    try {
+      await cancelManagedBrowserInstall()
+    } catch (caught) {
+      setIsCancellingManagedBrowserInstall(false)
+      setBrowserStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '取消托管浏览器安装失败。',
+      })
     }
   }
 
@@ -922,6 +1128,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
           browserRuntimeStatus: status,
         }
       })
+      setManagedBrowserInstallProgress(null)
       setBrowserStatus({
         tone: 'success',
         message: 'Aura 托管浏览器已卸载。',
@@ -1349,13 +1556,54 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
+            <div className="section-title">失败恢复</div>
+            <div className="toggle-stack">
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.enableProviderFailureRecovery}
+                  onChange={event =>
+                    handleSettingsChange('enableProviderFailureRecovery', event.target.checked)
+                  }
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>模型失败时自动恢复</strong>
+                  <span className="muted">
+                    当 Provider 在工具调用后中断、超时或断流时，自动重试并尽量基于已完成步骤补出最终回答。
+                  </span>
+                </div>
+              </label>
+            </div>
+            <label className="settings-number-field mt-3">
+              <span>自动恢复重试次数</span>
+              <input
+                type="number"
+                min={1}
+                max={5}
+                step={1}
+                value={draftSettings.providerFailureRecoveryMaxAttempts}
+                disabled={!draftSettings.enableProviderFailureRecovery}
+                onChange={event =>
+                  handleSettingsChange(
+                    'providerFailureRecoveryMaxAttempts',
+                    Math.max(1, Math.min(5, Number(event.target.value) || 1)),
+                  )
+                }
+              />
+            </label>
+            <div className="provider-note mt-3">
+              <p>开启后，Aura 会优先把瞬时模型故障当成可恢复问题处理，而不是立刻结束整轮任务。</p>
+              <p>次数越高越激进，通常能多扛住几次断流或超时，但也会增加等待时间和 token 成本。</p>
+            </div>
+          </section>
+
+          <section className="dashboard-card">
             <div className="section-title">审批策略</div>
             <div className="flex flex-col gap-3">
               {[
                 { key: 'autoApproveShell', label: 'Shell 默认自动允许' },
                 { key: 'autoApproveFileWrite', label: '文件写入默认自动允许' },
                 { key: 'autoApproveComputerUse', label: 'Computer Use 默认自动允许' },
-                { key: 'autoApproveChromeAutomation', label: 'Chrome 自动化默认自动允许' },
               ].map(item => (
                 <label key={item.key} className="relative flex items-center gap-3 cursor-pointer group">
                   <input
@@ -1377,7 +1625,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
               ))}
             </div>
             <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-70">
-              这组开关会立即生效并同步到主窗口。注意: `Shell` 只覆盖命令执行，文件写入、桌面交互和 Chrome 自动化仍按各自开关审批。
+              这组开关会立即生效并同步到主窗口。注意: `Shell` 只覆盖命令执行，文件写入和桌面交互仍按各自开关审批。
             </p>
           </section>
 
@@ -1404,6 +1652,26 @@ export function SettingsWindowApp({ initialTab }: Props) {
   function renderBrowser() {
     const runtimeStatus = draftSettings.browserRuntimeStatus
     const profilePath = resolveAuraBrowserProfilePath(auraHome, draftSettings.browser)
+    const chromeImportSourcesById = new Map(
+      draftSettings.chromeImportSources.map(source => [source.id, source] as const),
+    )
+    const latestImportedSite = draftSettings.importedChromeSites[0]
+    const installProgressValue = managedBrowserInstallProgress?.progress
+    const showManagedBrowserProgress = Boolean(managedBrowserInstallProgress)
+    const managedBrowserStage =
+      managedBrowserInstallProgress?.stage ||
+      (runtimeStatus?.managedChromeInstalled ? 'completed' : undefined)
+    const isManagedBrowserFailed = managedBrowserInstallProgress?.stage === 'failed'
+    const isAdvancedVisible = isBrowserAdvancedOpen || Boolean(browserValidationError)
+    const managedBrowserPrimaryText = runtimeStatus?.managedChromeInstalled
+      ? runtimeStatus.managedChromePath || '已安装'
+      : managedBrowserInstallProgress?.message || '未安装'
+    const managedBrowserSecondaryText =
+      managedBrowserInstallProgress?.downloadedBytes && managedBrowserInstallProgress?.totalBytes
+        ? `${formatBytes(managedBrowserInstallProgress.downloadedBytes)} / ${formatBytes(managedBrowserInstallProgress.totalBytes)}`
+        : runtimeStatus?.managedChromeInstalled
+          ? formatBytes(runtimeStatus.managedChromeSizeBytes)
+          : '建议安装后作为默认运行时，和系统 Chrome 隔离。'
 
     return (
       <section className="section-shell settings-panel">
@@ -1412,7 +1680,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <div className="eyebrow">Browser Runtime</div>
             <h2>浏览器</h2>
             <p className="muted mt-2">
-              默认网页任务将逐步切到 Aura 自己维护的浏览器运行时与 Profile。这里先完成运行环境、偏好和接管策略配置。
+              默认网页任务已经统一走 Aura 自己维护的浏览器运行时与 Profile。现在把常用设置放前面，安装、登录态和高级偏好按用途分组，阅读成本会低很多。
             </p>
           </div>
           <div className="header-actions">
@@ -1451,8 +1719,87 @@ export function SettingsWindowApp({ initialTab }: Props) {
         ) : null}
 
         <div className="settings-grid">
+          <section className="dashboard-card full-span browser-overview-card">
+            <div className="section-title">浏览器总览</div>
+            <div className="browser-summary-grid">
+              <div className="browser-summary-item">
+                <span className="browser-summary-label">当前来源</span>
+                <strong>{getBrowserRuntimeSourceLabel(draftSettings.browser.source)}</strong>
+                <span className="muted">
+                  {draftSettings.browser.enabled ? 'Aura 浏览器运行时已启用' : 'Aura 浏览器运行时已关闭'}
+                </span>
+              </div>
+              <div className="browser-summary-item">
+                <span className="browser-summary-label">Aura 托管浏览器</span>
+                <strong>{runtimeStatus?.managedChromeInstalled ? '已安装' : '未安装'}</strong>
+                <span className="muted">{managedBrowserSecondaryText}</span>
+              </div>
+              <div className="browser-summary-item">
+                <span className="browser-summary-label">Profile</span>
+                <strong>{draftSettings.browser.persistAuraProfile ? '持久化保存' : '按需使用'}</strong>
+                <span className="muted">{profilePath || '等待 Aura 目录初始化'}</span>
+              </div>
+              <div className="browser-summary-item">
+                <span className="browser-summary-label">人工接管</span>
+                <strong>
+                  {draftSettings.browser.takeoverMode === 'ask'
+                    ? '先询问再接管'
+                    : '阻塞时自动打开可见浏览器'}
+                </strong>
+                <span className="muted">
+                  {draftSettings.browser.headlessByDefault ? '默认先无头执行' : '默认直接可见执行'}
+                </span>
+              </div>
+            </div>
+
+            {showManagedBrowserProgress ? (
+              <div
+                className={`browser-install-panel ${isManagedBrowserFailed ? 'error' : runtimeStatus?.managedChromeInstalled ? 'success' : ''}`}
+              >
+                <div className="browser-install-panel-head">
+                  <div>
+                    <div className="browser-install-stage">
+                      {getManagedBrowserStageLabel(managedBrowserStage)}
+                    </div>
+                    <strong>{managedBrowserPrimaryText}</strong>
+                  </div>
+                  <span className="browser-install-percent">
+                    {runtimeStatus?.managedChromeInstalled && !managedBrowserInstallProgress
+                      ? '已就绪'
+                      : formatProgressPercent(installProgressValue)}
+                  </span>
+                </div>
+                <div className="browser-progress-track">
+                  <div
+                    className={`browser-progress-fill ${isManagedBrowserFailed ? 'error' : ''}`}
+                    style={{
+                      width: `${
+                        Math.max(
+                          0,
+                          Math.min(
+                            100,
+                            Math.round(
+                              ((runtimeStatus?.managedChromeInstalled && !managedBrowserInstallProgress
+                                ? 1
+                                : installProgressValue || 0) *
+                                100),
+                            ),
+                          ),
+                        )
+                      }%`,
+                    }}
+                  />
+                </div>
+                <div className="browser-install-meta">
+                  <span>{managedBrowserInstallProgress?.message || managedBrowserPrimaryText}</span>
+                  <span>{managedBrowserSecondaryText}</span>
+                </div>
+              </div>
+            ) : null}
+          </section>
+
           <section className="dashboard-card">
-            <div className="section-title">浏览器运行时</div>
+            <div className="section-title">基础运行环境</div>
             <div className="toggle-stack">
               <label className="toggle-inline">
                 <input
@@ -1462,19 +1809,29 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 />
                 <div className="flex flex-col">
                   <strong>启用 Aura 浏览器运行时</strong>
-                  <span className="muted">后续网页工具默认会优先走独立浏览器，而不是前台 Chrome。</span>
+                  <span className="muted">默认网页工具优先走 Aura 浏览器，而不是系统前台 Chrome。</span>
                 </div>
               </label>
             </div>
 
             <div className="dashboard-list mt-4">
               <div className="dashboard-row">
-                <strong>当前来源</strong>
+                <strong>默认浏览器来源</strong>
                 <span>{getBrowserRuntimeSourceLabel(draftSettings.browser.source)}</span>
               </div>
               <div className="dashboard-row">
-                <strong>默认执行模式</strong>
-                <span>{draftSettings.browser.headlessByDefault ? '无头执行' : '可见窗口'}</span>
+                <strong>最近检测时间</strong>
+                <span>{formatTimestamp(runtimeStatus?.lastCheckedAt)}</span>
+              </div>
+              <div className="dashboard-row">
+                <strong>自定义浏览器路径</strong>
+                <span>
+                  {runtimeStatus?.customExecutablePath
+                    ? runtimeStatus.customExecutableValid
+                      ? runtimeStatus.customExecutablePath
+                      : `${runtimeStatus.customExecutablePath}（当前无效）`
+                    : '未选择'}
+                </span>
               </div>
             </div>
 
@@ -1500,16 +1857,10 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 )
               })}
             </div>
-
-            {draftSettings.browser.executablePath ? (
-              <div className="provider-note mt-4">
-                <p>自定义路径: {draftSettings.browser.executablePath}</p>
-              </div>
-            ) : null}
           </section>
 
           <section className="dashboard-card">
-            <div className="section-title">浏览器安装与环境检测</div>
+            <div className="section-title">安装与环境检测</div>
             <div className="dashboard-list">
               <div className="dashboard-row">
                 <strong>系统 Chrome</strong>
@@ -1527,37 +1878,41 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     : '未安装'}
                 </span>
               </div>
-              <div className="dashboard-row">
-                <strong>自定义路径</strong>
-                <span>
-                  {runtimeStatus?.customExecutablePath
-                    ? runtimeStatus.customExecutableValid
-                      ? runtimeStatus.customExecutablePath
-                      : `${runtimeStatus.customExecutablePath}（无效）`
-                    : '未选择'}
-                </span>
-              </div>
-              <div className="dashboard-row">
-                <strong>最近检测时间</strong>
-                <span>{formatTimestamp(runtimeStatus?.lastCheckedAt)}</span>
-              </div>
             </div>
 
             <div className="provider-note mt-3">
-              <p>托管浏览器会下载安装到 Aura 自己的浏览器目录里，方便和系统 Chrome 隔离。</p>
+              <p>推荐优先安装 Aura 托管浏览器。它会放在 Aura 自己的运行时目录里，和系统浏览器隔离，环境也更稳定。</p>
             </div>
             <div className="header-actions mt-4">
               <button
                 className="secondary-button"
-                disabled={isInstallingManagedBrowser || isUninstallingManagedBrowser}
+                disabled={
+                  runtimeStatus?.managedChromeInstalled ||
+                  isInstallingManagedBrowser ||
+                  isUninstallingManagedBrowser
+                }
                 onClick={() => void handleInstallManagedBrowser()}
               >
                 <RefreshCw
                   size={14}
                   className={isInstallingManagedBrowser ? 'spin-icon' : undefined}
                 />
-                {isInstallingManagedBrowser ? '正在安装...' : '安装 Aura 托管浏览器'}
+                {runtimeStatus?.managedChromeInstalled
+                  ? 'Aura 托管浏览器已安装'
+                  : isInstallingManagedBrowser
+                    ? '正在安装...'
+                    : '安装 Aura 托管浏览器'}
               </button>
+              {isInstallingManagedBrowser ? (
+                <button
+                  className="secondary-button"
+                  disabled={isCancellingManagedBrowserInstall}
+                  onClick={() => void handleCancelManagedBrowserInstall()}
+                >
+                  <Trash2 size={14} />
+                  {isCancellingManagedBrowserInstall ? '正在取消...' : '取消安装'}
+                </button>
+              ) : null}
               <button
                 className="secondary-button"
                 disabled={
@@ -1574,132 +1929,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
-            <div className="section-title">搜索偏好</div>
-            <div className="form-container">
-              <div className="form-row">
-                <label>搜索引擎</label>
-                <select
-                  className="settings-select"
-                  value={draftSettings.browser.search.engine}
-                  onChange={event => updateBrowserSearch('engine', event.target.value as AgentSettings['browser']['search']['engine'])}
-                >
-                  <option value="google">Google</option>
-                  <option value="bing">Bing</option>
-                  <option value="duckduckgo">DuckDuckGo</option>
-                  <option value="baidu">百度</option>
-                  <option value="custom">自定义</option>
-                </select>
-              </div>
-
-              {draftSettings.browser.search.engine === 'custom' ? (
-                <div className="form-row top-align">
-                  <label>模板</label>
-                  <div>
-                    <input
-                      className="monospace"
-                      value={draftSettings.browser.search.customTemplate || ''}
-                      onChange={event => updateBrowserSearch('customTemplate', event.target.value)}
-                      placeholder="https://example.com/search?q={query}"
-                      type="text"
-                    />
-                    <p className="muted mt-2">模板必须包含 <code>{'{query}'}</code>，并以 http/https 开头。</p>
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="form-row">
-                <label>Region</label>
-                <input
-                  value={draftSettings.browser.search.region || ''}
-                  onChange={event => updateBrowserSearch('region', event.target.value)}
-                  placeholder="auto / us / cn"
-                  type="text"
-                />
-              </div>
-
-              <div className="form-row">
-                <label>Language</label>
-                <input
-                  value={draftSettings.browser.search.language || ''}
-                  onChange={event => updateBrowserSearch('language', event.target.value)}
-                  placeholder="auto / en / zh-CN"
-                  type="text"
-                />
-              </div>
-
-              <div className="form-row">
-                <label>SafeSearch</label>
-                <select
-                  className="settings-select"
-                  value={draftSettings.browser.search.safeSearch || 'moderate'}
-                  onChange={event => updateBrowserSearch('safeSearch', event.target.value as AgentSettings['browser']['search']['safeSearch'])}
-                >
-                  <option value="off">关闭</option>
-                  <option value="moderate">适中</option>
-                  <option value="strict">严格</option>
-                </select>
-              </div>
-            </div>
-          </section>
-
-          <section className="dashboard-card">
-            <div className="section-title">浏览器行为偏好</div>
-            <div className="form-container">
-              <div className="form-row">
-                <label>Accept-Language</label>
-                <input
-                  value={draftSettings.browser.behavior.acceptLanguage || ''}
-                  onChange={event => updateBrowserBehavior('acceptLanguage', event.target.value)}
-                  placeholder="auto / zh-CN,zh;q=0.9"
-                  type="text"
-                />
-              </div>
-              <div className="form-row">
-                <label>Timezone</label>
-                <input
-                  value={draftSettings.browser.behavior.timezone || ''}
-                  onChange={event => updateBrowserBehavior('timezone', event.target.value)}
-                  placeholder="system / Asia/Shanghai"
-                  type="text"
-                />
-              </div>
-              <div className="form-row">
-                <label>Locale</label>
-                <input
-                  value={draftSettings.browser.behavior.locale || ''}
-                  onChange={event => updateBrowserBehavior('locale', event.target.value)}
-                  placeholder="system / zh-CN"
-                  type="text"
-                />
-              </div>
-              <div className="form-row">
-                <label>Color Scheme</label>
-                <select
-                  className="settings-select"
-                  value={draftSettings.browser.behavior.colorScheme || 'system'}
-                  onChange={event => updateBrowserBehavior('colorScheme', event.target.value as AgentSettings['browser']['behavior']['colorScheme'])}
-                >
-                  <option value="system">跟随系统</option>
-                  <option value="light">浅色</option>
-                  <option value="dark">深色</option>
-                </select>
-              </div>
-              <div className="form-row">
-                <label>User-Agent</label>
-                <select
-                  className="settings-select"
-                  value={draftSettings.browser.behavior.userAgentMode || 'default'}
-                  onChange={event => updateBrowserBehavior('userAgentMode', event.target.value as AgentSettings['browser']['behavior']['userAgentMode'])}
-                >
-                  <option value="default">默认</option>
-                  <option value="desktop">Desktop 优先</option>
-                </select>
-              </div>
-            </div>
-          </section>
-
-          <section className="dashboard-card">
-            <div className="section-title">Aura 浏览器 Profile</div>
+            <div className="section-title">Profile 与会话</div>
             <div className="toggle-stack">
               <label className="toggle-inline">
                 <input
@@ -1720,7 +1950,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 <span>{profilePath || '等待 Aura 目录初始化'}</span>
               </div>
               <div className="dashboard-row">
-                <strong>当前会话状态</strong>
+                <strong>当前会话模式</strong>
                 <span>{draftSettings.browser.headlessByDefault ? '默认无头执行' : '默认可见窗口'}</span>
               </div>
             </div>
@@ -1728,59 +1958,103 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <div className="header-actions mt-4">
               <button
                 className="secondary-button"
-                disabled={!profilePath}
+                disabled={!profilePath || Boolean(profileActionKey)}
                 onClick={() => void openAuraBrowserProfileFolder()}
               >
                 <FolderOpen size={14} />
                 打开 Profile 文件夹
               </button>
+              <button
+                className="secondary-button"
+                disabled={!profilePath || Boolean(profileActionKey)}
+                onClick={() => void handleResetAuraSiteSessions()}
+              >
+                <RefreshCw
+                  size={14}
+                  className={profileActionKey === 'reset-site-sessions' ? 'spin-icon' : undefined}
+                />
+                重置全部站点会话
+              </button>
+              <button
+                className="secondary-button"
+                disabled={!profilePath || Boolean(profileActionKey)}
+                onClick={() => void handleResetAuraBrowserProfile()}
+              >
+                <Trash2
+                  size={14}
+                  className={profileActionKey === 'clear-profile' ? 'spin-icon' : undefined}
+                />
+                清空 Aura 浏览器 Profile
+              </button>
             </div>
             <div className="provider-note mt-3">
-              <p>清空 Profile 和重置站点会话会等浏览器运行时稳定后再接入，避免现在提供误导性的空操作。</p>
+              <p>“重置全部站点会话”会清空全部 Cookie，但保留 Profile；“清空 Aura 浏览器 Profile”会直接重建整个目录。</p>
             </div>
           </section>
 
           <section className="dashboard-card">
-            <div className="section-title">系统 Chrome 备用模式</div>
+            <div className="section-title">人工接管与可见浏览器</div>
             <div className="toggle-stack">
               <label className="toggle-inline">
                 <input
-                  checked={draftSettings.enableChromeAutomation}
-                  onChange={event => handleSettingsChange('enableChromeAutomation', event.target.checked)}
+                  checked={draftSettings.browser.takeoverMode === 'ask'}
+                  onChange={() => updateBrowserSettings({ takeoverMode: 'ask' })}
+                  type="radio"
+                />
+                <div className="flex flex-col">
+                  <strong>遇到阻塞时先询问</strong>
+                  <span className="muted">更稳妥，适合希望保留更多手动确认的场景。</span>
+                </div>
+              </label>
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.browser.takeoverMode === 'auto-visible-on-blocker'}
+                  onChange={() => updateBrowserSettings({ takeoverMode: 'auto-visible-on-blocker' })}
+                  type="radio"
+                />
+                <div className="flex flex-col">
+                  <strong>遇到阻塞时自动打开可见浏览器</strong>
+                  <span className="muted">适合登录、验证码、2FA 之类需要尽快人工接管的流程。</span>
+                </div>
+              </label>
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.browser.headlessByDefault}
+                  onChange={event => updateBrowserSettings({ headlessByDefault: event.target.checked })}
                   type="checkbox"
                 />
                 <div className="flex flex-col">
-                  <strong>允许系统前台 Chrome 自动化</strong>
-                  <span className="muted">仅在浏览器运行时不可用，或你明确要求直接操作系统 Chrome 时使用。</span>
+                  <strong>默认无头执行</strong>
+                  <span className="muted">关闭后，会优先以可见窗口启动 Aura 浏览器。</span>
                 </div>
               </label>
             </div>
-            <div className="provider-note mt-4">
-              <p>风险提示：启用后，Agent 可能切换到你的前台 Chrome 窗口并打断当前桌面操作。</p>
+
+            <div className="provider-note mt-3">
+              <p>登录、验证码或授权页出现阻塞时，Aura 会通过接管卡片提醒你切到可见浏览器处理。</p>
             </div>
           </section>
 
-          <section className="dashboard-card">
-            <div className="section-title">Chrome 登录缓存导入</div>
-            <div className="dashboard-list">
-              <div className="dashboard-row">
-                <strong>已发现导入源</strong>
-                <span>{draftSettings.chromeImportSources.length} 个</span>
+          <section className="dashboard-card full-span">
+            <div className="section-title">站点登录态导入</div>
+            <div className="browser-summary-grid compact">
+              <div className="browser-summary-item">
+                <span className="browser-summary-label">已发现导入源</span>
+                <strong>{draftSettings.chromeImportSources.length} 个</strong>
+                <span className="muted">扫描本机 Chrome Profile 后可选择来源。</span>
               </div>
-              <div className="dashboard-row">
-                <strong>最近一次导入</strong>
-                <span>
-                  {draftSettings.importedChromeSites[0]
-                    ? formatTimestamp(draftSettings.importedChromeSites[0].importedAt)
-                    : '暂无'}
+              <div className="browser-summary-item">
+                <span className="browser-summary-label">最近一次导入</span>
+                <strong>{latestImportedSite ? latestImportedSite.domain : '暂无'}</strong>
+                <span className="muted">
+                  {latestImportedSite ? formatTimestamp(latestImportedSite.importedAt) : '还没有导入任何站点'}
                 </span>
               </div>
             </div>
+
             <div className="provider-note mt-4">
               <p>这里只会导入所选站点的 Cookie / Session，不会导入密码、书签、扩展或完整浏览历史。</p>
-            </div>
-            <div className="provider-note mt-3">
-              <p>这里导入的是选定站点的 Cookie / Session。导入后会写入 Aura 浏览器的待应用队列，并在下次浏览器会话中自动加载。</p>
+              <p>导入完成后，Aura 会把这些 Cookie 写入自己的待应用队列，在下次浏览器会话中自动加载。</p>
             </div>
             <div className="header-actions mt-4">
               <button
@@ -1792,7 +2066,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   size={14}
                   className={isDiscoveringChromeProfiles ? 'spin-icon' : undefined}
                 />
-                {isDiscoveringChromeProfiles ? '正在扫描...' : '发现本机 Chrome Profile'}
+                {isDiscoveringChromeProfiles ? '正在扫描...' : '扫描本机 Chrome Profile'}
               </button>
             </div>
             <div className="form-container mt-4">
@@ -1843,18 +2117,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
             </div>
           </section>
 
-          <section className="dashboard-card">
+          <section className="dashboard-card full-span">
             <div className="section-title">已导入站点管理</div>
-            {draftSettings.chromeImportSources.length > 0 ? (
-              <div className="dashboard-list mb-4">
-                {draftSettings.chromeImportSources.map(source => (
-                  <div key={source.id} className="dashboard-row">
-                    <strong>{source.profileName}</strong>
-                    <span>{source.profilePath}</span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
             {draftSettings.importedChromeSites.length > 0 ? (
               <div className="dashboard-list">
                 {draftSettings.importedChromeSites.map(site => (
@@ -1862,7 +2126,12 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     <div className="flex flex-col gap-1">
                       <strong>{site.domain}</strong>
                       <span>
-                        {site.cookieCount} cookies · {formatTimestamp(site.lastRefreshedAt || site.importedAt)}
+                        来源 Profile:{' '}
+                        {chromeImportSourcesById.get(site.sourceProfileId)?.profileName || site.sourceProfileId}
+                      </span>
+                      <span>首次导入: {formatTimestamp(site.importedAt)}</span>
+                      <span>
+                        最近刷新: {formatTimestamp(site.lastRefreshedAt || site.importedAt)} · {site.cookieCount} cookies
                       </span>
                     </div>
                     <div className="header-actions">
@@ -1911,59 +2180,205 @@ export function SettingsWindowApp({ initialTab }: Props) {
               </div>
             ) : (
               <p className="muted">
-                还没有导入任何站点。当前已经支持发现 Chrome Profile，后续会继续补站点级导入、刷新导入和清理 Aura Profile 中的站点会话。
+                还没有导入任何站点。建议先扫描本机 Chrome Profile，再按站点导入登录态。
               </p>
             )}
           </section>
 
-          <section className="dashboard-card">
-            <div className="section-title">用户接管 / 可见浏览器</div>
-            <div className="toggle-stack">
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.browser.takeoverMode === 'ask'}
-                  onChange={() => updateBrowserSettings({ takeoverMode: 'ask' })}
-                  type="radio"
-                />
-                <div className="flex flex-col">
-                  <strong>遇到阻塞时先询问</strong>
-                  <span className="muted">更稳妥，适合希望保留更多手动确认的场景。</span>
-                </div>
-              </label>
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.browser.takeoverMode === 'auto-visible-on-blocker'}
-                  onChange={() => updateBrowserSettings({ takeoverMode: 'auto-visible-on-blocker' })}
-                  type="radio"
-                />
-                <div className="flex flex-col">
-                  <strong>遇到阻塞时自动打开可见浏览器</strong>
-                  <span className="muted">适合登录、验证码、2FA 之类需要尽快人工接管的流程。</span>
-                </div>
-              </label>
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.browser.headlessByDefault}
-                  onChange={event => updateBrowserSettings({ headlessByDefault: event.target.checked })}
-                  type="checkbox"
-                />
-                <div className="flex flex-col">
-                  <strong>默认无头执行</strong>
-                  <span className="muted">关闭后，会优先以可见窗口启动 Aura 浏览器。</span>
-                </div>
-              </label>
+          <section className="dashboard-card full-span">
+            <div className="section-header">
+              <div>
+                <div className="section-title">高级偏好</div>
+                <p className="muted">把不常改的搜索、浏览器行为和备用模式收在这里，默认先不打扰。</p>
+              </div>
+              <button
+                className="secondary-button"
+                onClick={() => setIsBrowserAdvancedOpen(current => !current)}
+              >
+                {isAdvancedVisible ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                {isAdvancedVisible ? '收起高级偏好' : '展开高级偏好'}
+              </button>
             </div>
 
-            <div className="dashboard-list mt-4">
-              <div className="dashboard-row">
-                <strong>当前接管策略</strong>
-                <span>{draftSettings.browser.takeoverMode === 'ask' ? '先询问' : '自动打开可见浏览器'}</span>
+            {isAdvancedVisible ? (
+              <div className="settings-grid browser-advanced-grid mt-4">
+                <section className="dashboard-card nested">
+                  <div className="section-title">搜索设置</div>
+                  <div className="form-container">
+                    <div className="form-row">
+                      <label>搜索引擎</label>
+                      <select
+                        className="settings-select"
+                        value={draftSettings.browser.search.engine}
+                        onChange={event => updateBrowserSearch('engine', event.target.value as AgentSettings['browser']['search']['engine'])}
+                      >
+                        <option value="google">Google</option>
+                        <option value="bing">Bing</option>
+                        <option value="duckduckgo">DuckDuckGo</option>
+                        <option value="baidu">百度</option>
+                        <option value="custom">自定义</option>
+                      </select>
+                    </div>
+
+                    {draftSettings.browser.search.engine === 'custom' ? (
+                      <div className="form-row top-align">
+                        <label>搜索模板</label>
+                        <div>
+                          <input
+                            className="monospace"
+                            value={draftSettings.browser.search.customTemplate || ''}
+                            onChange={event => updateBrowserSearch('customTemplate', event.target.value)}
+                            placeholder="https://example.com/search?q={query}"
+                            type="text"
+                          />
+                          <p className="muted mt-2">
+                            模板必须包含 <code>{'{query}'}</code>，并以 `http://` 或 `https://` 开头。
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="form-row">
+                      <label>搜索区域</label>
+                      <input
+                        value={draftSettings.browser.search.region || ''}
+                        onChange={event => updateBrowserSearch('region', event.target.value)}
+                        placeholder="auto / us / cn"
+                        type="text"
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label>搜索语言</label>
+                      <input
+                        value={draftSettings.browser.search.language || ''}
+                        onChange={event => updateBrowserSearch('language', event.target.value)}
+                        placeholder="auto / en / zh-CN"
+                        type="text"
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label>安全搜索</label>
+                      <select
+                        className="settings-select"
+                        value={draftSettings.browser.search.safeSearch || 'moderate'}
+                        onChange={event => updateBrowserSearch('safeSearch', event.target.value as AgentSettings['browser']['search']['safeSearch'])}
+                      >
+                        <option value="off">关闭</option>
+                        <option value="moderate">适中</option>
+                        <option value="strict">严格</option>
+                      </select>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="dashboard-card nested">
+                  <div className="section-title">浏览器行为</div>
+                  <div className="form-container">
+                    <div className="form-row">
+                      <label>请求语言</label>
+                      <input
+                        value={draftSettings.browser.behavior.acceptLanguage || ''}
+                        onChange={event => updateBrowserBehavior('acceptLanguage', event.target.value)}
+                        placeholder="auto / zh-CN,zh;q=0.9"
+                        type="text"
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label>时区</label>
+                      <input
+                        value={draftSettings.browser.behavior.timezone || ''}
+                        onChange={event => updateBrowserBehavior('timezone', event.target.value)}
+                        placeholder="system / Asia/Shanghai"
+                        type="text"
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label>地区 Locale</label>
+                      <input
+                        value={draftSettings.browser.behavior.locale || ''}
+                        onChange={event => updateBrowserBehavior('locale', event.target.value)}
+                        placeholder="system / zh-CN"
+                        type="text"
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label>配色方案</label>
+                      <select
+                        className="settings-select"
+                        value={draftSettings.browser.behavior.colorScheme || 'system'}
+                        onChange={event => updateBrowserBehavior('colorScheme', event.target.value as AgentSettings['browser']['behavior']['colorScheme'])}
+                      >
+                        <option value="system">跟随系统</option>
+                        <option value="light">浅色</option>
+                        <option value="dark">深色</option>
+                      </select>
+                    </div>
+                    <div className="form-row">
+                      <label>User-Agent 策略</label>
+                      <select
+                        className="settings-select"
+                        value={draftSettings.browser.behavior.userAgentMode || 'default'}
+                        onChange={event => updateBrowserBehavior('userAgentMode', event.target.value as AgentSettings['browser']['behavior']['userAgentMode'])}
+                      >
+                        <option value="default">默认</option>
+                        <option value="desktop">优先桌面站</option>
+                      </select>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="dashboard-card nested">
+                  <div className="section-title">系统 Chrome 备用模式</div>
+                  <div className="toggle-stack">
+                    <label className="toggle-inline">
+                      <input
+                        checked={draftSettings.enableChromeAutomation}
+                        onChange={event => handleSettingsChange('enableChromeAutomation', event.target.checked)}
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>允许系统前台 Chrome 自动化</strong>
+                        <span className="muted">仅在运行时不可用，或你明确要求直接操作系统 Chrome 时使用。</span>
+                      </div>
+                    </label>
+                    <label className={`toggle-inline ${!draftSettings.enableChromeAutomation ? 'disabled' : ''}`}>
+                      <input
+                        checked={draftSettings.browser.allowChromeAutomationFallback}
+                        disabled={!draftSettings.enableChromeAutomation}
+                        onChange={event =>
+                          updateBrowserSettings({ allowChromeAutomationFallback: event.target.checked })
+                        }
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>运行时不可用时允许自动降级</strong>
+                        <span className="muted">只在 Aura 浏览器启动失败或来源不可用时，才允许回退到系统 Chrome。</span>
+                      </div>
+                    </label>
+                    <label className={`toggle-inline ${!draftSettings.enableChromeAutomation ? 'disabled' : ''}`}>
+                      <input
+                        checked={draftSettings.autoApproveChromeAutomation}
+                        disabled={!draftSettings.enableChromeAutomation}
+                        onChange={event =>
+                          void handleApprovalSettingChange(
+                            'autoApproveChromeAutomation',
+                            event.target.checked,
+                          )
+                        }
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>Chrome 自动化默认自动允许</strong>
+                        <span className="muted">仅影响 `chrome_*` 备用工具的审批，不影响 Aura 浏览器运行时。</span>
+                      </div>
+                    </label>
+                  </div>
+                  <div className="provider-note mt-4">
+                    <p>风险提示：启用后，Agent 可能切换到你的前台 Chrome 窗口并打断当前桌面操作。</p>
+                  </div>
+                </section>
               </div>
-              <div className="dashboard-row">
-                <strong>状态占位</strong>
-                <span>{runtimeStatus ? '浏览器空闲 / 检测已就绪' : '等待首次检测'}</span>
-              </div>
-            </div>
+            ) : null}
           </section>
         </div>
       </section>

@@ -51,6 +51,12 @@ export type RuntimeErrorInfo = {
   retryable?: boolean
 }
 
+export type ProviderRetryInfo = {
+  attemptedRetries: number
+  configuredMaxAttempts: number
+  recovered?: boolean
+}
+
 export type AppendedInputStatus = 'queued' | 'consumed'
 
 export type AppendedInput = {
@@ -214,6 +220,7 @@ export type ChatMessageVariant = {
   steps?: TaskNode[]
   error?: string
   errorInfo?: RuntimeErrorInfo
+  retryInfo?: ProviderRetryInfo
   appendedInputs?: AppendedInput[]
   modelInfo?: MessageModelInfo
 }
@@ -236,6 +243,7 @@ export type ChatMessage = {
   steps?: TaskNode[]
   error?: string
   errorInfo?: RuntimeErrorInfo
+  retryInfo?: ProviderRetryInfo
   appendedInputs?: AppendedInput[]
   modelInfo?: MessageModelInfo
   versions?: ChatMessageVariant[]
@@ -338,6 +346,7 @@ export type BrowserRuntimeSettings = {
   source: BrowserRuntimeSource
   executablePath?: string
   managedExecutablePath?: string
+  allowChromeAutomationFallback: boolean
   headlessByDefault: boolean
   takeoverMode: BrowserTakeoverMode
   persistAuraProfile: boolean
@@ -374,6 +383,24 @@ export type BrowserRuntimeStatusRecord = {
   lastCheckedAt: number
 }
 
+export type ManagedBrowserInstallStage =
+  | 'preparing'
+  | 'resolving-download'
+  | 'downloading'
+  | 'extracting'
+  | 'verifying'
+  | 'cancelled'
+  | 'completed'
+  | 'failed'
+
+export type ManagedBrowserInstallProgress = {
+  stage: ManagedBrowserInstallStage
+  message: string
+  progress?: number
+  downloadedBytes?: number
+  totalBytes?: number
+}
+
 export type AgentSettings = {
   provider: ProviderMode
   apiKey: string
@@ -386,6 +413,8 @@ export type AgentSettings = {
   executionMode: ExecutionMode
   memoryMode: MemoryMode
   reasoningEffort: ReasoningEffort
+  enableProviderFailureRecovery: boolean
+  providerFailureRecoveryMaxAttempts: number
   enableMultiAgent: boolean
   enableComputerUse: boolean
   enableChromeAutomation: boolean
@@ -425,6 +454,7 @@ export type AgentResponse = {
   reasoning?: MessageReasoning[]
   usage?: MessageUsage
   capabilitySnapshot?: CapabilityUsageSnapshot
+  retryInfo?: ProviderRetryInfo
 }
 
 export type AgentTaskSnapshot = {
@@ -441,6 +471,7 @@ export type AgentTaskSnapshot = {
   appendedInputs?: AppendedInput[]
   error?: string
   errorInfo?: RuntimeErrorInfo
+  retryInfo?: ProviderRetryInfo
   errorCode?: string
   errorSource?: string
   rawError?: string

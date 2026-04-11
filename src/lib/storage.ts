@@ -106,6 +106,7 @@ function defaultBrowserRuntimeSettings(): BrowserRuntimeSettings {
   return {
     enabled: true,
     source: 'system-chrome',
+    allowChromeAutomationFallback: false,
     headlessByDefault: true,
     takeoverMode: 'ask',
     persistAuraProfile: true,
@@ -126,6 +127,8 @@ export const defaultSettings: AgentSettings = {
   executionMode: 'bounded',
   memoryMode: 'summary',
   reasoningEffort: 'medium',
+  enableProviderFailureRecovery: true,
+  providerFailureRecoveryMaxAttempts: 3,
   enableMultiAgent: true,
   enableComputerUse: true,
   enableChromeAutomation: true,
@@ -253,6 +256,34 @@ function normalizeCapabilityUsageSnapshot(value: unknown): CapabilityUsageSnapsh
     skills: normalizeEntries(snapshot.skills),
     plugins: normalizeEntries(snapshot.plugins),
     mcpServers: normalizeEntries(snapshot.mcpServers),
+  }
+}
+
+function normalizeProviderRetryInfo(value: unknown) {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const retryInfo = value as {
+    attemptedRetries?: unknown
+    configuredMaxAttempts?: unknown
+    recovered?: unknown
+  }
+  if (
+    typeof retryInfo.attemptedRetries !== 'number' ||
+    !Number.isFinite(retryInfo.attemptedRetries) ||
+    retryInfo.attemptedRetries <= 0 ||
+    typeof retryInfo.configuredMaxAttempts !== 'number' ||
+    !Number.isFinite(retryInfo.configuredMaxAttempts) ||
+    retryInfo.configuredMaxAttempts <= 0
+  ) {
+    return undefined
+  }
+
+  return {
+    attemptedRetries: Math.max(0, Math.round(retryInfo.attemptedRetries)),
+    configuredMaxAttempts: Math.max(1, Math.round(retryInfo.configuredMaxAttempts)),
+    recovered: retryInfo.recovered === true,
   }
 }
 
@@ -457,6 +488,7 @@ function normalizeMessageVariant(
       variant.errorInfo && typeof variant.errorInfo === 'object'
         ? variant.errorInfo
         : undefined,
+    retryInfo: normalizeProviderRetryInfo(variant.retryInfo),
     modelInfo:
       variant.modelInfo &&
       typeof variant.modelInfo === 'object' &&
@@ -666,6 +698,7 @@ function normalizeBrowserRuntimeSettings(value: unknown): BrowserRuntimeSettings
       typeof entry.managedExecutablePath === 'string' && entry.managedExecutablePath.trim()
         ? entry.managedExecutablePath.trim()
         : undefined,
+    allowChromeAutomationFallback: entry.allowChromeAutomationFallback === true,
     headlessByDefault: entry.headlessByDefault !== false,
     takeoverMode:
       entry.takeoverMode === 'auto-visible-on-blocker' ? entry.takeoverMode : defaults.takeoverMode,
@@ -826,6 +859,10 @@ function parseSettings(raw: string | null): AgentSettings {
       executionMode: normalizeExecutionMode(parsed.executionMode),
       memoryMode: normalizeMemoryMode(parsed.memoryMode),
       reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
+      enableProviderFailureRecovery: parsed.enableProviderFailureRecovery !== false,
+      providerFailureRecoveryMaxAttempts: normalizeProviderFailureRecoveryMaxAttempts(
+        parsed.providerFailureRecoveryMaxAttempts,
+      ),
       browser: normalizeBrowserRuntimeSettings(parsed.browser),
       chromeImportSources: normalizeChromeImportSources(parsed.chromeImportSources),
       importedChromeSites: normalizeImportedChromeSites(parsed.importedChromeSites),
@@ -863,6 +900,13 @@ function normalizeMaxSteps(value: unknown) {
     return defaultSettings.maxSteps
   }
   return Math.max(1, Math.min(128, Math.round(value)))
+}
+
+function normalizeProviderFailureRecoveryMaxAttempts(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return defaultSettings.providerFailureRecoveryMaxAttempts
+  }
+  return Math.max(1, Math.min(5, Math.round(value)))
 }
 
 function normalizeProvider(
@@ -1087,6 +1131,7 @@ function parseSessions(raw: string | null): Session[] {
               message.errorInfo && typeof message.errorInfo === 'object'
                 ? message.errorInfo
                 : undefined,
+            retryInfo: normalizeProviderRetryInfo(message.retryInfo),
             modelInfo:
               message.modelInfo &&
               typeof message.modelInfo === 'object' &&
@@ -1141,6 +1186,7 @@ function parseSessions(raw: string | null): Session[] {
             steps: activeVariant.steps,
             error: activeVariant.error,
             errorInfo: activeVariant.errorInfo,
+            retryInfo: activeVariant.retryInfo,
             appendedInputs: activeVariant.appendedInputs,
             modelInfo: activeVariant.modelInfo,
             versions,
@@ -1276,6 +1322,7 @@ function sessionHasPendingPersistence(session: PersistedSessionRecord) {
               steps: message.steps || [],
               error: message.error,
               errorInfo: message.errorInfo,
+              retryInfo: message.retryInfo,
               appendedInputs: message.appendedInputs || [],
               modelInfo: message.modelInfo,
             },
@@ -1316,6 +1363,7 @@ function persistedMessageVersions(message: PersistedSessionRecord['messages'][nu
       steps: message.steps || [],
       error: message.error,
       errorInfo: message.errorInfo,
+      retryInfo: message.retryInfo,
       appendedInputs: message.appendedInputs || [],
       modelInfo: message.modelInfo,
     },

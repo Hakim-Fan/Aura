@@ -1,12 +1,16 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { chromium } from 'playwright-core'
 import { createStructuredError } from './runtimeErrors.mjs'
 import { resolveWorkspacePath, stringifyOutput, truncate } from './utils.mjs'
 
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 }
 const DEFAULT_WAIT_UNTIL = 'domcontentloaded'
+const PROFILE_LOCK_RETRY_DELAYS_MS = [120, 250, 500, 1_000, 1_500]
+const execFileAsync = promisify(execFile)
 
 function resolveAuraBrowserRoot() {
   return path.join(os.homedir(), '.aura', 'browser')
@@ -127,7 +131,9 @@ async function resolveBrowserExecutable(settings) {
       source: 'tool',
       category: 'unsupported',
       code: 'BROWSER_RUNTIME_DISABLED',
-      suggestedAction: '请先在设置页的“浏览器”页签中启用 Aura 浏览器运行时。',
+      suggestedAction: settings.enableChromeAutomation && settings.browser?.allowChromeAutomationFallback
+        ? '请先在设置页的“浏览器”页签中启用 Aura 浏览器运行时；如果你已经开启系统 Chrome 备用模式并允许自动降级，也可以改用 chrome_* 工具继续。'
+        : '请先在设置页的“浏览器”页签中启用 Aura 浏览器运行时。',
     })
   }
 
@@ -150,8 +156,9 @@ async function resolveBrowserExecutable(settings) {
       source: 'tool',
       category: 'missing_dependency',
       code: 'BROWSER_RUNTIME_NOT_FOUND',
-      suggestedAction:
-        '请前往设置 > 浏览器，重新检测环境，或切换到系统 Chrome / 自定义浏览器可执行文件。',
+      suggestedAction: settings.enableChromeAutomation && settings.browser?.allowChromeAutomationFallback
+        ? '请前往设置 > 浏览器，重新检测环境，或切换到系统 Chrome / 自定义浏览器可执行文件；如果你已经开启系统 Chrome 备用模式并允许自动降级，也可以改用 chrome_* 工具继续。'
+        : '请前往设置 > 浏览器，重新检测环境，或切换到系统 Chrome / 自定义浏览器可执行文件。',
     })
   }
 
@@ -162,6 +169,147 @@ function normalizeWaitUntil(value) {
   return value === 'load' || value === 'domcontentloaded' || value === 'networkidle'
     ? value
     : DEFAULT_WAIT_UNTIL
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function isBrowserProfileLockedDetail(detail) {
+  return (
+    detail.includes('ProcessSingleton') ||
+    detail.includes('SingletonLock') ||
+    detail.includes('SingletonSocket')
+  )
+}
+
+function buildBrowserProfileLockedError(detail) {
+  return createStructuredError('Aura 浏览器 Profile 当前正被另一个浏览器实例占用。', {
+    source: 'tool',
+    category: 'unavailable',
+    code: 'BROWSER_PROFILE_LOCKED',
+    detail,
+    suggestedAction:
+      '请先关闭正在使用同一 Aura Profile 的浏览器窗口，或等待当前浏览器任务结束后再试。',
+  })
+}
+
+function isAuraManagedProfilePath(userDataDir) {
+  const normalized = path.resolve(userDataDir)
+  const auraProfilesRoot = path.resolve(resolveAuraBrowserRoot(), 'profiles')
+  return normalized === auraProfilesRoot || normalized.startsWith(`${auraProfilesRoot}${path.sep}`)
+}
+
+async function listProcessesUsingUserDataDir(userDataDir) {
+  if (process.platform !== 'darwin' && process.platform !== 'linux') {
+    return []
+  }
+
+  try {
+    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,command='], {
+      maxBuffer: 1024 * 1024,
+    })
+
+    return stdout
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => {
+        const match = line.match(/^(\d+)\s+(.*)$/u)
+        if (!match) {
+          return null
+        }
+        return {
+          pid: Number(match[1]),
+          command: match[2],
+        }
+      })
+      .filter(entry => entry && entry.pid && entry.command.includes(userDataDir))
+  } catch {
+    return []
+  }
+}
+
+async function forceCloseAuraProfileProcesses(userDataDir) {
+  if (!isAuraManagedProfilePath(userDataDir)) {
+    return 0
+  }
+
+  const matching = await listProcessesUsingUserDataDir(userDataDir)
+  const pids = matching
+    .map(entry => entry?.pid)
+    .filter(pid => typeof pid === 'number' && Number.isFinite(pid) && pid !== process.pid)
+
+  if (pids.length === 0) {
+    return 0
+  }
+
+  try {
+    await execFileAsync('kill', ['-TERM', ...pids.map(pid => String(pid))], {
+      maxBuffer: 1024 * 1024,
+    })
+  } catch {
+    // Some processes may already be exiting; continue with best-effort cleanup.
+  }
+
+  await wait(400)
+
+  const survivors = await listProcessesUsingUserDataDir(userDataDir)
+  const survivorPids = survivors
+    .map(entry => entry?.pid)
+    .filter(pid => typeof pid === 'number' && Number.isFinite(pid) && pid !== process.pid)
+
+  if (survivorPids.length > 0) {
+    try {
+      await execFileAsync('kill', ['-KILL', ...survivorPids.map(pid => String(pid))], {
+        maxBuffer: 1024 * 1024,
+      })
+    } catch {
+      // Preserve the original locked error if force-close still fails.
+    }
+    await wait(250)
+  }
+
+  return pids.length
+}
+
+async function launchPersistentContextWithRetry(
+  settings,
+  executablePath,
+  userDataDir,
+  headless,
+  { retryOnProfileLock = false } = {},
+) {
+  const maxAttempts = retryOnProfileLock ? PROFILE_LOCK_RETRY_DELAYS_MS.length + 1 : 1
+  let forceClosed = false
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await chromium.launchPersistentContext(
+        userDataDir,
+        browserContextOptions(settings, executablePath, headless),
+      )
+    } catch (error) {
+      const detail = error instanceof Error ? error.stack || error.message : String(error)
+      if (!isBrowserProfileLockedDetail(detail)) {
+        throw error
+      }
+      if (attempt >= maxAttempts) {
+        if (retryOnProfileLock && !forceClosed) {
+          const closedCount = await forceCloseAuraProfileProcesses(userDataDir)
+          forceClosed = closedCount > 0
+          if (forceClosed) {
+            attempt -= 1
+            continue
+          }
+        }
+        throw buildBrowserProfileLockedError(detail)
+      }
+      await wait(PROFILE_LOCK_RETRY_DELAYS_MS[attempt - 1] || 1_500)
+    }
+  }
+
+  throw buildBrowserProfileLockedError('Browser profile remained locked after retrying.')
 }
 
 function browserContextOptions(settings, executablePath, headless) {
@@ -512,6 +660,28 @@ export async function clearAuraProfileSiteCookies(settings, domain) {
   }
 }
 
+export async function clearAuraProfileAllCookies(settings) {
+  await browserSessionManager.close()
+  const executablePath = await resolveBrowserExecutable(settings)
+  const userDataDir = resolveAuraProfilePath(settings)
+  await fs.mkdir(userDataDir, { recursive: true })
+
+  const context = await chromium.launchPersistentContext(
+    userDataDir,
+    browserContextOptions(settings, executablePath, true),
+  )
+
+  try {
+    const cookies = await context.cookies()
+    await context.clearCookies()
+    return {
+      removedCount: cookies.length,
+    }
+  } finally {
+    await context.close().catch(() => {})
+  }
+}
+
 class BrowserSessionManager {
   constructor() {
     this.context = null
@@ -533,6 +703,7 @@ class BrowserSessionManager {
       this.headless !== headless
 
     if (shouldRestart) {
+      const hadContext = Boolean(this.context)
       const previousUrl =
         this.page && !this.page.isClosed() && this.page.url() !== 'about:blank'
           ? this.page.url()
@@ -540,25 +711,13 @@ class BrowserSessionManager {
 
       await this.close()
       await fs.mkdir(userDataDir, { recursive: true })
-      try {
-        this.context = await chromium.launchPersistentContext(
-          userDataDir,
-          browserContextOptions(settings, executablePath, headless),
-        )
-      } catch (error) {
-        const detail = error instanceof Error ? error.stack || error.message : String(error)
-        if (detail.includes('ProcessSingleton') || detail.includes('SingletonLock')) {
-          throw createStructuredError('Aura 浏览器 Profile 当前正被另一个浏览器实例占用。', {
-            source: 'tool',
-            category: 'unavailable',
-            code: 'BROWSER_PROFILE_LOCKED',
-            detail,
-            suggestedAction:
-              '请先关闭正在使用同一 Aura Profile 的浏览器窗口，或等待当前浏览器任务结束后再试。',
-          })
-        }
-        throw error
-      }
+      this.context = await launchPersistentContextWithRetry(
+        settings,
+        executablePath,
+        userDataDir,
+        headless,
+        { retryOnProfileLock: hadContext },
+      )
       this.context.on('page', nextPage => {
         this.page = nextPage
       })

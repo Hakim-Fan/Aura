@@ -5,18 +5,18 @@ use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use aes::Aes128;
-use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
-use rusqlite::{params, Connection, OptionalExtension};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use pbkdf2::pbkdf2_hmac;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use tauri::{Emitter, Manager, Runtime, State};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -37,6 +37,8 @@ struct AgentTaskSnapshot {
     usage: Option<serde_json::Value>,
     #[serde(rename = "capabilitySnapshot")]
     capability_snapshot: Option<serde_json::Value>,
+    #[serde(rename = "retryInfo")]
+    retry_info: Option<serde_json::Value>,
     #[serde(rename = "pendingApproval")]
     pending_approval: Option<serde_json::Value>,
     error: Option<String>,
@@ -60,6 +62,16 @@ struct AgentTaskHandle {
 #[derive(Default)]
 struct AgentTaskStore {
     tasks: Mutex<HashMap<String, AgentTaskHandle>>,
+}
+
+#[derive(Clone)]
+struct ManagedBrowserInstallHandle {
+    cancel_requested: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct ManagedBrowserInstallStore {
+    current: Mutex<Option<ManagedBrowserInstallHandle>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -137,6 +149,17 @@ struct BrowserRuntimeStatusRecord {
 }
 
 #[derive(Clone, Serialize)]
+struct ManagedBrowserInstallProgressPayload {
+    stage: String,
+    message: String,
+    progress: Option<f64>,
+    #[serde(rename = "downloadedBytes")]
+    downloaded_bytes: Option<u64>,
+    #[serde(rename = "totalBytes")]
+    total_bytes: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
 struct ChromeImportSource {
     id: String,
     #[serde(rename = "profileName")]
@@ -191,6 +214,14 @@ struct ChromeImportResult {
 struct ClearAuraSiteCookiesResult {
     #[serde(rename = "removedCount")]
     removed_count: usize,
+    #[serde(rename = "pendingRemovedCount")]
+    pending_removed_count: usize,
+}
+
+#[derive(Clone, Serialize)]
+struct ResetAuraBrowserProfileResult {
+    #[serde(rename = "clearedProfile")]
+    cleared_profile: bool,
     #[serde(rename = "pendingRemovedCount")]
     pending_removed_count: usize,
 }
@@ -297,7 +328,13 @@ fn extract_markdown_list_field(content: &str, field_name: &str) -> Vec<String> {
             if inline_value.starts_with('[') && inline_value.ends_with(']') {
                 return inline_value[1..inline_value.len() - 1]
                     .split(',')
-                    .map(|value| value.trim().trim_matches('"').trim_matches('\'').to_string())
+                    .map(|value| {
+                        value
+                            .trim()
+                            .trim_matches('"')
+                            .trim_matches('\'')
+                            .to_string()
+                    })
                     .filter(|value| !value.is_empty())
                     .collect();
             }
@@ -317,7 +354,11 @@ fn extract_markdown_list_field(content: &str, field_name: &str) -> Vec<String> {
             break;
         }
 
-        let value = trimmed[2..].trim().trim_matches('"').trim_matches('\'').trim();
+        let value = trimmed[2..]
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim();
         if !value.is_empty() {
             values.push(value.to_string());
         }
@@ -477,10 +518,7 @@ fn infer_plugin_support(entry_path: Option<&Path>, entry_content: &str) -> (bool
         .and_then(|value| value.to_str())
         .unwrap_or_default();
     if extension != "mjs" && extension != "js" {
-        return (
-            false,
-            Some("当前只支持 .mjs / .js 作为插件入口。".into()),
-        );
+        return (false, Some("当前只支持 .mjs / .js 作为插件入口。".into()));
     }
 
     let normalized = entry_content
@@ -499,11 +537,17 @@ fn infer_plugin_support(entry_path: Option<&Path>, entry_content: &str) -> (bool
 
     (
         false,
-        Some("已发现插件入口，但它不是 Aura 当前支持的工具插件格式。需要导出 plugin 对象及 tools。".into()),
+        Some(
+            "已发现插件入口，但它不是 Aura 当前支持的工具插件格式。需要导出 plugin 对象及 tools。"
+                .into(),
+        ),
     )
 }
 
-fn resolve_plugin_entry(dir: &Path, manifest_content: Option<&str>) -> (Option<PathBuf>, Option<String>) {
+fn resolve_plugin_entry(
+    dir: &Path,
+    manifest_content: Option<&str>,
+) -> (Option<PathBuf>, Option<String>) {
     if let Some(manifest_content) = manifest_content {
         if let Some(main_path) = parse_json_string_field(manifest_content, "main") {
             let candidate = dir.join(&main_path);
@@ -549,150 +593,189 @@ fn resolve_plugin_entry(dir: &Path, manifest_content: Option<&str>) -> (Option<P
     (None, None)
 }
 
-fn scan_aura_assets<R: Runtime>(app: &tauri::AppHandle<R>, dir: &Path, kind: &str) -> Result<Vec<AuraAssetMetadata>, String> {
+fn scan_aura_assets<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    dir: &Path,
+    kind: &str,
+) -> Result<Vec<AuraAssetMetadata>, String> {
     let mut assets = Vec::new();
     let bundled_dir = resolve_default_asset_dir(app, kind).ok();
 
-    let entries = fs::read_dir(dir)
-        .map_err(|error| format!("Failed to read Aura asset directory {}: {error}", dir.display()))?;
+    let entries = fs::read_dir(dir).map_err(|error| {
+        format!(
+            "Failed to read Aura asset directory {}: {error}",
+            dir.display()
+        )
+    })?;
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let (id, name, description, content_path, entry_path, supported, support_message, readonly) = if kind == "skills" {
-            if path.is_file()
-                && path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    == "md"
-            {
-                let id = path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let content = fs::read_to_string(&path).unwrap_or_default();
-                let name = extract_markdown_metadata_field(&content, "name")
-                    .unwrap_or_else(|| prettify_asset_name(&id));
-                let description = infer_skill_description(&content);
-                let (supported, support_message) = infer_skill_support(&content);
-                let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
-                (id, name, description, path.clone(), Some(path.clone()), supported, support_message, readonly)
-            } else if path.is_dir() {
-                let skill_path = path.join("SKILL.md");
-                if !skill_path.exists() {
-                    continue;
-                }
-                let id = path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let content = fs::read_to_string(&skill_path).unwrap_or_default();
-                let name = extract_markdown_metadata_field(&content, "name")
-                    .unwrap_or_else(|| prettify_asset_name(&id));
-                let description = infer_skill_description(&content);
-                let (supported, support_message) = infer_skill_support(&content);
-                let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
-                (id, name, description, skill_path.clone(), Some(skill_path), supported, support_message, readonly)
-            } else {
-                continue;
-            }
-        } else {
-            if path.is_file() {
-                let extension = path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default();
-                if extension != "mjs" && extension != "js" {
-                    continue;
-                }
-
-                let id = path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let content = fs::read_to_string(&path).unwrap_or_default();
-                let name = extract_metadata_field(&content, "name")
-                    .unwrap_or_else(|| prettify_asset_name(&id));
-                let description = infer_plugin_description(&content);
-                let (supported, support_message) = infer_plugin_support(Some(&path), &content);
-                let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
-                (
-                    id,
-                    name,
-                    description,
-                    path.clone(),
-                    Some(path.clone()),
-                    supported,
-                    support_message,
-                    readonly,
-                )
-            } else if path.is_dir() {
-                let manifest_path = path.join("manifest.json");
-                let manifest_content = fs::read_to_string(&manifest_path).ok();
-                let (entry_path, mut support_message) =
-                    resolve_plugin_entry(&path, manifest_content.as_deref());
-
-                let id = manifest_content
-                    .as_deref()
-                    .and_then(|value| parse_json_string_field(value, "id"))
-                    .unwrap_or_else(|| {
-                        path.file_name()
-                            .and_then(|value| value.to_str())
-                            .unwrap_or_default()
-                            .to_string()
-                    });
-
-                let name = manifest_content
-                    .as_deref()
-                    .and_then(|value| parse_json_string_field(value, "name"))
-                    .unwrap_or_else(|| prettify_asset_name(&id));
-
-                let preview_path = if manifest_path.exists() {
-                    manifest_path
-                } else if let Some(entry_path) = &entry_path {
-                    entry_path.clone()
+        let (id, name, description, content_path, entry_path, supported, support_message, readonly) =
+            if kind == "skills" {
+                if path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        == "md"
+                {
+                    let id = path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let content = fs::read_to_string(&path).unwrap_or_default();
+                    let name = extract_markdown_metadata_field(&content, "name")
+                        .unwrap_or_else(|| prettify_asset_name(&id));
+                    let description = infer_skill_description(&content);
+                    let (supported, support_message) = infer_skill_support(&content);
+                    let readonly = bundled_dir
+                        .as_ref()
+                        .map(|bundled| bundled.join(path.file_name().unwrap()).exists())
+                        .unwrap_or(false);
+                    (
+                        id,
+                        name,
+                        description,
+                        path.clone(),
+                        Some(path.clone()),
+                        supported,
+                        support_message,
+                        readonly,
+                    )
+                } else if path.is_dir() {
+                    let skill_path = path.join("SKILL.md");
+                    if !skill_path.exists() {
+                        continue;
+                    }
+                    let id = path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let content = fs::read_to_string(&skill_path).unwrap_or_default();
+                    let name = extract_markdown_metadata_field(&content, "name")
+                        .unwrap_or_else(|| prettify_asset_name(&id));
+                    let description = infer_skill_description(&content);
+                    let (supported, support_message) = infer_skill_support(&content);
+                    let readonly = bundled_dir
+                        .as_ref()
+                        .map(|bundled| bundled.join(path.file_name().unwrap()).exists())
+                        .unwrap_or(false);
+                    (
+                        id,
+                        name,
+                        description,
+                        skill_path.clone(),
+                        Some(skill_path),
+                        supported,
+                        support_message,
+                        readonly,
+                    )
                 } else {
-                    path.clone()
-                };
-                let entry_content = entry_path
-                    .as_ref()
-                    .and_then(|value| fs::read_to_string(value).ok())
-                    .unwrap_or_default();
-                let description = manifest_content
-                    .as_deref()
-                    .and_then(|value| parse_json_string_field(value, "description"))
-                    .or_else(|| {
-                        if entry_content.is_empty() {
-                            None
-                        } else {
-                            Some(infer_plugin_description(&entry_content))
-                        }
-                    })
-                    .unwrap_or_else(|| "Aura plugin".into());
-                let (supported, inferred_message) =
-                    infer_plugin_support(entry_path.as_deref(), &entry_content);
-                if support_message.is_none() {
-                    support_message = inferred_message;
+                    continue;
                 }
-
-                let readonly = bundled_dir.as_ref().map(|bundled| bundled.join(path.file_name().unwrap()).exists()).unwrap_or(false);
-                (
-                    id,
-                    name,
-                    description,
-                    preview_path,
-                    entry_path,
-                    supported,
-                    support_message,
-                    readonly,
-                )
             } else {
-                continue;
-            }
-        };
+                if path.is_file() {
+                    let extension = path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default();
+                    if extension != "mjs" && extension != "js" {
+                        continue;
+                    }
+
+                    let id = path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let content = fs::read_to_string(&path).unwrap_or_default();
+                    let name = extract_metadata_field(&content, "name")
+                        .unwrap_or_else(|| prettify_asset_name(&id));
+                    let description = infer_plugin_description(&content);
+                    let (supported, support_message) = infer_plugin_support(Some(&path), &content);
+                    let readonly = bundled_dir
+                        .as_ref()
+                        .map(|bundled| bundled.join(path.file_name().unwrap()).exists())
+                        .unwrap_or(false);
+                    (
+                        id,
+                        name,
+                        description,
+                        path.clone(),
+                        Some(path.clone()),
+                        supported,
+                        support_message,
+                        readonly,
+                    )
+                } else if path.is_dir() {
+                    let manifest_path = path.join("manifest.json");
+                    let manifest_content = fs::read_to_string(&manifest_path).ok();
+                    let (entry_path, mut support_message) =
+                        resolve_plugin_entry(&path, manifest_content.as_deref());
+
+                    let id = manifest_content
+                        .as_deref()
+                        .and_then(|value| parse_json_string_field(value, "id"))
+                        .unwrap_or_else(|| {
+                            path.file_name()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        });
+
+                    let name = manifest_content
+                        .as_deref()
+                        .and_then(|value| parse_json_string_field(value, "name"))
+                        .unwrap_or_else(|| prettify_asset_name(&id));
+
+                    let preview_path = if manifest_path.exists() {
+                        manifest_path
+                    } else if let Some(entry_path) = &entry_path {
+                        entry_path.clone()
+                    } else {
+                        path.clone()
+                    };
+                    let entry_content = entry_path
+                        .as_ref()
+                        .and_then(|value| fs::read_to_string(value).ok())
+                        .unwrap_or_default();
+                    let description = manifest_content
+                        .as_deref()
+                        .and_then(|value| parse_json_string_field(value, "description"))
+                        .or_else(|| {
+                            if entry_content.is_empty() {
+                                None
+                            } else {
+                                Some(infer_plugin_description(&entry_content))
+                            }
+                        })
+                        .unwrap_or_else(|| "Aura plugin".into());
+                    let (supported, inferred_message) =
+                        infer_plugin_support(entry_path.as_deref(), &entry_content);
+                    if support_message.is_none() {
+                        support_message = inferred_message;
+                    }
+
+                    let readonly = bundled_dir
+                        .as_ref()
+                        .map(|bundled| bundled.join(path.file_name().unwrap()).exists())
+                        .unwrap_or(false);
+                    (
+                        id,
+                        name,
+                        description,
+                        preview_path,
+                        entry_path,
+                        supported,
+                        support_message,
+                        readonly,
+                    )
+                } else {
+                    continue;
+                }
+            };
 
         if id.is_empty() {
             continue;
@@ -720,9 +803,9 @@ fn resolve_default_asset_dir<R: Runtime>(
 ) -> Result<PathBuf, String> {
     let dev_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../{dir_name}"));
     if dev_dir.exists() {
-        return dev_dir
-            .canonicalize()
-            .map_err(|error| format!("Failed to canonicalize default {dir_name} directory: {error}"));
+        return dev_dir.canonicalize().map_err(|error| {
+            format!("Failed to canonicalize default {dir_name} directory: {error}")
+        });
     }
 
     let resource_dir = app
@@ -738,13 +821,21 @@ fn resolve_default_asset_dir<R: Runtime>(
 }
 
 fn copy_path_recursively(source_path: &Path, target_path: &Path) -> Result<(), String> {
-    let metadata = fs::metadata(source_path)
-        .map_err(|error| format!("Failed to read asset metadata {}: {error}", source_path.display()))?;
+    let metadata = fs::metadata(source_path).map_err(|error| {
+        format!(
+            "Failed to read asset metadata {}: {error}",
+            source_path.display()
+        )
+    })?;
 
     if metadata.is_dir() {
         ensure_directory(target_path)?;
-        let entries = fs::read_dir(source_path)
-            .map_err(|error| format!("Failed to read bundled asset directory {}: {error}", source_path.display()))?;
+        let entries = fs::read_dir(source_path).map_err(|error| {
+            format!(
+                "Failed to read bundled asset directory {}: {error}",
+                source_path.display()
+            )
+        })?;
 
         for entry in entries.flatten() {
             let child_source = entry.path();
@@ -783,8 +874,12 @@ fn seed_directory_from_defaults<R: Runtime>(
         Ok(path) => path,
         Err(_) => return Ok(()),
     };
-    let entries = fs::read_dir(&source_dir)
-        .map_err(|error| format!("Failed to read bundled {dir_name} directory {}: {error}", source_dir.display()))?;
+    let entries = fs::read_dir(&source_dir).map_err(|error| {
+        format!(
+            "Failed to read bundled {dir_name} directory {}: {error}",
+            source_dir.display()
+        )
+    })?;
 
     for entry in entries.flatten() {
         let source_path = entry.path();
@@ -793,7 +888,10 @@ fn seed_directory_from_defaults<R: Runtime>(
         };
         let target_path = target_dir.join(file_name);
         copy_path_recursively(&source_path, &target_path).map_err(|error| {
-            format!("Failed to seed Aura {dir_name} asset {}: {error}", source_path.display())
+            format!(
+                "Failed to seed Aura {dir_name} asset {}: {error}",
+                source_path.display()
+            )
         })?;
     }
 
@@ -920,7 +1018,8 @@ fn detect_system_chrome_path() -> Option<PathBuf> {
 
         if let Ok(home) = resolve_user_home() {
             candidates.push(home.join("Applications/Google Chrome.app"));
-            candidates.push(home.join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"));
+            candidates
+                .push(home.join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"));
         }
 
         return candidates
@@ -932,31 +1031,139 @@ fn detect_system_chrome_path() -> Option<PathBuf> {
 }
 
 fn detect_managed_chrome_path(runtime_root: &Path, explicit_path: Option<&str>) -> Option<PathBuf> {
-    if let Some(path) = explicit_path.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(path) = explicit_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         return resolve_browser_executable_path(Path::new(path));
     }
 
-    let candidates = [
+    let mut candidates = vec![
         runtime_root.join("chrome").join("Google Chrome.app"),
-        runtime_root.join("chrome").join("Google Chrome for Testing.app"),
-        runtime_root.join("chrome").join("Google Chrome.app").join("Contents/MacOS/Google Chrome"),
-        runtime_root.join("chrome").join("Google Chrome for Testing.app").join("Contents/MacOS/Google Chrome for Testing"),
+        runtime_root
+            .join("chrome")
+            .join("Google Chrome for Testing.app"),
+        runtime_root
+            .join("chrome")
+            .join("Google Chrome.app")
+            .join("Contents/MacOS/Google Chrome"),
+        runtime_root
+            .join("chrome")
+            .join("Google Chrome for Testing.app")
+            .join("Contents/MacOS/Google Chrome for Testing"),
         runtime_root.join("chrome").join("chrome"),
-        runtime_root.join("chrome").join("chrome-mac").join("Google Chrome for Testing.app"),
-        runtime_root.join("chrome").join("chrome-mac").join("Google Chrome for Testing"),
+        runtime_root
+            .join("chrome")
+            .join("chrome-mac")
+            .join("Google Chrome for Testing.app"),
+        runtime_root
+            .join("chrome")
+            .join("chrome-mac")
+            .join("Google Chrome for Testing"),
     ];
+
+    if chrome_for_testing_platform() != "unsupported" {
+        let platform_dir = runtime_root
+            .join("chrome")
+            .join(format!("chrome-{}", chrome_for_testing_platform()));
+        candidates.push(platform_dir.join("Google Chrome for Testing.app"));
+        candidates.push(
+            platform_dir
+                .join("Google Chrome for Testing.app")
+                .join("Contents/MacOS/Google Chrome for Testing"),
+        );
+        candidates.push(platform_dir.join("Google Chrome for Testing"));
+        candidates.push(platform_dir.join("chrome"));
+    }
 
     candidates
         .into_iter()
         .find_map(|candidate| resolve_browser_executable_path(&candidate))
 }
 
-fn extract_zip_archive(bytes: &[u8], destination: &Path) -> Result<(), String> {
+fn managed_browser_install_cancelled_error() -> String {
+    "Aura 托管浏览器安装已取消。".to_string()
+}
+
+fn ensure_managed_browser_install_not_cancelled(cancel_requested: &Arc<AtomicBool>) -> Result<(), String> {
+    if cancel_requested.load(Ordering::SeqCst) {
+        Err(managed_browser_install_cancelled_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn cleanup_managed_browser_runtime(runtime_root: &Path) {
+    if runtime_root.exists() {
+        let _ = fs::remove_dir_all(runtime_root);
+    }
+}
+
+fn start_managed_browser_install(
+    store: &State<'_, ManagedBrowserInstallStore>,
+) -> Result<Arc<AtomicBool>, String> {
+    let mut current = store
+        .current
+        .lock()
+        .map_err(|_| "Managed browser install state is unavailable.".to_string())?;
+    if current.is_some() {
+        return Err("Aura 托管浏览器已经在安装中。".into());
+    }
+
+    let cancel_requested = Arc::new(AtomicBool::new(false));
+    *current = Some(ManagedBrowserInstallHandle {
+        cancel_requested: Arc::clone(&cancel_requested),
+    });
+    Ok(cancel_requested)
+}
+
+fn finish_managed_browser_install(
+    store: &State<'_, ManagedBrowserInstallStore>,
+    cancel_requested: &Arc<AtomicBool>,
+) {
+    if let Ok(mut current) = store.current.lock() {
+        if current
+            .as_ref()
+            .map(|handle| Arc::ptr_eq(&handle.cancel_requested, cancel_requested))
+            == Some(true)
+        {
+            *current = None;
+        }
+    }
+}
+
+fn emit_managed_browser_install_progress<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    stage: &str,
+    message: impl Into<String>,
+    progress: Option<f64>,
+    downloaded_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+) {
+    let payload = ManagedBrowserInstallProgressPayload {
+        stage: stage.to_string(),
+        message: message.into(),
+        progress: progress.map(|value| value.clamp(0.0, 1.0)),
+        downloaded_bytes,
+        total_bytes,
+    };
+
+    let _ = app.emit("browser-install-progress", payload);
+}
+
+fn extract_zip_archive<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    bytes: &[u8],
+    destination: &Path,
+    cancel_requested: &Arc<AtomicBool>,
+) -> Result<(), String> {
     let cursor = Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|error| format!("Failed to open browser archive: {error}"))?;
+    let total_entries = archive.len();
 
     for index in 0..archive.len() {
+        ensure_managed_browser_install_not_cancelled(cancel_requested)?;
         let mut entry = archive
             .by_index(index)
             .map_err(|error| format!("Failed to read browser archive entry: {error}"))?;
@@ -977,10 +1184,30 @@ fn extract_zip_archive(bytes: &[u8], destination: &Path) -> Result<(), String> {
             ensure_directory(parent)?;
         }
 
-        let mut output = fs::File::create(&target_path)
-            .map_err(|error| format!("Failed to create extracted browser file {}: {error}", target_path.display()))?;
-        std::io::copy(&mut entry, &mut output)
-            .map_err(|error| format!("Failed to write extracted browser file {}: {error}", target_path.display()))?;
+        let mut output = fs::File::create(&target_path).map_err(|error| {
+            format!(
+                "Failed to create extracted browser file {}: {error}",
+                target_path.display()
+            )
+        })?;
+        std::io::copy(&mut entry, &mut output).map_err(|error| {
+            format!(
+                "Failed to write extracted browser file {}: {error}",
+                target_path.display()
+            )
+        })?;
+
+        if total_entries > 0 && (index == 0 || index + 1 == total_entries || (index + 1) % 25 == 0)
+        {
+            emit_managed_browser_install_progress(
+                app,
+                "extracting",
+                format!("正在解压浏览器文件（{}/{}）", index + 1, total_entries),
+                Some((index + 1) as f64 / total_entries as f64),
+                None,
+                None,
+            );
+        }
     }
 
     Ok(())
@@ -1015,35 +1242,154 @@ fn fetch_managed_browser_download_url() -> Result<String, String> {
                 }
             })
         })
-        .ok_or_else(|| "Failed to locate a Chrome for Testing download for this platform.".to_string())
+        .ok_or_else(|| {
+            "Failed to locate a Chrome for Testing download for this platform.".to_string()
+        })
 }
 
-fn install_managed_browser_inner<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+fn install_managed_browser_inner<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    cancel_requested: &Arc<AtomicBool>,
+) -> Result<(), String> {
     let aura = ensure_aura_layout(app)?;
     let runtime_root = managed_browser_runtime_root(Path::new(&aura.browser_runtimes_dir));
     if let Some(parent) = runtime_root.parent() {
         ensure_directory(parent)?;
     }
+    ensure_managed_browser_install_not_cancelled(cancel_requested)?;
 
+    emit_managed_browser_install_progress(
+        app,
+        "preparing",
+        "正在准备 Aura 托管浏览器安装环境…",
+        Some(0.02),
+        None,
+        None,
+    );
+
+    emit_managed_browser_install_progress(
+        app,
+        "resolving-download",
+        "正在获取可用的 Chrome 版本信息…",
+        Some(0.08),
+        None,
+        None,
+    );
+    ensure_managed_browser_install_not_cancelled(cancel_requested)?;
     let download_url = fetch_managed_browser_download_url()?;
+
+    emit_managed_browser_install_progress(
+        app,
+        "downloading",
+        "正在下载 Aura 托管浏览器…",
+        Some(0.12),
+        Some(0),
+        None,
+    );
+    ensure_managed_browser_install_not_cancelled(cancel_requested)?;
     let mut response = reqwest::blocking::get(&download_url)
         .map_err(|error| format!("Failed to download managed browser: {error}"))?
         .error_for_status()
         .map_err(|error| format!("Managed browser download failed: {error}"))?;
 
+    let total_bytes = response.content_length();
     let mut archive_bytes = Vec::new();
-    response
-        .read_to_end(&mut archive_bytes)
-        .map_err(|error| format!("Failed to read managed browser archive: {error}"))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut downloaded_bytes = 0_u64;
+    loop {
+        ensure_managed_browser_install_not_cancelled(cancel_requested).inspect_err(|_| {
+            cleanup_managed_browser_runtime(&runtime_root);
+        })?;
+        let bytes_read = response
+            .read(&mut buffer)
+            .map_err(|error| format!("Failed to read managed browser archive: {error}"))?;
+        if bytes_read == 0 {
+            break;
+        }
+        archive_bytes.extend_from_slice(&buffer[..bytes_read]);
+        downloaded_bytes = downloaded_bytes.saturating_add(bytes_read as u64);
+        let progress = total_bytes
+            .filter(|total| *total > 0)
+            .map(|total| downloaded_bytes as f64 / total as f64);
+        emit_managed_browser_install_progress(
+            app,
+            "downloading",
+            if let Some(total) = total_bytes {
+                format!(
+                    "正在下载 Aura 托管浏览器（{} / {}）",
+                    human_readable_size(downloaded_bytes),
+                    human_readable_size(total),
+                )
+            } else {
+                format!(
+                    "正在下载 Aura 托管浏览器（已下载 {}）",
+                    human_readable_size(downloaded_bytes)
+                )
+            },
+            progress.map(|value| 0.12 + value * 0.58).or(Some(0.2)),
+            Some(downloaded_bytes),
+            total_bytes,
+        );
+    }
 
     if runtime_root.exists() {
-        fs::remove_dir_all(&runtime_root)
-            .map_err(|error| format!("Failed to clear old managed browser runtime {}: {error}", runtime_root.display()))?;
+        fs::remove_dir_all(&runtime_root).map_err(|error| {
+            format!(
+                "Failed to clear old managed browser runtime {}: {error}",
+                runtime_root.display()
+            )
+        })?;
     }
     ensure_directory(&runtime_root)?;
 
-    extract_zip_archive(&archive_bytes, &runtime_root)?;
+    ensure_managed_browser_install_not_cancelled(cancel_requested).inspect_err(|_| {
+        cleanup_managed_browser_runtime(&runtime_root);
+    })?;
+    emit_managed_browser_install_progress(
+        app,
+        "extracting",
+        "下载完成，正在解压浏览器文件…",
+        Some(0.74),
+        Some(downloaded_bytes),
+        total_bytes,
+    );
+
+    if let Err(error) = extract_zip_archive(app, &archive_bytes, &runtime_root, cancel_requested) {
+        if error == managed_browser_install_cancelled_error() {
+            cleanup_managed_browser_runtime(&runtime_root);
+        }
+        return Err(error);
+    }
+
+    ensure_managed_browser_install_not_cancelled(cancel_requested).inspect_err(|_| {
+        cleanup_managed_browser_runtime(&runtime_root);
+    })?;
+    emit_managed_browser_install_progress(
+        app,
+        "verifying",
+        "正在验证托管浏览器是否可用…",
+        Some(0.96),
+        Some(downloaded_bytes),
+        total_bytes,
+    );
     Ok(())
+}
+
+fn human_readable_size(value: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = value as f64;
+    let mut unit_index = 0_usize;
+
+    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_index += 1;
+    }
+
+    if unit_index == 0 || size >= 100.0 {
+        format!("{:.0} {}", size, UNITS[unit_index])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit_index])
+    }
 }
 
 fn chrome_profile_name_map() -> HashMap<String, String> {
@@ -1101,7 +1447,10 @@ fn chrome_safe_storage_password() -> Result<String, String> {
     Ok(password)
 }
 
-fn decrypt_chrome_cookie_value(encrypted_value: &[u8], safe_storage_password: &str) -> Result<String, String> {
+fn decrypt_chrome_cookie_value(
+    encrypted_value: &[u8],
+    safe_storage_password: &str,
+) -> Result<String, String> {
     if encrypted_value.is_empty() {
         return Ok(String::new());
     }
@@ -1113,7 +1462,12 @@ fn decrypt_chrome_cookie_value(encrypted_value: &[u8], safe_storage_password: &s
     };
 
     let mut key = [0_u8; 16];
-    pbkdf2_hmac::<Sha1>(safe_storage_password.as_bytes(), b"saltysalt", 1003, &mut key);
+    pbkdf2_hmac::<Sha1>(
+        safe_storage_password.as_bytes(),
+        b"saltysalt",
+        1003,
+        &mut key,
+    );
     let iv = [b' '; 16];
     let mut buffer = payload.to_vec();
     let decrypted = cbc::Decryptor::<Aes128>::new(&key.into(), &iv.into())
@@ -1154,16 +1508,26 @@ fn host_matches_domain(host: &str, domain: &str) -> bool {
         || normalized_host.ends_with(&format!(".{normalized_domain}"))
 }
 
-fn load_pending_cookie_imports<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Vec<PendingBrowserCookie>, String> {
+fn load_pending_cookie_imports<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Vec<PendingBrowserCookie>, String> {
     let path = pending_cookie_imports_path(app)?;
     if !path.exists() {
         return Ok(Vec::new());
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("Failed to read pending cookie imports {}: {error}", path.display()))?;
-    serde_json::from_str::<Vec<PendingBrowserCookie>>(&content)
-        .map_err(|error| format!("Failed to parse pending cookie imports {}: {error}", path.display()))
+    let content = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "Failed to read pending cookie imports {}: {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str::<Vec<PendingBrowserCookie>>(&content).map_err(|error| {
+        format!(
+            "Failed to parse pending cookie imports {}: {error}",
+            path.display()
+        )
+    })
 }
 
 fn save_pending_cookie_imports<R: Runtime>(
@@ -1176,8 +1540,12 @@ fn save_pending_cookie_imports<R: Runtime>(
     }
     let content = serde_json::to_string_pretty(cookies)
         .map_err(|error| format!("Failed to serialize pending cookie imports: {error}"))?;
-    fs::write(&path, content)
-        .map_err(|error| format!("Failed to write pending cookie imports {}: {error}", path.display()))
+    fs::write(&path, content).map_err(|error| {
+        format!(
+            "Failed to write pending cookie imports {}: {error}",
+            path.display()
+        )
+    })
 }
 
 fn remove_pending_site_cookie_imports<R: Runtime>(
@@ -1192,6 +1560,46 @@ fn remove_pending_site_cookie_imports<R: Runtime>(
     }
     save_pending_cookie_imports(app, &pending)?;
     Ok(original_len - pending.len())
+}
+
+fn clear_pending_cookie_imports<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<usize, String> {
+    let path = pending_cookie_imports_path(app)?;
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let pending = load_pending_cookie_imports(app)?;
+    fs::remove_file(&path).map_err(|error| {
+        format!(
+            "Failed to remove pending cookie imports {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(pending.len())
+}
+
+fn resolve_aura_browser_profile_target<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    aura_profile_path: Option<String>,
+) -> Result<PathBuf, String> {
+    let aura = ensure_aura_layout(app)?;
+    let profiles_root = PathBuf::from(&aura.browser_profiles_dir);
+    let browser_root = PathBuf::from(&aura.browser_dir);
+    let target = aura_profile_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| profiles_root.join("default"));
+
+    if !target.starts_with(&profiles_root) || target == profiles_root || target == browser_root {
+        return Err(format!(
+            "Refusing to modify browser profile outside Aura profiles directory: {}",
+            target.display()
+        ));
+    }
+
+    Ok(target)
 }
 
 fn managed_browser_runtime_root(runtime_root: &Path) -> PathBuf {
@@ -1230,8 +1638,12 @@ fn resolve_app_db_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf,
 
 fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, String> {
     let db_path = resolve_app_db_path(app)?;
-    let connection = Connection::open(&db_path)
-        .map_err(|error| format!("Failed to open SQLite database {}: {error}", db_path.display()))?;
+    let connection = Connection::open(&db_path).map_err(|error| {
+        format!(
+            "Failed to open SQLite database {}: {error}",
+            db_path.display()
+        )
+    })?;
 
     connection
         .execute_batch(
@@ -1345,7 +1757,8 @@ fn parse_json_object_column(raw: Option<String>) -> serde_json::Value {
 }
 
 fn value_to_json_string(value: &serde_json::Value) -> Result<String, String> {
-    serde_json::to_string(value).map_err(|error| format!("Failed to serialize JSON payload: {error}"))
+    serde_json::to_string(value)
+        .map_err(|error| format!("Failed to serialize JSON payload: {error}"))
 }
 
 fn get_json_string_field(value: &serde_json::Value, key: &str, fallback: &str) -> String {
@@ -1357,7 +1770,10 @@ fn get_json_string_field(value: &serde_json::Value, key: &str, fallback: &str) -
 }
 
 fn get_json_i64_field(value: &serde_json::Value, key: &str, fallback: i64) -> i64 {
-    value.get(key).and_then(|entry| entry.as_i64()).unwrap_or(fallback)
+    value
+        .get(key)
+        .and_then(|entry| entry.as_i64())
+        .unwrap_or(fallback)
 }
 
 fn get_json_array_field(value: &serde_json::Value, key: &str) -> serde_json::Value {
@@ -1440,8 +1856,7 @@ fn resolve_aura_relative_path<R: Runtime>(
         return Err("Aura relative path must not be empty.".into());
     }
 
-    let candidate = ensure_aura_layout(app)?
-        .home_dir;
+    let candidate = ensure_aura_layout(app)?.home_dir;
     let candidate = PathBuf::from(candidate).join(sanitized);
     let aura_home = resolve_aura_home()?;
 
@@ -1527,7 +1942,8 @@ fn resolve_bridge_script_path<R: Runtime>(
     app: &tauri::AppHandle<R>,
     script_name: &str,
 ) -> Result<PathBuf, String> {
-    let dev_bridge = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../bridge/{script_name}"));
+    let dev_bridge =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../bridge/{script_name}"));
     if dev_bridge.exists() {
         return dev_bridge
             .canonicalize()
@@ -1677,7 +2093,9 @@ where
 }
 
 fn extract_array(value: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
-    value.and_then(|entry| entry.as_array().cloned()).unwrap_or_default()
+    value
+        .and_then(|entry| entry.as_array().cloned())
+        .unwrap_or_default()
 }
 
 fn extract_object(value: Option<&serde_json::Value>) -> Option<serde_json::Value> {
@@ -1855,6 +2273,7 @@ fn spawn_agent_task<R: Runtime>(
         reasoning: Vec::new(),
         usage: None,
         capability_snapshot: None,
+        retry_info: None,
         pending_approval: None,
         error: None,
         error_info: None,
@@ -2007,7 +2426,9 @@ fn spawn_agent_task<R: Runtime>(
                         current.task_tree = extract_array(result.get("taskTree"));
                         current.reasoning = extract_array(result.get("reasoning"));
                         current.usage = extract_object(result.get("usage"));
-                        current.capability_snapshot = extract_object(result.get("capabilitySnapshot"));
+                        current.capability_snapshot =
+                            extract_object(result.get("capabilitySnapshot"));
+                        current.retry_info = extract_object(result.get("retryInfo"));
                     }
                 }),
                 Some("failed") => with_snapshot(&stdout_snapshot, |current| {
@@ -2026,6 +2447,7 @@ fn spawn_agent_task<R: Runtime>(
                         .get("source")
                         .and_then(|value| value.as_str())
                         .map(|value| value.to_string());
+                    current.retry_info = extract_object(event.get("retryInfo"));
                     current.raw_error = event
                         .get("rawMessage")
                         .and_then(|value| value.as_str())
@@ -2273,10 +2695,7 @@ fn append_input_to_agent_task(
 }
 
 #[tauri::command]
-fn cancel_agent_task_step(
-    state: State<'_, AgentTaskStore>,
-    task_id: String,
-) -> Result<(), String> {
+fn cancel_agent_task_step(state: State<'_, AgentTaskStore>, task_id: String) -> Result<(), String> {
     let tasks = state
         .tasks
         .lock()
@@ -2305,10 +2724,7 @@ fn cancel_agent_task_step(
 }
 
 #[tauri::command]
-fn abort_agent_task(
-    state: State<'_, AgentTaskStore>,
-    task_id: String,
-) -> Result<(), String> {
+fn abort_agent_task(state: State<'_, AgentTaskStore>, task_id: String) -> Result<(), String> {
     let tasks = state
         .tasks
         .lock()
@@ -2332,7 +2748,10 @@ fn abort_agent_task(
             .snapshot
             .lock()
             .map_err(|_| "Failed to lock task snapshot.".to_string())?;
-        if snapshot.status == "running" || snapshot.status == "queued" || snapshot.status == "awaiting_approval" {
+        if snapshot.status == "running"
+            || snapshot.status == "queued"
+            || snapshot.status == "awaiting_approval"
+        {
             snapshot.status = "failed".into();
             snapshot.error = Some("任务已被用户强行终止。".into());
         }
@@ -2363,7 +2782,9 @@ fn load_persisted_app_state<R: Runtime>(
             |row| row.get(0),
         )
         .optional()
-        .map_err(|error| format!("Failed to load project capability overrides from SQLite: {error}"))?;
+        .map_err(|error| {
+            format!("Failed to load project capability overrides from SQLite: {error}")
+        })?;
 
     let mut sessions_statement = connection
         .prepare(
@@ -2475,7 +2896,9 @@ fn load_persisted_app_state<R: Runtime>(
             let mut versions = Vec::new();
             for version_row in version_rows {
                 versions.push(
-                    version_row.map_err(|error| format!("Failed to decode message version row: {error}"))?,
+                    version_row.map_err(|error| {
+                        format!("Failed to decode message version row: {error}")
+                    })?,
                 );
             }
 
@@ -2730,8 +3153,8 @@ fn read_text_file(file_path: String) -> Result<String, String> {
     if !path.exists() {
         return Err(format!("File does not exist: {}", path.display()));
     }
-    let bytes =
-        fs::read(&path).map_err(|error| format!("Failed to read file {}: {error}", path.display()))?;
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("Failed to read file {}: {error}", path.display()))?;
     let truncated = if bytes.len() > 256 * 1024 {
         &bytes[..256 * 1024]
     } else {
@@ -2762,8 +3185,8 @@ fn detect_browser_runtime<R: Runtime>(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let custom_resolved_path = custom_path_input
-        .and_then(|value| resolve_browser_executable_path(Path::new(value)));
+    let custom_resolved_path =
+        custom_path_input.and_then(|value| resolve_browser_executable_path(Path::new(value)));
 
     Ok(BrowserRuntimeStatusRecord {
         system_chrome_detected: system_chrome_path.is_some(),
@@ -2794,11 +3217,68 @@ fn detect_browser_runtime<R: Runtime>(
 }
 
 #[tauri::command]
-fn install_managed_browser<R: Runtime>(
+async fn install_managed_browser<R: Runtime>(
     app: tauri::AppHandle<R>,
+    install_store: State<'_, ManagedBrowserInstallStore>,
 ) -> Result<BrowserRuntimeStatusRecord, String> {
-    install_managed_browser_inner(&app)?;
-    detect_browser_runtime(app, None, None)
+    let cancel_requested = start_managed_browser_install(&install_store)?;
+
+    let app_for_task = app.clone();
+    let cancel_for_task = Arc::clone(&cancel_requested);
+    let install_result = tauri::async_runtime::spawn_blocking(move || {
+        match install_managed_browser_inner(&app_for_task, &cancel_for_task) {
+            Ok(()) => {
+                let status = detect_browser_runtime(app_for_task.clone(), None, None)?;
+                emit_managed_browser_install_progress(
+                    &app_for_task,
+                    "completed",
+                    "Aura 托管浏览器安装完成。",
+                    Some(1.0),
+                    None,
+                    None,
+                );
+                Ok(status)
+            }
+            Err(error) => {
+                let stage = if error == managed_browser_install_cancelled_error() {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                emit_managed_browser_install_progress(
+                    &app_for_task,
+                    stage,
+                    error.clone(),
+                    None,
+                    None,
+                    None,
+                );
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|error| format!("Managed browser install task failed: {error}"));
+
+    finish_managed_browser_install(&install_store, &cancel_requested);
+
+    install_result?
+}
+
+#[tauri::command]
+fn cancel_managed_browser_install(
+    install_store: State<'_, ManagedBrowserInstallStore>,
+) -> Result<(), String> {
+    let current = install_store
+        .current
+        .lock()
+        .map_err(|_| "Managed browser install state is unavailable.".to_string())?;
+    let Some(handle) = current.as_ref() else {
+        return Err("当前没有正在进行的 Aura 托管浏览器安装。".into());
+    };
+
+    handle.cancel_requested.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2808,8 +3288,12 @@ fn uninstall_managed_browser<R: Runtime>(
     let aura = ensure_aura_layout(&app)?;
     let runtime_root = managed_browser_runtime_root(Path::new(&aura.browser_runtimes_dir));
     if runtime_root.exists() {
-        fs::remove_dir_all(&runtime_root)
-            .map_err(|error| format!("Failed to remove managed browser runtime {}: {error}", runtime_root.display()))?;
+        fs::remove_dir_all(&runtime_root).map_err(|error| {
+            format!(
+                "Failed to remove managed browser runtime {}: {error}",
+                runtime_root.display()
+            )
+        })?;
     }
     detect_browser_runtime(app, None, None)
 }
@@ -2823,13 +3307,19 @@ fn discover_chrome_import_sources() -> Result<Vec<ChromeImportSource>, String> {
 
     let profile_names = chrome_profile_name_map();
     let mut sources = fs::read_dir(&chrome_root)
-        .map_err(|error| format!("Failed to read Chrome user data directory {}: {error}", chrome_root.display()))?
+        .map_err(|error| {
+            format!(
+                "Failed to read Chrome user data directory {}: {error}",
+                chrome_root.display()
+            )
+        })?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .filter_map(|path| {
             let directory_name = path.file_name()?.to_str()?.to_string();
-            let is_profile_dir = directory_name == "Default" || directory_name.starts_with("Profile ");
+            let is_profile_dir =
+                directory_name == "Default" || directory_name.starts_with("Profile ");
             if !is_profile_dir {
                 return None;
             }
@@ -2877,7 +3367,10 @@ fn import_chrome_site_cookies<R: Runtime>(
 
     let cookies_db = PathBuf::from(&source_profile_path).join("Cookies");
     if !cookies_db.exists() {
-        return Err(format!("Chrome cookie database not found: {}", cookies_db.display()));
+        return Err(format!(
+            "Chrome cookie database not found: {}",
+            cookies_db.display()
+        ));
     }
 
     let temp_db = std::env::temp_dir().join(format!(
@@ -2948,7 +3441,9 @@ fn import_chrome_site_cookies<R: Runtime>(
     let _ = fs::remove_file(&temp_db);
 
     if imported_cookies.is_empty() {
-        return Err(format!("No Chrome cookies were found for domain {normalized_domain}."));
+        return Err(format!(
+            "No Chrome cookies were found for domain {normalized_domain}."
+        ));
     }
 
     let mut pending = load_pending_cookie_imports(&app)?;
@@ -3012,10 +3507,9 @@ fn clear_aura_site_cookies<R: Runtime>(
     let augmented_path = build_augmented_path();
     let output = Command::new(&node_bin)
         .arg(script_path)
-        .arg(
-            serde_json::to_string(&payload)
-                .map_err(|error| format!("Failed to serialize browser profile action payload: {error}"))?,
-        )
+        .arg(serde_json::to_string(&payload).map_err(|error| {
+            format!("Failed to serialize browser profile action payload: {error}")
+        })?)
         .current_dir(bridge_cwd)
         .env("PATH", &augmented_path)
         .output()
@@ -3036,6 +3530,101 @@ fn clear_aura_site_cookies<R: Runtime>(
 
     Ok(ClearAuraSiteCookiesResult {
         removed_count,
+        pending_removed_count,
+    })
+}
+
+#[tauri::command]
+fn reset_aura_site_sessions<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    browser_source: String,
+    executable_path: Option<String>,
+    managed_executable_path: Option<String>,
+    aura_profile_path: Option<String>,
+) -> Result<ClearAuraSiteCookiesResult, String> {
+    let pending_removed_count = clear_pending_cookie_imports(&app)?;
+    let script_path = resolve_bridge_script_path(&app, "browserProfileActions.mjs")?;
+    let bridge_cwd = resolve_bridge_cwd(&app)?;
+    let payload = serde_json::json!({
+        "action": "clear-all-cookies",
+        "settings": {
+            "browser": {
+                "enabled": true,
+                "source": browser_source,
+                "executablePath": executable_path,
+                "managedExecutablePath": managed_executable_path,
+                "auraProfilePath": aura_profile_path,
+                "headlessByDefault": true,
+                "search": {
+                    "engine": "google",
+                    "region": "auto",
+                    "language": "auto",
+                    "safeSearch": "moderate"
+                },
+                "behavior": {
+                    "acceptLanguage": "auto",
+                    "timezone": "system",
+                    "locale": "system",
+                    "colorScheme": "system",
+                    "userAgentMode": "default"
+                }
+            }
+        }
+    });
+
+    let node_bin = resolve_node_binary();
+    let augmented_path = build_augmented_path();
+    let output = Command::new(&node_bin)
+        .arg(script_path)
+        .arg(serde_json::to_string(&payload).map_err(|error| {
+            format!("Failed to serialize browser profile action payload: {error}")
+        })?)
+        .current_dir(bridge_cwd)
+        .env("PATH", &augmented_path)
+        .output()
+        .map_err(|error| format!("Failed to run browser profile action bridge: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Resetting Aura site sessions failed.".into()
+        } else {
+            stderr
+        });
+    }
+
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|error| format!("Failed to parse browser profile action response: {error}"))?;
+    let removed_count = parsed["removedCount"].as_u64().unwrap_or(0) as usize;
+
+    Ok(ClearAuraSiteCookiesResult {
+        removed_count,
+        pending_removed_count,
+    })
+}
+
+#[tauri::command]
+fn reset_aura_browser_profile<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    aura_profile_path: Option<String>,
+) -> Result<ResetAuraBrowserProfileResult, String> {
+    let profile_path = resolve_aura_browser_profile_target(&app, aura_profile_path)?;
+    let pending_removed_count = clear_pending_cookie_imports(&app)?;
+    let cleared_profile = profile_path.exists();
+
+    if cleared_profile {
+        fs::remove_dir_all(&profile_path).map_err(|error| {
+            format!(
+                "Failed to clear Aura browser profile {}: {error}",
+                profile_path.display()
+            )
+        })?;
+    }
+
+    ensure_directory(&profile_path)?;
+
+    Ok(ResetAuraBrowserProfileResult {
+        cleared_profile,
         pending_removed_count,
     })
 }
@@ -3079,8 +3668,12 @@ fn delete_aura_asset<R: Runtime>(
     }
 
     if target.is_dir() {
-        fs::remove_dir_all(&target)
-            .map_err(|error| format!("Failed to delete Aura directory {}: {error}", target.display()))?;
+        fs::remove_dir_all(&target).map_err(|error| {
+            format!(
+                "Failed to delete Aura directory {}: {error}",
+                target.display()
+            )
+        })?;
     } else {
         fs::remove_file(&target)
             .map_err(|error| format!("Failed to delete Aura file {}: {error}", target.display()))?;
@@ -3090,13 +3683,15 @@ fn delete_aura_asset<R: Runtime>(
 }
 
 #[tauri::command]
-fn reset_aura_home<R: Runtime>(
-    _app: tauri::AppHandle<R>,
-) -> Result<(), String> {
+fn reset_aura_home<R: Runtime>(_app: tauri::AppHandle<R>) -> Result<(), String> {
     let home = resolve_aura_home()?;
     if home.exists() {
-        fs::remove_dir_all(&home)
-            .map_err(|error| format!("Failed to reset Aura home directory {}: {error}", home.display()))?;
+        fs::remove_dir_all(&home).map_err(|error| {
+            format!(
+                "Failed to reset Aura home directory {}: {error}",
+                home.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -3131,7 +3726,10 @@ fn read_image_preview(file_path: String) -> Result<Option<String>, String> {
         return Err("Image is too large to preview inline.".into());
     }
 
-    Ok(Some(format!("data:{mime};base64,{}", STANDARD.encode(bytes))))
+    Ok(Some(format!(
+        "data:{mime};base64,{}",
+        STANDARD.encode(bytes)
+    )))
 }
 
 #[tauri::command]
@@ -3344,7 +3942,9 @@ fn quit_app(app_handle: tauri::AppHandle) {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
-            if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../../src/assets/aura_status_icon.png")) {
+            if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!(
+                "../../src/assets/aura_status_icon.png"
+            )) {
                 let _ = tauri::tray::TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
                     .build(app);
@@ -3352,6 +3952,7 @@ fn main() {
             Ok(())
         })
         .manage(AgentTaskStore::default())
+        .manage(ManagedBrowserInstallStore::default())
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
@@ -3381,10 +3982,13 @@ fn main() {
             ensure_aura_home,
             detect_browser_runtime,
             install_managed_browser,
+            cancel_managed_browser_install,
             uninstall_managed_browser,
             discover_chrome_import_sources,
             import_chrome_site_cookies,
             clear_aura_site_cookies,
+            reset_aura_site_sessions,
+            reset_aura_browser_profile,
             read_aura_file,
             write_aura_file,
             read_workspace_tree,

@@ -3,10 +3,13 @@ import type {
   AgentSettings,
   ChromeImportSource,
   ImportedChromeSite,
+  ManagedBrowserInstallProgress,
   BrowserRuntimeSource,
   BrowserRuntimeStatusRecord,
 } from '../types'
 import type { AuraHomeState } from './aura'
+
+export const BROWSER_INSTALL_PROGRESS_EVENT = 'browser-install-progress'
 
 type DetectBrowserRuntimeArgs = {
   customExecutablePath?: string
@@ -26,9 +29,15 @@ export async function installManagedBrowser(): Promise<BrowserRuntimeStatusRecor
   return invoke<BrowserRuntimeStatusRecord>('install_managed_browser')
 }
 
+export async function cancelManagedBrowserInstall(): Promise<void> {
+  return invoke('cancel_managed_browser_install')
+}
+
 export async function uninstallManagedBrowser(): Promise<BrowserRuntimeStatusRecord> {
   return invoke<BrowserRuntimeStatusRecord>('uninstall_managed_browser')
 }
+
+export type { ManagedBrowserInstallProgress }
 
 export async function discoverChromeImportSources(): Promise<ChromeImportSource[]> {
   return invoke<ChromeImportSource[]>('discover_chrome_import_sources')
@@ -53,6 +62,25 @@ export async function clearAuraSiteCookies(args: {
     browserSource: args.settings.source,
     executablePath: args.settings.executablePath,
     managedExecutablePath: args.settings.managedExecutablePath,
+    auraProfilePath: args.settings.auraProfilePath,
+  })
+}
+
+export async function resetAuraSiteSessions(args: {
+  settings: AgentSettings['browser']
+}): Promise<{ removedCount: number; pendingRemovedCount: number }> {
+  return invoke('reset_aura_site_sessions', {
+    browserSource: args.settings.source,
+    executablePath: args.settings.executablePath,
+    managedExecutablePath: args.settings.managedExecutablePath,
+    auraProfilePath: args.settings.auraProfilePath,
+  })
+}
+
+export async function resetAuraBrowserProfile(args: {
+  settings: AgentSettings['browser']
+}): Promise<{ clearedProfile: boolean; pendingRemovedCount: number }> {
+  return invoke('reset_aura_browser_profile', {
     auraProfilePath: args.settings.auraProfilePath,
   })
 }

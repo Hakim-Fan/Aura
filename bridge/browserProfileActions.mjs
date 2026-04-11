@@ -1,4 +1,4 @@
-import { clearAuraProfileSiteCookies } from './browserRuntime.mjs'
+import { clearAuraProfileAllCookies, clearAuraProfileSiteCookies } from './browserRuntime.mjs'
 
 async function runAction(payload) {
   if (payload?.action === 'clear-site-cookies') {
@@ -10,6 +10,14 @@ async function runAction(payload) {
     }
 
     return clearAuraProfileSiteCookies(payload.settings, payload.domain)
+  }
+
+  if (payload?.action === 'clear-all-cookies') {
+    if (!payload.settings?.browser) {
+      throw new Error('Missing browser settings.')
+    }
+
+    return clearAuraProfileAllCookies(payload.settings)
   }
 
   throw new Error(`Unsupported browser profile action: ${payload?.action || 'unknown'}`)

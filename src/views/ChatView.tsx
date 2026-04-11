@@ -1574,6 +1574,10 @@ function AssistantMessageCard({
       .filter(Boolean)
       .join(' · ')
     : null
+  const retrySummary =
+    message.retryInfo && message.retryInfo.attemptedRetries > 0
+      ? `自动重试 ${message.retryInfo.attemptedRetries} 次`
+      : ''
   const messageModelLabel =
     message.modelInfo?.label ||
     (activeModelId.split('/').filter(Boolean).at(-1) || activeModelId || '未记录模型')
@@ -1643,6 +1647,11 @@ function AssistantMessageCard({
                     {messageModelLabel}
                   </span>
                   <span>{activitySummary}</span>
+                  {retrySummary ? (
+                    <span className="text-[11px] text-[var(--text-secondary)] opacity-75">
+                      {retrySummary}
+                    </span>
+                  ) : null}
                   {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </button>
                 {messageFailureSummary ? (

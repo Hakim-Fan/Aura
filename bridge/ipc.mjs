@@ -292,6 +292,14 @@ rl.on('line', line => {
           typeof error.errorInfo === 'object'
             ? error.errorInfo
             : undefined,
+        retryInfo:
+          error &&
+          typeof error === 'object' &&
+          'retryInfo' in error &&
+          error.retryInfo &&
+          typeof error.retryInfo === 'object'
+            ? error.retryInfo
+            : undefined,
       })
       process.exitCode = 1
     })

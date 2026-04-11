@@ -73,6 +73,65 @@ function extractProviderReasoning(reasoning = []) {
     .join('\n\n')
 }
 
+function extractPartialProviderMessage(normalized) {
+  return typeof normalized?.errorInfo?.partialMessage === 'string'
+    ? normalized.errorInfo.partialMessage.trim()
+    : ''
+}
+
+function extractPartialProviderReasoning(normalized) {
+  return typeof normalized?.errorInfo?.partialReasoning === 'string'
+    ? normalized.errorInfo.partialReasoning.trim()
+    : ''
+}
+
+function extractProviderRetryInfo(value) {
+  if (!value || typeof value !== 'object' || !value.retryInfo || typeof value.retryInfo !== 'object') {
+    return undefined
+  }
+
+  const retryInfo = value.retryInfo
+  if (
+    typeof retryInfo.attemptedRetries !== 'number' ||
+    !Number.isFinite(retryInfo.attemptedRetries) ||
+    retryInfo.attemptedRetries <= 0 ||
+    typeof retryInfo.configuredMaxAttempts !== 'number' ||
+    !Number.isFinite(retryInfo.configuredMaxAttempts) ||
+    retryInfo.configuredMaxAttempts <= 0
+  ) {
+    return undefined
+  }
+
+  return {
+    attemptedRetries: Math.round(retryInfo.attemptedRetries),
+    configuredMaxAttempts: Math.round(retryInfo.configuredMaxAttempts),
+    recovered: retryInfo.recovered === true,
+  }
+}
+
+function mergeProviderRetryInfo(...entries) {
+  const validEntries = entries.filter(
+    entry =>
+      entry &&
+      typeof entry.attemptedRetries === 'number' &&
+      Number.isFinite(entry.attemptedRetries) &&
+      entry.attemptedRetries > 0,
+  )
+
+  if (validEntries.length === 0) {
+    return undefined
+  }
+
+  return {
+    attemptedRetries: validEntries.reduce((sum, entry) => sum + entry.attemptedRetries, 0),
+    configuredMaxAttempts: validEntries.reduce(
+      (max, entry) => Math.max(max, entry.configuredMaxAttempts || 0),
+      0,
+    ),
+    recovered: validEntries.some(entry => entry.recovered === true),
+  }
+}
+
 function normalizeFinalAnswer(message) {
   return (message || '').trim()
 }
@@ -196,6 +255,58 @@ function normalizeAgentError(error) {
   })
 }
 
+function summarizeToolOutput(output, maxLength = 220) {
+  const normalized = String(output || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!normalized) {
+    return ''
+  }
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength)}...`
+    : normalized
+}
+
+function buildPartialRecoveryMessage(toolEvents, normalized, partialMessage = '') {
+  const successfulEvents = toolEvents.filter(event => event.status === 'success')
+  const recentSuccessful = successfulEvents.slice(-3)
+  const completedSteps = recentSuccessful
+    .map((event, index) => {
+      const summary = summarizeToolOutput(event.output) || event.summary || event.name
+      return `${index + 1}. ${event.name}: ${summary}`
+    })
+    .join('\n')
+
+  const recentFailures = toolEvents
+    .filter(event => event.status === 'error')
+    .slice(-2)
+    .map((event, index) => {
+      const detail =
+        event.errorInfo?.summary ||
+        summarizeToolOutput(event.error || event.output, 160) ||
+        event.summary ||
+        event.name
+      return `${index + 1}. ${event.name}: ${detail}`
+    })
+    .join('\n')
+
+  return [
+    '执行在模型生成最终回答时中断了，但我先把已经保留下来的内容和已完成进展整理给你。',
+    partialMessage ? `模型中断前已经写出的内容：\n${partialMessage.slice(0, 6000)}` : null,
+    completedSteps
+      ? `已完成的步骤：\n${completedSteps}`
+      : toolEvents.length > 0
+        ? '本轮已经执行过工具步骤，但还没来得及整理成完整结论。'
+        : '这次中断发生在模型整理最终回答时，还没有额外的工具步骤可供复盘。',
+    recentFailures ? `中断前最近看到的问题：\n${recentFailures}` : null,
+    normalized?.errorInfo?.suggestedAction
+      ? `建议：${normalized.errorInfo.suggestedAction}`
+      : '如果你愿意，我可以基于这些已完成步骤继续重试，而不用从头再来。',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
 function createTaskTracker(hooks, rootTitle) {
   const root = {
     id: createId('main'),
@@ -295,6 +406,36 @@ function buildCapabilityExposureNote(snapshot) {
   return lines.join('\n')
 }
 
+function getBrowserSourceLabel(source) {
+  switch (source) {
+    case 'managed-chrome':
+      return 'Aura managed browser'
+    case 'custom-executable':
+      return 'custom browser executable'
+    case 'system-chrome':
+    default:
+      return 'system Chrome'
+  }
+}
+
+function isBrowserSourceAvailable(settings) {
+  const source = settings.browser?.source
+  const status = settings.browserRuntimeStatus
+  if (!status || !source) {
+    return null
+  }
+
+  switch (source) {
+    case 'managed-chrome':
+      return status.managedChromeInstalled === true
+    case 'custom-executable':
+      return status.customExecutableValid === true
+    case 'system-chrome':
+    default:
+      return status.systemChromeDetected === true
+  }
+}
+
 function buildSystemPrompt(settings, skillPrompt, exposureNote) {
   const sections = [
     'You are Aura, a local-first desktop coding agent.',
@@ -337,7 +478,9 @@ function buildSystemPrompt(settings, skillPrompt, exposureNote) {
   }
   if (settings.enableChromeAutomation) {
     capabilities.push(
-      '- chrome_* tools are a backup mode for interacting with the user\'s frontmost Google Chrome window on macOS when explicitly requested or when the Aura browser runtime is unavailable.',
+      settings.browser?.allowChromeAutomationFallback
+        ? '- chrome_* tools are a backup mode for interacting with the user\'s frontmost Google Chrome window on macOS. Use them only when the user explicitly requests system Chrome, or when browser_* fails because the Aura browser runtime is unavailable.'
+        : '- chrome_* tools are only for explicit requests to interact with the user\'s frontmost Google Chrome window on macOS. Do not use them as an automatic fallback.',
     )
   }
   if (capabilities.length > 0) {
@@ -345,6 +488,24 @@ function buildSystemPrompt(settings, skillPrompt, exposureNote) {
   }
 
   if (settings.browser?.enabled) {
+    const browserSource = settings.browser.source || 'system-chrome'
+    const availability = isBrowserSourceAvailable(settings)
+    const statusLabel =
+      availability === null ? 'unknown' : availability ? 'available' : 'unavailable'
+    const browserRoutingPolicy = [
+      `Aura browser source: ${getBrowserSourceLabel(browserSource)} (${statusLabel}).`,
+      'Routing policy: use browser_* for all normal web work. Do not switch to chrome_* just because a site needs login, MFA, CAPTCHA, consent, or other interactive steps; use browser_takeover_visible instead.',
+    ]
+
+    if (settings.enableChromeAutomation) {
+      browserRoutingPolicy.push(
+        settings.browser.allowChromeAutomationFallback
+          ? 'Fallback rule: chrome_* is allowed only after the Aura browser runtime is unavailable/disabled/missing, or when the user explicitly asks to operate system Chrome.'
+          : 'Fallback rule: if the Aura browser runtime is unavailable, do not switch to chrome_* unless the user explicitly asks to operate system Chrome.',
+      )
+    }
+
+    sections.push(browserRoutingPolicy.join('\n'))
     sections.push(
       'When a browser_* tool output includes blocker.detected=true, treat that as a real user-blocking state. Prefer calling browser_takeover_visible when the workflow cannot continue headlessly, then wait for user confirmation before proceeding.',
     )
@@ -459,7 +620,7 @@ export async function runAgent(request) {
 
       if (shouldRunFinalization(result)) {
         try {
-          const finalizedMessage = await finalizeGoogleAnswer({
+          const finalized = await finalizeGoogleAnswer({
             settings,
             systemPrompt,
             messages: resolvedMessages,
@@ -467,10 +628,11 @@ export async function runAgent(request) {
             reasoningText: extractProviderReasoning(result.reasoning || []),
             draftMessage: result.message,
           })
-          if (finalizedMessage.trim()) {
+          if (finalized.message.trim()) {
             result = {
               ...result,
-              message: finalizedMessage,
+              message: finalized.message,
+              retryInfo: mergeProviderRetryInfo(result.retryInfo, finalized.retryInfo),
             }
           }
         } catch {
@@ -493,6 +655,7 @@ export async function runAgent(request) {
         ...result,
         capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
         reasoning,
+        retryInfo: result.retryInfo,
         status: 'completed',
         taskTree: taskTracker.getTree(),
       }
@@ -517,7 +680,7 @@ export async function runAgent(request) {
 
       if (shouldRunFinalization(result)) {
         try {
-          const finalizedMessage = await finalizeOpenAiCompatibleAnswer({
+          const finalized = await finalizeOpenAiCompatibleAnswer({
             settings,
             systemPrompt,
             messages: resolvedMessages,
@@ -525,10 +688,11 @@ export async function runAgent(request) {
             reasoningText: extractProviderReasoning(result.reasoning || []),
             draftMessage: result.message,
           })
-          if (finalizedMessage.trim()) {
+          if (finalized.message.trim()) {
             result = {
               ...result,
-              message: finalizedMessage,
+              message: finalized.message,
+              retryInfo: mergeProviderRetryInfo(result.retryInfo, finalized.retryInfo),
             }
           }
         } catch {
@@ -551,6 +715,7 @@ export async function runAgent(request) {
         ...result,
         capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
         reasoning,
+        retryInfo: result.retryInfo,
         status: 'completed',
         taskTree: taskTracker.getTree(),
       }
@@ -564,40 +729,59 @@ export async function runAgent(request) {
     })
   } catch (error) {
     const normalized = normalizeAgentError(error)
+    const partialMessage = extractPartialProviderMessage(normalized)
+    const partialReasoning = extractPartialProviderReasoning(normalized)
+    const retryInfo = extractProviderRetryInfo(normalized)
+    const hasRecoveryContext =
+      toolEvents.length > 0 || partialMessage.length > 0 || partialReasoning.length > 0
 
-    if (normalized.source === 'provider' && toolEvents.length > 0) {
+    if (
+      settings.enableProviderFailureRecovery !== false &&
+      normalized.source === 'provider' &&
+      hasRecoveryContext
+    ) {
       try {
-        const recoveredMessage =
+        const recovered =
           settings.provider === 'google'
             ? await finalizeGoogleAnswer({
                 settings,
                 systemPrompt,
                 messages,
                 toolEvents,
-                reasoningText: '',
-                draftMessage: '',
+                reasoningText: partialReasoning,
+                draftMessage: partialMessage,
               })
             : await finalizeOpenAiCompatibleAnswer({
                 settings,
                 systemPrompt,
                 messages,
                 toolEvents,
-                reasoningText: '',
-                draftMessage: '',
+                reasoningText: partialReasoning,
+                draftMessage: partialMessage,
               })
 
-        if (recoveredMessage.trim()) {
-          const summaryReasoning = summarizeReasoning(messages, toolEvents, recoveredMessage)
+        if (recovered.message.trim()) {
+          const mergedRetryInfo = mergeProviderRetryInfo(
+            retryInfo,
+            recovered.retryInfo
+              ? {
+                  ...recovered.retryInfo,
+                  recovered: true,
+                }
+              : undefined,
+          )
+          const summaryReasoning = summarizeReasoning(messages, toolEvents, recovered.message)
           hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
             blockId: summaryReasoning[0].id,
             kind: summaryReasoning[0].kind,
           })
           taskTracker.completeTask(currentTaskId, '生成最终回答')
           return {
-            message: recoveredMessage,
+            message: recovered.message,
             toolEvents,
             capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
             reasoning: summaryReasoning,
+            retryInfo: mergedRetryInfo,
             usage: undefined,
             status: 'completed',
             taskTree: taskTracker.getTree(),
@@ -605,6 +789,28 @@ export async function runAgent(request) {
         }
       } catch {
         // Recovery finalization is best-effort only. Preserve the original failure if it also fails.
+      }
+
+      const fallbackMessage = buildPartialRecoveryMessage(
+        toolEvents,
+        normalized,
+        partialMessage,
+      )
+      const summaryReasoning = summarizeReasoning(messages, toolEvents, fallbackMessage)
+      hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
+        blockId: summaryReasoning[0].id,
+        kind: summaryReasoning[0].kind,
+      })
+      taskTracker.completeTask(currentTaskId, '生成部分恢复回答')
+      return {
+        message: fallbackMessage,
+        toolEvents,
+        capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
+        reasoning: summaryReasoning,
+        retryInfo,
+        usage: undefined,
+        status: 'completed',
+        taskTree: taskTracker.getTree(),
       }
     }
 
@@ -614,6 +820,7 @@ export async function runAgent(request) {
     enriched.source = normalized.source
     enriched.rawMessage = normalized.rawMessage
     enriched.errorInfo = normalized.errorInfo
+    enriched.retryInfo = retryInfo
     throw enriched
   } finally {
     await mcp.close()

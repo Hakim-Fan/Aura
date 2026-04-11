@@ -48,6 +48,33 @@ function extractSource(error, fallbackSource) {
   return fallbackSource
 }
 
+function extractRetryInfo(error) {
+  if (!error || typeof error !== 'object' || !error.retryInfo || typeof error.retryInfo !== 'object') {
+    return undefined
+  }
+
+  const retryInfo = error.retryInfo
+  const attemptedRetries =
+    typeof retryInfo.attemptedRetries === 'number' && Number.isFinite(retryInfo.attemptedRetries)
+      ? Math.max(0, Math.round(retryInfo.attemptedRetries))
+      : 0
+  const configuredMaxAttempts =
+    typeof retryInfo.configuredMaxAttempts === 'number' &&
+    Number.isFinite(retryInfo.configuredMaxAttempts)
+      ? Math.max(1, Math.round(retryInfo.configuredMaxAttempts))
+      : 0
+
+  if (attemptedRetries <= 0 || configuredMaxAttempts <= 0) {
+    return undefined
+  }
+
+  return {
+    attemptedRetries,
+    configuredMaxAttempts,
+    recovered: retryInfo.recovered === true,
+  }
+}
+
 function classifyError({ code, status, rawMessage }) {
   const normalizedCode = (code || '').toUpperCase()
   const normalizedMessage = (rawMessage || '').toLowerCase()
@@ -197,6 +224,7 @@ export function normalizeRuntimeError(error, context = {}) {
   const code = extractCode(error)
   const status = extractStatus(error)
   const source = extractSource(error, context.source || 'system')
+  const retryInfo = extractRetryInfo(error)
 
   if (
     error &&
@@ -209,6 +237,7 @@ export function normalizeRuntimeError(error, context = {}) {
       source,
       rawMessage,
       message: error.errorInfo.summary || context.fallbackSummary || '执行失败。',
+      retryInfo,
       errorInfo: {
         source,
         code,
@@ -226,6 +255,7 @@ export function normalizeRuntimeError(error, context = {}) {
     source,
     rawMessage,
     message: summary,
+    retryInfo,
     errorInfo: {
       source,
       category,
