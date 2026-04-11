@@ -238,6 +238,17 @@ function describeBuiltinGroup(tool) {
     }
   }
 
+  if (tool.name.startsWith('browser_')) {
+    return {
+      id: 'advanced:browser-runtime',
+      kind: 'advanced',
+      name: 'Aura Browser Runtime',
+      description: tool.description,
+      keywords: ['browser', 'page', 'website', 'url', 'dom', 'screenshot', 'search', '网页', '浏览器'],
+      defaultSelected: false,
+    }
+  }
+
   if (tool.name.startsWith('chrome_')) {
     return {
       id: 'advanced:chrome-automation',
@@ -340,8 +351,11 @@ function scoreToolGroup(group, context) {
     if (group.id === 'advanced:computer-use' && context.signals.isDesktopTask) {
       score += 6
     }
+    if (group.id === 'advanced:browser-runtime' && context.signals.isBrowserTask) {
+      score += 8
+    }
     if (group.id === 'advanced:chrome-automation' && context.signals.isBrowserTask) {
-      score += 6
+      score += 4
     }
   }
 

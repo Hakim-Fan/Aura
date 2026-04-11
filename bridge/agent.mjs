@@ -330,9 +330,14 @@ function buildSystemPrompt(settings, skillPrompt, exposureNote) {
       '- You may control the local desktop through computer_* tools on macOS.',
     )
   }
+  if (settings.browser?.enabled) {
+    capabilities.push(
+      '- Prefer browser_* tools for normal web tasks. They run inside the Aura browser runtime with an isolated profile and do not need the frontmost Chrome window.',
+    )
+  }
   if (settings.enableChromeAutomation) {
     capabilities.push(
-      '- You may automate Google Chrome through chrome_* tools on macOS.',
+      '- chrome_* tools are a backup mode for interacting with the user\'s frontmost Google Chrome window on macOS when explicitly requested or when the Aura browser runtime is unavailable.',
     )
   }
   if (capabilities.length > 0) {

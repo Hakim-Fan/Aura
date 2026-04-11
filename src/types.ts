@@ -303,6 +303,77 @@ export type MemoryMode = 'summary' | 'claude-like'
 
 export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max'
 
+export type BrowserRuntimeSource =
+  | 'system-chrome'
+  | 'managed-chrome'
+  | 'custom-executable'
+
+export type BrowserSearchEngine =
+  | 'google'
+  | 'bing'
+  | 'duckduckgo'
+  | 'baidu'
+  | 'custom'
+
+export type BrowserTakeoverMode = 'ask' | 'auto-visible-on-blocker'
+
+export type BrowserSearchPreferences = {
+  engine: BrowserSearchEngine
+  customTemplate?: string
+  region?: string
+  language?: string
+  safeSearch?: 'off' | 'moderate' | 'strict'
+}
+
+export type BrowserBehaviorPreferences = {
+  acceptLanguage?: string
+  timezone?: string
+  locale?: string
+  colorScheme?: 'light' | 'dark' | 'system'
+  userAgentMode?: 'default' | 'desktop'
+}
+
+export type BrowserRuntimeSettings = {
+  enabled: boolean
+  source: BrowserRuntimeSource
+  executablePath?: string
+  managedExecutablePath?: string
+  headlessByDefault: boolean
+  takeoverMode: BrowserTakeoverMode
+  persistAuraProfile: boolean
+  auraProfilePath?: string
+  search: BrowserSearchPreferences
+  behavior: BrowserBehaviorPreferences
+}
+
+export type ChromeImportSource = {
+  id: string
+  profileName: string
+  profilePath: string
+  isDefault: boolean
+}
+
+export type ImportedChromeSite = {
+  id: string
+  domain: string
+  sourceProfileId: string
+  importedAt: number
+  lastRefreshedAt?: number
+  cookieCount: number
+  notes?: string
+}
+
+export type BrowserRuntimeStatusRecord = {
+  systemChromeDetected: boolean
+  systemChromePath?: string
+  managedChromeInstalled: boolean
+  managedChromePath?: string
+  managedChromeSizeBytes?: number
+  customExecutablePath?: string
+  customExecutableValid?: boolean
+  lastCheckedAt: number
+}
+
 export type AgentSettings = {
   provider: ProviderMode
   apiKey: string
@@ -324,6 +395,10 @@ export type AgentSettings = {
   autoApproveChromeAutomation: boolean
   enabledSkillIds: string[]
   enabledPluginIds: string[]
+  browser: BrowserRuntimeSettings
+  chromeImportSources: ChromeImportSource[]
+  importedChromeSites: ImportedChromeSite[]
+  browserRuntimeStatus?: BrowserRuntimeStatusRecord
   mcpServers: McpServerConfig[]
   sendShortcut: 'enter' | 'meta-enter'
 }

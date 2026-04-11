@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -85,6 +86,12 @@ struct AuraHomeState {
     home_dir: String,
     #[serde(rename = "configDir")]
     config_dir: String,
+    #[serde(rename = "browserDir")]
+    browser_dir: String,
+    #[serde(rename = "browserProfilesDir")]
+    browser_profiles_dir: String,
+    #[serde(rename = "browserRuntimesDir")]
+    browser_runtimes_dir: String,
     #[serde(rename = "skillsDir")]
     skills_dir: String,
     #[serde(rename = "pluginsDir")]
@@ -103,6 +110,26 @@ struct AuraHomeState {
     mcp_servers_path: String,
     skills: Vec<AuraAssetMetadata>,
     plugins: Vec<AuraAssetMetadata>,
+}
+
+#[derive(Clone, Serialize)]
+struct BrowserRuntimeStatusRecord {
+    #[serde(rename = "systemChromeDetected")]
+    system_chrome_detected: bool,
+    #[serde(rename = "systemChromePath")]
+    system_chrome_path: Option<String>,
+    #[serde(rename = "managedChromeInstalled")]
+    managed_chrome_installed: bool,
+    #[serde(rename = "managedChromePath")]
+    managed_chrome_path: Option<String>,
+    #[serde(rename = "managedChromeSizeBytes")]
+    managed_chrome_size_bytes: Option<u64>,
+    #[serde(rename = "customExecutablePath")]
+    custom_executable_path: Option<String>,
+    #[serde(rename = "customExecutableValid")]
+    custom_executable_valid: Option<bool>,
+    #[serde(rename = "lastCheckedAt")]
+    last_checked_at: u64,
 }
 
 fn resolve_user_home() -> Result<PathBuf, String> {
@@ -713,6 +740,9 @@ fn seed_directory_from_defaults<R: Runtime>(
 fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeState, String> {
     let home_dir = resolve_aura_home()?;
     let config_dir = home_dir.join("config");
+    let browser_dir = home_dir.join("browser");
+    let browser_profiles_dir = browser_dir.join("profiles");
+    let browser_runtimes_dir = browser_dir.join("runtimes");
     let skills_dir = home_dir.join("skills");
     let plugins_dir = home_dir.join("plugins");
     let mcp_dir = home_dir.join("mcp");
@@ -722,6 +752,9 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
     for dir in [
         &home_dir,
         &config_dir,
+        &browser_dir,
+        &browser_profiles_dir,
+        &browser_runtimes_dir,
         &skills_dir,
         &plugins_dir,
         &mcp_dir,
@@ -741,6 +774,9 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
     Ok(AuraHomeState {
         home_dir: home_dir.display().to_string(),
         config_dir: config_dir.display().to_string(),
+        browser_dir: browser_dir.display().to_string(),
+        browser_profiles_dir: browser_profiles_dir.display().to_string(),
+        browser_runtimes_dir: browser_runtimes_dir.display().to_string(),
         skills_dir: skills_dir.display().to_string(),
         plugins_dir: plugins_dir.display().to_string(),
         mcp_dir: mcp_dir.display().to_string(),
@@ -752,6 +788,104 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
         skills: scan_aura_assets(app, &skills_dir, "skills")?,
         plugins: scan_aura_assets(app, &plugins_dir, "plugins")?,
     })
+}
+
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn canonical_display_path(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
+fn resolve_app_bundle_executable(path: &Path) -> Option<PathBuf> {
+    if !path.is_dir() || path.extension().and_then(|value| value.to_str()) != Some("app") {
+        return None;
+    }
+
+    let executable_name = path.file_stem()?.to_str()?;
+    let macos_dir = path.join("Contents").join("MacOS");
+    let named_candidate = macos_dir.join(executable_name);
+    if named_candidate.is_file() {
+        return Some(named_candidate);
+    }
+
+    fs::read_dir(&macos_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|candidate| candidate.is_file())
+}
+
+fn resolve_browser_executable_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+
+    resolve_app_bundle_executable(path)
+}
+
+fn total_path_size(path: &Path) -> Option<u64> {
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.is_file() {
+        return Some(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return None;
+    }
+
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path).ok()? {
+        let entry = entry.ok()?;
+        total = total.saturating_add(total_path_size(&entry.path())?);
+    }
+    Some(total)
+}
+
+fn detect_system_chrome_path() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let mut candidates = vec![
+            PathBuf::from("/Applications/Google Chrome.app"),
+            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ];
+
+        if let Ok(home) = resolve_user_home() {
+            candidates.push(home.join("Applications/Google Chrome.app"));
+            candidates.push(home.join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"));
+        }
+
+        return candidates
+            .into_iter()
+            .find_map(|candidate| resolve_browser_executable_path(&candidate));
+    }
+
+    None
+}
+
+fn detect_managed_chrome_path(runtime_root: &Path, explicit_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = explicit_path.map(str::trim).filter(|value| !value.is_empty()) {
+        return resolve_browser_executable_path(Path::new(path));
+    }
+
+    let candidates = [
+        runtime_root.join("chrome").join("Google Chrome.app"),
+        runtime_root.join("chrome").join("Google Chrome for Testing.app"),
+        runtime_root.join("chrome").join("Google Chrome.app").join("Contents/MacOS/Google Chrome"),
+        runtime_root.join("chrome").join("Google Chrome for Testing.app").join("Contents/MacOS/Google Chrome for Testing"),
+        runtime_root.join("chrome").join("chrome"),
+        runtime_root.join("chrome").join("chrome-mac").join("Google Chrome for Testing.app"),
+        runtime_root.join("chrome").join("chrome-mac").join("Google Chrome for Testing"),
+    ];
+
+    candidates
+        .into_iter()
+        .find_map(|candidate| resolve_browser_executable_path(&candidate))
 }
 
 fn resolve_app_db_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
@@ -2277,6 +2411,47 @@ fn ensure_aura_home<R: Runtime>(app: tauri::AppHandle<R>) -> Result<AuraHomeStat
 }
 
 #[tauri::command]
+fn detect_browser_runtime<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    custom_executable_path: Option<String>,
+    managed_executable_path: Option<String>,
+) -> Result<BrowserRuntimeStatusRecord, String> {
+    let aura = ensure_aura_layout(&app)?;
+    let runtime_root = PathBuf::from(aura.browser_runtimes_dir);
+
+    let system_chrome_path = detect_system_chrome_path();
+    let managed_chrome_path =
+        detect_managed_chrome_path(&runtime_root, managed_executable_path.as_deref());
+
+    let custom_path_input = custom_executable_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let custom_resolved_path = custom_path_input
+        .and_then(|value| resolve_browser_executable_path(Path::new(value)));
+
+    Ok(BrowserRuntimeStatusRecord {
+        system_chrome_detected: system_chrome_path.is_some(),
+        system_chrome_path: system_chrome_path
+            .as_ref()
+            .map(|path| canonical_display_path(path)),
+        managed_chrome_installed: managed_chrome_path.is_some(),
+        managed_chrome_path: managed_chrome_path
+            .as_ref()
+            .map(|path| canonical_display_path(path)),
+        managed_chrome_size_bytes: managed_chrome_path
+            .as_ref()
+            .and_then(|path| total_path_size(path)),
+        custom_executable_path: custom_resolved_path
+            .as_ref()
+            .map(|path| canonical_display_path(path))
+            .or_else(|| custom_path_input.map(String::from)),
+        custom_executable_valid: custom_path_input.map(|_| custom_resolved_path.is_some()),
+        last_checked_at: current_timestamp_ms(),
+    })
+}
+
+#[tauri::command]
 fn read_aura_file<R: Runtime>(
     app: tauri::AppHandle<R>,
     relative_path: String,
@@ -2580,9 +2755,9 @@ fn quit_app(app_handle: tauri::AppHandle) {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
-            if let Some(icon) = app.default_window_icon() {
+            if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../../src/assets/aura_status_icon.png")) {
                 let _ = tauri::tray::TrayIconBuilder::with_id("main-tray")
-                    .icon(icon.clone())
+                    .icon(icon)
                     .build(app);
             }
             Ok(())
@@ -2615,6 +2790,7 @@ fn main() {
             run_provider_action,
             run_mcp_action,
             ensure_aura_home,
+            detect_browser_runtime,
             read_aura_file,
             write_aura_file,
             read_workspace_tree,

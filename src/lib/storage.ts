@@ -1,9 +1,15 @@
 import type {
   AgentSettings,
+  BrowserBehaviorPreferences,
+  BrowserRuntimeSettings,
+  BrowserRuntimeStatusRecord,
+  BrowserSearchPreferences,
   CapabilityOverrideMode,
   CapabilityUsageSnapshot,
   ChatMessageVariant,
+  ChromeImportSource,
   ExecutionMode,
+  ImportedChromeSite,
   MemoryMode,
   ProjectCapabilityOverrides,
   ResolvedAgentCapabilities,
@@ -77,6 +83,37 @@ function defaultProfiles(): ProviderProfile[] {
   ]
 }
 
+function defaultBrowserSearchPreferences(): BrowserSearchPreferences {
+  return {
+    engine: 'google',
+    region: 'auto',
+    language: 'auto',
+    safeSearch: 'moderate',
+  }
+}
+
+function defaultBrowserBehaviorPreferences(): BrowserBehaviorPreferences {
+  return {
+    acceptLanguage: 'auto',
+    timezone: 'system',
+    locale: 'system',
+    colorScheme: 'system',
+    userAgentMode: 'default',
+  }
+}
+
+function defaultBrowserRuntimeSettings(): BrowserRuntimeSettings {
+  return {
+    enabled: true,
+    source: 'system-chrome',
+    headlessByDefault: true,
+    takeoverMode: 'ask',
+    persistAuraProfile: true,
+    search: defaultBrowserSearchPreferences(),
+    behavior: defaultBrowserBehaviorPreferences(),
+  }
+}
+
 export const defaultSettings: AgentSettings = {
   provider: 'openai',
   apiKey: '',
@@ -98,6 +135,9 @@ export const defaultSettings: AgentSettings = {
   autoApproveChromeAutomation: false,
   enabledSkillIds: [],
   enabledPluginIds: [],
+  browser: defaultBrowserRuntimeSettings(),
+  chromeImportSources: [],
+  importedChromeSites: [],
   mcpServers: [],
   sendShortcut: 'meta-enter',
 }
@@ -533,6 +573,234 @@ function normalizeMcpServers(value: unknown) {
     .filter((entry): entry is AgentSettings['mcpServers'][number] => Boolean(entry))
 }
 
+function normalizeBrowserSearchPreferences(value: unknown): BrowserSearchPreferences {
+  const defaults = defaultBrowserSearchPreferences()
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<BrowserSearchPreferences>
+  return {
+    engine:
+      entry.engine === 'google' ||
+      entry.engine === 'bing' ||
+      entry.engine === 'duckduckgo' ||
+      entry.engine === 'baidu' ||
+      entry.engine === 'custom'
+        ? entry.engine
+        : defaults.engine,
+    customTemplate:
+      typeof entry.customTemplate === 'string' && entry.customTemplate.trim()
+        ? entry.customTemplate.trim()
+        : undefined,
+    region:
+      typeof entry.region === 'string' && entry.region.trim()
+        ? entry.region.trim()
+        : defaults.region,
+    language:
+      typeof entry.language === 'string' && entry.language.trim()
+        ? entry.language.trim()
+        : defaults.language,
+    safeSearch:
+      entry.safeSearch === 'off' ||
+      entry.safeSearch === 'strict' ||
+      entry.safeSearch === 'moderate'
+        ? entry.safeSearch
+        : defaults.safeSearch,
+  }
+}
+
+function normalizeBrowserBehaviorPreferences(value: unknown): BrowserBehaviorPreferences {
+  const defaults = defaultBrowserBehaviorPreferences()
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<BrowserBehaviorPreferences>
+  return {
+    acceptLanguage:
+      typeof entry.acceptLanguage === 'string' && entry.acceptLanguage.trim()
+        ? entry.acceptLanguage.trim()
+        : defaults.acceptLanguage,
+    timezone:
+      typeof entry.timezone === 'string' && entry.timezone.trim()
+        ? entry.timezone.trim()
+        : defaults.timezone,
+    locale:
+      typeof entry.locale === 'string' && entry.locale.trim()
+        ? entry.locale.trim()
+        : defaults.locale,
+    colorScheme:
+      entry.colorScheme === 'light' ||
+      entry.colorScheme === 'dark' ||
+      entry.colorScheme === 'system'
+        ? entry.colorScheme
+        : defaults.colorScheme,
+    userAgentMode:
+      entry.userAgentMode === 'desktop' || entry.userAgentMode === 'default'
+        ? entry.userAgentMode
+        : defaults.userAgentMode,
+  }
+}
+
+function normalizeBrowserRuntimeSettings(value: unknown): BrowserRuntimeSettings {
+  const defaults = defaultBrowserRuntimeSettings()
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<BrowserRuntimeSettings>
+  return {
+    enabled: entry.enabled !== false,
+    source:
+      entry.source === 'managed-chrome' ||
+      entry.source === 'custom-executable' ||
+      entry.source === 'system-chrome'
+        ? entry.source
+        : defaults.source,
+    executablePath:
+      typeof entry.executablePath === 'string' && entry.executablePath.trim()
+        ? entry.executablePath.trim()
+        : undefined,
+    managedExecutablePath:
+      typeof entry.managedExecutablePath === 'string' && entry.managedExecutablePath.trim()
+        ? entry.managedExecutablePath.trim()
+        : undefined,
+    headlessByDefault: entry.headlessByDefault !== false,
+    takeoverMode:
+      entry.takeoverMode === 'auto-visible-on-blocker' ? entry.takeoverMode : defaults.takeoverMode,
+    persistAuraProfile: entry.persistAuraProfile !== false,
+    auraProfilePath:
+      typeof entry.auraProfilePath === 'string' && entry.auraProfilePath.trim()
+        ? entry.auraProfilePath.trim()
+        : undefined,
+    search: normalizeBrowserSearchPreferences(entry.search),
+    behavior: normalizeBrowserBehaviorPreferences(entry.behavior),
+  }
+}
+
+function normalizeChromeImportSources(value: unknown): ChromeImportSource[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') {
+        return null
+      }
+
+      const source = entry as Partial<ChromeImportSource>
+      if (
+        typeof source.profileName !== 'string' ||
+        !source.profileName.trim() ||
+        typeof source.profilePath !== 'string' ||
+        !source.profilePath.trim()
+      ) {
+        return null
+      }
+
+      return {
+        id:
+          typeof source.id === 'string' && source.id.trim()
+            ? source.id
+            : `chrome-import-${index}-${Math.random().toString(36).slice(2, 8)}`,
+        profileName: source.profileName.trim(),
+        profilePath: source.profilePath.trim(),
+        isDefault: source.isDefault === true,
+      } satisfies ChromeImportSource
+    })
+    .filter((entry): entry is ChromeImportSource => Boolean(entry))
+}
+
+function normalizeImportedChromeSites(value: unknown): ImportedChromeSite[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') {
+        return null
+      }
+
+      const site = entry as Partial<ImportedChromeSite>
+      if (
+        typeof site.domain !== 'string' ||
+        !site.domain.trim() ||
+        typeof site.sourceProfileId !== 'string' ||
+        !site.sourceProfileId.trim()
+      ) {
+        return null
+      }
+
+      const normalized: ImportedChromeSite = {
+        id:
+          typeof site.id === 'string' && site.id.trim()
+            ? site.id
+            : `imported-site-${index}-${Math.random().toString(36).slice(2, 8)}`,
+        domain: site.domain.trim(),
+        sourceProfileId: site.sourceProfileId.trim(),
+        importedAt:
+          typeof site.importedAt === 'number' && Number.isFinite(site.importedAt)
+            ? site.importedAt
+            : Date.now(),
+        cookieCount:
+          typeof site.cookieCount === 'number' && Number.isFinite(site.cookieCount)
+            ? Math.max(0, Math.round(site.cookieCount))
+            : 0,
+      }
+
+      if (typeof site.lastRefreshedAt === 'number' && Number.isFinite(site.lastRefreshedAt)) {
+        normalized.lastRefreshedAt = site.lastRefreshedAt
+      }
+      if (typeof site.notes === 'string' && site.notes.trim()) {
+        normalized.notes = site.notes.trim()
+      }
+
+      return normalized
+    })
+    .filter((entry): entry is ImportedChromeSite => Boolean(entry))
+}
+
+function normalizeBrowserRuntimeStatusRecord(
+  value: unknown,
+): BrowserRuntimeStatusRecord | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const status = value as Partial<BrowserRuntimeStatusRecord>
+  return {
+    systemChromeDetected: status.systemChromeDetected === true,
+    systemChromePath:
+      typeof status.systemChromePath === 'string' && status.systemChromePath.trim()
+        ? status.systemChromePath.trim()
+        : undefined,
+    managedChromeInstalled: status.managedChromeInstalled === true,
+    managedChromePath:
+      typeof status.managedChromePath === 'string' && status.managedChromePath.trim()
+        ? status.managedChromePath.trim()
+        : undefined,
+    managedChromeSizeBytes:
+      typeof status.managedChromeSizeBytes === 'number' && Number.isFinite(status.managedChromeSizeBytes)
+        ? status.managedChromeSizeBytes
+        : undefined,
+    customExecutablePath:
+      typeof status.customExecutablePath === 'string' && status.customExecutablePath.trim()
+        ? status.customExecutablePath.trim()
+        : undefined,
+    customExecutableValid:
+      typeof status.customExecutableValid === 'boolean'
+        ? status.customExecutableValid
+        : undefined,
+    lastCheckedAt:
+      typeof status.lastCheckedAt === 'number' && Number.isFinite(status.lastCheckedAt)
+        ? status.lastCheckedAt
+        : Date.now(),
+  }
+}
+
 function parseSettings(raw: string | null): AgentSettings {
   if (!raw) {
     return defaultSettings
@@ -558,6 +826,10 @@ function parseSettings(raw: string | null): AgentSettings {
       executionMode: normalizeExecutionMode(parsed.executionMode),
       memoryMode: normalizeMemoryMode(parsed.memoryMode),
       reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
+      browser: normalizeBrowserRuntimeSettings(parsed.browser),
+      chromeImportSources: normalizeChromeImportSources(parsed.chromeImportSources),
+      importedChromeSites: normalizeImportedChromeSites(parsed.importedChromeSites),
+      browserRuntimeStatus: normalizeBrowserRuntimeStatusRecord(parsed.browserRuntimeStatus),
       mcpServers: normalizeMcpServers(parsed.mcpServers),
     })
   } catch {

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { buildBrowserTools } from './browserRuntime.mjs'
 import { createStructuredError } from './runtimeErrors.mjs'
 import { resolveWorkspacePath, stringifyOutput, truncate } from './utils.mjs'
 
@@ -430,6 +431,7 @@ function buildMultiAgentTools({
 export function createAdvancedTools(options) {
   return [
     ...buildMultiAgentTools(options),
+    ...buildBrowserTools(options),
     ...buildComputerTools(options),
     ...buildChromeTools(options),
   ]

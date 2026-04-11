@@ -1229,12 +1229,24 @@ textarea {
   transition: all 0.2s;
 }
 
+.settings-select {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(0, 0, 0, 0.01);
+  font-size: 14px;
+  outline: none;
+  transition: all 0.2s;
+}
+
 input.monospace {
   font-family: 'JetBrains Mono', 'SF Mono', monospace;
   font-size: 13px;
 }
 
 input:focus,
+.settings-select:focus,
 textarea:focus {
   background: white;
   border-color: var(--bg-user-bubble);

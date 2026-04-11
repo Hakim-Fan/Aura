@@ -26,6 +26,7 @@ export function getInitialSettingsTab(): SettingsTab {
   if (
     tab === 'general' ||
     tab === 'providers' ||
+    tab === 'browser' ||
     tab === 'mcp' ||
     tab === 'skills' ||
     tab === 'plugins'
