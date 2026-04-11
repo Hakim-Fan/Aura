@@ -4007,6 +4007,7 @@ fn main() {
         .expect("error while building Aura desktop app")
         .run(|app_handle, event| {
             // macOS: 点击程序坞图标时重新显示并激活窗口
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 if let Some(window) = app_handle.get_webview_window("main") {
                     let _ = window.show();
