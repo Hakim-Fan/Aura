@@ -1737,7 +1737,12 @@ export function SettingsWindowApp({ initialTab }: Props) {
               <div className="browser-summary-item">
                 <span className="browser-summary-label">Profile</span>
                 <strong>{draftSettings.browser.persistAuraProfile ? '持久化保存' : '按需使用'}</strong>
-                <span className="muted">{profilePath || '等待 Aura 目录初始化'}</span>
+                <span 
+                  className="muted truncate w-full" 
+                  title={profilePath || '等待 Aura 目录初始化'}
+                >
+                  {profilePath || '等待 Aura 目录初始化'}
+                </span>
               </div>
               <div className="browser-summary-item">
                 <span className="browser-summary-label">人工接管</span>
@@ -1945,9 +1950,14 @@ export function SettingsWindowApp({ initialTab }: Props) {
             </div>
 
             <div className="dashboard-list mt-4">
-              <div className="dashboard-row">
-                <strong>Profile 路径</strong>
-                <span>{profilePath || '等待 Aura 目录初始化'}</span>
+              <div className="dashboard-row overflow-hidden">
+                <strong className="shrink-0">Profile 路径</strong>
+                <span 
+                  className="truncate flex-1 text-right" 
+                  title={profilePath || '等待 Aura 目录初始化'}
+                >
+                  {profilePath || '等待 Aura 目录初始化'}
+                </span>
               </div>
               <div className="dashboard-row">
                 <strong>当前会话模式</strong>

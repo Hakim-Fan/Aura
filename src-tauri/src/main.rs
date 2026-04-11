@@ -3943,7 +3943,7 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!(
-                "../../src/assets/aura_status_icon.png"
+                "../../src/assets/aura_status_icon_white.png"
             )) {
                 let _ = tauri::tray::TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
