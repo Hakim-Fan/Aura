@@ -5,9 +5,13 @@ import { ChevronDown, ChevronUp, FolderOpen, RefreshCw, Search, Trash2 } from 'l
 import { builtinPlugins, builtinSkills } from './catalog'
 import {
   detectBrowserRuntime,
+  discoverChromeImportSources,
   getBrowserRuntimeSourceLabel,
+  importChromeSiteCookies,
+  installManagedBrowser,
   isBrowserRuntimeSourceAvailable,
   resolveAuraBrowserProfilePath,
+  uninstallManagedBrowser,
   validateCustomSearchTemplate,
 } from './lib/browser'
 import { inspectMcpServer, type McpInspectResult } from './lib/mcp'
@@ -135,6 +139,12 @@ export function SettingsWindowApp({ initialTab }: Props) {
   const [isTestingProvider, setIsTestingProvider] = useState(false)
   const [isFetchingModels, setIsFetchingModels] = useState(false)
   const [isRefreshingBrowserRuntime, setIsRefreshingBrowserRuntime] = useState(false)
+  const [isInstallingManagedBrowser, setIsInstallingManagedBrowser] = useState(false)
+  const [isUninstallingManagedBrowser, setIsUninstallingManagedBrowser] = useState(false)
+  const [isDiscoveringChromeProfiles, setIsDiscoveringChromeProfiles] = useState(false)
+  const [isImportingChromeSite, setIsImportingChromeSite] = useState(false)
+  const [selectedChromeImportSourceId, setSelectedChromeImportSourceId] = useState('')
+  const [chromeImportDomainInput, setChromeImportDomainInput] = useState('')
   const [availableSkills, setAvailableSkills] = useState<AuraAsset[]>(() =>
     builtinSkills.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '', readonly: true })),
   )
@@ -267,6 +277,17 @@ export function SettingsWindowApp({ initialTab }: Props) {
     const timer = window.setTimeout(() => setSaveState('idle'), 1800)
     return () => window.clearTimeout(timer)
   }, [saveState])
+
+  useEffect(() => {
+    if (
+      selectedChromeImportSourceId &&
+      draftSettings.chromeImportSources.some(source => source.id === selectedChromeImportSourceId)
+    ) {
+      return
+    }
+
+    setSelectedChromeImportSourceId(draftSettings.chromeImportSources[0]?.id || '')
+  }, [draftSettings.chromeImportSources, selectedChromeImportSourceId])
 
   function handleSettingsChange<K extends keyof AgentSettings>(
     key: K,
@@ -840,6 +861,183 @@ export function SettingsWindowApp({ initialTab }: Props) {
     await openPathInDefaultApp(resolveAuraBrowserProfilePath(nextAura, draftSettings.browser))
   }
 
+  async function handleInstallManagedBrowser() {
+    setIsInstallingManagedBrowser(true)
+    setBrowserStatus(null)
+
+    try {
+      const status = await installManagedBrowser()
+      setDraftSettings(current => ({
+        ...current,
+        browser: {
+          ...current.browser,
+          managedExecutablePath: status.managedChromePath || current.browser.managedExecutablePath,
+        },
+        browserRuntimeStatus: status,
+      }))
+      setBrowserStatus({
+        tone: 'success',
+        message: 'Aura 托管浏览器安装完成。',
+      })
+      setSaveState('idle')
+    } catch (caught) {
+      setBrowserStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '托管浏览器安装失败。',
+      })
+    } finally {
+      setIsInstallingManagedBrowser(false)
+    }
+  }
+
+  async function handleUninstallManagedBrowser() {
+    setIsUninstallingManagedBrowser(true)
+    setBrowserStatus(null)
+
+    try {
+      const status = await uninstallManagedBrowser()
+      setDraftSettings(current => {
+        let nextSource = current.browser.source
+        let nextEnabled = current.browser.enabled
+        if (nextSource === 'managed-chrome') {
+          if (status.systemChromeDetected) {
+            nextSource = 'system-chrome'
+          } else if (status.customExecutableValid) {
+            nextSource = 'custom-executable'
+          } else {
+            nextEnabled = false
+          }
+        }
+
+        return {
+          ...current,
+          browser: {
+            ...current.browser,
+            enabled: nextEnabled,
+            source: nextSource,
+            managedExecutablePath: undefined,
+          },
+          browserRuntimeStatus: status,
+        }
+      })
+      setBrowserStatus({
+        tone: 'success',
+        message: 'Aura 托管浏览器已卸载。',
+      })
+      setSaveState('idle')
+    } catch (caught) {
+      setBrowserStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '托管浏览器卸载失败。',
+      })
+    } finally {
+      setIsUninstallingManagedBrowser(false)
+    }
+  }
+
+  async function handleDiscoverChromeProfiles() {
+    setIsDiscoveringChromeProfiles(true)
+    setBrowserStatus(null)
+
+    try {
+      const sources = await discoverChromeImportSources()
+      setDraftSettings(current => ({
+        ...current,
+        chromeImportSources: sources,
+      }))
+      setSelectedChromeImportSourceId(sources[0]?.id || '')
+      setBrowserStatus({
+        tone: 'success',
+        message:
+          sources.length > 0
+            ? `已发现 ${sources.length} 个 Chrome Profile。`
+            : '没有发现可导入的 Chrome Profile。',
+      })
+      setSaveState('idle')
+    } catch (caught) {
+      setBrowserStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '发现 Chrome Profile 失败。',
+      })
+    } finally {
+      setIsDiscoveringChromeProfiles(false)
+    }
+  }
+
+  async function handleImportChromeSiteCookies() {
+    const normalizedDomain = chromeImportDomainInput.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim()
+    const source = draftSettings.chromeImportSources.find(entry => entry.id === selectedChromeImportSourceId)
+
+    if (!source) {
+      setBrowserStatus({
+        tone: 'error',
+        message: '请先选择一个 Chrome Profile。',
+      })
+      return
+    }
+
+    if (!normalizedDomain) {
+      setBrowserStatus({
+        tone: 'error',
+        message: '请输入要导入的站点域名。',
+      })
+      return
+    }
+
+    setIsImportingChromeSite(true)
+    setBrowserStatus(null)
+
+    try {
+      const result = await importChromeSiteCookies({
+        sourceProfilePath: source.profilePath,
+        domain: normalizedDomain,
+      })
+
+      setDraftSettings(current => {
+        const existing = current.importedChromeSites.find(site => site.domain === result.domain)
+        const nextImportedSites = existing
+          ? current.importedChromeSites.map(site =>
+            site.domain === result.domain
+              ? {
+                ...site,
+                sourceProfileId: source.id,
+                importedAt: result.importedAt,
+                lastRefreshedAt: result.importedAt,
+                cookieCount: result.cookieCount,
+              }
+              : site,
+          )
+          : [
+            {
+              id: `imported-site-${Math.random().toString(36).slice(2, 8)}`,
+              domain: result.domain,
+              sourceProfileId: source.id,
+              importedAt: result.importedAt,
+              cookieCount: result.cookieCount,
+            },
+            ...current.importedChromeSites,
+          ]
+
+        return {
+          ...current,
+          importedChromeSites: nextImportedSites,
+        }
+      })
+      setBrowserStatus({
+        tone: 'success',
+        message: `已导入 ${result.domain} 的 ${result.cookieCount} 条 Cookie，Aura 浏览器下次使用时会自动应用。`,
+      })
+      setSaveState('idle')
+    } catch (caught) {
+      setBrowserStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : 'Chrome 站点登录态导入失败。',
+      })
+    } finally {
+      setIsImportingChromeSite(false)
+    }
+  }
+
   async function chooseDefaultWorkspace() {
     const selected = await open({
       directory: true,
@@ -1285,7 +1483,32 @@ export function SettingsWindowApp({ initialTab }: Props) {
             </div>
 
             <div className="provider-note mt-3">
-              <p>托管浏览器安装/卸载还没接入，这里目前只展示真实检测结果，不再放不可点击的假按钮。</p>
+              <p>托管浏览器会下载安装到 Aura 自己的浏览器目录里，方便和系统 Chrome 隔离。</p>
+            </div>
+            <div className="header-actions mt-4">
+              <button
+                className="secondary-button"
+                disabled={isInstallingManagedBrowser || isUninstallingManagedBrowser}
+                onClick={() => void handleInstallManagedBrowser()}
+              >
+                <RefreshCw
+                  size={14}
+                  className={isInstallingManagedBrowser ? 'spin-icon' : undefined}
+                />
+                {isInstallingManagedBrowser ? '正在安装...' : '安装 Aura 托管浏览器'}
+              </button>
+              <button
+                className="secondary-button"
+                disabled={
+                  !runtimeStatus?.managedChromeInstalled ||
+                  isInstallingManagedBrowser ||
+                  isUninstallingManagedBrowser
+                }
+                onClick={() => void handleUninstallManagedBrowser()}
+              >
+                <Trash2 size={14} />
+                {isUninstallingManagedBrowser ? '正在卸载...' : '卸载托管浏览器'}
+              </button>
             </div>
           </section>
 
@@ -1496,12 +1719,81 @@ export function SettingsWindowApp({ initialTab }: Props) {
               <p>这里只会导入所选站点的 Cookie / Session，不会导入密码、书签、扩展或完整浏览历史。</p>
             </div>
             <div className="provider-note mt-3">
-              <p>Chrome Profile 发现和站点级登录态导入还未开始实现，这里暂时只呈现持久化结构和真实数据列表。</p>
+              <p>这里导入的是选定站点的 Cookie / Session。导入后会写入 Aura 浏览器的待应用队列，并在下次浏览器会话中自动加载。</p>
+            </div>
+            <div className="header-actions mt-4">
+              <button
+                className="secondary-button"
+                disabled={isDiscoveringChromeProfiles}
+                onClick={() => void handleDiscoverChromeProfiles()}
+              >
+                <RefreshCw
+                  size={14}
+                  className={isDiscoveringChromeProfiles ? 'spin-icon' : undefined}
+                />
+                {isDiscoveringChromeProfiles ? '正在扫描...' : '发现本机 Chrome Profile'}
+              </button>
+            </div>
+            <div className="form-container mt-4">
+              <div className="form-row">
+                <label>来源 Profile</label>
+                <select
+                  className="settings-select"
+                  value={selectedChromeImportSourceId}
+                  onChange={event => setSelectedChromeImportSourceId(event.target.value)}
+                  disabled={draftSettings.chromeImportSources.length === 0}
+                >
+                  {draftSettings.chromeImportSources.length === 0 ? (
+                    <option value="">请先扫描本机 Chrome</option>
+                  ) : null}
+                  {draftSettings.chromeImportSources.map(source => (
+                    <option key={source.id} value={source.id}>
+                      {source.profileName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label>站点域名</label>
+                <input
+                  value={chromeImportDomainInput}
+                  onChange={event => setChromeImportDomainInput(event.target.value)}
+                  placeholder="例如 github.com / x.com / notion.so"
+                  type="text"
+                />
+              </div>
+            </div>
+            <div className="header-actions mt-4">
+              <button
+                className="secondary-button"
+                disabled={
+                  draftSettings.chromeImportSources.length === 0 ||
+                  !chromeImportDomainInput.trim() ||
+                  isImportingChromeSite
+                }
+                onClick={() => void handleImportChromeSiteCookies()}
+              >
+                <RefreshCw
+                  size={14}
+                  className={isImportingChromeSite ? 'spin-icon' : undefined}
+                />
+                {isImportingChromeSite ? '正在导入...' : '导入站点登录态'}
+              </button>
             </div>
           </section>
 
           <section className="dashboard-card">
             <div className="section-title">已导入站点管理</div>
+            {draftSettings.chromeImportSources.length > 0 ? (
+              <div className="dashboard-list mb-4">
+                {draftSettings.chromeImportSources.map(source => (
+                  <div key={source.id} className="dashboard-row">
+                    <strong>{source.profileName}</strong>
+                    <span>{source.profilePath}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {draftSettings.importedChromeSites.length > 0 ? (
               <div className="dashboard-list">
                 {draftSettings.importedChromeSites.map(site => (
@@ -1514,7 +1806,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 ))}
               </div>
             ) : (
-              <p className="muted">还没有导入任何站点。后续会支持刷新导入、删除记录和清理 Aura Profile 中的站点会话。</p>
+              <p className="muted">
+                还没有导入任何站点。当前已经支持发现 Chrome Profile，后续会继续补站点级导入、刷新导入和清理 Aura Profile 中的站点会话。
+              </p>
             )}
           </section>
 

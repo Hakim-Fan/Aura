@@ -20,6 +20,10 @@ function resolveAuraProfilePath(settings) {
   return path.join(resolveAuraBrowserRoot(), 'profiles', 'default')
 }
 
+function resolvePendingCookieImportsPath() {
+  return path.join(resolveAuraBrowserRoot(), 'pending-cookie-imports.json')
+}
+
 function systemChromeCandidates() {
   const home = os.homedir()
   return [
@@ -307,6 +311,34 @@ async function safeEvaluate(page, script) {
   return result.value || ''
 }
 
+async function applyPendingCookieImports(context) {
+  const pendingPath = resolvePendingCookieImportsPath()
+  if (!(await fileExists(pendingPath))) {
+    return 0
+  }
+
+  try {
+    const content = await fs.readFile(pendingPath, 'utf8')
+    const cookies = JSON.parse(content)
+    if (!Array.isArray(cookies) || cookies.length === 0) {
+      await fs.rm(pendingPath, { force: true })
+      return 0
+    }
+
+    await context.addCookies(cookies)
+    await fs.rm(pendingPath, { force: true })
+    return cookies.length
+  } catch (error) {
+    throw createStructuredError('应用导入的 Chrome 登录态失败。', {
+      source: 'tool',
+      category: 'execution_failed',
+      code: 'BROWSER_COOKIE_IMPORT_APPLY_FAILED',
+      detail: error instanceof Error ? error.stack || error.message : String(error),
+      suggestedAction: '请重新导入站点登录态，或检查 Aura 浏览器 Profile 目录是否可写。',
+    })
+  }
+}
+
 class BrowserSessionManager {
   constructor() {
     this.context = null
@@ -314,6 +346,7 @@ class BrowserSessionManager {
     this.executablePath = ''
     this.userDataDir = ''
     this.headless = true
+    this.closingPromise = null
   }
 
   async ensureSession(settings, options = {}) {
@@ -334,10 +367,25 @@ class BrowserSessionManager {
 
       await this.close()
       await fs.mkdir(userDataDir, { recursive: true })
-      this.context = await chromium.launchPersistentContext(
-        userDataDir,
-        browserContextOptions(settings, executablePath, headless),
-      )
+      try {
+        this.context = await chromium.launchPersistentContext(
+          userDataDir,
+          browserContextOptions(settings, executablePath, headless),
+        )
+      } catch (error) {
+        const detail = error instanceof Error ? error.stack || error.message : String(error)
+        if (detail.includes('ProcessSingleton') || detail.includes('SingletonLock')) {
+          throw createStructuredError('Aura 浏览器 Profile 当前正被另一个浏览器实例占用。', {
+            source: 'tool',
+            category: 'unavailable',
+            code: 'BROWSER_PROFILE_LOCKED',
+            detail,
+            suggestedAction:
+              '请先关闭正在使用同一 Aura Profile 的浏览器窗口，或等待当前浏览器任务结束后再试。',
+          })
+        }
+        throw error
+      }
       this.context.on('page', nextPage => {
         this.page = nextPage
       })
@@ -351,6 +399,8 @@ class BrowserSessionManager {
       }
     }
 
+    await applyPendingCookieImports(this.context)
+
     if (!this.page || this.page.isClosed()) {
       const openPages = this.context?.pages().filter(entry => !entry.isClosed()) || []
       this.page = openPages.at(-1) || (await this.context.newPage())
@@ -360,21 +410,42 @@ class BrowserSessionManager {
   }
 
   async close() {
-    if (this.context) {
-      await this.context.close().catch(() => {})
+    if (this.closingPromise) {
+      await this.closingPromise
+      return
     }
-    this.context = null
-    this.page = null
-    this.executablePath = ''
-    this.userDataDir = ''
+
+    this.closingPromise = (async () => {
+      if (this.context) {
+        await this.context.close().catch(() => {})
+      }
+      this.context = null
+      this.page = null
+      this.executablePath = ''
+      this.userDataDir = ''
+    })()
+
+    try {
+      await this.closingPromise
+    } finally {
+      this.closingPromise = null
+    }
   }
 }
 
 const browserSessionManager = new BrowserSessionManager()
 
-process.once('exit', () => {
-  void browserSessionManager.close()
+process.once('beforeExit', () => {
+  return browserSessionManager.close()
 })
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    void browserSessionManager.close().finally(() => {
+      process.exit(0)
+    })
+  })
+}
 
 export function buildBrowserTools({ settings, context }) {
   if (!settings.browser?.enabled) {

@@ -2,15 +2,19 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aes::Aes128;
+use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use pbkdf2::pbkdf2_hmac;
+use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 use tauri::{Emitter, Manager, Runtime, State};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
@@ -130,6 +134,57 @@ struct BrowserRuntimeStatusRecord {
     custom_executable_valid: Option<bool>,
     #[serde(rename = "lastCheckedAt")]
     last_checked_at: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct ChromeImportSource {
+    id: String,
+    #[serde(rename = "profileName")]
+    profile_name: String,
+    #[serde(rename = "profilePath")]
+    profile_path: String,
+    #[serde(rename = "isDefault")]
+    is_default: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChromeLocalState {
+    profile: Option<ChromeLocalStateProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChromeLocalStateProfile {
+    #[serde(rename = "info_cache")]
+    info_cache: Option<HashMap<String, ChromeProfileInfo>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChromeProfileInfo {
+    name: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PendingBrowserCookie {
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    secure: bool,
+    #[serde(rename = "httpOnly")]
+    http_only: bool,
+    #[serde(rename = "sameSite", skip_serializing_if = "Option::is_none")]
+    same_site: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires: Option<f64>,
+}
+
+#[derive(Clone, Serialize)]
+struct ChromeImportResult {
+    domain: String,
+    #[serde(rename = "cookieCount")]
+    cookie_count: usize,
+    #[serde(rename = "importedAt")]
+    imported_at: u64,
 }
 
 fn resolve_user_home() -> Result<PathBuf, String> {
@@ -886,6 +941,264 @@ fn detect_managed_chrome_path(runtime_root: &Path, explicit_path: Option<&str>) 
     candidates
         .into_iter()
         .find_map(|candidate| resolve_browser_executable_path(&candidate))
+}
+
+fn extract_zip_archive(bytes: &[u8], destination: &Path) -> Result<(), String> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|error| format!("Failed to open browser archive: {error}"))?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("Failed to read browser archive entry: {error}"))?;
+        let Some(relative_path) = entry.enclosed_name().map(|value| value.to_path_buf()) else {
+            continue;
+        };
+        let target_path = destination.join(relative_path);
+
+        if entry.name().ends_with('/') {
+            if let Some(parent) = target_path.parent() {
+                ensure_directory(parent)?;
+            }
+            ensure_directory(&target_path)?;
+            continue;
+        }
+
+        if let Some(parent) = target_path.parent() {
+            ensure_directory(parent)?;
+        }
+
+        let mut output = fs::File::create(&target_path)
+            .map_err(|error| format!("Failed to create extracted browser file {}: {error}", target_path.display()))?;
+        std::io::copy(&mut entry, &mut output)
+            .map_err(|error| format!("Failed to write extracted browser file {}: {error}", target_path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn fetch_managed_browser_download_url() -> Result<String, String> {
+    if chrome_for_testing_platform() == "unsupported" {
+        return Err("Managed browser installation is currently implemented for macOS only.".into());
+    }
+
+    let response = reqwest::blocking::get(
+        "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+    )
+    .map_err(|error| format!("Failed to fetch Chrome download metadata: {error}"))?
+    .error_for_status()
+    .map_err(|error| format!("Chrome download metadata request failed: {error}"))?;
+
+    let payload: serde_json::Value = response
+        .json()
+        .map_err(|error| format!("Failed to parse Chrome download metadata: {error}"))?;
+
+    payload["channels"]["Stable"]["downloads"]["chrome"]
+        .as_array()
+        .and_then(|entries| {
+            entries.iter().find_map(|entry| {
+                let platform = entry["platform"].as_str()?;
+                let url = entry["url"].as_str()?;
+                if platform == chrome_for_testing_platform() {
+                    Some(url.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| "Failed to locate a Chrome for Testing download for this platform.".to_string())
+}
+
+fn install_managed_browser_inner<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+    let aura = ensure_aura_layout(app)?;
+    let runtime_root = managed_browser_runtime_root(Path::new(&aura.browser_runtimes_dir));
+    if let Some(parent) = runtime_root.parent() {
+        ensure_directory(parent)?;
+    }
+
+    let download_url = fetch_managed_browser_download_url()?;
+    let mut response = reqwest::blocking::get(&download_url)
+        .map_err(|error| format!("Failed to download managed browser: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Managed browser download failed: {error}"))?;
+
+    let mut archive_bytes = Vec::new();
+    response
+        .read_to_end(&mut archive_bytes)
+        .map_err(|error| format!("Failed to read managed browser archive: {error}"))?;
+
+    if runtime_root.exists() {
+        fs::remove_dir_all(&runtime_root)
+            .map_err(|error| format!("Failed to clear old managed browser runtime {}: {error}", runtime_root.display()))?;
+    }
+    ensure_directory(&runtime_root)?;
+
+    extract_zip_archive(&archive_bytes, &runtime_root)?;
+    Ok(())
+}
+
+fn chrome_profile_name_map() -> HashMap<String, String> {
+    let local_state_path = chrome_user_data_root()
+        .map(|root| root.join("Local State"))
+        .ok();
+
+    let Some(local_state_path) = local_state_path else {
+        return HashMap::new();
+    };
+
+    let Ok(content) = fs::read_to_string(local_state_path) else {
+        return HashMap::new();
+    };
+
+    let Ok(parsed) = serde_json::from_str::<ChromeLocalState>(&content) else {
+        return HashMap::new();
+    };
+
+    parsed
+        .profile
+        .and_then(|profile| profile.info_cache)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let name = value.name.unwrap_or_default().trim().to_string();
+            if name.is_empty() {
+                None
+            } else {
+                Some((key, name))
+            }
+        })
+        .collect()
+}
+
+fn pending_cookie_imports_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(ensure_aura_layout(app)?.browser_dir).join("pending-cookie-imports.json"))
+}
+
+fn chrome_safe_storage_password() -> Result<String, String> {
+    let output = Command::new("security")
+        .args(["find-generic-password", "-w", "-s", "Chrome Safe Storage"])
+        .output()
+        .map_err(|error| format!("Failed to access macOS keychain for Chrome cookies: {error}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if password.is_empty() {
+        return Err("Chrome Safe Storage password is empty.".into());
+    }
+
+    Ok(password)
+}
+
+fn decrypt_chrome_cookie_value(encrypted_value: &[u8], safe_storage_password: &str) -> Result<String, String> {
+    if encrypted_value.is_empty() {
+        return Ok(String::new());
+    }
+
+    let payload = if encrypted_value.starts_with(b"v10") || encrypted_value.starts_with(b"v11") {
+        &encrypted_value[3..]
+    } else {
+        encrypted_value
+    };
+
+    let mut key = [0_u8; 16];
+    pbkdf2_hmac::<Sha1>(safe_storage_password.as_bytes(), b"saltysalt", 1003, &mut key);
+    let iv = [b' '; 16];
+    let mut buffer = payload.to_vec();
+    let decrypted = cbc::Decryptor::<Aes128>::new(&key.into(), &iv.into())
+        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
+        .map_err(|error| format!("Failed to decrypt Chrome cookie value: {error}"))?;
+
+    String::from_utf8(decrypted.to_vec())
+        .map_err(|error| format!("Decrypted Chrome cookie value was not valid UTF-8: {error}"))
+}
+
+fn chrome_epoch_to_unix_seconds(value: i64) -> Option<f64> {
+    if value <= 0 {
+        return None;
+    }
+
+    let unix_seconds = (value as f64 / 1_000_000.0) - 11_644_473_600.0;
+    if unix_seconds.is_finite() && unix_seconds > 0.0 {
+        Some(unix_seconds)
+    } else {
+        None
+    }
+}
+
+fn chrome_same_site_label(value: i64) -> Option<String> {
+    match value {
+        1 => Some("None".to_string()),
+        2 => Some("Lax".to_string()),
+        3 => Some("Strict".to_string()),
+        _ => None,
+    }
+}
+
+fn host_matches_domain(host: &str, domain: &str) -> bool {
+    let normalized_host = host.trim_start_matches('.').to_ascii_lowercase();
+    let normalized_domain = domain.trim_start_matches('.').to_ascii_lowercase();
+
+    normalized_host == normalized_domain
+        || normalized_host.ends_with(&format!(".{normalized_domain}"))
+}
+
+fn load_pending_cookie_imports<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Vec<PendingBrowserCookie>, String> {
+    let path = pending_cookie_imports_path(app)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("Failed to read pending cookie imports {}: {error}", path.display()))?;
+    serde_json::from_str::<Vec<PendingBrowserCookie>>(&content)
+        .map_err(|error| format!("Failed to parse pending cookie imports {}: {error}", path.display()))
+}
+
+fn save_pending_cookie_imports<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    cookies: &[PendingBrowserCookie],
+) -> Result<(), String> {
+    let path = pending_cookie_imports_path(app)?;
+    if let Some(parent) = path.parent() {
+        ensure_directory(parent)?;
+    }
+    let content = serde_json::to_string_pretty(cookies)
+        .map_err(|error| format!("Failed to serialize pending cookie imports: {error}"))?;
+    fs::write(&path, content)
+        .map_err(|error| format!("Failed to write pending cookie imports {}: {error}", path.display()))
+}
+
+fn managed_browser_runtime_root(runtime_root: &Path) -> PathBuf {
+    runtime_root.join("chrome")
+}
+
+fn chrome_for_testing_platform() -> &'static str {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        "mac-arm64"
+    }
+
+    #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+    {
+        "mac-x64"
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        "unsupported"
+    }
+}
+
+fn chrome_user_data_root() -> Result<PathBuf, String> {
+    Ok(resolve_user_home()?
+        .join("Library")
+        .join("Application Support")
+        .join("Google")
+        .join("Chrome"))
 }
 
 fn resolve_app_db_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
@@ -2439,15 +2752,192 @@ fn detect_browser_runtime<R: Runtime>(
         managed_chrome_path: managed_chrome_path
             .as_ref()
             .map(|path| canonical_display_path(path)),
-        managed_chrome_size_bytes: managed_chrome_path
-            .as_ref()
-            .and_then(|path| total_path_size(path)),
+        managed_chrome_size_bytes: {
+            let managed_root = managed_browser_runtime_root(&runtime_root);
+            if managed_root.exists() {
+                total_path_size(&managed_root)
+            } else {
+                managed_chrome_path
+                    .as_ref()
+                    .and_then(|path| total_path_size(path))
+            }
+        },
         custom_executable_path: custom_resolved_path
             .as_ref()
             .map(|path| canonical_display_path(path))
             .or_else(|| custom_path_input.map(String::from)),
         custom_executable_valid: custom_path_input.map(|_| custom_resolved_path.is_some()),
         last_checked_at: current_timestamp_ms(),
+    })
+}
+
+#[tauri::command]
+fn install_managed_browser<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<BrowserRuntimeStatusRecord, String> {
+    install_managed_browser_inner(&app)?;
+    detect_browser_runtime(app, None, None)
+}
+
+#[tauri::command]
+fn uninstall_managed_browser<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<BrowserRuntimeStatusRecord, String> {
+    let aura = ensure_aura_layout(&app)?;
+    let runtime_root = managed_browser_runtime_root(Path::new(&aura.browser_runtimes_dir));
+    if runtime_root.exists() {
+        fs::remove_dir_all(&runtime_root)
+            .map_err(|error| format!("Failed to remove managed browser runtime {}: {error}", runtime_root.display()))?;
+    }
+    detect_browser_runtime(app, None, None)
+}
+
+#[tauri::command]
+fn discover_chrome_import_sources() -> Result<Vec<ChromeImportSource>, String> {
+    let chrome_root = chrome_user_data_root()?;
+    if !chrome_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let profile_names = chrome_profile_name_map();
+    let mut sources = fs::read_dir(&chrome_root)
+        .map_err(|error| format!("Failed to read Chrome user data directory {}: {error}", chrome_root.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            let directory_name = path.file_name()?.to_str()?.to_string();
+            let is_profile_dir = directory_name == "Default" || directory_name.starts_with("Profile ");
+            if !is_profile_dir {
+                return None;
+            }
+
+            let profile_name = profile_names
+                .get(&directory_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    if directory_name == "Default" {
+                        "Default".to_string()
+                    } else {
+                        directory_name.clone()
+                    }
+                });
+
+            Some(ChromeImportSource {
+                id: directory_name.clone(),
+                profile_name,
+                profile_path: path.display().to_string(),
+                is_default: directory_name == "Default",
+            })
+        })
+        .collect::<Vec<_>>();
+
+    sources.sort_by(|left, right| {
+        right
+            .is_default
+            .cmp(&left.is_default)
+            .then_with(|| left.profile_name.cmp(&right.profile_name))
+    });
+
+    Ok(sources)
+}
+
+#[tauri::command]
+fn import_chrome_site_cookies<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    source_profile_path: String,
+    domain: String,
+) -> Result<ChromeImportResult, String> {
+    let normalized_domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    if normalized_domain.is_empty() {
+        return Err("Import domain cannot be empty.".into());
+    }
+
+    let cookies_db = PathBuf::from(&source_profile_path).join("Cookies");
+    if !cookies_db.exists() {
+        return Err(format!("Chrome cookie database not found: {}", cookies_db.display()));
+    }
+
+    let temp_db = std::env::temp_dir().join(format!(
+        "aura-chrome-cookies-{}-{}.sqlite",
+        normalized_domain,
+        current_timestamp_ms()
+    ));
+    fs::copy(&cookies_db, &temp_db)
+        .map_err(|error| format!("Failed to copy Chrome cookie database: {error}"))?;
+
+    let safe_storage_password = chrome_safe_storage_password()?;
+    let connection = Connection::open(&temp_db)
+        .map_err(|error| format!("Failed to open copied Chrome cookie database: {error}"))?;
+
+    let mut statement = connection
+        .prepare(
+            "SELECT host_key, path, name, value, encrypted_value, expires_utc, is_secure, is_httponly, has_expires, same_site
+             FROM cookies",
+        )
+        .map_err(|error| format!("Failed to query Chrome cookie database: {error}"))?;
+
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("Failed to iterate Chrome cookie database rows: {error}"))?;
+
+    let mut imported_cookies = Vec::new();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("Failed to read Chrome cookie row: {error}"))?
+    {
+        let host_key: String = row.get(0).unwrap_or_default();
+        if !host_matches_domain(&host_key, &normalized_domain) {
+            continue;
+        }
+
+        let name: String = row.get(2).unwrap_or_default();
+        if name.trim().is_empty() {
+            continue;
+        }
+
+        let plaintext_value: String = row.get(3).unwrap_or_default();
+        let encrypted_value: Vec<u8> = row.get(4).unwrap_or_default();
+        let value = if !plaintext_value.is_empty() {
+            plaintext_value
+        } else if !encrypted_value.is_empty() {
+            decrypt_chrome_cookie_value(&encrypted_value, &safe_storage_password)?
+        } else {
+            String::new()
+        };
+
+        imported_cookies.push(PendingBrowserCookie {
+            name,
+            value,
+            domain: host_key,
+            path: row.get::<_, String>(1).unwrap_or_else(|_| "/".to_string()),
+            secure: row.get::<_, i64>(6).unwrap_or(0) != 0,
+            http_only: row.get::<_, i64>(7).unwrap_or(0) != 0,
+            same_site: chrome_same_site_label(row.get::<_, i64>(9).unwrap_or(0)),
+            expires: if row.get::<_, i64>(8).unwrap_or(0) != 0 {
+                chrome_epoch_to_unix_seconds(row.get::<_, i64>(5).unwrap_or(0))
+            } else {
+                None
+            },
+        });
+    }
+
+    let _ = fs::remove_file(&temp_db);
+
+    if imported_cookies.is_empty() {
+        return Err(format!("No Chrome cookies were found for domain {normalized_domain}."));
+    }
+
+    let mut pending = load_pending_cookie_imports(&app)?;
+    pending.retain(|cookie| !host_matches_domain(&cookie.domain, &normalized_domain));
+    pending.extend(imported_cookies.clone());
+    save_pending_cookie_imports(&app, &pending)?;
+
+    Ok(ChromeImportResult {
+        domain: normalized_domain,
+        cookie_count: imported_cookies.len(),
+        imported_at: current_timestamp_ms(),
     })
 }
 
@@ -2791,6 +3281,10 @@ fn main() {
             run_mcp_action,
             ensure_aura_home,
             detect_browser_runtime,
+            install_managed_browser,
+            uninstall_managed_browser,
+            discover_chrome_import_sources,
+            import_chrome_site_cookies,
             read_aura_file,
             write_aura_file,
             read_workspace_tree,

@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
   AgentSettings,
+  ChromeImportSource,
+  ImportedChromeSite,
   BrowserRuntimeSource,
   BrowserRuntimeStatusRecord,
 } from '../types'
@@ -17,6 +19,28 @@ export async function detectBrowserRuntime(
   return invoke<BrowserRuntimeStatusRecord>('detect_browser_runtime', {
     customExecutablePath: args.customExecutablePath,
     managedExecutablePath: args.managedExecutablePath,
+  })
+}
+
+export async function installManagedBrowser(): Promise<BrowserRuntimeStatusRecord> {
+  return invoke<BrowserRuntimeStatusRecord>('install_managed_browser')
+}
+
+export async function uninstallManagedBrowser(): Promise<BrowserRuntimeStatusRecord> {
+  return invoke<BrowserRuntimeStatusRecord>('uninstall_managed_browser')
+}
+
+export async function discoverChromeImportSources(): Promise<ChromeImportSource[]> {
+  return invoke<ChromeImportSource[]>('discover_chrome_import_sources')
+}
+
+export async function importChromeSiteCookies(args: {
+  sourceProfilePath: string
+  domain: string
+}): Promise<Pick<ImportedChromeSite, 'domain' | 'cookieCount' | 'importedAt'>> {
+  return invoke('import_chrome_site_cookies', {
+    sourceProfilePath: args.sourceProfilePath,
+    domain: args.domain,
   })
 }
 
