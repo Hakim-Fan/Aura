@@ -141,15 +141,11 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/AppImage/*.AppImage
 
-  # 创建 GitHub Release 并上传所有安装包
+  # 将构建产物发布到公开仓库 Hakim-Fan/Aura-release
   create-release:
     needs: [build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -162,18 +158,32 @@ jobs:
             echo "=== Artifacts directory contents ==="
             find artifacts -type f -print
           else
-            echo "::warning::artifacts directory does not exist — build jobs may have failed"
-            mkdir -p artifacts
+            echo "::error::No artifacts found — build jobs may have failed"
+            exit 1
           fi
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.version || github.ref_name }}
-          name: Aura ${{ github.event.inputs.version || github.ref_name }}
-          draft: true
-          prerelease: false
-          files: artifacts/**/*
-          generate_release_notes: true
+      - name: Publish Release to public repo
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          TAG_NAME="${{ github.event.inputs.version || github.ref_name }}"
+          PUBLIC_REPO="Hakim-Fan/Aura-release"
+
+          # 如果该版本的 release 已存在，先删除
+          gh release delete "${TAG_NAME}" --repo "${PUBLIC_REPO}" --yes 2>/dev/null || true
+
+          # 创建 draft release
+          gh release create "${TAG_NAME}" \
+            --repo "${PUBLIC_REPO}" \
+            --title "Aura ${TAG_NAME}" \
+            --draft \
+            --notes "## Aura ${TAG_NAME}
+
+          ### Downloads
+          Choose the installer for your platform:
+          - **macOS** (Universal): \`.dmg\`
+          - **Windows**: \`.msi\` or \`.exe\`
+          - **Linux**: \`.deb\` or \`.AppImage\`"
+
+          # 上传所有产物
+          find artifacts -type f -exec gh release upload "${TAG_NAME}" --repo "${PUBLIC_REPO}" {} +
