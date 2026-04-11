@@ -133,6 +133,8 @@ type Props = {
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
   onCancelCurrentStep: () => void
   onToggleMessageActivity: (messageId: string) => void
+  onRequestBrowserTakeover: (reason: string) => void
+  onContinueBrowserTakeover: (reason: string) => void
   onStop: () => void
 }
 
@@ -212,6 +214,114 @@ function summarizePath(path: string) {
     return path
   }
   return `.../${segments.slice(-2).join('/')}`
+}
+
+function parseJsonOutput(value?: string) {
+  if (!value?.trim()) {
+    return null
+  }
+
+  try {
+    return JSON.parse(value) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+function deriveBrowserTakeoverState(displayedToolEvents: ToolEvent[]) {
+  for (let index = displayedToolEvents.length - 1; index >= 0; index -= 1) {
+    const event = displayedToolEvents[index]
+    if (event.status === 'error') {
+      continue
+    }
+
+    if (event.name === 'browser_resume_after_takeover' && event.status === 'success') {
+      return null
+    }
+
+    const output = parseJsonOutput(event.output)
+    if (!output) {
+      continue
+    }
+
+    if (event.name === 'browser_takeover_visible' && event.status === 'success') {
+      return {
+        state: 'visible' as const,
+        reason:
+          (typeof output.blockerReason === 'string' && output.blockerReason) ||
+          (typeof output.blocker === 'object' &&
+          output.blocker &&
+          typeof (output.blocker as { reason?: unknown }).reason === 'string'
+            ? String((output.blocker as { reason?: unknown }).reason)
+            : '需要你接管 Aura 浏览器继续完成当前流程。'),
+      }
+    }
+
+    const blocker =
+      typeof output.blocker === 'object' && output.blocker
+        ? (output.blocker as { detected?: unknown; reason?: unknown })
+        : null
+
+    if (blocker?.detected === true) {
+      return {
+        state: output.takeoverTriggered === true ? ('visible' as const) : ('waiting' as const),
+        reason:
+          typeof blocker.reason === 'string' && blocker.reason
+            ? blocker.reason
+            : '浏览器流程被阻塞，可能需要你接管可见浏览器继续。',
+      }
+    }
+  }
+
+  return null
+}
+
+function BrowserTakeoverBanner({
+  reason,
+  state,
+  onOpenTakeover,
+  onContinue,
+}: {
+  reason: string
+  state: 'waiting' | 'visible'
+  onOpenTakeover: () => void
+  onContinue: () => void
+}) {
+  return (
+    <div className="mb-6 rounded-2xl border border-[rgba(196,138,38,0.18)] bg-[rgba(255,248,235,0.92)] px-4 py-4 shadow-[0_12px_30px_rgba(196,138,38,0.08)]">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div className="min-w-0">
+          <div className="mb-1 text-11px font-700 uppercase tracking-[0.18em] text-amber-700/75">
+            {state === 'visible' ? '可见浏览器处理中' : '等待浏览器接管'}
+          </div>
+          <div className="text-14px font-600 text-[var(--text-primary)]">
+            {reason}
+          </div>
+          <div className="mt-1 text-12px leading-relaxed text-[var(--text-secondary)]">
+            {state === 'visible'
+              ? '你可以在 Aura 浏览器窗口里完成登录、验证码或授权操作，完成后点击“继续执行”。'
+              : '点击“打开浏览器接管”后，当前任务会请求 agent 直接把 Aura 浏览器切到可见模式。'}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            className="rounded-xl bg-white px-3 py-2 text-12px font-600 text-[var(--accent-soft-strong)] ring-1 ring-[rgba(79,123,116,0.12)] transition-all hover:bg-[rgba(79,123,116,0.04)]"
+            onClick={onOpenTakeover}
+            type="button"
+          >
+            打开浏览器接管
+          </button>
+          <button
+            className="rounded-xl bg-[var(--accent-soft-strong)] px-3 py-2 text-12px font-600 text-white transition-all hover:brightness-110"
+            onClick={onContinue}
+            type="button"
+          >
+            继续执行
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function formatDuration(ms: number) {
@@ -1858,6 +1968,8 @@ export function ChatView({
   onForceExecuteAppendedInput,
   onCancelCurrentStep,
   onToggleMessageActivity,
+  onRequestBrowserTakeover,
+  onContinueBrowserTakeover,
   onStop,
 }: Props) {
   const [inspectorOpen, setInspectorOpen] = useState(false)
@@ -1912,6 +2024,10 @@ export function ChatView({
       isRunning ? 'running' : 'idle',
     ].join(':')
   }, [isRunning, messages])
+  const browserTakeoverState = useMemo(
+    () => deriveBrowserTakeoverState(displayedToolEvents),
+    [displayedToolEvents],
+  )
 
   function isNearBottom() {
     const container = scrollRef.current
@@ -2122,6 +2238,14 @@ export function ChatView({
               </div>
             ) : (
               <div className="max-w-980px mx-auto px-8 flex flex-col gap-14">
+                {browserTakeoverState ? (
+                  <BrowserTakeoverBanner
+                    reason={browserTakeoverState.reason}
+                    state={browserTakeoverState.state}
+                    onOpenTakeover={() => onRequestBrowserTakeover(browserTakeoverState.reason)}
+                    onContinue={() => onContinueBrowserTakeover(browserTakeoverState.reason)}
+                  />
+                ) : null}
                 {messages.map(message =>
                   message.role === 'user' ? (
                     <UserMessageCard

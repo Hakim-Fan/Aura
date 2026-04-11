@@ -212,6 +212,140 @@ async function buildPageSnapshot(page, meta = {}) {
   }
 }
 
+async function detectBrowserBlocker(page) {
+  const signals = await page
+    .evaluate(() => {
+      const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim()
+      const sampledText = bodyText.slice(0, 5000)
+      const passwordInput = Boolean(document.querySelector('input[type="password"]'))
+      const otpInput = Boolean(
+        document.querySelector(
+          'input[autocomplete="one-time-code"], input[inputmode="numeric"], input[name*="otp" i], input[name*="code" i]',
+        ),
+      )
+      const challengeIframe = Array.from(document.querySelectorAll('iframe')).some(frame => {
+        const source = `${frame.getAttribute('src') || ''} ${frame.getAttribute('title') || ''}`.toLowerCase()
+        return (
+          source.includes('captcha') ||
+          source.includes('challenge') ||
+          source.includes('turnstile') ||
+          source.includes('recaptcha')
+        )
+      })
+      return {
+        title: document.title || '',
+        bodyText: sampledText,
+        passwordInput,
+        otpInput,
+        challengeIframe,
+      }
+    })
+    .catch(() => null)
+
+  if (!signals) {
+    return {
+      detected: false,
+      kind: '',
+      reason: '',
+      signals: [],
+    }
+  }
+
+  const combined = `${page.url()} ${signals.title} ${signals.bodyText}`.toLowerCase()
+  const matchedSignals = []
+
+  const challengeKeywords = [
+    'captcha',
+    'verify you are human',
+    'human verification',
+    'security check',
+    'cf challenge',
+    'cloudflare',
+    'recaptcha',
+    'turnstile',
+    'challenge',
+    '验证码',
+    '人机验证',
+  ]
+  if (signals.challengeIframe || challengeKeywords.some(keyword => combined.includes(keyword))) {
+    matchedSignals.push('challenge')
+    return {
+      detected: true,
+      kind: 'verification',
+      reason: '页面出现验证码、人机校验或安全挑战，通常需要你亲自接管浏览器继续。',
+      signals: matchedSignals,
+    }
+  }
+
+  const twoFactorKeywords = [
+    '2fa',
+    'two-factor',
+    'two factor',
+    'verification code',
+    'one-time code',
+    'authenticator',
+    'sms code',
+    'enter the code',
+    'otp',
+    '一次性验证码',
+    '短信验证码',
+    '验证码',
+  ]
+  if (signals.otpInput || twoFactorKeywords.some(keyword => combined.includes(keyword))) {
+    matchedSignals.push('two-factor')
+    return {
+      detected: true,
+      kind: 'two-factor',
+      reason: '页面要求输入验证码、2FA 或一次性口令，通常需要你亲自接管浏览器继续。',
+      signals: matchedSignals,
+    }
+  }
+
+  const loginKeywords = [
+    'sign in',
+    'log in',
+    'login',
+    'sign on',
+    'continue with',
+    '登录',
+    '请登录',
+  ]
+  if (signals.passwordInput && loginKeywords.some(keyword => combined.includes(keyword))) {
+    matchedSignals.push('login')
+    return {
+      detected: true,
+      kind: 'login',
+      reason: '页面进入登录流程，可能需要你在 Aura 浏览器里完成登录后再继续。',
+      signals: matchedSignals,
+    }
+  }
+
+  return {
+    detected: false,
+    kind: '',
+    reason: '',
+    signals: [],
+  }
+}
+
+async function buildBrowserResult(page, settings, meta = {}) {
+  const blocker = await detectBrowserBlocker(page)
+  let takeoverTriggered = false
+  let resultPage = page
+
+  if (blocker.detected && settings.browser?.takeoverMode === 'auto-visible-on-blocker') {
+    resultPage = await browserSessionManager.ensureSession(settings, { visible: true })
+    takeoverTriggered = true
+  }
+
+  return buildPageSnapshot(resultPage, {
+    blocker,
+    takeoverTriggered,
+    headless: browserSessionManager.headless,
+    ...meta,
+  })
+}
+
 function buildSearchUrl(settings, query) {
   const search = settings.browser?.search || {}
   const encodedQuery = encodeURIComponent(query)
@@ -336,6 +470,45 @@ async function applyPendingCookieImports(context) {
       detail: error instanceof Error ? error.stack || error.message : String(error),
       suggestedAction: '请重新导入站点登录态，或检查 Aura 浏览器 Profile 目录是否可写。',
     })
+  }
+}
+
+function cookieDomainMatches(domain, targetDomain) {
+  const normalizedDomain = String(domain || '').replace(/^\./, '').toLowerCase()
+  const normalizedTarget = String(targetDomain || '').replace(/^\./, '').toLowerCase()
+  return (
+    normalizedDomain === normalizedTarget ||
+    normalizedDomain.endsWith(`.${normalizedTarget}`)
+  )
+}
+
+export async function clearAuraProfileSiteCookies(settings, domain) {
+  await browserSessionManager.close()
+  const executablePath = await resolveBrowserExecutable(settings)
+  const userDataDir = resolveAuraProfilePath(settings)
+  await fs.mkdir(userDataDir, { recursive: true })
+
+  const context = await chromium.launchPersistentContext(
+    userDataDir,
+    browserContextOptions(settings, executablePath, true),
+  )
+
+  try {
+    const cookies = await context.cookies()
+    const remaining = cookies.filter(cookie => !cookieDomainMatches(cookie.domain, domain))
+    const removedCount = cookies.length - remaining.length
+
+    await context.clearCookies()
+    if (remaining.length > 0) {
+      await context.addCookies(remaining)
+    }
+
+    return {
+      removedCount,
+      remainingCount: remaining.length,
+    }
+  } finally {
+    await context.close().catch(() => {})
   }
 }
 
@@ -467,6 +640,7 @@ export function buildBrowserTools({ settings, context }) {
           },
           newPage: { type: 'boolean', description: 'Open in a new page before navigation.' },
           visible: { type: 'boolean', description: 'Launch or relaunch the Aura browser in a visible window.' },
+          blockerReason: { type: 'string', description: 'Optional user-facing reason for why takeover may be needed.' },
         },
         required: ['url'],
       },
@@ -482,7 +656,11 @@ export function buildBrowserTools({ settings, context }) {
         await targetPage.goto(args.url, {
           waitUntil: normalizeWaitUntil(args.waitUntil),
         })
-        return stringifyOutput(await buildPageSnapshot(targetPage, { headless: browserSessionManager.headless }))
+        return stringifyOutput(
+          await buildBrowserResult(targetPage, settings, {
+            blockerReason: typeof args.blockerReason === 'string' ? args.blockerReason : undefined,
+          }),
+        )
       },
     },
     {
@@ -505,10 +683,9 @@ export function buildBrowserTools({ settings, context }) {
         })
         await page.goto(targetUrl, { waitUntil: DEFAULT_WAIT_UNTIL })
         return stringifyOutput(
-          await buildPageSnapshot(page, {
+          await buildBrowserResult(page, settings, {
             searchUrl: targetUrl,
             query: args.query,
-            headless: browserSessionManager.headless,
           }),
         )
       },
@@ -532,7 +709,7 @@ export function buildBrowserTools({ settings, context }) {
           args.format === 'html' ? 'html' : 'text',
           normalizeTimeout(args.maxLength, 12_000),
         )
-        const snapshot = await buildPageSnapshot(page, {
+        const snapshot = await buildBrowserResult(page, settings, {
           content,
           format: args.format === 'html' ? 'html' : 'text',
         })
@@ -555,7 +732,7 @@ export function buildBrowserTools({ settings, context }) {
         const page = await browserSessionManager.ensureSession(settings)
         const result = await safeEvaluate(page, args.script)
         return stringifyOutput({
-          ...(await buildPageSnapshot(page)),
+          ...(await buildBrowserResult(page, settings)),
           result: truncate(result, 12_000),
         })
       },
@@ -588,7 +765,7 @@ export function buildBrowserTools({ settings, context }) {
           fullPage: args.fullPage !== false,
         })
         return stringifyOutput({
-          ...(await buildPageSnapshot(page)),
+          ...(await buildBrowserResult(page, settings)),
           savedTo: targetPath,
         })
       },
@@ -611,7 +788,7 @@ export function buildBrowserTools({ settings, context }) {
         await page.locator(args.selector).click({
           timeout: normalizeTimeout(args.timeoutMs),
         })
-        return stringifyOutput(await buildPageSnapshot(page, { clicked: args.selector }))
+        return stringifyOutput(await buildBrowserResult(page, settings, { clicked: args.selector }))
       },
     },
     {
@@ -639,7 +816,7 @@ export function buildBrowserTools({ settings, context }) {
           await locator.press('Enter')
         }
         return stringifyOutput(
-          await buildPageSnapshot(page, {
+          await buildBrowserResult(page, settings, {
             filled: args.selector,
             textLength: args.text.length,
           }),
@@ -686,7 +863,7 @@ export function buildBrowserTools({ settings, context }) {
         }
 
         return stringifyOutput(
-          await buildPageSnapshot(page, {
+          await buildBrowserResult(page, settings, {
             waitedFor: args.selector || args.text,
           }),
         )
@@ -700,6 +877,7 @@ export function buildBrowserTools({ settings, context }) {
         type: 'object',
         properties: {
           url: { type: 'string', description: 'Optional URL to open after switching to visible mode.' },
+          blockerReason: { type: 'string', description: 'Optional blocker reason shown in the tool output.' },
         },
       },
       async run(args, runtime = {}) {
@@ -709,9 +887,10 @@ export function buildBrowserTools({ settings, context }) {
           await page.goto(args.url, { waitUntil: DEFAULT_WAIT_UNTIL })
         }
         return stringifyOutput(
-          await buildPageSnapshot(page, {
+          await buildBrowserResult(page, settings, {
             headless: false,
             mode: 'visible',
+            blockerReason: typeof args.blockerReason === 'string' ? args.blockerReason : undefined,
           }),
         )
       },
@@ -728,7 +907,7 @@ export function buildBrowserTools({ settings, context }) {
         runtime.throwIfAborted?.()
         const page = await browserSessionManager.ensureSession(settings, { visible: false })
         return stringifyOutput(
-          await buildPageSnapshot(page, {
+          await buildBrowserResult(page, settings, {
             headless: browserSessionManager.headless,
             mode: browserSessionManager.headless ? 'headless' : 'visible',
           }),

@@ -187,6 +187,14 @@ struct ChromeImportResult {
     imported_at: u64,
 }
 
+#[derive(Clone, Serialize)]
+struct ClearAuraSiteCookiesResult {
+    #[serde(rename = "removedCount")]
+    removed_count: usize,
+    #[serde(rename = "pendingRemovedCount")]
+    pending_removed_count: usize,
+}
+
 fn resolve_user_home() -> Result<PathBuf, String> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -1170,6 +1178,20 @@ fn save_pending_cookie_imports<R: Runtime>(
         .map_err(|error| format!("Failed to serialize pending cookie imports: {error}"))?;
     fs::write(&path, content)
         .map_err(|error| format!("Failed to write pending cookie imports {}: {error}", path.display()))
+}
+
+fn remove_pending_site_cookie_imports<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    domain: &str,
+) -> Result<usize, String> {
+    let mut pending = load_pending_cookie_imports(app)?;
+    let original_len = pending.len();
+    pending.retain(|cookie| !host_matches_domain(&cookie.domain, domain));
+    if pending.len() == original_len {
+        return Ok(0);
+    }
+    save_pending_cookie_imports(app, &pending)?;
+    Ok(original_len - pending.len())
 }
 
 fn managed_browser_runtime_root(runtime_root: &Path) -> PathBuf {
@@ -2942,6 +2964,83 @@ fn import_chrome_site_cookies<R: Runtime>(
 }
 
 #[tauri::command]
+fn clear_aura_site_cookies<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    domain: String,
+    browser_source: String,
+    executable_path: Option<String>,
+    managed_executable_path: Option<String>,
+    aura_profile_path: Option<String>,
+) -> Result<ClearAuraSiteCookiesResult, String> {
+    let normalized_domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    if normalized_domain.is_empty() {
+        return Err("Domain cannot be empty when clearing Aura site cookies.".into());
+    }
+
+    let pending_removed_count = remove_pending_site_cookie_imports(&app, &normalized_domain)?;
+    let script_path = resolve_bridge_script_path(&app, "browserProfileActions.mjs")?;
+    let bridge_cwd = resolve_bridge_cwd(&app)?;
+    let payload = serde_json::json!({
+        "action": "clear-site-cookies",
+        "domain": normalized_domain,
+        "settings": {
+            "browser": {
+                "enabled": true,
+                "source": browser_source,
+                "executablePath": executable_path,
+                "managedExecutablePath": managed_executable_path,
+                "auraProfilePath": aura_profile_path,
+                "headlessByDefault": true,
+                "search": {
+                    "engine": "google",
+                    "region": "auto",
+                    "language": "auto",
+                    "safeSearch": "moderate"
+                },
+                "behavior": {
+                    "acceptLanguage": "auto",
+                    "timezone": "system",
+                    "locale": "system",
+                    "colorScheme": "system",
+                    "userAgentMode": "default"
+                }
+            }
+        }
+    });
+
+    let node_bin = resolve_node_binary();
+    let augmented_path = build_augmented_path();
+    let output = Command::new(&node_bin)
+        .arg(script_path)
+        .arg(
+            serde_json::to_string(&payload)
+                .map_err(|error| format!("Failed to serialize browser profile action payload: {error}"))?,
+        )
+        .current_dir(bridge_cwd)
+        .env("PATH", &augmented_path)
+        .output()
+        .map_err(|error| format!("Failed to run browser profile action bridge: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Clearing Aura site cookies failed.".into()
+        } else {
+            stderr
+        });
+    }
+
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|error| format!("Failed to parse browser profile action response: {error}"))?;
+    let removed_count = parsed["removedCount"].as_u64().unwrap_or(0) as usize;
+
+    Ok(ClearAuraSiteCookiesResult {
+        removed_count,
+        pending_removed_count,
+    })
+}
+
+#[tauri::command]
 fn read_aura_file<R: Runtime>(
     app: tauri::AppHandle<R>,
     relative_path: String,
@@ -3285,6 +3384,7 @@ fn main() {
             uninstall_managed_browser,
             discover_chrome_import_sources,
             import_chrome_site_cookies,
+            clear_aura_site_cookies,
             read_aura_file,
             write_aura_file,
             read_workspace_tree,

@@ -44,6 +44,19 @@ export async function importChromeSiteCookies(args: {
   })
 }
 
+export async function clearAuraSiteCookies(args: {
+  domain: string
+  settings: AgentSettings['browser']
+}): Promise<{ removedCount: number; pendingRemovedCount: number }> {
+  return invoke('clear_aura_site_cookies', {
+    domain: args.domain,
+    browserSource: args.settings.source,
+    executablePath: args.settings.executablePath,
+    managedExecutablePath: args.settings.managedExecutablePath,
+    auraProfilePath: args.settings.auraProfilePath,
+  })
+}
+
 export function isBrowserRuntimeSourceAvailable(
   status: BrowserRuntimeStatusRecord | undefined,
   source: BrowserRuntimeSource,

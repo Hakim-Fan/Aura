@@ -344,6 +344,12 @@ function buildSystemPrompt(settings, skillPrompt, exposureNote) {
     sections.push(`Available advanced capabilities:\n${capabilities.join('\n')}`)
   }
 
+  if (settings.browser?.enabled) {
+    sections.push(
+      'When a browser_* tool output includes blocker.detected=true, treat that as a real user-blocking state. Prefer calling browser_takeover_visible when the workflow cannot continue headlessly, then wait for user confirmation before proceeding.',
+    )
+  }
+
   if (skillPrompt.trim()) {
     sections.push('Selected skill summaries:\n' + skillPrompt)
     sections.push(

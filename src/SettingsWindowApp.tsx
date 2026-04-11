@@ -4,6 +4,7 @@ import { ask, open } from '@tauri-apps/plugin-dialog'
 import { ChevronDown, ChevronUp, FolderOpen, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { builtinPlugins, builtinSkills } from './catalog'
 import {
+  clearAuraSiteCookies,
   detectBrowserRuntime,
   discoverChromeImportSources,
   getBrowserRuntimeSourceLabel,
@@ -143,6 +144,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
   const [isUninstallingManagedBrowser, setIsUninstallingManagedBrowser] = useState(false)
   const [isDiscoveringChromeProfiles, setIsDiscoveringChromeProfiles] = useState(false)
   const [isImportingChromeSite, setIsImportingChromeSite] = useState(false)
+  const [siteActionKey, setSiteActionKey] = useState('')
   const [selectedChromeImportSourceId, setSelectedChromeImportSourceId] = useState('')
   const [chromeImportDomainInput, setChromeImportDomainInput] = useState('')
   const [availableSkills, setAvailableSkills] = useState<AuraAsset[]>(() =>
@@ -964,9 +966,19 @@ export function SettingsWindowApp({ initialTab }: Props) {
     }
   }
 
-  async function handleImportChromeSiteCookies() {
-    const normalizedDomain = chromeImportDomainInput.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim()
-    const source = draftSettings.chromeImportSources.find(entry => entry.id === selectedChromeImportSourceId)
+  async function handleImportChromeSiteCookies(options?: {
+    domain?: string
+    sourceProfileId?: string
+    actionKey?: string
+  }) {
+    const normalizedDomain = (options?.domain || chromeImportDomainInput)
+      .trim()
+      .replace(/^https?:\/\//i, '')
+      .replace(/\/.*$/, '')
+      .trim()
+    const source = draftSettings.chromeImportSources.find(
+      entry => entry.id === (options?.sourceProfileId || selectedChromeImportSourceId),
+    )
 
     if (!source) {
       setBrowserStatus({
@@ -985,6 +997,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
     }
 
     setIsImportingChromeSite(true)
+    setSiteActionKey(options?.actionKey || '')
     setBrowserStatus(null)
 
     try {
@@ -1035,7 +1048,55 @@ export function SettingsWindowApp({ initialTab }: Props) {
       })
     } finally {
       setIsImportingChromeSite(false)
+      setSiteActionKey('')
     }
+  }
+
+  async function handleClearAuraSiteCookies(domain: string) {
+    setSiteActionKey(`clear:${domain}`)
+    setBrowserStatus(null)
+
+    try {
+      const result = await clearAuraSiteCookies({
+        domain,
+        settings: draftSettings.browser,
+      })
+      setDraftSettings(current => ({
+        ...current,
+        importedChromeSites: current.importedChromeSites.map(site =>
+          site.domain === domain
+            ? {
+              ...site,
+              cookieCount: 0,
+            }
+            : site,
+        ),
+      }))
+      setBrowserStatus({
+        tone: 'success',
+        message: `已从 Aura Profile 中清理 ${domain} 的站点状态，移除了 ${result.removedCount} 条已写入 Cookie，待应用队列里还清掉了 ${result.pendingRemovedCount} 条。`,
+      })
+      setSaveState('idle')
+    } catch (caught) {
+      setBrowserStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '清理 Aura 站点状态失败。',
+      })
+    } finally {
+      setSiteActionKey('')
+    }
+  }
+
+  function handleDeleteImportedChromeSiteRecord(domain: string) {
+    setDraftSettings(current => ({
+      ...current,
+      importedChromeSites: current.importedChromeSites.filter(site => site.domain !== domain),
+    }))
+    setBrowserStatus({
+      tone: 'success',
+      message: `已删除 ${domain} 的导入记录。Aura Profile 中的站点状态如果还需要清理，请再执行一次“清理 Aura 状态”。`,
+    })
+    setSaveState('idle')
   }
 
   async function chooseDefaultWorkspace() {
@@ -1798,10 +1859,53 @@ export function SettingsWindowApp({ initialTab }: Props) {
               <div className="dashboard-list">
                 {draftSettings.importedChromeSites.map(site => (
                   <div key={site.id} className="dashboard-row">
-                    <strong>{site.domain}</strong>
-                    <span>
-                      {site.cookieCount} cookies · {formatTimestamp(site.lastRefreshedAt || site.importedAt)}
-                    </span>
+                    <div className="flex flex-col gap-1">
+                      <strong>{site.domain}</strong>
+                      <span>
+                        {site.cookieCount} cookies · {formatTimestamp(site.lastRefreshedAt || site.importedAt)}
+                      </span>
+                    </div>
+                    <div className="header-actions">
+                      <button
+                        className="secondary-button"
+                        disabled={isImportingChromeSite || Boolean(siteActionKey)}
+                        onClick={() =>
+                          void handleImportChromeSiteCookies({
+                            domain: site.domain,
+                            sourceProfileId: site.sourceProfileId,
+                            actionKey: `refresh:${site.domain}`,
+                          })
+                        }
+                      >
+                        <RefreshCw
+                          size={14}
+                          className={
+                            isImportingChromeSite && siteActionKey === `refresh:${site.domain}`
+                              ? 'spin-icon'
+                              : undefined
+                          }
+                        />
+                        刷新导入
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={Boolean(siteActionKey)}
+                        onClick={() => void handleClearAuraSiteCookies(site.domain)}
+                      >
+                        <Trash2
+                          size={14}
+                          className={siteActionKey === `clear:${site.domain}` ? 'spin-icon' : undefined}
+                        />
+                        清理 Aura 状态
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={Boolean(siteActionKey)}
+                        onClick={() => handleDeleteImportedChromeSiteRecord(site.domain)}
+                      >
+                        删除记录
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
