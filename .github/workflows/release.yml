@@ -157,7 +157,14 @@ jobs:
           merge-multiple: true
 
       - name: List artifacts
-        run: ls -la artifacts/
+        run: |
+          if [ -d "artifacts" ]; then
+            echo "=== Artifacts directory contents ==="
+            find artifacts -type f -print
+          else
+            echo "::warning::artifacts directory does not exist — build jobs may have failed"
+            mkdir -p artifacts
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

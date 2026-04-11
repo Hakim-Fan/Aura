@@ -1563,6 +1563,10 @@ function AssistantMessageCard({
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.suggestedAction
       : ''
+  const messageRetryDetail =
+    message.retryInfo && message.retryInfo.attemptedRetries > 0
+      ? `已自动重试 ${message.retryInfo.attemptedRetries}/${message.retryInfo.configuredMaxAttempts} 次`
+      : ''
   const activitySummary = activity
     ? [
       activityStatusLabel(activity.status),
@@ -1740,7 +1744,10 @@ function AssistantMessageCard({
 
           {message.error ? (
             <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-2 text-13px text-red-500">
-              {message.error}
+              <div>{message.error}</div>
+              {messageRetryDetail ? (
+                <div className="mt-1 text-11px text-red-400/90">{messageRetryDetail}</div>
+              ) : null}
             </div>
           ) : null}
 
@@ -1757,11 +1764,18 @@ function AssistantMessageCard({
             <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
           ) : !isStreaming ? (
             <div className="rounded-xl border border-dashed border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-4 py-3 text-13px text-[var(--text-secondary)]">
-              {(message.events?.length || 0) > 0
-                ? '模型执行了操作，但没有生成最终总结回答。'
-                : providerReasoning.length > 0
-                  ? '模型在思考中计划了后续动作，但没有成功形成最终回答。'
-                  : '模型执行了操作，但没有生成最终总结回答。'}
+              <div>
+                {(message.events?.length || 0) > 0
+                  ? '模型执行了操作，但没有生成最终总结回答。'
+                  : providerReasoning.length > 0
+                    ? '模型在思考中计划了后续动作，但没有成功形成最终回答。'
+                    : '模型执行了操作，但没有生成最终总结回答。'}
+              </div>
+              {messageRetryDetail ? (
+                <div className="mt-1 text-11px text-[var(--text-secondary)] opacity-70">
+                  {messageRetryDetail}
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">

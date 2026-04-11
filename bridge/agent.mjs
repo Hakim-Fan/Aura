@@ -24,8 +24,9 @@ function clone(value) {
 }
 
 function summarizeMessages(messages) {
-  const firstUser = messages.find(message => message.role === 'user')?.content || 'Agent task'
-  return firstUser.length > 80 ? `${firstUser.slice(0, 80)}...` : firstUser
+  const latestUser =
+    [...messages].reverse().find(message => message.role === 'user')?.content || 'Agent task'
+  return latestUser.length > 80 ? `${latestUser.slice(0, 80)}...` : latestUser
 }
 
 function summarizeReasoning(messages, toolEvents, finalMessage) {
@@ -447,6 +448,23 @@ function buildSystemPrompt(settings, skillPrompt, exposureNote) {
     'Do not access paths outside the configured workspace root.',
     'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
   ]
+
+  const approvalPolicy = [
+    `Approval policy: shell is ${settings.autoApproveShell ? 'auto-approved' : 'approval-required'}.`,
+    `Approval policy: file writes are ${settings.autoApproveFileWrite ? 'auto-approved' : 'approval-required'}.`,
+    `Approval policy: computer use is ${settings.autoApproveComputerUse ? 'auto-approved' : 'approval-required'}.`,
+  ]
+  if (settings.enableChromeAutomation) {
+    approvalPolicy.push(
+      `Approval policy: chrome automation is ${settings.autoApproveChromeAutomation ? 'auto-approved' : 'approval-required'}.`,
+    )
+  }
+  sections.push(approvalPolicy.join('\n'))
+  sections.push(
+    settings.autoApproveFileWrite
+      ? 'When file writes are auto-approved, do not ask the user for permission to modify files. Read the relevant file, make the edit with file-writing tools, and verify the result directly.'
+      : 'When file writes require approval, you may proceed to the write tool and let the app request approval instead of asking the user in natural language first.',
+  )
 
   const reasoningInstructions = {
     // 思考程度：关闭。倾向于快速、简明的回答，除非任务明确要求，否则避免进行过多的内部探索与展开。

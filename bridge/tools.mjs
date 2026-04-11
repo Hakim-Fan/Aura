@@ -246,6 +246,43 @@ async function collectSearchMatches(rootPath, query, baseCwd, matches = [], sign
   if (signal?.aborted) {
     throw buildStepCancelledError({ source: 'builtin', name: 'search_code' })
   }
+
+  let stats
+  try {
+    stats = await fs.stat(rootPath)
+  } catch {
+    return matches
+  }
+
+  if (stats.isFile()) {
+    let content
+    try {
+      content = await fs.readFile(rootPath)
+    } catch {
+      return matches
+    }
+
+    if (detectBinary(content)) {
+      return matches
+    }
+
+    const text = content.toString('utf8')
+    const lines = text.split(/\r?\n/u)
+    for (let index = 0; index < lines.length; index += 1) {
+      if (!lines[index].includes(query)) {
+        continue
+      }
+      matches.push(
+        `${path.relative(baseCwd, rootPath) || path.basename(rootPath)}:${index + 1}:${lines[index]}`,
+      )
+      if (matches.length >= 200) {
+        return matches
+      }
+    }
+
+    return matches
+  }
+
   const entries = await fs.readdir(rootPath, { withFileTypes: true })
 
   for (const entry of entries) {
