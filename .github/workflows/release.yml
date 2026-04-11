@@ -52,7 +52,7 @@ jobs:
       - name: Build Tauri Universal Binary
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          pnpm tauri build --target universal-apple-darwin
+          pnpm tauri build --target universal-apple-darwin --no-sign
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
