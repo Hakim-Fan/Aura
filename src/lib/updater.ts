@@ -1,4 +1,5 @@
 import { getVersion } from '@tauri-apps/api/app';
+import { fetch } from '@tauri-apps/plugin-http';
 
 export interface ReleaseInfo {
   version: string;
@@ -28,11 +29,12 @@ export async function checkForUpdates(): Promise<ReleaseInfo | null> {
   try {
     const currentVersion = await getVersion();
     const response = await fetch('https://api.github.com/repos/Hakim-Fan/Aura-release/releases/latest', {
+      method: 'GET',
       headers: {
          'Accept': 'application/vnd.github+json',
-         // Use a user-agent as required by GitHub API
          'User-Agent': 'Aura-Desktop-App'
-      }
+      },
+      connectTimeout: 5000
     });
     
     if (!response.ok) {
