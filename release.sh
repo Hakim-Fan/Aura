@@ -91,16 +91,36 @@ echo ""
 if [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
   update_version "$CURRENT_VERSION" "$NEW_VERSION"
   echo ""
-
-  # 自动提交版本变更
-  echo -e "${YELLOW}→ 提交版本变更...${NC}"
-  git -C "$SCRIPT_DIR" add -A
-  git -C "$SCRIPT_DIR" commit -m "chore: bump version to ${NEW_VERSION}"
-
-  # 同步到 Gitee
-  echo -e "${YELLOW}→ 同步到 Gitee...${NC}"
-  git -C "$SCRIPT_DIR" push origin HEAD
 fi
+
+# 编写更新日志
+NOTES_FILE="$SCRIPT_DIR/RELEASE_NOTES.md"
+cat > "$NOTES_FILE" << EOF
+## Aura ${TAG} 更新日志
+
+- 
+EOF
+
+echo -e "${YELLOW}→ 请编写更新日志（保存并关闭编辑器即可）...${NC}"
+${EDITOR:-nano} "$NOTES_FILE"
+
+# 检查是否写了内容
+if [ ! -s "$NOTES_FILE" ]; then
+  echo -e "${RED}✗ 更新日志为空，已取消${NC}"
+  exit 1
+fi
+
+echo -e "${GREEN}✓ 更新日志已保存${NC}"
+echo ""
+
+# 提交所有变更
+echo -e "${YELLOW}→ 提交变更...${NC}"
+git -C "$SCRIPT_DIR" add -A
+git -C "$SCRIPT_DIR" commit -m "chore: release ${TAG}"
+
+# 同步到 Gitee
+echo -e "${YELLOW}→ 同步到 Gitee...${NC}"
+git -C "$SCRIPT_DIR" push origin HEAD
 
 # 检查工作区是否干净
 if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain)" ]; then

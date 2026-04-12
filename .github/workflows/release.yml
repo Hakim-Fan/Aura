@@ -143,6 +143,8 @@ jobs:
     needs: [build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -169,18 +171,18 @@ jobs:
           # 如果该版本的 release 已存在，先删除
           gh release delete "${TAG_NAME}" --repo "${PUBLIC_REPO}" --yes 2>/dev/null || true
 
-          # 创建 draft release
-          gh release create "${TAG_NAME}" \
-            --repo "${PUBLIC_REPO}" \
-            --title "Aura ${TAG_NAME}" \
-            --draft \
-            --notes "## Aura ${TAG_NAME}
-
-          ### Downloads
-          Choose the installer for your platform:
-          - **macOS** (Universal): \`.dmg\`
-          - **Windows**: \`.msi\` or \`.exe\`
-          - **Linux**: \`.deb\` or \`.AppImage\`"
+          # 使用 RELEASE_NOTES.md 作为发布说明，自动发布（非 draft）
+          if [ -f "RELEASE_NOTES.md" ]; then
+            gh release create "${TAG_NAME}" \
+              --repo "${PUBLIC_REPO}" \
+              --title "Aura ${TAG_NAME}" \
+              --notes-file "RELEASE_NOTES.md"
+          else
+            gh release create "${TAG_NAME}" \
+              --repo "${PUBLIC_REPO}" \
+              --title "Aura ${TAG_NAME}" \
+              --notes "Aura ${TAG_NAME} released."
+          fi
 
           # 上传所有产物
           find artifacts -type f -exec gh release upload "${TAG_NAME}" --repo "${PUBLIC_REPO}" {} +
