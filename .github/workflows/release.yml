@@ -12,9 +12,13 @@ on:
         default: 'v0.1.0'
 
 jobs:
-  # 构建 macOS 版本（Universal - 同时支持 Intel 和 Apple Silicon）
+  # 构建 macOS 版本
   build-macos:
     runs-on: macos-latest
+    strategy:
+      matrix:
+        platform: [macos-latest]
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
 
@@ -31,36 +35,23 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Install dependencies
         run: pnpm install
 
-      - name: Install Apple certificates (optional)
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        if: env.APPLE_CERTIFICATE != '' && env.APPLE_CERTIFICATE != null
+      - name: Build Tauri App
         run: |
-          echo "$APPLE_CERTIFICATE" | base64 -d > certificate.p12
-          security create-keychain -p "actions" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "actions" build.keychain
-          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
-
-      - name: Build Tauri Universal Binary
-        run: |
-          rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          pnpm tauri build --target universal-apple-darwin
+          pnpm tauri build --target ${{ matrix.target }}
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-universal
-          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          name: macos-${{ matrix.target }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
 
   # 构建 Windows 版本
   build-windows:
