@@ -109,10 +109,6 @@ if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain)" ]; then
   echo -e "${YELLOW}→ 提交变更...${NC}"
   git -C "$SCRIPT_DIR" add -A
   git -C "$SCRIPT_DIR" commit -m "chore: release ${TAG}"
-
-  # 同步到 Gitee
-  echo -e "${YELLOW}→ 同步到 Gitee...${NC}"
-  git -C "$SCRIPT_DIR" push origin HEAD
 else
   echo -e "${GREEN}✓ 无需提交，工作区已是最新${NC}"
 fi
