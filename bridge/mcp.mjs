@@ -22,7 +22,7 @@ export async function connectMcpTools(servers) {
     const client = new Client(
       {
         name: 'aura-desktop',
-        version: '0.1.0',
+        version: '0.1.0', // 客户端标识版本，随应用版本同步更新（release.sh 自动处理）
       },
       {
         capabilities: {},
