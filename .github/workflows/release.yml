@@ -15,12 +15,13 @@ jobs:
   # 构建 macOS 版本
   build-macos:
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             node_arch: arm64
             target: aarch64-apple-darwin
-          - runner: macos-13
+          - runner: macos-15-intel
             node_arch: x64
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
@@ -45,7 +46,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Build Tauri App
         run: |
@@ -80,7 +81,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Build Tauri Windows
         run: pnpm tauri build
@@ -122,7 +123,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Build Tauri Linux
         run: pnpm tauri build
