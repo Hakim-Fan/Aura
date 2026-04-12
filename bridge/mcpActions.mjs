@@ -52,7 +52,7 @@ async function inspectServer(server) {
   const client = new Client(
     {
       name: 'aura-desktop',
-      version: '0.1.0', // 客户端标识版本，随应用版本同步更新（release.sh 自动处理）
+      version: '0.1.0', // 客户端标识版本，随应用版本同步更新
     },
     {
       capabilities: {},
@@ -89,8 +89,8 @@ async function inspectServer(server) {
       tools,
     }
   } finally {
-    await client.close?.().catch(() => {})
-    await transport.close?.().catch(() => {})
+    await client.close?.().catch(() => { })
+    await transport.close?.().catch(() => { })
   }
 }
 
