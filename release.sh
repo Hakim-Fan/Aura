@@ -93,24 +93,15 @@ if [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
   echo ""
 fi
 
-# 编写更新日志
+# 读取更新日志
 NOTES_FILE="$SCRIPT_DIR/RELEASE_NOTES.md"
-cat > "$NOTES_FILE" << EOF
-## Aura ${TAG} 更新日志
-
-- 
-EOF
-
-echo -e "${YELLOW}→ 请编写更新日志（保存并关闭编辑器即可）...${NC}"
-${EDITOR:-nano} "$NOTES_FILE"
-
-# 检查是否写了内容
 if [ ! -s "$NOTES_FILE" ]; then
-  echo -e "${RED}✗ 更新日志为空，已取消${NC}"
+  echo -e "${RED}✗ RELEASE_NOTES.md 为空或不存在，请先编辑该文件${NC}"
   exit 1
 fi
 
-echo -e "${GREEN}✓ 更新日志已保存${NC}"
+echo -e "${GREEN}✓ 更新日志:${NC}"
+echo -e "${CYAN}$(cat "$NOTES_FILE")${NC}"
 echo ""
 
 # 提交所有变更
