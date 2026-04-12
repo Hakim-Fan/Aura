@@ -3,11 +3,13 @@
 node_modules/
 
 dist/
+dist-bridge/
 build/
 coverage/
 .cache/
 .turbo/
 target/
+src-tauri/binaries/
 
 *.log
 *.tmp

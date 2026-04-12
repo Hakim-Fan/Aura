@@ -17,6 +17,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use tauri::{Emitter, Manager, Runtime, State};
+use tauri_plugin_shell::ShellExt;
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -801,11 +802,13 @@ fn resolve_default_asset_dir<R: Runtime>(
     app: &tauri::AppHandle<R>,
     dir_name: &str,
 ) -> Result<PathBuf, String> {
-    let dev_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../{dir_name}"));
-    if dev_dir.exists() {
-        return dev_dir.canonicalize().map_err(|error| {
-            format!("Failed to canonicalize default {dir_name} directory: {error}")
-        });
+    if cfg!(debug_assertions) {
+        let dev_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../{dir_name}"));
+        if dev_dir.exists() {
+            return dev_dir.canonicalize().map_err(|error| {
+                format!("Failed to canonicalize default {dir_name} directory: {error}")
+            });
+        }
     }
 
     let resource_dir = app
@@ -1942,32 +1945,42 @@ fn resolve_bridge_script_path<R: Runtime>(
     app: &tauri::AppHandle<R>,
     script_name: &str,
 ) -> Result<PathBuf, String> {
-    let dev_bridge =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../bridge/{script_name}"));
-    if dev_bridge.exists() {
-        return dev_bridge
-            .canonicalize()
-            .map_err(|error| format!("Failed to canonicalize bridge path: {error}"));
+    if cfg!(debug_assertions) {
+        let dev_bridge =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../bridge/{script_name}"));
+        if dev_bridge.exists() {
+            return dev_bridge
+                .canonicalize()
+                .map_err(|error| format!("Failed to canonicalize bridge path: {error}"));
+        }
     }
 
     let resource_dir = app
         .path()
         .resource_dir()
         .map_err(|error| format!("Failed to resolve resource directory: {error}"))?;
-    let bundled_bridge = resource_dir.join(format!("bridge/{script_name}"));
-    if bundled_bridge.exists() {
-        return Ok(bundled_bridge);
+
+    for relative_path in [
+        format!("dist-bridge/{script_name}"),
+        format!("bridge/{script_name}"),
+    ] {
+        let bundled_bridge = resource_dir.join(relative_path);
+        if bundled_bridge.exists() {
+            return Ok(bundled_bridge);
+        }
     }
 
-    Err("Unable to locate the Node bridge script.".into())
+    Err("Unable to locate the bundled Node bridge script. Make sure `pnpm build:bridge` ran before packaging.".into())
 }
 
 fn resolve_bridge_cwd<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
-    let dev_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    if dev_root.exists() {
-        return dev_root
-            .canonicalize()
-            .map_err(|error| format!("Failed to resolve desktop app root in dev: {error}"));
+    if cfg!(debug_assertions) {
+        let dev_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        if dev_root.exists() {
+            return dev_root
+                .canonicalize()
+                .map_err(|error| format!("Failed to resolve desktop app root in dev: {error}"));
+        }
     }
 
     app.path()
@@ -2081,6 +2094,34 @@ fn build_augmented_path() -> String {
     // Merge: extra dirs first, then existing PATH
     extra_dirs.push(current_path);
     extra_dirs.join(":")
+}
+
+fn format_node_launch_error(error: &std::io::Error) -> String {
+    if cfg!(debug_assertions) {
+        let node_bin = resolve_node_binary();
+        format!("Failed to spawn Node bridge. Is node installed?\nTried: {node_bin}\n\n{error}")
+    } else {
+        format!("Failed to spawn bundled Node bridge runtime: {error}")
+    }
+}
+
+fn build_node_command<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    bridge_cwd: &Path,
+) -> Result<Command, String> {
+    let augmented_path = build_augmented_path();
+    let mut command = if cfg!(debug_assertions) {
+        let node_bin = resolve_node_binary();
+        Command::new(&node_bin)
+    } else {
+        app.shell()
+            .sidecar("node")
+            .map(Command::from)
+            .map_err(|error| format!("Failed to resolve bundled Node runtime: {error}"))?
+    };
+    command.current_dir(bridge_cwd);
+    command.env("PATH", &augmented_path);
+    Ok(command)
 }
 
 fn with_snapshot<F>(snapshot: &Arc<Mutex<AgentTaskSnapshot>>, mutator: F)
@@ -2233,20 +2274,13 @@ fn spawn_agent_task<R: Runtime>(
 ) -> Result<String, String> {
     let bridge_path = resolve_bridge_script_path(&app, "ipc.mjs")?;
     let bridge_cwd = resolve_bridge_cwd(&app)?;
-
-    let node_bin = resolve_node_binary();
-    let augmented_path = build_augmented_path();
-    let mut child = Command::new(&node_bin)
+    let mut child = build_node_command(&app, &bridge_cwd)?
         .arg(bridge_path)
-        .current_dir(bridge_cwd)
-        .env("PATH", &augmented_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| {
-            format!("Failed to spawn Node bridge. Is node installed?\nTried: {node_bin}\n\n{error}")
-        })?;
+        .map_err(|error| format_node_launch_error(&error))?;
 
     let stdin = child
         .stdin
@@ -2505,18 +2539,14 @@ fn run_provider_action<R: Runtime>(
 ) -> Result<serde_json::Value, String> {
     let script_path = resolve_bridge_script_path(&app, "providerActions.mjs")?;
     let bridge_cwd = resolve_bridge_cwd(&app)?;
-    let node_bin = resolve_node_binary();
-    let augmented_path = build_augmented_path();
-    let output = Command::new(&node_bin)
+    let output = build_node_command(&app, &bridge_cwd)?
         .arg(script_path)
         .arg(
             serde_json::to_string(&payload)
                 .map_err(|error| format!("Failed to serialize provider action payload: {error}"))?,
         )
-        .current_dir(bridge_cwd)
-        .env("PATH", &augmented_path)
         .output()
-        .map_err(|error| format!("Failed to run provider action bridge: {error}"))?;
+        .map_err(|error| format!("Failed to run provider action bridge: {}", format_node_launch_error(&error)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2540,16 +2570,14 @@ async fn run_mcp_action<R: Runtime>(
     let bridge_cwd = resolve_bridge_cwd(&app)?;
     let payload_json = serde_json::to_string(&payload)
         .map_err(|error| format!("Failed to serialize MCP action payload: {error}"))?;
+    let app_handle = app.clone();
 
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        let node_bin = resolve_node_binary();
-        let augmented_path = build_augmented_path();
-        Command::new(&node_bin)
+    let output = tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
+        build_node_command(&app_handle, &bridge_cwd)?
             .arg(script_path)
             .arg(payload_json)
-            .current_dir(bridge_cwd)
-            .env("PATH", &augmented_path)
             .output()
+            .map_err(|error| format_node_launch_error(&error))
     })
     .await
     .map_err(|error| format!("Failed to join MCP action task: {error}"))?
@@ -3503,17 +3531,13 @@ fn clear_aura_site_cookies<R: Runtime>(
         }
     });
 
-    let node_bin = resolve_node_binary();
-    let augmented_path = build_augmented_path();
-    let output = Command::new(&node_bin)
+    let output = build_node_command(&app, &bridge_cwd)?
         .arg(script_path)
         .arg(serde_json::to_string(&payload).map_err(|error| {
             format!("Failed to serialize browser profile action payload: {error}")
         })?)
-        .current_dir(bridge_cwd)
-        .env("PATH", &augmented_path)
         .output()
-        .map_err(|error| format!("Failed to run browser profile action bridge: {error}"))?;
+        .map_err(|error| format!("Failed to run browser profile action bridge: {}", format_node_launch_error(&error)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -3572,17 +3596,13 @@ fn reset_aura_site_sessions<R: Runtime>(
         }
     });
 
-    let node_bin = resolve_node_binary();
-    let augmented_path = build_augmented_path();
-    let output = Command::new(&node_bin)
+    let output = build_node_command(&app, &bridge_cwd)?
         .arg(script_path)
         .arg(serde_json::to_string(&payload).map_err(|error| {
             format!("Failed to serialize browser profile action payload: {error}")
         })?)
-        .current_dir(bridge_cwd)
-        .env("PATH", &augmented_path)
         .output()
-        .map_err(|error| format!("Failed to run browser profile action bridge: {error}"))?;
+        .map_err(|error| format!("Failed to run browser profile action bridge: {}", format_node_launch_error(&error)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

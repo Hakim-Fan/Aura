@@ -5,7 +5,7 @@
   "identifier": "com.hyfun.aura",
   "build": {
     "beforeDevCommand": "pnpm dev:web",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm desktop:prepare-build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
@@ -30,6 +30,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/node"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -37,10 +40,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "../bridge",
-      "../skills"
-    ],
+    "resources": {
+      "../dist-bridge": "dist-bridge",
+      "../skills": "skills"
+    },
     "macOS": {
       "entitlements": "Entitlements-macOS.plist"
     }

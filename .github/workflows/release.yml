@@ -14,11 +14,16 @@ on:
 jobs:
   # 构建 macOS 版本
   build-macos:
-    runs-on: macos-latest
     strategy:
       matrix:
-        platform: [macos-latest]
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+        include:
+          - runner: macos-14
+            node_arch: arm64
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            node_arch: x64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +36,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          architecture: ${{ matrix.node_arch }}
           cache: 'pnpm'
 
       - name: Install Rust
