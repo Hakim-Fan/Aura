@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Pencil, Plus, Search, Settings2, Trash2 } from 'lucide-react'
+import { ArrowUpCircle, Pencil, Plus, Search, Settings2, Trash2 } from 'lucide-react'
 import type { Session } from '../types'
 import { ConfirmModal } from './ConfirmModal'
 
@@ -16,6 +16,8 @@ type Props = {
   onRenameSession: (sessionId: string, title: string) => void
   onOpenSettings: () => void
   settingsOpen: boolean
+  updateRelease?: { version: string } | null
+  onShowUpdate?: () => void
 }
 
 export function AppSidebar({
@@ -31,6 +33,8 @@ export function AppSidebar({
   onRenameSession,
   onOpenSettings,
   settingsOpen,
+  updateRelease,
+  onShowUpdate,
 }: Props) {
   const [deleteConfirmation, setDeleteConfirmation] = useState<{
     id: string
@@ -159,7 +163,7 @@ export function AppSidebar({
         ))}
       </div>
 
-      <div className="p-4 border-t border-[var(--border-subtle)]">
+      <div className="p-4 border-t border-[var(--border-subtle)] flex items-center justify-between">
         <button
           className={`p-2 rounded-lg text-[var(--text-secondary)] transition-colors ${settingsOpen ? 'bg-[var(--bg-sidebar-active)] text-[var(--text-primary)]' : 'hover:bg-[rgba(0,0,0,0.05)]'
             }`}
@@ -168,6 +172,16 @@ export function AppSidebar({
         >
           <Settings2 size={16} />
         </button>
+
+        {updateRelease && (
+          <button
+            onClick={onShowUpdate}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#e2eeed] hover:bg-[#d6e5e4] text-[#4f7b74] rounded-full transition-all active:scale-95 group"
+          >
+            <ArrowUpCircle size={15} className="text-[#6da099] group-hover:scale-110 transition-transform" />
+            <span className="text-12px font-700 tracking-wide">更新</span>
+          </button>
+        )}
       </div>
 
       <ConfirmModal

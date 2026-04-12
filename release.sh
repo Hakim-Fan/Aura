@@ -136,7 +136,7 @@ fi
 
 # 推送代码到 GitHub
 echo -e "${YELLOW}→ 推送代码到 GitHub...${NC}"
-git -C "$SCRIPT_DIR" push github HEAD:main --force
+git -C "$SCRIPT_DIR" push github HEAD:master --force
 
 # 创建并推送 tag
 echo -e "${YELLOW}→ 创建 tag ${TAG}...${NC}"

@@ -63,6 +63,9 @@ import type {
 } from './types'
 import { ChatView } from './views/ChatView'
 import { HomeView } from './views/HomeView'
+import { checkForUpdates, type ReleaseInfo } from './lib/updater'
+import { UpdateModal } from './components/UpdateModal'
+import { getVersion } from '@tauri-apps/api/app'
 
 function createId() {
   return Math.random().toString(36).slice(2, 10)
@@ -833,6 +836,38 @@ export function MainWindowApp() {
   const [runningTasksBySession, setRunningTasksBySession] = useState<
     Record<string, RunningTaskBinding>
   >({})
+
+  // --- Update Check Logic ---
+  const [currentVersion, setCurrentVersion] = useState('')
+  const [updateRelease, setUpdateRelease] = useState<ReleaseInfo | null>(null)
+  const [isUpdateModalOpen, setUpdateModalOpen] = useState(false)
+  const lastCheckTime = useRef<number>(0)
+
+  const handleCheckUpdate = async (force = false) => {
+    const now = Date.now()
+    if (!force && now - lastCheckTime.current < 10 * 60 * 1000) {
+      return
+    }
+    lastCheckTime.current = now
+    const release = await checkForUpdates()
+    if (release) {
+      setUpdateRelease(release)
+    }
+  }
+
+  useEffect(() => {
+    getVersion().then(setCurrentVersion)
+    handleCheckUpdate(true)
+
+    const unlistenPromise = listen('tauri://focus', () => {
+      handleCheckUpdate()
+    })
+
+    return () => {
+      unlistenPromise.then(unlisten => unlisten())
+    }
+  }, [])
+  // --- End Update Check Logic ---
   const [workspaceTree, setWorkspaceTree] = useState<WorkspaceNode | null>(null)
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   const [workspaceError, setWorkspaceError] = useState('')
@@ -2735,6 +2770,8 @@ export function MainWindowApp() {
             })
           }
           settingsOpen={false}
+          updateRelease={updateRelease}
+          onShowUpdate={() => setUpdateModalOpen(true)}
         />
         <div
           className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-[rgba(79,123,116,0.18)] transition-colors"
@@ -2848,6 +2885,12 @@ export function MainWindowApp() {
           )}
         </main>
       </div>
+      <UpdateModal
+        isOpen={isUpdateModalOpen}
+        currentVersion={currentVersion}
+        release={updateRelease}
+        onClose={() => setUpdateModalOpen(false)}
+      />
     </>
   )
 }

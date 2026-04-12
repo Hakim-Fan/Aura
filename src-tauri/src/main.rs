@@ -3954,6 +3954,7 @@ fn main() {
         .manage(AgentTaskStore::default())
         .manage(ManagedBrowserInstallStore::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 let _ = window.hide();
