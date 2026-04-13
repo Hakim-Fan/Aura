@@ -87,6 +87,72 @@ function emit(event) {
   process.stdout.write(`${JSON.stringify(sanitizePayload(event))}\n`)
 }
 
+const PHASE_STALL_TIMEOUTS_MS = {
+  preparing: 20_000,
+  model_connecting: 45_000,
+  model_streaming: 90_000,
+  tool_running: 120_000,
+  finalizing: 60_000,
+  recovering: 60_000,
+  awaiting_approval: Number.POSITIVE_INFINITY,
+}
+
+function createExecutionMonitor() {
+  let phase = 'preparing'
+  let phaseStartedAt = Date.now()
+  let lastProgressAt = phaseStartedAt
+  let lastHeartbeatAt = phaseStartedAt
+  let timer = null
+
+  function emitStatus() {
+    lastHeartbeatAt = Date.now()
+    const timeoutMs = PHASE_STALL_TIMEOUTS_MS[phase] || 60_000
+    const stalled =
+      Number.isFinite(timeoutMs) && lastHeartbeatAt - lastProgressAt > timeoutMs
+
+    emit({
+      type: 'runtime_status',
+      phase,
+      phaseStartedAt,
+      lastHeartbeatAt,
+      lastProgressAt,
+      stalled,
+    })
+  }
+
+  return {
+    start() {
+      emitStatus()
+      timer = setInterval(() => {
+        emitStatus()
+      }, 2_000)
+      timer.unref?.()
+    },
+    stop() {
+      if (timer) {
+        clearInterval(timer)
+        timer = null
+      }
+    },
+    markProgress() {
+      lastProgressAt = Date.now()
+      emitStatus()
+    },
+    setPhase(nextPhase, { markProgress = true } = {}) {
+      if (!nextPhase) {
+        return
+      }
+      const now = Date.now()
+      phase = nextPhase
+      phaseStartedAt = now
+      if (markProgress) {
+        lastProgressAt = now
+      }
+      emitStatus()
+    },
+  }
+}
+
 let pendingApprovalResolve = null
 const pendingAppActionRequests = new Map()
 let started = false
@@ -194,11 +260,14 @@ rl.on('line', (line) => {
 
   started = true
   emit({ type: 'started' })
+  const executionMonitor = createExecutionMonitor()
+  executionMonitor.start()
   const emitTextDelta = createDeltaEmitter('text_delta')
   const emitReasoningDelta = createDeltaEmitter('reasoning_delta')
 
   const hooks = {
     onTextDelta(delta, meta = {}) {
+      executionMonitor.markProgress()
       emitTextDelta(delta, {
         blockId: meta.blockId,
         order: meta.order,
@@ -206,6 +275,7 @@ rl.on('line', (line) => {
       })
     },
     onReasoningDelta(delta, meta = {}) {
+      executionMonitor.markProgress()
       emitReasoningDelta(delta, {
         blockId: meta.blockId,
         kind: meta.kind,
@@ -213,15 +283,25 @@ rl.on('line', (line) => {
       })
     },
     onUsage(usage) {
+      executionMonitor.markProgress()
       emit({ type: 'usage', usage })
     },
     onToolEvent(event) {
+      executionMonitor.markProgress()
       emit({ type: 'tool_event', event })
     },
     onTaskTree(tree) {
+      executionMonitor.markProgress()
       emit({ type: 'task_tree', tree })
     },
+    onProgress() {
+      executionMonitor.markProgress()
+    },
+    onPhaseChange(phase, meta = {}) {
+      executionMonitor.setPhase(phase, meta)
+    },
     requestApproval(request) {
+      executionMonitor.setPhase('awaiting_approval', { markProgress: false })
       emit({ type: 'approval_required', request })
       return new Promise((resolve) => {
         pendingApprovalResolve = resolve
@@ -276,12 +356,14 @@ rl.on('line', (line) => {
     hooks,
   })
     .then((result) => {
+      executionMonitor.stop()
       emit({
         type: 'completed',
         result,
       })
     })
     .catch((error) => {
+      executionMonitor.stop()
       emit({
         type: 'failed',
         message: error instanceof Error ? error.message : String(error),

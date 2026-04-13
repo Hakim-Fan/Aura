@@ -42,6 +42,7 @@ import {
 import { WorkspaceExplorer } from '../components/WorkspaceExplorer'
 import { TaskTreeView } from '../components/TaskTreeView'
 import type {
+  AgentExecutionPhase,
   AgentSettings,
   AgentTaskSnapshot,
   AppendedInput,
@@ -365,6 +366,50 @@ function activityStatusLabel(status?: string) {
     default:
       return '空闲'
   }
+}
+
+function activityPhaseLabel(phase?: AgentExecutionPhase, stalled = false) {
+  const suffix = stalled ? '，连接较慢' : ''
+  switch (phase) {
+    case 'preparing':
+      return `准备上下文${suffix}`
+    case 'model_connecting':
+      return `连接模型${suffix}`
+    case 'model_streaming':
+      return `接收回复${suffix}`
+    case 'tool_running':
+      return `执行工具${suffix}`
+    case 'finalizing':
+      return `整理最终回答${suffix}`
+    case 'recovering':
+      return `恢复回答${suffix}`
+    case 'awaiting_approval':
+      return '等待审批'
+    default:
+      return stalled ? '执行较慢' : ''
+  }
+}
+
+function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], withLimit = true) {
+  if (!retryInfo || retryInfo.attemptedRetries <= 0) {
+    return ''
+  }
+
+  const configuredMaxRetries =
+    typeof retryInfo.configuredMaxRetries === 'number'
+      ? retryInfo.configuredMaxRetries
+      : Math.max(0, retryInfo.configuredMaxAttempts - 1)
+  const stageLabel =
+    retryInfo.stageLabel ||
+    (retryInfo.stage === 'recovery'
+      ? '恢复回答'
+      : retryInfo.stage === 'finalization'
+        ? '补充整理'
+        : '主回答')
+
+  return withLimit
+    ? `${stageLabel}已自动重试 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次`
+    : `${stageLabel}重试 ${retryInfo.attemptedRetries} 次`
 }
 
 function eventKindLabel(event: MessageEvent) {
@@ -1563,13 +1608,12 @@ function AssistantMessageCard({
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.suggestedAction
       : ''
-  const messageRetryDetail =
-    message.retryInfo && message.retryInfo.attemptedRetries > 0
-      ? `已自动重试 ${message.retryInfo.attemptedRetries}/${message.retryInfo.configuredMaxAttempts} 次`
-      : ''
+  const messageRetryDetail = formatRetryLabel(message.retryInfo, true)
+  const phaseSummary = activityPhaseLabel(activity?.phase, activity?.stalled === true)
   const activitySummary = activity
     ? [
       activityStatusLabel(activity.status),
+      phaseSummary || null,
       duration ? formatDuration(duration) : null,
       activity.toolCount > 0 ? `${activity.toolCount} 个工具` : null,
       activity.skillCount > 0 ? `${activity.skillCount} 个技能` : null,
@@ -1578,10 +1622,7 @@ function AssistantMessageCard({
       .filter(Boolean)
       .join(' · ')
     : null
-  const retrySummary =
-    message.retryInfo && message.retryInfo.attemptedRetries > 0
-      ? `自动重试 ${message.retryInfo.attemptedRetries} 次`
-      : ''
+  const retrySummary = formatRetryLabel(message.retryInfo, false)
   const messageModelLabel =
     message.modelInfo?.label ||
     (activeModelId.split('/').filter(Boolean).at(-1) || activeModelId || '未记录模型')
@@ -1780,7 +1821,7 @@ function AssistantMessageCard({
           ) : (
             <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
               <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
-              正在整理信息并生成最终回答...
+              {phaseSummary || '正在整理信息并生成最终回答...'}
             </div>
           )}
 

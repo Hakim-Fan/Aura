@@ -593,6 +593,10 @@ function buildMessageActivity(
   startedAt: number,
   toolEvents: ToolEvent[],
   taskTree: TaskNode[],
+  runtimeStatus: Pick<
+    AgentTaskSnapshot,
+    'phase' | 'phaseStartedAt' | 'lastHeartbeatAt' | 'lastProgressAt' | 'stalled'
+  > = {},
   expanded = status !== 'completed',
 ): MessageActivity {
   return {
@@ -602,6 +606,11 @@ function buildMessageActivity(
     toolCount: toolEvents.length,
     skillCount: 0,
     stepCount: countTaskNodes(taskTree),
+    phase: runtimeStatus.phase,
+    phaseStartedAt: runtimeStatus.phaseStartedAt,
+    lastHeartbeatAt: runtimeStatus.lastHeartbeatAt,
+    lastProgressAt: runtimeStatus.lastProgressAt,
+    stalled: runtimeStatus.stalled,
     expanded,
   }
 }
@@ -624,6 +633,11 @@ function createPendingAssistantMessage(): ChatMessage {
       toolCount: 0,
       skillCount: 0,
       stepCount: 0,
+      phase: 'preparing',
+      phaseStartedAt: startedAt,
+      lastHeartbeatAt: startedAt,
+      lastProgressAt: startedAt,
+      stalled: false,
       expanded: true,
     },
   }
@@ -1210,6 +1224,7 @@ export function MainWindowApp() {
                   currentVariant.createdAt || Date.now(),
                   snapshot.toolEvents,
                   snapshot.taskTree,
+                  snapshot,
                   currentVariant.activity?.expanded ?? true,
                 ),
                 appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
@@ -1258,6 +1273,7 @@ export function MainWindowApp() {
                             currentVariant.createdAt || Date.now(),
                             snapshot.toolEvents,
                             snapshot.taskTree,
+                            snapshot,
                             snapshot.status !== 'completed',
                           ),
                           appendedInputs:

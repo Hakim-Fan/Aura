@@ -243,7 +243,61 @@ async function parseJsonResponse(response) {
   }
 }
 
-async function readSseStream(response, onData) {
+async function fetchWithTimeout(url, init, { timeoutMs, timeoutMessage, messages }) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort(new Error(timeoutMessage))
+  }, timeoutMs)
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw createClassifiedError('模型服务响应超时。', {
+        source: 'provider',
+        category: 'timeout',
+        code: 'PROVIDER_REQUEST_TIMEOUT',
+        rawMessage: presentProviderError(timeoutMessage, messages),
+        suggestedAction: '当前模型响应较慢。你可以稍后重试，或切换到更稳定的 Provider / 模型。',
+        retryable: true,
+      })
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function readChunkWithTimeout(reader, timeoutMs, timeoutMessage, messages) {
+  let timerId
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise((_, reject) => {
+        timerId = setTimeout(() => {
+          reject(
+            createClassifiedError('模型服务流式输出长时间没有继续。', {
+              source: 'provider',
+              category: 'timeout',
+              code: 'PROVIDER_STREAM_STALLED',
+              rawMessage: presentProviderError(timeoutMessage, messages),
+              suggestedAction:
+                '当前流式连接似乎已经停滞。你可以稍后重试，或切换到更稳定的模型 / Provider。',
+              retryable: true,
+            }),
+          )
+        }, timeoutMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timerId)
+  }
+}
+
+async function readSseStream(response, onData, options = {}) {
   if (!response.body) {
     throw createStructuredError('模型服务没有返回可读取的流式结果。', {
       source: 'provider',
@@ -256,10 +310,26 @@ async function readSseStream(response, onData) {
   }
 
   const decoder = new TextDecoder()
+  const reader = response.body.getReader()
   let buffer = ''
+  let isFirstChunk = true
+  const firstChunkTimeoutMs = options.firstChunkTimeoutMs || 45_000
+  const idleTimeoutMs = options.idleTimeoutMs || 90_000
 
-  for await (const chunk of response.body) {
-    buffer += decoder.decode(chunk, { stream: true })
+  while (true) {
+    const { value, done } = await readChunkWithTimeout(
+      reader,
+      isFirstChunk ? firstChunkTimeoutMs : idleTimeoutMs,
+      isFirstChunk ? 'Timed out while waiting for the first streaming chunk.' : 'Streaming response stalled while waiting for the next chunk.',
+      options.messages,
+    )
+    if (done) {
+      break
+    }
+
+    isFirstChunk = false
+    options.onChunk?.()
+    buffer += decoder.decode(value, { stream: true })
 
     while (true) {
       const delimiterMatch = /\r?\n\r?\n/u.exec(buffer)
@@ -546,9 +616,24 @@ function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function getProviderFailureRecoveryMaxAttempts(settings) {
+const PROVIDER_CONNECT_TIMEOUT_MS = 45_000
+const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 90_000
+const PROVIDER_FINALIZATION_TIMEOUT_MS = 60_000
+
+function providerRetryStageLabel(stage) {
+  switch (stage) {
+    case 'finalization':
+      return '补充整理'
+    case 'recovery':
+      return '恢复回答'
+    default:
+      return '主回答'
+  }
+}
+
+function getProviderFailureRecoveryMaxRetries(settings) {
   if (settings?.enableProviderFailureRecovery === false) {
-    return 1
+    return 0
   }
 
   const configured = Number(settings?.providerFailureRecoveryMaxAttempts)
@@ -556,17 +641,21 @@ function getProviderFailureRecoveryMaxAttempts(settings) {
     return 3
   }
 
-  return Math.max(1, Math.min(5, Math.round(configured)))
+  return Math.max(0, Math.min(5, Math.round(configured)))
 }
 
-function buildProviderRetryInfo(retryCount, maxAttempts, extras = {}) {
+function buildProviderRetryInfo(retryCount, maxRetries, extras = {}) {
   if (retryCount <= 0) {
     return undefined
   }
 
+  const stage = extras.stage || 'response'
   return {
     attemptedRetries: retryCount,
-    configuredMaxAttempts: maxAttempts,
+    configuredMaxRetries: maxRetries,
+    configuredMaxAttempts: maxRetries + 1,
+    stage,
+    stageLabel: extras.stageLabel || providerRetryStageLabel(stage),
     recovered: extras.recovered === true,
   }
 }
@@ -584,14 +673,33 @@ function mergeProviderRetryInfo(...entries) {
     return undefined
   }
 
-  return {
-    attemptedRetries: validEntries.reduce((sum, entry) => sum + entry.attemptedRetries, 0),
-    configuredMaxAttempts: validEntries.reduce(
-      (max, entry) => Math.max(max, entry.configuredMaxAttempts || 0),
-      0,
-    ),
-    recovered: validEntries.some(entry => entry.recovered === true),
-  }
+  return validEntries.reduce((selected, entry) => {
+    if (!selected) {
+      return { ...entry }
+    }
+
+    if (selected.stage && entry.stage && selected.stage !== entry.stage) {
+      return {
+        ...entry,
+        recovered: selected.recovered === true || entry.recovered === true,
+      }
+    }
+
+    return {
+      ...selected,
+      ...entry,
+      attemptedRetries: Math.max(selected.attemptedRetries, entry.attemptedRetries),
+      configuredMaxRetries: Math.max(
+        selected.configuredMaxRetries || 0,
+        entry.configuredMaxRetries || 0,
+      ),
+      configuredMaxAttempts: Math.max(
+        selected.configuredMaxAttempts || 0,
+        entry.configuredMaxAttempts || 0,
+      ),
+      recovered: selected.recovered === true || entry.recovered === true,
+    }
+  }, undefined)
 }
 
 function extractProviderRetryInfo(value) {
@@ -600,20 +708,42 @@ function extractProviderRetryInfo(value) {
   }
 
   const retryInfo = value.retryInfo
+  const configuredMaxRetries =
+    typeof retryInfo.configuredMaxRetries === 'number' &&
+    Number.isFinite(retryInfo.configuredMaxRetries)
+      ? Math.max(0, Math.round(retryInfo.configuredMaxRetries))
+      : typeof retryInfo.configuredMaxAttempts === 'number' &&
+          Number.isFinite(retryInfo.configuredMaxAttempts)
+        ? Math.max(0, Math.round(retryInfo.configuredMaxAttempts) - 1)
+        : undefined
+  const configuredMaxAttempts =
+    typeof retryInfo.configuredMaxAttempts === 'number' &&
+    Number.isFinite(retryInfo.configuredMaxAttempts)
+      ? Math.max(1, Math.round(retryInfo.configuredMaxAttempts))
+      : typeof configuredMaxRetries === 'number'
+        ? configuredMaxRetries + 1
+        : undefined
   if (
     typeof retryInfo.attemptedRetries !== 'number' ||
     !Number.isFinite(retryInfo.attemptedRetries) ||
     retryInfo.attemptedRetries <= 0 ||
-    typeof retryInfo.configuredMaxAttempts !== 'number' ||
-    !Number.isFinite(retryInfo.configuredMaxAttempts) ||
-    retryInfo.configuredMaxAttempts <= 0
+    typeof configuredMaxAttempts !== 'number' ||
+    configuredMaxAttempts <= 0
   ) {
     return undefined
   }
 
   return {
     attemptedRetries: Math.round(retryInfo.attemptedRetries),
-    configuredMaxAttempts: Math.round(retryInfo.configuredMaxAttempts),
+    configuredMaxRetries,
+    configuredMaxAttempts,
+    stage:
+      retryInfo.stage === 'response' ||
+      retryInfo.stage === 'finalization' ||
+      retryInfo.stage === 'recovery'
+        ? retryInfo.stage
+        : undefined,
+    stageLabel: typeof retryInfo.stageLabel === 'string' ? retryInfo.stageLabel : undefined,
     recovered: retryInfo.recovered === true,
   }
 }
@@ -672,10 +802,11 @@ function attachProviderRetryInfo(error, retryInfo) {
   return target
 }
 
-async function runProviderOperationWithRetry(operation, { messages, maxAttempts = 3, baseDelayMs = 800 }) {
+async function runProviderOperationWithRetry(operation, { messages, maxRetries = 3, baseDelayMs = 800 }) {
   let lastError
   let bestPartialState = null
   let retryCount = 0
+  const maxAttempts = maxRetries + 1
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const attemptState = {
@@ -697,7 +828,7 @@ async function runProviderOperationWithRetry(operation, { messages, maxAttempts 
       normalized = attachPartialProviderState(normalized, bestPartialState)
       normalized = attachProviderRetryInfo(
         normalized,
-        buildProviderRetryInfo(retryCount, maxAttempts),
+        buildProviderRetryInfo(retryCount, maxRetries),
       )
       lastError = normalized
 
@@ -811,8 +942,9 @@ export async function finalizeOpenAiCompatibleAnswer({
   toolEvents,
   reasoningText,
   draftMessage,
+  stage = 'finalization',
 }) {
-  const maxAttempts = getProviderFailureRecoveryMaxAttempts(settings)
+  const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
   const attemptResult = await runProviderOperationWithRetry(async () => {
     const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
     const transcript = toOpenAiTranscript(systemPrompt, [
@@ -835,18 +967,26 @@ export async function finalizeOpenAiCompatibleAnswer({
       },
     ])
 
-    const response = await fetch(`${apiBase}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${settings.apiKey}`,
+    const response = await fetchWithTimeout(
+      `${apiBase}/chat/completions`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${settings.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: settings.model,
+          messages: transcript,
+          stream: false,
+        }),
       },
-      body: JSON.stringify({
-        model: settings.model,
-        messages: transcript,
-        stream: false,
-      }),
-    })
+      {
+        timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+        timeoutMessage: 'Timed out while waiting for the final answer completion request.',
+        messages,
+      },
+    )
 
     if (!response.ok) {
       const data = await parseJsonResponse(response)
@@ -862,11 +1002,13 @@ export async function finalizeOpenAiCompatibleAnswer({
     return content.trim()
   }, {
     messages,
-    maxAttempts,
+    maxRetries,
   })
   return {
     message: attemptResult.value,
-    retryInfo: buildProviderRetryInfo(attemptResult.retryCount, maxAttempts),
+    retryInfo: buildProviderRetryInfo(attemptResult.retryCount, maxRetries, {
+      stage,
+    }),
   }
 }
 
@@ -877,44 +1019,53 @@ export async function finalizeGoogleAnswer({
   toolEvents,
   reasoningText,
   draftMessage,
+  stage = 'finalization',
 }) {
-  const maxAttempts = getProviderFailureRecoveryMaxAttempts(settings)
+  const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
   const attemptResult = await runProviderOperationWithRetry(async () => {
     const apiBase = normalizeBaseUrl(
       settings.baseUrl,
       'https://generativelanguage.googleapis.com/v1beta',
     )
-    const response = await fetch(`${apiBase}/models/${settings.model}:generateContent`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-goog-api-key': settings.apiKey,
-      },
-      body: JSON.stringify({
-        system_instruction: {
-          parts: [{ text: systemPrompt }],
+    const response = await fetchWithTimeout(
+      `${apiBase}/models/${settings.model}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-goog-api-key': settings.apiKey,
         },
-        contents: toGeminiContents([
-          ...messages,
-          ...(draftMessage?.trim()
-            ? [
-                {
-                  role: 'assistant',
-                  content: draftMessage,
-                },
-              ]
-            : []),
-          {
-            role: 'user',
-            content: buildFinalizerPrompt({
-              toolEvents,
-              reasoningText,
-              draftMessage,
-            }),
+        body: JSON.stringify({
+          system_instruction: {
+            parts: [{ text: systemPrompt }],
           },
-        ]),
-      }),
-    })
+          contents: toGeminiContents([
+            ...messages,
+            ...(draftMessage?.trim()
+              ? [
+                  {
+                    role: 'assistant',
+                    content: draftMessage,
+                  },
+                ]
+              : []),
+            {
+              role: 'user',
+              content: buildFinalizerPrompt({
+                toolEvents,
+                reasoningText,
+                draftMessage,
+              }),
+            },
+          ]),
+        }),
+      },
+      {
+        timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+        timeoutMessage: 'Timed out while waiting for the final answer completion request.',
+        messages,
+      },
+    )
 
     if (!response.ok) {
       const data = await parseJsonResponse(response)
@@ -933,11 +1084,13 @@ export async function finalizeGoogleAnswer({
       .trim()
   }, {
     messages,
-    maxAttempts,
+    maxRetries,
   })
   return {
     message: attemptResult.value,
-    retryInfo: buildProviderRetryInfo(attemptResult.retryCount, maxAttempts),
+    retryInfo: buildProviderRetryInfo(attemptResult.retryCount, maxRetries, {
+      stage,
+    }),
   }
 }
 
@@ -959,7 +1112,7 @@ export async function runOpenAiCompatibleAgent({
   const providerReasoningBlocks = []
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
-  const maxAttempts = getProviderFailureRecoveryMaxAttempts(settings)
+  const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
 
   try {
     for (let step = 0; step < loopConfig.maxIterations; step += 1) {
@@ -969,27 +1122,36 @@ export async function runOpenAiCompatibleAgent({
       const toolOrder = reasoningOrder + 1
 
       const attemptResult = await runProviderOperationWithRetry(async attemptState => {
-        const response = await fetch(`${apiBase}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${settings.apiKey}`,
+        hooks?.onPhaseChange?.('model_connecting')
+        const response = await fetchWithTimeout(
+          `${apiBase}/chat/completions`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${settings.apiKey}`,
+            },
+            body: JSON.stringify({
+              model: settings.model,
+              messages: transcript,
+              tools: openAiToolDefs(tools),
+              tool_choice: 'auto',
+              stream: true,
+              ...(settings.provider === 'openai'
+                ? {
+                    stream_options: {
+                      include_usage: true,
+                    },
+                  }
+                : {}),
+            }),
           },
-          body: JSON.stringify({
-            model: settings.model,
-            messages: transcript,
-            tools: openAiToolDefs(tools),
-            tool_choice: 'auto',
-            stream: true,
-            ...(settings.provider === 'openai'
-              ? {
-                  stream_options: {
-                    include_usage: true,
-                  },
-                }
-              : {}),
-          }),
-        })
+          {
+            timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+            timeoutMessage: 'Timed out while waiting for the streaming response to start.',
+            messages: conversationMessages,
+          },
+        )
 
         if (!response.ok) {
           const data = await parseJsonResponse(response)
@@ -999,6 +1161,7 @@ export async function runOpenAiCompatibleAgent({
             messages,
           )
         }
+        hooks?.onPhaseChange?.('model_streaming')
 
         let content = ''
         let phaseReasoning = ''
@@ -1056,6 +1219,14 @@ export async function runOpenAiCompatibleAgent({
             attemptState.receivedOutput = true
             mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
           }
+        }, {
+          messages: conversationMessages,
+          firstChunkTimeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+          idleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+          onChunk() {
+            attemptState.receivedOutput = true
+            hooks?.onProgress?.()
+          },
         })
 
         streamParser.flush()
@@ -1067,7 +1238,7 @@ export async function runOpenAiCompatibleAgent({
         }
       }, {
         messages: conversationMessages,
-        maxAttempts,
+        maxRetries,
       })
       const stepResult = attemptResult.value
       providerRetryCount += attemptResult.retryCount
@@ -1120,7 +1291,9 @@ export async function runOpenAiCompatibleAgent({
         reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
         usage: latestUsage,
         messages: conversationMessages,
-        retryInfo: buildProviderRetryInfo(providerRetryCount, maxAttempts),
+        retryInfo: buildProviderRetryInfo(providerRetryCount, maxRetries, {
+          stage: 'response',
+        }),
       }
       }
 
@@ -1151,6 +1324,7 @@ export async function runOpenAiCompatibleAgent({
         })
       }
 
+      hooks?.onPhaseChange?.('tool_running')
       for (const toolCall of finalizedToolCalls) {
         const tool = registry.get(toolCall.function.name)
         const args = parseToolArguments(toolCall.function.arguments || '{}')
@@ -1173,7 +1347,9 @@ export async function runOpenAiCompatibleAgent({
   } catch (error) {
     const normalized = maybeNormalizeProviderTermination(error, conversationMessages)
     const aggregateRetryInfo = mergeProviderRetryInfo(
-      buildProviderRetryInfo(providerRetryCount, maxAttempts),
+      buildProviderRetryInfo(providerRetryCount, maxRetries, {
+        stage: 'response',
+      }),
       extractProviderRetryInfo(error),
     )
     throw attachProviderRetryInfo(normalized, aggregateRetryInfo)
@@ -1221,7 +1397,7 @@ export async function runGoogleAgent({
   const providerReasoningBlocks = []
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
-  const maxAttempts = getProviderFailureRecoveryMaxAttempts(settings)
+  const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
 
   try {
     for (let step = 0; step < loopConfig.maxIterations; step += 1) {
@@ -1231,7 +1407,8 @@ export async function runGoogleAgent({
       const toolOrder = reasoningOrder + 1
 
       const attemptResult = await runProviderOperationWithRetry(async attemptState => {
-        const response = await fetch(
+        hooks?.onPhaseChange?.('model_connecting')
+        const response = await fetchWithTimeout(
           `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
           {
             method: 'POST',
@@ -1247,6 +1424,11 @@ export async function runGoogleAgent({
               tools: geminiToolDefs(tools),
             }),
           },
+          {
+            timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+            timeoutMessage: 'Timed out while waiting for the streaming response to start.',
+            messages: conversationMessages,
+          },
         )
 
         if (!response.ok) {
@@ -1257,6 +1439,7 @@ export async function runGoogleAgent({
             messages,
           )
         }
+        hooks?.onPhaseChange?.('model_streaming')
 
         let content = ''
         let phaseReasoning = ''
@@ -1310,6 +1493,14 @@ export async function runGoogleAgent({
             attemptState.receivedOutput = true
           }
           collectGeminiFunctionCalls(functionCalls, parts)
+        }, {
+          messages: conversationMessages,
+          firstChunkTimeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+          idleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+          onChunk() {
+            attemptState.receivedOutput = true
+            hooks?.onProgress?.()
+          },
         })
 
         streamParser.flush()
@@ -1321,7 +1512,7 @@ export async function runGoogleAgent({
         }
       }, {
         messages: conversationMessages,
-        maxAttempts,
+        maxRetries,
       })
       const stepResult = attemptResult.value
       providerRetryCount += attemptResult.retryCount
@@ -1374,7 +1565,9 @@ export async function runGoogleAgent({
         reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
         usage: latestUsage,
         messages: conversationMessages,
-        retryInfo: buildProviderRetryInfo(providerRetryCount, maxAttempts),
+        retryInfo: buildProviderRetryInfo(providerRetryCount, maxRetries, {
+          stage: 'response',
+        }),
       }
       }
 
@@ -1412,6 +1605,7 @@ export async function runGoogleAgent({
         })
       }
 
+      hooks?.onPhaseChange?.('tool_running')
       const toolResponses = []
       for (const entry of functionCalls) {
         const tool = registry.get(entry.name)
@@ -1442,7 +1636,9 @@ export async function runGoogleAgent({
   } catch (error) {
     const normalized = maybeNormalizeProviderTermination(error, conversationMessages)
     const aggregateRetryInfo = mergeProviderRetryInfo(
-      buildProviderRetryInfo(providerRetryCount, maxAttempts),
+      buildProviderRetryInfo(providerRetryCount, maxRetries, {
+        stage: 'response',
+      }),
       extractProviderRetryInfo(error),
     )
     throw attachProviderRetryInfo(normalized, aggregateRetryInfo)

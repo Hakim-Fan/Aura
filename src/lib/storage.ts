@@ -15,6 +15,7 @@ import type {
   ResolvedAgentCapabilities,
   ProviderMode,
   ProviderProfile,
+  ProviderRetryStage,
   ReasoningEffort,
   Session,
   WorkspaceCapabilityOverrides,
@@ -266,23 +267,48 @@ function normalizeProviderRetryInfo(value: unknown) {
 
   const retryInfo = value as {
     attemptedRetries?: unknown
+    configuredMaxRetries?: unknown
     configuredMaxAttempts?: unknown
+    stage?: unknown
+    stageLabel?: unknown
     recovered?: unknown
   }
+  const configuredMaxRetries =
+    typeof retryInfo.configuredMaxRetries === 'number' && Number.isFinite(retryInfo.configuredMaxRetries)
+      ? Math.max(0, Math.round(retryInfo.configuredMaxRetries))
+      : typeof retryInfo.configuredMaxAttempts === 'number' &&
+          Number.isFinite(retryInfo.configuredMaxAttempts)
+        ? Math.max(0, Math.round(retryInfo.configuredMaxAttempts) - 1)
+        : undefined
+  const stage: ProviderRetryStage | undefined =
+    retryInfo.stage === 'response' ||
+    retryInfo.stage === 'finalization' ||
+    retryInfo.stage === 'recovery'
+      ? retryInfo.stage
+      : undefined
+  const configuredMaxAttempts =
+    typeof retryInfo.configuredMaxAttempts === 'number' &&
+    Number.isFinite(retryInfo.configuredMaxAttempts)
+      ? Math.max(1, Math.round(retryInfo.configuredMaxAttempts))
+      : typeof configuredMaxRetries === 'number'
+        ? configuredMaxRetries + 1
+        : undefined
   if (
     typeof retryInfo.attemptedRetries !== 'number' ||
     !Number.isFinite(retryInfo.attemptedRetries) ||
     retryInfo.attemptedRetries <= 0 ||
-    typeof retryInfo.configuredMaxAttempts !== 'number' ||
-    !Number.isFinite(retryInfo.configuredMaxAttempts) ||
-    retryInfo.configuredMaxAttempts <= 0
+    typeof configuredMaxAttempts !== 'number' ||
+    configuredMaxAttempts <= 0
   ) {
     return undefined
   }
 
   return {
     attemptedRetries: Math.max(0, Math.round(retryInfo.attemptedRetries)),
-    configuredMaxAttempts: Math.max(1, Math.round(retryInfo.configuredMaxAttempts)),
+    configuredMaxRetries,
+    configuredMaxAttempts,
+    stage,
+    stageLabel: typeof retryInfo.stageLabel === 'string' ? retryInfo.stageLabel : undefined,
     recovered: retryInfo.recovered === true,
   }
 }

@@ -92,20 +92,42 @@ function extractProviderRetryInfo(value) {
   }
 
   const retryInfo = value.retryInfo
+  const configuredMaxRetries =
+    typeof retryInfo.configuredMaxRetries === 'number' &&
+    Number.isFinite(retryInfo.configuredMaxRetries)
+      ? Math.max(0, Math.round(retryInfo.configuredMaxRetries))
+      : typeof retryInfo.configuredMaxAttempts === 'number' &&
+          Number.isFinite(retryInfo.configuredMaxAttempts)
+        ? Math.max(0, Math.round(retryInfo.configuredMaxAttempts) - 1)
+        : undefined
+  const configuredMaxAttempts =
+    typeof retryInfo.configuredMaxAttempts === 'number' &&
+    Number.isFinite(retryInfo.configuredMaxAttempts)
+      ? Math.max(1, Math.round(retryInfo.configuredMaxAttempts))
+      : typeof configuredMaxRetries === 'number'
+        ? configuredMaxRetries + 1
+        : undefined
   if (
     typeof retryInfo.attemptedRetries !== 'number' ||
     !Number.isFinite(retryInfo.attemptedRetries) ||
     retryInfo.attemptedRetries <= 0 ||
-    typeof retryInfo.configuredMaxAttempts !== 'number' ||
-    !Number.isFinite(retryInfo.configuredMaxAttempts) ||
-    retryInfo.configuredMaxAttempts <= 0
+    typeof configuredMaxAttempts !== 'number' ||
+    configuredMaxAttempts <= 0
   ) {
     return undefined
   }
 
   return {
     attemptedRetries: Math.round(retryInfo.attemptedRetries),
-    configuredMaxAttempts: Math.round(retryInfo.configuredMaxAttempts),
+    configuredMaxRetries,
+    configuredMaxAttempts,
+    stage:
+      retryInfo.stage === 'response' ||
+      retryInfo.stage === 'finalization' ||
+      retryInfo.stage === 'recovery'
+        ? retryInfo.stage
+        : undefined,
+    stageLabel: typeof retryInfo.stageLabel === 'string' ? retryInfo.stageLabel : undefined,
     recovered: retryInfo.recovered === true,
   }
 }
@@ -123,14 +145,33 @@ function mergeProviderRetryInfo(...entries) {
     return undefined
   }
 
-  return {
-    attemptedRetries: validEntries.reduce((sum, entry) => sum + entry.attemptedRetries, 0),
-    configuredMaxAttempts: validEntries.reduce(
-      (max, entry) => Math.max(max, entry.configuredMaxAttempts || 0),
-      0,
-    ),
-    recovered: validEntries.some(entry => entry.recovered === true),
-  }
+  return validEntries.reduce((selected, entry) => {
+    if (!selected) {
+      return { ...entry }
+    }
+
+    if (selected.stage && entry.stage && selected.stage !== entry.stage) {
+      return {
+        ...entry,
+        recovered: selected.recovered === true || entry.recovered === true,
+      }
+    }
+
+    return {
+      ...selected,
+      ...entry,
+      attemptedRetries: Math.max(selected.attemptedRetries, entry.attemptedRetries),
+      configuredMaxRetries: Math.max(
+        selected.configuredMaxRetries || 0,
+        entry.configuredMaxRetries || 0,
+      ),
+      configuredMaxAttempts: Math.max(
+        selected.configuredMaxAttempts || 0,
+        entry.configuredMaxAttempts || 0,
+      ),
+      recovered: selected.recovered === true || entry.recovered === true,
+    }
+  }, undefined)
 }
 
 function normalizeFinalAnswer(message) {
@@ -144,9 +185,42 @@ function latestUserIntent(messages) {
     ?.content?.toLowerCase() || ''
 }
 
+function looksLikeInformationalQuestion(intent) {
+  if (!intent) {
+    return false
+  }
+
+  return [
+    '我想知道',
+    '想知道',
+    '请问',
+    '是否可以',
+    '可不可以',
+    '能不能',
+    '能否',
+    '是不是',
+    '有没有',
+    '是什么',
+    '什么意思',
+    '怎么理解',
+    '为什么',
+    'can i ',
+    'could i ',
+    'whether ',
+    'what is ',
+    'why ',
+  ].some(keyword => intent.includes(keyword))
+}
+
 function taskNeedsExecution(messages) {
   const intent = latestUserIntent(messages)
   if (!intent) {
+    return false
+  }
+
+  // Questions about whether something is possible should not be treated as
+  // requests that require tool execution.
+  if (looksLikeInformationalQuestion(intent)) {
     return false
   }
 
@@ -196,6 +270,7 @@ function resultClaimsExecution(message) {
   return [
     'done',
     'completed',
+    'already done',
     'installed',
     'configured',
     'created',
@@ -204,8 +279,10 @@ function resultClaimsExecution(message) {
     'enabled',
     'wrote',
     'fixed',
+    '已完成',
+    '已经为你',
+    '已经帮你',
     '完成',
-    '已经',
     '已为你',
     '已帮你',
     '装好了',
@@ -236,8 +313,8 @@ function enforceEvidencePolicy(messages, result, toolEvents) {
 function shouldRunFinalization(result) {
   const finalMessage = normalizeFinalAnswer(result.message)
   const providerReasoning = extractProviderReasoning(result.reasoning || [])
-  const hasContext = (result.toolEvents || []).length > 0 || providerReasoning.length > 200
-  if (!hasContext) {
+  const hasToolContext = (result.toolEvents || []).length > 0
+  if (!hasToolContext) {
     return false
   }
   if (!finalMessage || finalMessage === '模型没有返回文本内容。') {
@@ -246,7 +323,7 @@ function shouldRunFinalization(result) {
   if (finalMessage.length >= 120) {
     return false
   }
-  return !/[。！？!?\n]/u.test(finalMessage.slice(60))
+  return providerReasoning.length > 200 && !/[。！？!?\n]/u.test(finalMessage.slice(60))
 }
 
 function normalizeAgentError(error) {
@@ -545,6 +622,7 @@ function buildSystemPrompt(settings, skillPrompt, exposureNote) {
 
 export async function runAgent(request) {
   const { settings, messages, runtime = {}, hooks = {}, capabilities } = request
+  hooks?.onPhaseChange?.('preparing')
   if (!settings?.apiKey?.trim()) {
     throw createStructuredError('模型调用失败，当前缺少 API Key。', {
       source: 'provider',
@@ -620,6 +698,7 @@ export async function runAgent(request) {
 
   try {
     if (settings.provider === 'google') {
+      hooks?.onPhaseChange?.('model_connecting')
       let result = await runGoogleAgent({
         settings,
         systemPrompt,
@@ -638,6 +717,7 @@ export async function runAgent(request) {
 
       if (shouldRunFinalization(result)) {
         try {
+          hooks?.onPhaseChange?.('finalizing')
           const finalized = await finalizeGoogleAnswer({
             settings,
             systemPrompt,
@@ -645,12 +725,13 @@ export async function runAgent(request) {
             toolEvents,
             reasoningText: extractProviderReasoning(result.reasoning || []),
             draftMessage: result.message,
+            stage: 'finalization',
           })
           if (finalized.message.trim()) {
             result = {
               ...result,
               message: finalized.message,
-              retryInfo: mergeProviderRetryInfo(result.retryInfo, finalized.retryInfo),
+              retryInfo: finalized.retryInfo || result.retryInfo,
             }
           }
         } catch {
@@ -680,6 +761,7 @@ export async function runAgent(request) {
     }
 
     if (settings.provider === 'openai' || settings.provider === 'custom') {
+      hooks?.onPhaseChange?.('model_connecting')
       let result = await runOpenAiCompatibleAgent({
         settings,
         systemPrompt,
@@ -698,6 +780,7 @@ export async function runAgent(request) {
 
       if (shouldRunFinalization(result)) {
         try {
+          hooks?.onPhaseChange?.('finalizing')
           const finalized = await finalizeOpenAiCompatibleAnswer({
             settings,
             systemPrompt,
@@ -705,12 +788,13 @@ export async function runAgent(request) {
             toolEvents,
             reasoningText: extractProviderReasoning(result.reasoning || []),
             draftMessage: result.message,
+            stage: 'finalization',
           })
           if (finalized.message.trim()) {
             result = {
               ...result,
               message: finalized.message,
-              retryInfo: mergeProviderRetryInfo(result.retryInfo, finalized.retryInfo),
+              retryInfo: finalized.retryInfo || result.retryInfo,
             }
           }
         } catch {
@@ -751,14 +835,16 @@ export async function runAgent(request) {
     const partialReasoning = extractPartialProviderReasoning(normalized)
     const retryInfo = extractProviderRetryInfo(normalized)
     const hasRecoveryContext =
-      toolEvents.length > 0 || partialMessage.length > 0 || partialReasoning.length > 0
+      toolEvents.length > 0 || partialMessage.length > 0
 
     if (
       settings.enableProviderFailureRecovery !== false &&
       normalized.source === 'provider' &&
       hasRecoveryContext
     ) {
+      let recoveryRetryInfo
       try {
+        hooks?.onPhaseChange?.('recovering')
         const recovered =
           settings.provider === 'google'
             ? await finalizeGoogleAnswer({
@@ -768,6 +854,7 @@ export async function runAgent(request) {
                 toolEvents,
                 reasoningText: partialReasoning,
                 draftMessage: partialMessage,
+                stage: 'recovery',
               })
             : await finalizeOpenAiCompatibleAnswer({
                 settings,
@@ -776,18 +863,10 @@ export async function runAgent(request) {
                 toolEvents,
                 reasoningText: partialReasoning,
                 draftMessage: partialMessage,
+                stage: 'recovery',
               })
 
         if (recovered.message.trim()) {
-          const mergedRetryInfo = mergeProviderRetryInfo(
-            retryInfo,
-            recovered.retryInfo
-              ? {
-                  ...recovered.retryInfo,
-                  recovered: true,
-                }
-              : undefined,
-          )
           const summaryReasoning = summarizeReasoning(messages, toolEvents, recovered.message)
           hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
             blockId: summaryReasoning[0].id,
@@ -799,13 +878,19 @@ export async function runAgent(request) {
             toolEvents,
             capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
             reasoning: summaryReasoning,
-            retryInfo: mergedRetryInfo,
+            retryInfo: recovered.retryInfo
+              ? {
+                  ...recovered.retryInfo,
+                  recovered: true,
+                }
+              : undefined,
             usage: undefined,
             status: 'completed',
             taskTree: taskTracker.getTree(),
           }
         }
-      } catch {
+      } catch (recoveryError) {
+        recoveryRetryInfo = extractProviderRetryInfo(recoveryError)
         // Recovery finalization is best-effort only. Preserve the original failure if it also fails.
       }
 
@@ -825,7 +910,7 @@ export async function runAgent(request) {
         toolEvents,
         capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
         reasoning: summaryReasoning,
-        retryInfo,
+        retryInfo: recoveryRetryInfo || retryInfo,
         usage: undefined,
         status: 'completed',
         taskTree: taskTracker.getTree(),

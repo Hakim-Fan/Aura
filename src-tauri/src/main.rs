@@ -40,6 +40,14 @@ struct AgentTaskSnapshot {
     capability_snapshot: Option<serde_json::Value>,
     #[serde(rename = "retryInfo")]
     retry_info: Option<serde_json::Value>,
+    phase: Option<String>,
+    #[serde(rename = "phaseStartedAt")]
+    phase_started_at: Option<u64>,
+    #[serde(rename = "lastHeartbeatAt")]
+    last_heartbeat_at: Option<u64>,
+    #[serde(rename = "lastProgressAt")]
+    last_progress_at: Option<u64>,
+    stalled: Option<bool>,
     #[serde(rename = "pendingApproval")]
     pending_approval: Option<serde_json::Value>,
     error: Option<String>,
@@ -2308,6 +2316,11 @@ fn spawn_agent_task<R: Runtime>(
         usage: None,
         capability_snapshot: None,
         retry_info: None,
+        phase: Some("preparing".into()),
+        phase_started_at: None,
+        last_heartbeat_at: None,
+        last_progress_at: None,
+        stalled: Some(false),
         pending_approval: None,
         error: None,
         error_info: None,
@@ -2357,6 +2370,7 @@ fn spawn_agent_task<R: Runtime>(
             match event.get("type").and_then(|value| value.as_str()) {
                 Some("started") => with_snapshot(&stdout_snapshot, |current| {
                     current.status = "running".into();
+                    current.phase = Some("preparing".into());
                     current.error = None;
                     current.error_code = None;
                     current.error_source = None;
@@ -2396,8 +2410,22 @@ fn spawn_agent_task<R: Runtime>(
                 Some("task_tree") => with_snapshot(&stdout_snapshot, |current| {
                     current.task_tree = extract_array(event.get("tree"));
                 }),
+                Some("runtime_status") => with_snapshot(&stdout_snapshot, |current| {
+                    current.phase = event
+                        .get("phase")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    current.phase_started_at =
+                        event.get("phaseStartedAt").and_then(|value| value.as_u64());
+                    current.last_heartbeat_at =
+                        event.get("lastHeartbeatAt").and_then(|value| value.as_u64());
+                    current.last_progress_at =
+                        event.get("lastProgressAt").and_then(|value| value.as_u64());
+                    current.stalled = event.get("stalled").and_then(|value| value.as_bool());
+                }),
                 Some("approval_required") => with_snapshot(&stdout_snapshot, |current| {
                     current.status = "awaiting_approval".into();
+                    current.phase = Some("awaiting_approval".into());
                     current.pending_approval = event.get("request").cloned();
                 }),
                 Some("app_action_request") => {

@@ -51,11 +51,25 @@ export type RuntimeErrorInfo = {
   retryable?: boolean
 }
 
+export type ProviderRetryStage = 'response' | 'finalization' | 'recovery'
+
 export type ProviderRetryInfo = {
   attemptedRetries: number
+  configuredMaxRetries?: number
   configuredMaxAttempts: number
+  stage?: ProviderRetryStage
+  stageLabel?: string
   recovered?: boolean
 }
+
+export type AgentExecutionPhase =
+  | 'preparing'
+  | 'model_connecting'
+  | 'model_streaming'
+  | 'tool_running'
+  | 'finalizing'
+  | 'recovering'
+  | 'awaiting_approval'
 
 export type AppendedInputStatus = 'queued' | 'consumed'
 
@@ -89,6 +103,11 @@ export type MessageActivity = {
   toolCount: number
   skillCount: number
   stepCount: number
+  phase?: AgentExecutionPhase
+  phaseStartedAt?: number
+  lastHeartbeatAt?: number
+  lastProgressAt?: number
+  stalled?: boolean
   expanded?: boolean
 }
 
@@ -472,6 +491,11 @@ export type AgentTaskSnapshot = {
   error?: string
   errorInfo?: RuntimeErrorInfo
   retryInfo?: ProviderRetryInfo
+  phase?: AgentExecutionPhase
+  phaseStartedAt?: number
+  lastHeartbeatAt?: number
+  lastProgressAt?: number
+  stalled?: boolean
   errorCode?: string
   errorSource?: string
   rawError?: string

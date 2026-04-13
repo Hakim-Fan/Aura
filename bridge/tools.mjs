@@ -1480,6 +1480,8 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
 
   const abortController = hooks.createCurrentStepAbortController?.()
   try {
+    hooks?.onPhaseChange?.('tool_running')
+    hooks?.onProgress?.()
     updateEvent({
       status: 'running',
       output: '',
