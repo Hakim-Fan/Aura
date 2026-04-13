@@ -36,11 +36,14 @@ function sanitizePayload(value) {
     return sanitizeUtf16(value)
   }
   if (Array.isArray(value)) {
-    return value.map(entry => sanitizePayload(entry))
+    return value.map((entry) => sanitizePayload(entry))
   }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, sanitizePayload(entry)]),
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        sanitizePayload(entry),
+      ]),
     )
   }
   return value
@@ -102,7 +105,7 @@ const rl = readline.createInterface({
   crlfDelay: Infinity,
 })
 
-rl.on('line', line => {
+rl.on('line', (line) => {
   let message
   try {
     message = JSON.parse(line)
@@ -116,7 +119,9 @@ rl.on('line', line => {
 
   if (message.type === 'approval') {
     if (pendingApprovalResolve) {
-      pendingApprovalResolve(message.decision === 'approve' ? 'approve' : 'deny')
+      pendingApprovalResolve(
+        message.decision === 'approve' ? 'approve' : 'deny',
+      )
       pendingApprovalResolve = null
     }
     return
@@ -134,7 +139,13 @@ rl.on('line', line => {
     }
     pendingAppActionRequests.delete(requestId)
     if (message.ok === false) {
-      pending.reject(new Error(typeof message.error === 'string' ? message.error : 'App action failed'))
+      pending.reject(
+        new Error(
+          typeof message.error === 'string'
+            ? message.error
+            : 'App action failed',
+        ),
+      )
       return
     }
     pending.resolve(message.result)
@@ -166,7 +177,10 @@ rl.on('line', line => {
   }
 
   if (message.type === 'cancel_current_step') {
-    if (currentStepAbortController && !currentStepAbortController.signal.aborted) {
+    if (
+      currentStepAbortController &&
+      !currentStepAbortController.signal.aborted
+    ) {
       currentStepAbortController.abort(
         new Error('Current step cancelled by the user.'),
       )
@@ -209,7 +223,7 @@ rl.on('line', line => {
     },
     requestApproval(request) {
       emit({ type: 'approval_required', request })
-      return new Promise(resolve => {
+      return new Promise((resolve) => {
         pendingApprovalResolve = resolve
       })
     },
@@ -226,7 +240,9 @@ rl.on('line', line => {
       })
     },
     consumeAppendedInputs() {
-      const queuedInputs = appendedInputs.filter(input => input.status === 'queued')
+      const queuedInputs = appendedInputs.filter(
+        (input) => input.status === 'queued',
+      )
       if (queuedInputs.length === 0) {
         return []
       }
@@ -235,7 +251,7 @@ rl.on('line', line => {
         input.status = 'consumed'
       }
       emitAppendedInputs()
-      return queuedInputs.map(input => ({
+      return queuedInputs.map((input) => ({
         id: input.id,
         role: 'user',
         content: input.content,
@@ -259,22 +275,28 @@ rl.on('line', line => {
     ...message.payload,
     hooks,
   })
-    .then(result => {
+    .then((result) => {
       emit({
         type: 'completed',
         result,
       })
     })
-    .catch(error => {
+    .catch((error) => {
       emit({
         type: 'failed',
         message: error instanceof Error ? error.message : String(error),
         code:
-          error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+          error &&
+          typeof error === 'object' &&
+          'code' in error &&
+          typeof error.code === 'string'
             ? error.code
             : undefined,
         source:
-          error && typeof error === 'object' && 'source' in error && typeof error.source === 'string'
+          error &&
+          typeof error === 'object' &&
+          'source' in error &&
+          typeof error.source === 'string'
             ? error.source
             : undefined,
         rawMessage:

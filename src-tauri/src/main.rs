@@ -2330,6 +2330,10 @@ fn spawn_agent_task<R: Runtime>(
         tasks.insert(task_id.clone(), handle.clone());
     }
 
+    // 共享 stderr 缓冲区：stderr 线程写入，stdout 线程退出时读取
+    let stderr_buffer_for_stderr: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let stderr_buffer = stderr_buffer_for_stderr.clone();
+
     let stdout_snapshot = snapshot.clone();
     let stdout_stdin = handle.stdin.clone();
     let stdout_app = app.clone();
@@ -2490,9 +2494,25 @@ fn spawn_agent_task<R: Runtime>(
                 _ => {}
             }
         }
+
+        // --- 核心修复：检测管道断开带来的异常退出 ---
+        // 短暂等待以确保 stderr 线程也完成了写入
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let collected_stderr = stderr_buffer.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        with_snapshot(&stdout_snapshot, |current| {
+            if current.status == "running" || current.status == "queued" || current.status == "awaiting_approval" {
+                current.status = "failed".into();
+                let stderr_message = collected_stderr.trim().to_string();
+                current.error = Some(if stderr_message.is_empty() {
+                    "Node 桥接进程已断开。这可能是由于网络错误或脚本执行异常导致的崩溃。".into()
+                } else {
+                    stderr_message
+                });
+            }
+        });
     });
 
-    let stderr_snapshot = snapshot.clone();
+    let stderr_buf_for_thread = stderr_buffer_for_stderr.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -2502,11 +2522,15 @@ fn spawn_agent_task<R: Runtime>(
             if line.trim().is_empty() {
                 continue;
             }
-            with_snapshot(&stderr_snapshot, |current| {
-                if current.status == "failed" && current.error.is_none() {
-                    current.error = Some(line.clone());
+            // 实时追加每行 stderr 到共享 buffer，上限 8KB
+            if let Ok(mut buf) = stderr_buf_for_thread.lock() {
+                if buf.len() < 8192 {
+                    if !buf.is_empty() {
+                        buf.push('\n');
+                    }
+                    buf.push_str(&line);
                 }
-            });
+            }
         }
     });
 
