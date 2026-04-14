@@ -52,6 +52,19 @@ function baseUrlPlaceholder(provider: ProviderMode) {
     : 'https://api.openai.com/v1'
 }
 
+function formatTokenCount(value?: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return ''
+  }
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`
+  }
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`
+  }
+  return `${Math.round(value)}`
+}
+
 export function ProvidersView({
   profiles,
   activeProfileId,
@@ -289,6 +302,20 @@ export function ProvidersView({
                             <div className="flex-1 min-w-0 pr-4">
                               <strong className="truncate">{model.id.split('/').filter(Boolean).at(-1) || model.id}</strong>
                               <span className="truncate block opacity-60 text-[11px]">{model.id}</span>
+                              {model.contextWindowTokens || model.maxOutputTokens ? (
+                                <div className="mt-1 flex flex-wrap gap-1.5">
+                                  {model.contextWindowTokens ? (
+                                    <span className="micro-pill">
+                                      上下文 {formatTokenCount(model.contextWindowTokens)}
+                                    </span>
+                                  ) : null}
+                                  {model.maxOutputTokens ? (
+                                    <span className="micro-pill">
+                                      输出 {formatTokenCount(model.maxOutputTokens)}
+                                    </span>
+                                  ) : null}
+                                </div>
+                              ) : null}
                             </div>
                             <div className="flex items-center">
                               <button

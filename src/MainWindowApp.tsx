@@ -21,9 +21,11 @@ import {
   hydrateStorageFromAuraHome,
   hydrateProjectCapabilityOverridesFromAuraHome,
   loadSessions,
+  loadSessionFolders,
   loadSettings,
   loadProjectCapabilityOverrides,
   resolveCapabilitiesForWorkspace,
+  saveSessionFolders,
   saveSessions,
   saveSettings,
   saveProjectCapabilityOverrides,
@@ -57,6 +59,7 @@ import type {
   ProviderProfile,
   ReasoningEffort,
   Session,
+  SessionFolder,
   TaskNode,
   ToolEvent,
   WorkspaceNode,
@@ -66,6 +69,7 @@ import { HomeView } from './views/HomeView'
 import { checkForUpdates, type ReleaseInfo } from './lib/updater'
 import { UpdateModal } from './components/UpdateModal'
 import { getVersion } from '@tauri-apps/api/app'
+import { sortSessionsByRecentActivity } from './lib/sessionMeta'
 
 function createId() {
   return Math.random().toString(36).slice(2, 10)
@@ -816,17 +820,25 @@ function buildCapabilityPanelItems(
     description: server.description || server.command || 'MCP server',
     source: 'user' as const,
     installed: true,
-    supported: Boolean(server.command.trim()),
-    supportMessage: server.command.trim() ? undefined : '尚未填写 MCP 启动命令。',
+    supported: Boolean(server.command.trim()) && server.healthStatus !== 'error',
+    supportMessage:
+      !server.command.trim()
+        ? '尚未填写 MCP 启动命令。'
+        : server.healthStatus === 'error'
+          ? server.healthMessage || '连接测试失败，暂不可启用。'
+          : server.healthStatus === 'unknown'
+            ? '尚未验证连接，测试通过后才会真正启用。'
+            : undefined,
     path: server.cwd || undefined,
     entryPath: undefined,
     readonly: Boolean(server.isDefault),
     globalEnabled: server.enabled,
     projectOverride: workspaceOverrides.mcp[server.id] || 'inherit',
     effectiveEnabled:
+      server.healthStatus === 'ok' &&
       workspaceOverrides.mcp[server.id] === 'on'
         ? true
-        : workspaceOverrides.mcp[server.id] === 'off'
+        : workspaceOverrides.mcp[server.id] === 'off' || server.healthStatus !== 'ok'
           ? false
           : server.enabled,
   }))
@@ -837,6 +849,7 @@ function buildCapabilityPanelItems(
 export function MainWindowApp() {
   const [settings, setSettings] = useState<AgentSettings>(() => loadSettings())
   const [sessions, setSessions] = useState<Session[]>(() => loadSessions())
+  const [sessionFolders, setSessionFolders] = useState<SessionFolder[]>(() => loadSessionFolders())
   const [auraHome, setAuraHome] = useState<AuraHomeState | null>(null)
   const [projectCapabilityOverrides, setProjectCapabilityOverrides] =
     useState<ProjectCapabilityOverrides>(() => loadProjectCapabilityOverrides())
@@ -919,6 +932,7 @@ export function MainWindowApp() {
         setAuraHome(hydrated.aura)
         setSettings(hydrated.settings)
         setSessions(hydrated.sessions)
+        setSessionFolders(hydrated.sessionFolders)
         setProjectCapabilityOverrides(hydratedProjectOverrides)
       } catch (caught) {
         if (!cancelled) {
@@ -1013,6 +1027,13 @@ export function MainWindowApp() {
     }
     saveSessions(sessions)
   }, [sessions, storageReady])
+
+  useEffect(() => {
+    if (!storageReady) {
+      return
+    }
+    saveSessionFolders(sessionFolders)
+  }, [sessionFolders, storageReady])
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth))
@@ -1462,9 +1483,9 @@ export function MainWindowApp() {
 
   function updateSession(sessionId: string, updater: (session: Session) => Session) {
     setSessions(current =>
-      current
-        .map(session => (session.id === sessionId ? updater(session) : session))
-        .sort((a, b) => b.updatedAt - a.updatedAt),
+      sortSessionsByRecentActivity(
+        current.map(session => (session.id === sessionId ? updater(session) : session)),
+      ),
     )
   }
 
@@ -1624,6 +1645,86 @@ export function MainWindowApp() {
   function openSession(sessionId: string) {
     setActiveSessionId(sessionId)
     setError('')
+  }
+
+  function createSessionFolder(name: string) {
+    const nextName = name.trim()
+    if (!nextName) {
+      return
+    }
+
+    setSessionFolders(current => [
+      ...current,
+      {
+        id: createId(),
+        name: nextName,
+        expanded: true,
+        createdAt: Date.now(),
+      },
+    ])
+  }
+
+  function renameSessionFolder(folderId: string, name: string) {
+    const nextName = name.trim()
+    if (!nextName) {
+      return
+    }
+
+    setSessionFolders(current =>
+      current.map(folder =>
+        folder.id === folderId
+          ? {
+              ...folder,
+              name: nextName,
+            }
+          : folder,
+      ),
+    )
+  }
+
+  function toggleSessionFolder(folderId: string) {
+    setSessionFolders(current =>
+      current.map(folder =>
+        folder.id === folderId
+          ? {
+              ...folder,
+              expanded: !folder.expanded,
+            }
+          : folder,
+      ),
+    )
+  }
+
+  function deleteSessionFolder(folderId: string) {
+    setSessionFolders(current => current.filter(folder => folder.id !== folderId))
+    setSessions(current =>
+      current.map(session =>
+        session.folderId === folderId
+          ? {
+              ...session,
+              folderId: undefined,
+            }
+          : session,
+      ),
+    )
+  }
+
+  function moveSessionToFolder(sessionId: string, folderId?: string) {
+    const normalizedFolderId =
+      typeof folderId === 'string' && sessionFolders.some(folder => folder.id === folderId)
+        ? folderId
+        : undefined
+
+    setSessions(current =>
+      current.map(session =>
+        session.id === sessionId
+          ? {
+              ...session,
+              folderId: normalizedFolderId,
+            }
+          : session,
+      ),
+    )
   }
 
   function renameSession(sessionId: string, title: string) {
@@ -2772,10 +2873,17 @@ export function MainWindowApp() {
           sessionFilter={sessionFilter}
           onSessionFilterChange={setSessionFilter}
           sessions={filteredSessions}
+          sessionFolders={sessionFolders}
+          auraWorkspaceDir={auraHome?.workspaceDir || ''}
           runningSessionIds={Object.keys(runningTasksBySession)}
           activeSessionId={activeSession?.id || null}
           onOpenSession={openSession}
           onCreateSession={createFreshSession}
+          onCreateSessionFolder={createSessionFolder}
+          onRenameSessionFolder={renameSessionFolder}
+          onDeleteSessionFolder={deleteSessionFolder}
+          onToggleSessionFolder={toggleSessionFolder}
+          onMoveSessionToFolder={moveSessionToFolder}
           onRenameSession={renameSession}
           onDeleteSession={(sessionId, deleteWorkspace) =>
             void deleteSession(sessionId, deleteWorkspace)

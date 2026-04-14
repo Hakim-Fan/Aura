@@ -41,6 +41,7 @@ import {
 } from 'lucide-react'
 import { WorkspaceExplorer } from '../components/WorkspaceExplorer'
 import { TaskTreeView } from '../components/TaskTreeView'
+import { formatConversationTimestamp } from '../lib/sessionMeta'
 import type {
   AgentExecutionPhase,
   AgentSettings,
@@ -1560,6 +1561,7 @@ function AssistantMessageCard({
   onToggleActivity: (messageId: string) => void
 }) {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
+  const messageTimeLabel = formatConversationTimestamp(message.createdAt)
   const activity = message.activity
   const duration = activity
     ? (
@@ -1830,6 +1832,11 @@ function AssistantMessageCard({
           <div className="flex items-center justify-end pt-1">
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
+                {messageTimeLabel ? (
+                  <span className="px-1.5 text-11px text-[var(--text-secondary)] opacity-80">
+                    {messageTimeLabel}
+                  </span>
+                ) : null}
                 <button
                   className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
                   title="复制"
@@ -1919,6 +1926,8 @@ function UserMessageCard({
   onResend: (messageId: string) => void
   onOpenAttachment: (path: string) => void
 }) {
+  const messageTimeLabel = formatConversationTimestamp(message.createdAt)
+
   return (
     <article className="group flex flex-col items-end gap-2">
       {message.attachments?.length ? (
@@ -1953,6 +1962,11 @@ function UserMessageCard({
       </div>
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/90 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
+          {messageTimeLabel ? (
+            <span className="px-1.5 text-11px text-[var(--text-secondary)] opacity-80">
+              {messageTimeLabel}
+            </span>
+          ) : null}
           <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制" onClick={() => onCopyText(message.content)}>
             <Copy size={14} />
           </button>

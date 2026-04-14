@@ -18,16 +18,19 @@ import type {
   ProviderRetryStage,
   ReasoningEffort,
   Session,
+  SessionFolder,
   WorkspaceCapabilityOverrides,
 } from '../types'
 import { builtinSkills } from '../catalog'
 import { ensureAuraHome, type AuraHomeState } from './aura'
+import { getSessionSortTimestamp, sortSessionsByRecentActivity } from './sessionMeta'
 import {
   deletePersistedMessage,
   deletePersistedMessageVersion,
   deletePersistedSession,
   loadPersistedAppState,
   savePersistedProjectCapabilityOverrides,
+  savePersistedSessionFolders,
   savePersistedSettings,
   upsertPersistedMessage,
   upsertPersistedMessageVersion,
@@ -587,48 +590,83 @@ function normalizeMcpServers(value: unknown) {
     return []
   }
 
-  return value
-    .map((entry, index) => {
-      if (!entry || typeof entry !== 'object') {
-        return null
-      }
+  const byFingerprint = new Map<string, AgentSettings['mcpServers'][number]>()
 
-      const server = entry as Partial<AgentSettings['mcpServers'][number]>
-      const id =
-        typeof server.id === 'string' && server.id.trim()
-          ? server.id
-          : `mcp-${Math.random().toString(36).slice(2, 10)}-${index}`
-      const name =
-        typeof server.name === 'string' && server.name.trim() ? server.name : 'new-mcp'
+  for (const [index, entry] of value.entries()) {
+    if (!entry || typeof entry !== 'object') {
+      continue
+    }
 
-      return {
-        id,
-        name,
-        description:
-          typeof server.description === 'string'
-            ? server.description
-            : '',
-        command:
-          typeof server.command === 'string'
-            ? server.command
-            : '',
-        args:
-          typeof server.args === 'string'
-            ? server.args
-            : '',
-        env:
-          typeof server.env === 'string'
-            ? server.env
-            : '{}',
-        cwd:
-          typeof server.cwd === 'string'
-            ? server.cwd
-            : '',
-        enabled: server.enabled !== false,
-        isDefault: server.isDefault === true,
-      } as AgentSettings['mcpServers'][number]
-    })
-    .filter((entry): entry is AgentSettings['mcpServers'][number] => Boolean(entry))
+    const server = entry as Partial<AgentSettings['mcpServers'][number]>
+    const id =
+      typeof server.id === 'string' && server.id.trim()
+        ? server.id
+        : `mcp-${Math.random().toString(36).slice(2, 10)}-${index}`
+    const name =
+      typeof server.name === 'string' && server.name.trim() ? server.name.trim() : 'new-mcp'
+    const command = typeof server.command === 'string' ? server.command.trim() : ''
+    const args = typeof server.args === 'string' ? server.args.trim() : ''
+    const cwd = typeof server.cwd === 'string' ? server.cwd.trim() : ''
+    const healthStatus =
+      server.healthStatus === 'ok' || server.healthStatus === 'error'
+        ? server.healthStatus
+        : 'unknown'
+    const normalized = {
+      id,
+      name,
+      description:
+        typeof server.description === 'string'
+          ? server.description
+          : '',
+      command,
+      args,
+      env:
+        typeof server.env === 'string'
+          ? server.env
+          : '{}',
+      cwd,
+      enabled: server.enabled === true && healthStatus === 'ok',
+      healthStatus,
+      healthMessage:
+        typeof server.healthMessage === 'string' ? server.healthMessage : '',
+      lastCheckedAt:
+        typeof server.lastCheckedAt === 'number' && Number.isFinite(server.lastCheckedAt)
+          ? server.lastCheckedAt
+          : undefined,
+      toolCount:
+        typeof server.toolCount === 'number' && Number.isFinite(server.toolCount)
+          ? Math.max(0, Math.round(server.toolCount))
+          : undefined,
+      isDefault: server.isDefault === true,
+    } as AgentSettings['mcpServers'][number]
+    const fingerprint = [command, args, cwd, name.toLowerCase()].join('::')
+    const existing = byFingerprint.get(fingerprint)
+
+    byFingerprint.set(fingerprint, existing
+      ? {
+          ...existing,
+          ...normalized,
+          id: existing.id || normalized.id,
+        }
+      : normalized)
+  }
+
+  return Array.from(byFingerprint.values())
+}
+
+function normalizeProviderProfiles(value: AgentSettings['providerProfiles']) {
+  return value.map(profile => ({
+    ...profile,
+    models: normalizeModels(profile.models),
+  }))
+}
+
+function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
+  return {
+    ...settings,
+    providerProfiles: normalizeProviderProfiles(settings.providerProfiles),
+    mcpServers: normalizeMcpServers(settings.mcpServers),
+  }
 }
 
 function normalizeBrowserSearchPreferences(value: unknown): BrowserSearchPreferences {
@@ -955,20 +993,53 @@ function normalizeModels(value: unknown) {
   if (!Array.isArray(value)) {
     return []
   }
-  return value
-    .map(entry => {
-      if (typeof entry === 'string') {
-        return { id: entry, enabled: true }
-      }
-      if (entry && typeof entry === 'object' && typeof entry.id === 'string') {
-        return {
-          id: entry.id,
-          enabled: entry.enabled !== false,
-        }
-      }
-      return null
+
+  const byId = new Map<string, ProviderProfile['models'][number]>()
+
+  for (const entry of value) {
+    const normalized =
+      typeof entry === 'string'
+        ? { id: entry, enabled: true }
+        : entry && typeof entry === 'object' && typeof entry.id === 'string'
+          ? {
+              id: entry.id,
+              enabled: entry.enabled !== false,
+              contextWindowTokens:
+                typeof entry.contextWindowTokens === 'number' &&
+                Number.isFinite(entry.contextWindowTokens) &&
+                entry.contextWindowTokens > 0
+                  ? Math.round(entry.contextWindowTokens)
+                  : undefined,
+              maxOutputTokens:
+                typeof entry.maxOutputTokens === 'number' &&
+                Number.isFinite(entry.maxOutputTokens) &&
+                entry.maxOutputTokens > 0
+                  ? Math.round(entry.maxOutputTokens)
+                  : undefined,
+            }
+          : null
+
+    if (!normalized?.id?.trim()) {
+      continue
+    }
+
+    const modelId = normalized.id.trim()
+    const existing = byId.get(modelId)
+    byId.set(modelId, {
+      id: modelId,
+      enabled: existing ? existing.enabled || normalized.enabled !== false : normalized.enabled !== false,
+      contextWindowTokens: Math.max(
+        existing?.contextWindowTokens || 0,
+        normalized.contextWindowTokens || 0,
+      ) || undefined,
+      maxOutputTokens: Math.max(
+        existing?.maxOutputTokens || 0,
+        normalized.maxOutputTokens || 0,
+      ) || undefined,
     })
-    .filter((entry): entry is ProviderProfile['models'][number] => Boolean(entry))
+  }
+
+  return Array.from(byId.values()).sort((left, right) => left.id.localeCompare(right.id))
 }
 
 function normalizeProfiles(
@@ -1098,22 +1169,23 @@ function resolveActiveProfile(
 }
 
 function syncLegacyFields(settings: AgentSettings): AgentSettings {
+  const normalizedSettings = normalizeMutableSettings(settings)
   const activeProfile = resolveActiveProfile(
-    settings.providerProfiles,
-    settings.activeProviderProfileId,
+    normalizedSettings.providerProfiles,
+    normalizedSettings.activeProviderProfileId,
   )
 
   if (!activeProfile) {
-    return settings
+    return normalizedSettings
   }
 
   return {
-    ...settings,
+    ...normalizedSettings,
     activeProviderProfileId: activeProfile.id,
     provider: activeProfile.provider,
     apiKey: activeProfile.apiKey,
     baseUrl: activeProfile.baseUrl,
-    model: resolvePreferredModelId(activeProfile, settings.model),
+    model: resolvePreferredModelId(activeProfile, normalizedSettings.model),
   }
 }
 
@@ -1134,6 +1206,7 @@ function parseSessions(raw: string | null): Session[] {
             : 'profile-legacy',
         provider: normalizeProvider(session.provider, defaultSettings.provider),
         model: session.model || defaultSettings.model,
+        folderId: typeof session.folderId === 'string' ? session.folderId : undefined,
         workspacePath: session.workspacePath || '',
         workspaceRoot: session.workspaceRoot || '',
         workspaceMode: session.workspaceMode || 'explicit',
@@ -1229,7 +1302,37 @@ function parseSessions(raw: string | null): Session[] {
         }
         return session.title.trim() !== '新会话'
       })
-      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .sort((left, right) => {
+        const timestampDelta = getSessionSortTimestamp(right) - getSessionSortTimestamp(left)
+        if (timestampDelta !== 0) {
+          return timestampDelta
+        }
+        return right.updatedAt - left.updatedAt
+      })
+  } catch {
+    return []
+  }
+}
+
+function parseSessionFolders(raw: string | null): SessionFolder[] {
+  if (!raw) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Array<Partial<SessionFolder> & Pick<SessionFolder, 'id'>>
+    return parsed
+      .map(folder => ({
+        id: folder.id,
+        name:
+          typeof folder.name === 'string' && folder.name.trim() ? folder.name.trim() : '未命名分组',
+        expanded: folder.expanded !== false,
+        createdAt:
+          typeof folder.createdAt === 'number' && Number.isFinite(folder.createdAt)
+            ? folder.createdAt
+            : Date.now(),
+      }))
+      .sort((left, right) => left.createdAt - right.createdAt)
   } catch {
     return []
   }
@@ -1313,6 +1416,7 @@ type PersistedSessionRecord = ReturnType<typeof serializeSessions>[number]
 
 let cachedSettings: AgentSettings = cloneValue(defaultSettings)
 let cachedSessions: Session[] = []
+let cachedSessionFolders: SessionFolder[] = []
 let cachedProjectCapabilityOverrides: ProjectCapabilityOverrides = {}
 let persistedSessionSnapshots = new Map<string, PersistedSessionRecord>()
 let sessionPersistenceQueue = Promise.resolve()
@@ -1513,21 +1617,31 @@ async function readPersistedState() {
     settings = normalizedSettings
   }
   const sessions = parseSessions(parsePersistedJson(persisted.sessions || []))
+  const sessionFolders = parseSessionFolders(parsePersistedJson(persisted.sessionFolders || []))
+  const validFolderIds = new Set(sessionFolders.map(folder => folder.id))
+  const normalizedSessions = sortSessionsByRecentActivity(
+    sessions.map(session => ({
+      ...session,
+      folderId: session.folderId && validFolderIds.has(session.folderId) ? session.folderId : undefined,
+    })),
+  )
   const overrides = parseProjectCapabilityOverrides(
     parsePersistedJson(persisted.projectCapabilityOverrides),
   )
 
   cachedSettings = cloneValue(settings)
-  cachedSessions = cloneValue(sessions)
+  cachedSessions = cloneValue(normalizedSessions)
+  cachedSessionFolders = cloneValue(sessionFolders)
   cachedProjectCapabilityOverrides = cloneValue(overrides)
   persistedSessionSnapshots = new Map(
-    serializeSessions(sessions).map(session => [session.id, cloneValue(session)]),
+    serializeSessions(normalizedSessions).map(session => [session.id, cloneValue(session)]),
   )
 
   return {
     aura,
     settings: cloneValue(settings),
-    sessions: cloneValue(sessions),
+    sessions: cloneValue(normalizedSessions),
+    sessionFolders: cloneValue(sessionFolders),
     overrides: cloneValue(overrides),
   }
 }
@@ -1538,6 +1652,10 @@ export function loadSettings(): AgentSettings {
 
 export function loadSessions(): Session[] {
   return cloneValue(cachedSessions)
+}
+
+export function loadSessionFolders(): SessionFolder[] {
+  return cloneValue(cachedSessionFolders)
 }
 
 export function saveSettings(settings: AgentSettings) {
@@ -1555,13 +1673,22 @@ export async function saveSettingsAndAwaitPersistence(settings: AgentSettings) {
 }
 
 export function saveSessions(sessions: Session[]) {
-  cachedSessions = cloneValue(sessions)
-  const nextSessions = cloneValue(sessions)
+  const sortedSessions = sortSessionsByRecentActivity(sessions)
+  cachedSessions = cloneValue(sortedSessions)
+  const nextSessions = cloneValue(sortedSessions)
   sessionPersistenceQueue = sessionPersistenceQueue
     .then(() => persistSessions(nextSessions))
     .catch(() => {
       // Keep the UI responsive even if SQLite persistence fails.
     })
+}
+
+export function saveSessionFolders(sessionFolders: SessionFolder[]) {
+  const sortedFolders = [...sessionFolders].sort((left, right) => left.createdAt - right.createdAt)
+  cachedSessionFolders = cloneValue(sortedFolders)
+  void savePersistedSessionFolders(sortedFolders).catch(() => {
+    // Keep the UI responsive even if SQLite persistence fails.
+  })
 }
 
 export function loadProjectCapabilityOverrides(): ProjectCapabilityOverrides {
@@ -1693,6 +1820,7 @@ export function resolveCapabilitiesForWorkspace(args: {
   const resolvedMcpServers = settings.mcpServers
     .filter(server =>
       resolveCapabilityEnabled(server.enabled, projectOverrides.mcp[server.id]) &&
+      server.healthStatus === 'ok' &&
       Boolean(server.command.trim()),
     )
     .map(server => ({
@@ -1731,12 +1859,14 @@ export async function hydrateStorageFromAuraHome(): Promise<{
   aura: AuraHomeState
   settings: AgentSettings
   sessions: Session[]
+  sessionFolders: SessionFolder[]
 }> {
-  const { aura, settings, sessions } = await readPersistedState()
+  const { aura, settings, sessions, sessionFolders } = await readPersistedState()
 
   return {
     aura,
     settings,
     sessions,
+    sessionFolders,
   }
 }

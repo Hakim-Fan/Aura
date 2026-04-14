@@ -5,6 +5,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import {
   formatToolError,
+  parseCommandSpec,
   parseLooseJson,
   resolveWorkspacePath,
   stringifyOutput,
@@ -665,19 +666,53 @@ function normalizeMcpServerEntries(items) {
   if (!Array.isArray(items)) {
     return []
   }
-  return items
-    .filter(item => item && typeof item === 'object')
-    .map(item => ({
+  const byFingerprint = new Map()
+
+  for (const item of items.filter(item => item && typeof item === 'object')) {
+    const command = typeof item.command === 'string' ? item.command.trim() : ''
+    const args = typeof item.args === 'string' ? item.args.trim() : ''
+    const cwd = typeof item.cwd === 'string' ? item.cwd.trim() : ''
+    const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim() : 'new-mcp'
+    const healthStatus =
+      item.healthStatus === 'ok' || item.healthStatus === 'error'
+        ? item.healthStatus
+        : 'unknown'
+    const normalized = {
       id: typeof item.id === 'string' && item.id.trim() ? item.id.trim() : `mcp-${Date.now()}`,
-      name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : 'new-mcp',
+      name,
       description: typeof item.description === 'string' ? item.description : '',
-      command: typeof item.command === 'string' ? item.command : '',
-      args: typeof item.args === 'string' ? item.args : '',
+      command,
+      args,
       env: typeof item.env === 'string' ? item.env : '{}',
-      cwd: typeof item.cwd === 'string' ? item.cwd : '',
-      enabled: item.enabled !== false,
+      cwd,
+      enabled: item.enabled === true && healthStatus === 'ok',
+      healthStatus,
+      healthMessage: typeof item.healthMessage === 'string' ? item.healthMessage : '',
+      lastCheckedAt:
+        typeof item.lastCheckedAt === 'number' && Number.isFinite(item.lastCheckedAt)
+          ? item.lastCheckedAt
+          : undefined,
+      toolCount:
+        typeof item.toolCount === 'number' && Number.isFinite(item.toolCount)
+          ? Math.max(0, Math.round(item.toolCount))
+          : undefined,
       isDefault: item.isDefault === true,
-    }))
+    }
+    const fingerprint = [command, args, cwd, name.toLowerCase()].join('::')
+    const existing = byFingerprint.get(fingerprint)
+    byFingerprint.set(
+      fingerprint,
+      existing
+        ? {
+            ...existing,
+            ...normalized,
+            id: existing.id || normalized.id,
+          }
+        : normalized,
+    )
+  }
+
+  return Array.from(byFingerprint.values())
 }
 
 async function updateCapabilityEnabled(context, kind, capabilityId, enabled) {
@@ -700,27 +735,84 @@ async function updateCapabilityEnabled(context, kind, capabilityId, enabled) {
 async function upsertMcpServer(context, serverInput) {
   const settings = await getLiveSettings(context)
   const current = normalizeMcpServerEntries(settings.mcpServers)
+  const commandSpec = parseCommandSpec(
+    typeof serverInput.command === 'string' ? serverInput.command : '',
+    typeof serverInput.args === 'string' ? serverInput.args : '',
+  )
+  const name =
+    typeof serverInput.name === 'string' && serverInput.name.trim()
+      ? serverInput.name.trim()
+      : 'new-mcp'
+  const description =
+    typeof serverInput.description === 'string' ? serverInput.description : ''
+  const cwd = typeof serverInput.cwd === 'string' ? serverInput.cwd.trim() : ''
+  const env =
+    typeof serverInput.env === 'string'
+      ? serverInput.env
+      : JSON.stringify(serverInput.env || {}, null, 2)
+  const fingerprint = [
+    commandSpec.command,
+    commandSpec.args.join(' '),
+    cwd,
+    name.toLowerCase(),
+  ].join('::')
+  const matchedServer =
+    current.find(server => server.id === serverInput.id) ||
+    current.find(
+      server => [server.command, server.args, server.cwd, server.name.toLowerCase()].join('::') === fingerprint,
+    )
   const serverId =
     typeof serverInput.id === 'string' && serverInput.id.trim()
       ? serverInput.id.trim()
-      : `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      : matchedServer?.id || `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const nextServer = {
     id: serverId,
-    name:
-      typeof serverInput.name === 'string' && serverInput.name.trim()
-        ? serverInput.name.trim()
-        : 'new-mcp',
-    description:
-      typeof serverInput.description === 'string' ? serverInput.description : '',
-    command:
-      typeof serverInput.command === 'string' ? serverInput.command.trim() : '',
-    args: typeof serverInput.args === 'string' ? serverInput.args : '',
-    env:
-      typeof serverInput.env === 'string'
-        ? serverInput.env
-        : JSON.stringify(serverInput.env || {}, null, 2),
-    cwd: typeof serverInput.cwd === 'string' ? serverInput.cwd : '',
-    enabled: serverInput.enabled !== false,
+    name,
+    description,
+    command: commandSpec.command,
+    args: commandSpec.args.join(' '),
+    env,
+    cwd,
+    enabled:
+      matchedServer &&
+      matchedServer.command === commandSpec.command &&
+      matchedServer.args === commandSpec.args.join(' ') &&
+      matchedServer.cwd === cwd &&
+      matchedServer.env === env &&
+      matchedServer.healthStatus === 'ok' &&
+      serverInput.enabled !== false,
+    healthStatus:
+      matchedServer &&
+      matchedServer.command === commandSpec.command &&
+      matchedServer.args === commandSpec.args.join(' ') &&
+      matchedServer.cwd === cwd &&
+      matchedServer.env === env
+        ? matchedServer.healthStatus || 'unknown'
+        : 'unknown',
+    healthMessage:
+      matchedServer &&
+      matchedServer.command === commandSpec.command &&
+      matchedServer.args === commandSpec.args.join(' ') &&
+      matchedServer.cwd === cwd &&
+      matchedServer.env === env
+        ? matchedServer.healthMessage || ''
+        : '',
+    lastCheckedAt:
+      matchedServer &&
+      matchedServer.command === commandSpec.command &&
+      matchedServer.args === commandSpec.args.join(' ') &&
+      matchedServer.cwd === cwd &&
+      matchedServer.env === env
+        ? matchedServer.lastCheckedAt
+        : undefined,
+    toolCount:
+      matchedServer &&
+      matchedServer.command === commandSpec.command &&
+      matchedServer.args === commandSpec.args.join(' ') &&
+      matchedServer.cwd === cwd &&
+      matchedServer.env === env
+        ? matchedServer.toolCount
+        : undefined,
     isDefault: serverInput.isDefault === true,
   }
 
@@ -1087,7 +1179,8 @@ export function createBuiltinTools(context) {
           mcpServers: normalizeMcpServerEntries(settings.mcpServers).map(server => ({
             id: server.id,
             name: server.name,
-            enabled: server.enabled !== false,
+            enabled: server.enabled === true && server.healthStatus === 'ok',
+            healthStatus: server.healthStatus,
             command: server.command,
           })),
         })
@@ -1312,7 +1405,7 @@ export function createBuiltinTools(context) {
       aliases: ['savemcp', 'upsertmcp'],
       approvalCategory: 'file_write',
       description:
-        'Create or update an MCP server entry in Aura settings and optionally enable it.',
+        'Create or update an MCP server entry in Aura settings. New or changed configs stay pending until they pass MCP connection verification.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1330,7 +1423,7 @@ export function createBuiltinTools(context) {
           },
           command: {
             type: 'string',
-            description: 'Executable command, for example "npx".',
+            description: 'Executable command, or a full inline command such as "npx -y @upstash/context7-mcp@latest".',
           },
           args: {
             type: 'string',
@@ -1361,7 +1454,15 @@ export function createBuiltinTools(context) {
           ...args,
           env: envValue,
         })
-        return stringifyOutput(nextServer)
+        return stringifyOutput({
+          ...nextServer,
+          ready: nextServer.enabled === true && nextServer.healthStatus === 'ok',
+          requiresValidation: nextServer.healthStatus !== 'ok',
+          note:
+            nextServer.healthStatus === 'ok' && nextServer.enabled === true
+              ? ''
+              : '配置已保存，但还未进入工具池；需要先通过 MCP 连接验证。',
+        })
       },
     },
     {

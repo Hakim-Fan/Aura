@@ -19,7 +19,11 @@ import {
   uninstallManagedBrowser,
   validateCustomSearchTemplate,
 } from './lib/browser'
-import { inspectMcpServer, type McpInspectResult } from './lib/mcp'
+import {
+  inspectMcpServer,
+  type McpInspectResult,
+  validateMcpServerInput,
+} from './lib/mcp'
 import { fetchProviderModels, testProviderConnection } from './lib/provider'
 import { ensureAuraHome, deleteAuraAsset, resetAuraHome, type AuraAsset, type AuraHomeState } from './lib/aura'
 import {
@@ -124,6 +128,19 @@ function formatBytes(value?: number) {
   }
 
   return `${size.toFixed(size >= 100 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+}
+
+function formatTokenCount(value?: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return ''
+  }
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`
+  }
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`
+  }
+  return `${Math.round(value)}`
 }
 
 function formatProgressPercent(value?: number) {
@@ -661,14 +678,22 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   function setAllMcpEnabled(enabled: boolean) {
-    setDraftSettings(current => ({
-      ...current,
-      mcpServers: current.mcpServers.map(server => ({
+    if (!enabled) {
+      void persistMcpServers(
+        draftSettings.mcpServers.map(server => ({
+          ...server,
+          enabled: false,
+        })),
+      )
+      return
+    }
+
+    void persistMcpServers(
+      draftSettings.mcpServers.map(server => ({
         ...server,
-        enabled,
+        enabled: server.healthStatus === 'ok',
       })),
-    }))
-    setSaveState('idle')
+    )
   }
 
   async function refreshAuraAssets(kind?: 'skills' | 'plugins') {
@@ -710,12 +735,26 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
   async function handleDeleteMcp() {
     if (!mcpToDelete) return
+    await persistMcpServers(draftSettings.mcpServers.filter(s => s.id !== mcpToDelete.id))
+    setMcpToDelete(null)
+  }
 
+  async function persistMcpServers(nextServers: AgentSettings['mcpServers']) {
+    const latest = loadSettings()
+    await saveSettingsAndAwaitPersistence({
+      ...latest,
+      mcpServers: nextServers,
+    })
+    setSavedSettings(current => ({
+      ...current,
+      mcpServers: nextServers,
+    }))
     setDraftSettings(current => ({
       ...current,
-      mcpServers: current.mcpServers.filter(s => s.id !== mcpToDelete.id),
+      mcpServers: nextServers,
     }))
-    setMcpToDelete(null)
+    await broadcastSettingsUpdated()
+    setSaveState('saved')
   }
 
   async function handleFactoryReset() {
@@ -757,15 +796,68 @@ export function SettingsWindowApp({ initialTab }: Props) {
     await openPathInDefaultApp(nextAura.mcpDir)
   }
 
-  async function testMcpServer(serverId: string) {
+  async function testMcpServer(
+    serverId: string,
+    options?: {
+      enableOnSuccess?: boolean
+      persistResult?: boolean
+    },
+  ) {
     const server = draftSettings.mcpServers.find(entry => entry.id === serverId)
     if (!server) {
-      return
+      return false
     }
 
     setTestingMcpServerId(serverId)
     try {
+      const validation = validateMcpServerInput(server)
+      if (!validation.isValid) {
+        const message = validation.firstMessage || 'MCP 配置校验失败。'
+        const nextServers = draftSettings.mcpServers.map(entry =>
+          entry.id === serverId
+            ? {
+                ...entry,
+                enabled: false,
+                healthStatus: 'error' as const,
+                healthMessage: message,
+                lastCheckedAt: Date.now(),
+                toolCount: 0,
+              }
+            : entry,
+        )
+        setMcpInspectResults(current => ({
+          ...current,
+          [serverId]: {
+            tone: 'error',
+            message,
+            tools: [],
+          },
+        }))
+        setDraftSettings(current => ({
+          ...current,
+          mcpServers: nextServers,
+        }))
+        if (options?.persistResult) {
+          await persistMcpServers(nextServers)
+        } else {
+          setSaveState('idle')
+        }
+        return false
+      }
+
       const result = await inspectMcpServer(server)
+      const nextServers = draftSettings.mcpServers.map(entry =>
+        entry.id === serverId
+          ? {
+              ...entry,
+              enabled: options?.enableOnSuccess ? true : entry.enabled,
+              healthStatus: 'ok' as const,
+              healthMessage: result.message,
+              lastCheckedAt: Date.now(),
+              toolCount: result.tools.length,
+            }
+          : entry,
+      )
       setMcpInspectResults(current => ({
         ...current,
         [serverId]: {
@@ -774,8 +866,30 @@ export function SettingsWindowApp({ initialTab }: Props) {
           tools: result.tools,
         },
       }))
+      setDraftSettings(current => ({
+        ...current,
+        mcpServers: nextServers,
+      }))
+      if (options?.persistResult) {
+        await persistMcpServers(nextServers)
+      } else {
+        setSaveState('idle')
+      }
+      return true
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'MCP 连接测试失败。'
+      const nextServers = draftSettings.mcpServers.map(entry =>
+        entry.id === serverId
+          ? {
+              ...entry,
+              enabled: false,
+              healthStatus: 'error' as const,
+              healthMessage: message,
+              lastCheckedAt: Date.now(),
+              toolCount: 0,
+            }
+          : entry,
+      )
       setMcpInspectResults(current => ({
         ...current,
         [serverId]: {
@@ -784,9 +898,40 @@ export function SettingsWindowApp({ initialTab }: Props) {
           tools: [],
         },
       }))
+      setDraftSettings(current => ({
+        ...current,
+        mcpServers: nextServers,
+      }))
+      if (options?.persistResult) {
+        await persistMcpServers(nextServers)
+      } else {
+        setSaveState('idle')
+      }
+      return false
     } finally {
       setTestingMcpServerId('')
     }
+  }
+
+  async function toggleMcpServerEnabled(serverId: string, nextEnabled: boolean) {
+    if (!nextEnabled) {
+      await persistMcpServers(
+        draftSettings.mcpServers.map(server =>
+          server.id === serverId
+            ? {
+                ...server,
+                enabled: false,
+              }
+            : server,
+        ),
+      )
+      return
+    }
+
+    await testMcpServer(serverId, {
+      enableOnSuccess: true,
+      persistResult: true,
+    })
   }
 
   async function openAuraAssetFolder(kind: 'skills' | 'plugins') {
@@ -1362,14 +1507,19 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setProviderStatus(null)
     try {
       const result = await fetchProviderModels(buildProviderRequestSettings(selectedProfile))
+      const existingById = new Map(selectedProfile.models.map(model => [model.id, model]))
       updateProviderProfile(
         selectedProfile.id,
         'models',
-        result.models.map(model => ({
-          id: model,
-          enabled:
-            selectedProfile.models.find(existing => existing.id === model)?.enabled ?? false,
-        })),
+        result.models.map(model => {
+          const existing = existingById.get(model.id)
+          return {
+            ...model,
+            enabled: existing?.enabled ?? false,
+            contextWindowTokens: model.contextWindowTokens || existing?.contextWindowTokens,
+            maxOutputTokens: model.maxOutputTokens || existing?.maxOutputTokens,
+          }
+        }),
       )
       setProviderStatus({
         tone: 'success',
@@ -2442,6 +2592,34 @@ export function SettingsWindowApp({ initialTab }: Props) {
           {draftSettings.mcpServers.length > 0 ? (
             draftSettings.mcpServers.map(server => (
               <article key={server.id} className="asset-card asset-card-rich">
+                {(() => {
+                  const statusTone =
+                    server.healthStatus === 'ok'
+                      ? 'success'
+                      : server.healthStatus === 'error'
+                        ? 'error'
+                        : 'idle'
+                  const inspectResult = mcpInspectResults[server.id]
+                  const statusLabel =
+                    server.enabled && server.healthStatus === 'ok'
+                      ? '已启用'
+                      : server.healthStatus === 'ok'
+                        ? '已验证'
+                        : server.healthStatus === 'error'
+                          ? '连接失败'
+                          : '待验证'
+                  const statusMessage =
+                    server.healthStatus === 'ok'
+                      ? server.healthMessage || `连接成功，发现 ${server.toolCount || 0} 个工具。`
+                      : server.healthStatus === 'error'
+                        ? server.healthMessage || '连接测试失败。'
+                        : '该 MCP 还没有通过连接验证，验证通过后才能真正启用。'
+                  const feedbackTone = inspectResult?.tone || statusTone
+                  const feedbackMessage = inspectResult?.message || statusMessage
+                  const feedbackTools = inspectResult?.tools || []
+
+                  return (
+                    <>
                 <div className="asset-card-head">
                   <div>
                     <strong>{server.name}</strong>
@@ -2450,13 +2628,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   <label className="relative flex cursor-pointer items-center gap-2.5 truncate">
                     <input
                       checked={server.enabled}
-                      disabled
                       type="checkbox"
                       className="peer sr-only"
+                      onChange={event => void toggleMcpServerEnabled(server.id, event.target.checked)}
                     />
                     <div className="relative h-4.5 w-8 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-green-500/80 after:absolute after:top-0.5 after:left-[2px] after:h-3.5 after:w-3.5 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-3.5" />
                     <span className="text-12px font-600 text-black/40 truncate whitespace-nowrap">
-                      {server.enabled ? '已启用' : '已停用'}
+                      {statusLabel}
                     </span>
                   </label>
                 </div>
@@ -2468,33 +2646,45 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   {server.env.trim() !== '{}' ? (
                     <span className="micro-pill">已配置环境变量</span>
                   ) : null}
+                  {server.lastCheckedAt ? (
+                    <span className="micro-pill">{`最近验证: ${formatTimestamp(server.lastCheckedAt)}`}</span>
+                  ) : null}
                 </div>
-                {mcpInspectResults[server.id] ? (
-                  <div
-                    className={`provider-feedback ${mcpInspectResults[server.id]?.tone === 'success' ? 'success' : 'error'}`}
-                  >
-                    <strong>{mcpInspectResults[server.id]?.message}</strong>
-                    {mcpInspectResults[server.id]?.tools.length ? (
-                      <div className="mcp-tool-chip-list">
-                        {mcpInspectResults[server.id]?.tools.map(tool => (
-                          <div key={`${server.id}-${tool.name}`} className="mcp-tool-chip-group">
-                            <span className="mcp-tool-chip">
-                              {tool.name}
-                            </span>
-                            <div className="mcp-tool-tooltip">
-                              {tool.description}
-                            </div>
+                <div
+                  className={`provider-feedback ${
+                    feedbackTone === 'success'
+                      ? 'success'
+                      : feedbackTone === 'error'
+                        ? 'error'
+                        : ''
+                  }`}
+                >
+                  <strong>{feedbackMessage}</strong>
+                  {server.healthStatus === 'unknown' ? (
+                    <div className="mt-1 text-12px opacity-80">
+                      现在保存配置不会自动代表可用，测试通过后才会加入工具池。
+                    </div>
+                  ) : null}
+                  {feedbackTools.length ? (
+                    <div className="mcp-tool-chip-list">
+                      {feedbackTools.map(tool => (
+                        <div key={`${server.id}-${tool.name}`} className="mcp-tool-chip-group">
+                          <span className="mcp-tool-chip">
+                            {tool.name}
+                          </span>
+                          <div className="mcp-tool-tooltip">
+                            {tool.description}
                           </div>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
                 <div className="header-actions">
                   <button
                     className="secondary-button"
                     disabled={testingMcpServerId === server.id}
-                    onClick={() => void testMcpServer(server.id)}
+                    onClick={() => void testMcpServer(server.id, { persistResult: true })}
                   >
                     <RefreshCw
                       size={14}
@@ -2518,6 +2708,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     </button>
                   )}
                 </div>
+                    </>
+                  )
+                })()}
               </article>
             ))
           ) : (

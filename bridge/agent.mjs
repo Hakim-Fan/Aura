@@ -2,6 +2,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { selectTurnCapabilities } from './capabilitySelector.mjs'
 import { createAdvancedTools } from './advancedTools.mjs'
+import { closeHeadlessBrowserSession } from './browserRuntime.mjs'
 import { buildSkillPrompt, loadPluginTools, loadSkillCatalog } from './extensions.mjs'
 import { connectMcpTools } from './mcp.mjs'
 import {
@@ -481,6 +482,13 @@ function buildCapabilityExposureNote(snapshot) {
     lines.push(`Selected optional capabilities: ${items}.`)
   }
 
+  if (snapshot?.mcpServers?.length) {
+    const names = snapshot.mcpServers.map(server => server.name).filter(Boolean).join(', ')
+    lines.push(
+      `Selected MCP servers for this turn: ${names}. Their tools are already mounted in the tool list for this turn, so call them directly when relevant instead of saying MCP must be invoked by an external client.`,
+    )
+  }
+
   return lines.join('\n')
 }
 
@@ -494,6 +502,30 @@ function getBrowserSourceLabel(source) {
     default:
       return 'system Chrome'
   }
+}
+
+function buildCurrentDateContext() {
+  const now = new Date()
+  const timezone =
+    Intl.DateTimeFormat().resolvedOptions().timeZone || 'system local timezone'
+  const absoluteDate = new Intl.DateTimeFormat('en-US', {
+    dateStyle: 'full',
+    timeStyle: 'long',
+    timeZone: timezone,
+  }).format(now)
+  const isoDate = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now)
+
+  return [
+    `Current local datetime: ${absoluteDate}.`,
+    `Current local date: ${isoDate}.`,
+    `Current timezone: ${timezone}.`,
+    'When the user says today, tomorrow, yesterday, latest, current, or this week, resolve it from the current local date above instead of relying on model-internal dates.',
+  ].join('\n')
 }
 
 function isBrowserSourceAvailable(settings) {
@@ -518,6 +550,7 @@ function buildSystemPrompt(settings, skillPrompt, exposureNote) {
   const sections = [
     'You are Aura, a local-first desktop coding agent.',
     `The active workspace is: ${settings.cwd}`,
+    buildCurrentDateContext(),
     'Use tools when they reduce uncertainty or let you act directly inside the workspace.',
     'Prefer concrete changes and verification steps over abstract advice.',
     'If the user asks for any real-world action such as editing files, changing configuration, installing capabilities, or downloading assets, you must use tools and verify the result before claiming success.',
@@ -926,6 +959,7 @@ export async function runAgent(request) {
     enriched.retryInfo = retryInfo
     throw enriched
   } finally {
+    await closeHeadlessBrowserSession().catch(() => {})
     await mcp.close()
   }
 }

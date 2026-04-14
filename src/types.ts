@@ -3,6 +3,8 @@ export type ProviderMode = 'openai' | 'google' | 'custom'
 export type ProviderModel = {
   id: string
   enabled: boolean
+  contextWindowTokens?: number
+  maxOutputTokens?: number
 }
 
 export type ProviderProfile = {
@@ -321,6 +323,10 @@ export type McpServerConfig = {
   env: string
   cwd: string
   enabled: boolean
+  healthStatus?: 'unknown' | 'ok' | 'error'
+  healthMessage?: string
+  lastCheckedAt?: number
+  toolCount?: number
   isDefault?: boolean
 }
 
@@ -457,6 +463,7 @@ export type Session = {
   providerProfileId: string
   provider: ProviderMode
   model: string
+  folderId?: string
   workspacePath: string
   workspaceRoot: string
   workspaceMode: 'explicit' | 'default'
@@ -464,6 +471,13 @@ export type Session = {
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]
   updatedAt: number
+}
+
+export type SessionFolder = {
+  id: string
+  name: string
+  expanded: boolean
+  createdAt: number
 }
 
 export type AgentResponse = {

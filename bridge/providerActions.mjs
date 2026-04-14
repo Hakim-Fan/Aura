@@ -9,6 +9,83 @@ async function parseJsonResponse(response) {
   }
 }
 
+function pickFiniteNumber(...values) {
+  for (const value of values) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.round(parsed)
+    }
+  }
+  return undefined
+}
+
+function dedupeModels(entries) {
+  const byId = new Map()
+
+  for (const entry of entries) {
+    if (!entry?.id) {
+      continue
+    }
+    const existing = byId.get(entry.id)
+    if (!existing) {
+      byId.set(entry.id, entry)
+      continue
+    }
+
+    byId.set(entry.id, {
+      ...existing,
+      contextWindowTokens: Math.max(
+        existing.contextWindowTokens || 0,
+        entry.contextWindowTokens || 0,
+      ) || undefined,
+      maxOutputTokens: Math.max(
+        existing.maxOutputTokens || 0,
+        entry.maxOutputTokens || 0,
+      ) || undefined,
+    })
+  }
+
+  return Array.from(byId.values()).sort((left, right) => left.id.localeCompare(right.id))
+}
+
+function toProviderModel(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return null
+  }
+
+  const id = typeof entry.id === 'string' ? entry.id.trim() : ''
+  if (!id) {
+    return null
+  }
+
+  return {
+    id,
+    enabled: false,
+    contextWindowTokens: pickFiniteNumber(
+      entry.context_window,
+      entry.contextWindow,
+      entry.context_length,
+      entry.contextLength,
+      entry.max_context_length,
+      entry.maxContextLength,
+      entry.input_token_limit,
+      entry.inputTokenLimit,
+      entry.inputTokenLimit,
+      entry.max_input_tokens,
+      entry.maxInputTokens,
+    ),
+    maxOutputTokens: pickFiniteNumber(
+      entry.max_output_tokens,
+      entry.maxOutputTokens,
+      entry.output_token_limit,
+      entry.outputTokenLimit,
+      entry.outputTokenLimit,
+      entry.completion_token_limit,
+      entry.completionTokenLimit,
+    ),
+  }
+}
+
 async function fetchOpenAiModels(settings) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
   const response = await fetch(`${apiBase}/models`, {
@@ -20,10 +97,7 @@ async function fetchOpenAiModels(settings) {
   if (!response.ok) {
     throw new Error(data.error?.message || 'Failed to fetch models from OpenAI-compatible provider')
   }
-  const models = (data.data || [])
-    .map(entry => entry.id)
-    .filter(Boolean)
-    .sort((left, right) => left.localeCompare(right))
+  const models = dedupeModels((data.data || []).map(toProviderModel))
   return {
     ok: true,
     message: `成功获取 ${models.length} 个模型。`,
@@ -43,10 +117,20 @@ async function fetchGoogleModels(settings) {
   if (!response.ok) {
     throw new Error(data.error?.message || 'Failed to fetch models from Google')
   }
-  const models = (data.models || [])
-    .map(entry => String(entry.name || '').replace(/^models\//, ''))
-    .filter(Boolean)
-    .sort((left, right) => left.localeCompare(right))
+  const models = dedupeModels(
+    (data.models || []).map(entry => ({
+      id: String(entry.name || '').replace(/^models\//, ''),
+      enabled: false,
+      contextWindowTokens: pickFiniteNumber(
+        entry.inputTokenLimit,
+        entry.input_token_limit,
+      ),
+      maxOutputTokens: pickFiniteNumber(
+        entry.outputTokenLimit,
+        entry.output_token_limit,
+      ),
+    })),
+  )
   return {
     ok: true,
     message: `成功获取 ${models.length} 个模型。`,

@@ -976,6 +976,11 @@ fn canonical_display_path(path: &Path) -> String {
         .to_string()
 }
 
+fn canonicalize_existing_path(path: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(path)
+        .map_err(|error| format!("Failed to canonicalize path {}: {error}", path.display()))
+}
+
 fn resolve_app_bundle_executable(path: &Path) -> Option<PathBuf> {
     if !path.is_dir() || path.extension().and_then(|value| value.to_str()) != Some("app") {
         return None;
@@ -1673,6 +1678,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               provider_profile_id TEXT NOT NULL,
               provider TEXT NOT NULL,
               model TEXT NOT NULL,
+              folder_id TEXT NOT NULL DEFAULT '',
               workspace_path TEXT NOT NULL,
               workspace_root TEXT NOT NULL,
               workspace_mode TEXT NOT NULL,
@@ -1745,6 +1751,16 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
             "#,
         )
         .map_err(|error| format!("Failed to initialize SQLite schema: {error}"))?;
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE sessions ADD COLUMN folder_id TEXT NOT NULL DEFAULT ''",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!("Failed to migrate SQLite sessions table: {error}"));
+        }
+    }
 
     Ok(connection)
 }
@@ -2866,9 +2882,18 @@ fn load_persisted_app_state<R: Runtime>(
             format!("Failed to load project capability overrides from SQLite: {error}")
         })?;
 
+    let session_folders_json: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM app_kv WHERE key = 'session_folders'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load session folders from SQLite: {error}"))?;
+
     let mut sessions_statement = connection
         .prepare(
-            "SELECT id, title, provider_profile_id, provider, model, workspace_path, workspace_root, workspace_mode, updated_at
+            "SELECT id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, updated_at
              FROM sessions
              ORDER BY updated_at DESC",
         )
@@ -2885,7 +2910,8 @@ fn load_persisted_app_state<R: Runtime>(
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, i64>(8)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
             ))
         })
         .map_err(|error| format!("Failed to read sessions from SQLite: {error}"))?;
@@ -2899,6 +2925,7 @@ fn load_persisted_app_state<R: Runtime>(
             provider_profile_id,
             provider,
             model,
+            folder_id,
             workspace_path,
             workspace_root,
             workspace_mode,
@@ -2998,6 +3025,7 @@ fn load_persisted_app_state<R: Runtime>(
             "providerProfileId": provider_profile_id,
             "provider": provider,
             "model": model,
+            "folderId": folder_id,
             "workspacePath": workspace_path,
             "workspaceRoot": workspace_root,
             "workspaceMode": workspace_mode,
@@ -3011,6 +3039,7 @@ fn load_persisted_app_state<R: Runtime>(
     Ok(serde_json::json!({
         "settings": parse_json_column(settings_json),
         "sessions": sessions,
+        "sessionFolders": parse_json_column(session_folders_json),
         "projectCapabilityOverrides": parse_json_column(project_overrides_json),
     }))
 }
@@ -3035,6 +3064,15 @@ fn save_project_capability_overrides_sqlite<R: Runtime>(
 }
 
 #[tauri::command]
+fn save_session_folders_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    session_folders: serde_json::Value,
+) -> Result<(), String> {
+    let connection = open_app_db(&app)?;
+    upsert_kv(&connection, "session_folders", &session_folders)
+}
+
+#[tauri::command]
 fn upsert_session_sqlite<R: Runtime>(
     app: tauri::AppHandle<R>,
     session: serde_json::Value,
@@ -3043,13 +3081,14 @@ fn upsert_session_sqlite<R: Runtime>(
     connection
         .execute(
             "INSERT INTO sessions (
-                id, title, provider_profile_id, provider, model, workspace_path, workspace_root, workspace_mode, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 provider_profile_id = excluded.provider_profile_id,
                 provider = excluded.provider,
                 model = excluded.model,
+                folder_id = excluded.folder_id,
                 workspace_path = excluded.workspace_path,
                 workspace_root = excluded.workspace_root,
                 workspace_mode = excluded.workspace_mode,
@@ -3060,6 +3099,7 @@ fn upsert_session_sqlite<R: Runtime>(
                 get_json_string_field(&session, "providerProfileId", ""),
                 get_json_string_field(&session, "provider", "openai"),
                 get_json_string_field(&session, "model", ""),
+                get_json_string_field(&session, "folderId", ""),
                 get_json_string_field(&session, "workspacePath", ""),
                 get_json_string_field(&session, "workspaceRoot", ""),
                 get_json_string_field(&session, "workspaceMode", "explicit"),
@@ -3983,7 +4023,10 @@ async fn write_attachment_bytes(
 }
 
 #[tauri::command]
-fn delete_workspace_directory(workspace_path: String) -> Result<(), String> {
+fn delete_workspace_directory<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    workspace_path: String,
+) -> Result<(), String> {
     let target = PathBuf::from(&workspace_path);
     if workspace_path.trim().is_empty() {
         return Ok(());
@@ -3995,6 +4038,16 @@ fn delete_workspace_directory(workspace_path: String) -> Result<(), String> {
         return Err(format!(
             "Workspace path is not a directory: {}",
             target.display()
+        ));
+    }
+
+    let aura_workspace_root = PathBuf::from(ensure_aura_layout(&app)?.workspace_dir);
+    let canonical_root = canonicalize_existing_path(&aura_workspace_root)?;
+    let canonical_target = canonicalize_existing_path(&target)?;
+    if canonical_target == canonical_root || !canonical_target.starts_with(&canonical_root) {
+        return Err(format!(
+            "Only workspaces inside {} can be deleted by Aura.",
+            canonical_root.display()
         ));
     }
 
@@ -4039,6 +4092,7 @@ fn main() {
             load_persisted_app_state,
             save_settings_sqlite,
             save_project_capability_overrides_sqlite,
+            save_session_folders_sqlite,
             upsert_session_sqlite,
             delete_session_sqlite,
             upsert_message_sqlite,

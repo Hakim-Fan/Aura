@@ -168,6 +168,34 @@ function inferTaskSignals(text) {
       '页面',
       '网址',
     ]),
+    isResearchTask: hasAny(text, [
+      'search',
+      'lookup',
+      'find',
+      'query',
+      'latest',
+      'current',
+      'today',
+      'news',
+      'price',
+      'stock',
+      'quote',
+      'documentation',
+      'docs',
+      '查询',
+      '搜索',
+      '查一下',
+      '查找',
+      '最新',
+      '当前',
+      '今天',
+      '新闻',
+      '价格',
+      '股价',
+      '行情',
+      '资料',
+      '文档',
+    ]),
     isComplexTask: hasAny(text, [
       'complex',
       'parallel',
@@ -343,6 +371,19 @@ function scoreToolGroup(group, context) {
   }
 
   let score = countMatches(context.text, group.keywords || [])
+  const normalizedKeywords = normalizeText((group.keywords || []).join(' '))
+  const looksLikeSearchCapability =
+    normalizedKeywords.includes('search') ||
+    normalizedKeywords.includes('duckduckgo') ||
+    normalizedKeywords.includes('web') ||
+    normalizedKeywords.includes('browse') ||
+    normalizedKeywords.includes('query') ||
+    normalizedKeywords.includes('fetch') ||
+    normalizedKeywords.includes('news') ||
+    normalizedKeywords.includes('price') ||
+    normalizedKeywords.includes('文档') ||
+    normalizedKeywords.includes('搜索') ||
+    normalizedKeywords.includes('查询')
 
   if (group.kind === 'advanced') {
     if (group.id === 'advanced:multi-agent' && context.signals.isComplexTask) {
@@ -351,12 +392,19 @@ function scoreToolGroup(group, context) {
     if (group.id === 'advanced:computer-use' && context.signals.isDesktopTask) {
       score += 6
     }
-    if (group.id === 'advanced:browser-runtime' && context.signals.isBrowserTask) {
+    if (
+      group.id === 'advanced:browser-runtime' &&
+      (context.signals.isBrowserTask || context.signals.isResearchTask)
+    ) {
       score += 8
     }
     if (group.id === 'advanced:chrome-automation' && context.signals.isBrowserTask) {
       score += 4
     }
+  }
+
+  if (group.kind === 'mcp' && context.signals.isResearchTask && looksLikeSearchCapability) {
+    score += 10
   }
 
   if (group.kind === 'plugin' && group.id.includes('workspace-inspector') && context.signals.isStructureTask) {
