@@ -89,22 +89,22 @@ const browserRuntimeOptions: Array<{
   label: string
   description: string
 }> = [
-  {
-    id: 'system-chrome',
-    label: '系统 Chrome',
-    description: '复用本机已安装的 Chrome，但会使用 Aura 自己的 Profile。',
-  },
-  {
-    id: 'managed-chrome',
-    label: 'Aura 托管浏览器',
-    description: '支持一键安装和卸载，和系统浏览器隔离更彻底。',
-  },
-  {
-    id: 'custom-executable',
-    label: '自定义可执行文件',
-    description: '使用你指定的独立浏览器程序，仍然搭配 Aura Profile 运行。',
-  },
-]
+    {
+      id: 'system-chrome',
+      label: '系统 Chrome',
+      description: '复用本机已安装的 Chrome，但会使用 Aura 自己的 Profile。',
+    },
+    {
+      id: 'managed-chrome',
+      label: 'Aura 托管浏览器',
+      description: '支持一键安装和卸载，和系统浏览器隔离更彻底。',
+    },
+    {
+      id: 'custom-executable',
+      label: '自定义可执行文件',
+      description: '使用你指定的独立浏览器程序，仍然搭配 Aura Profile 运行。',
+    },
+  ]
 
 function formatTimestamp(value?: number) {
   if (!value) {
@@ -816,13 +816,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
         const nextServers = draftSettings.mcpServers.map(entry =>
           entry.id === serverId
             ? {
-                ...entry,
-                enabled: false,
-                healthStatus: 'error' as const,
-                healthMessage: message,
-                lastCheckedAt: Date.now(),
-                toolCount: 0,
-              }
+              ...entry,
+              enabled: false,
+              healthStatus: 'error' as const,
+              healthMessage: message,
+              lastCheckedAt: Date.now(),
+              toolCount: 0,
+            }
             : entry,
         )
         setMcpInspectResults(current => ({
@@ -849,13 +849,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
       const nextServers = draftSettings.mcpServers.map(entry =>
         entry.id === serverId
           ? {
-              ...entry,
-              enabled: options?.enableOnSuccess ? true : entry.enabled,
-              healthStatus: 'ok' as const,
-              healthMessage: result.message,
-              lastCheckedAt: Date.now(),
-              toolCount: result.tools.length,
-            }
+            ...entry,
+            enabled: options?.enableOnSuccess ? true : entry.enabled,
+            healthStatus: 'ok' as const,
+            healthMessage: result.message,
+            lastCheckedAt: Date.now(),
+            toolCount: result.tools.length,
+          }
           : entry,
       )
       setMcpInspectResults(current => ({
@@ -881,13 +881,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
       const nextServers = draftSettings.mcpServers.map(entry =>
         entry.id === serverId
           ? {
-              ...entry,
-              enabled: false,
-              healthStatus: 'error' as const,
-              healthMessage: message,
-              lastCheckedAt: Date.now(),
-              toolCount: 0,
-            }
+            ...entry,
+            enabled: false,
+            healthStatus: 'error' as const,
+            healthMessage: message,
+            lastCheckedAt: Date.now(),
+            toolCount: 0,
+          }
           : entry,
       )
       setMcpInspectResults(current => ({
@@ -919,9 +919,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
         draftSettings.mcpServers.map(server =>
           server.id === serverId
             ? {
-                ...server,
-                enabled: false,
-              }
+              ...server,
+              enabled: false,
+            }
             : server,
         ),
       )
@@ -1226,9 +1226,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setManagedBrowserInstallProgress(current =>
       current
         ? {
-            ...current,
-            message: '正在取消 Aura 托管浏览器安装…',
-          }
+          ...current,
+          message: '正在取消 Aura 托管浏览器安装…',
+        }
         : current,
     )
 
@@ -1920,8 +1920,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
               <div className="browser-summary-item">
                 <span className="browser-summary-label">Profile</span>
                 <strong>{draftSettings.browser.persistAuraProfile ? '持久化保存' : '按需使用'}</strong>
-                <span 
-                  className="muted truncate w-full" 
+                <span
+                  className="muted truncate w-full"
                   title={profilePath || '等待 Aura 目录初始化'}
                 >
                   {profilePath || '等待 Aura 目录初始化'}
@@ -1961,20 +1961,19 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   <div
                     className={`browser-progress-fill ${isManagedBrowserFailed ? 'error' : ''}`}
                     style={{
-                      width: `${
-                        Math.max(
-                          0,
-                          Math.min(
-                            100,
-                            Math.round(
-                              ((runtimeStatus?.managedChromeInstalled && !managedBrowserInstallProgress
-                                ? 1
-                                : installProgressValue || 0) *
-                                100),
-                            ),
+                      width: `${Math.max(
+                        0,
+                        Math.min(
+                          100,
+                          Math.round(
+                            ((runtimeStatus?.managedChromeInstalled && !managedBrowserInstallProgress
+                              ? 1
+                              : installProgressValue || 0) *
+                              100),
                           ),
-                        )
-                      }%`,
+                        ),
+                      )
+                        }%`,
                     }}
                   />
                 </div>
@@ -2135,8 +2134,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <div className="dashboard-list mt-4">
               <div className="dashboard-row overflow-hidden">
                 <strong className="shrink-0">Profile 路径</strong>
-                <span 
-                  className="truncate flex-1 text-right" 
+                <span
+                  className="truncate flex-1 text-right"
                   title={profilePath || '等待 Aura 目录初始化'}
                 >
                   {profilePath || '等待 Aura 目录初始化'}
@@ -2653,94 +2652,93 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
                   return (
                     <>
-                <div className="asset-card-head">
-                  <div>
-                    <strong>{server.name}</strong>
-                    <p>{server.description || server.command || '尚未添加描述'}</p>
-                  </div>
-                  <label className="relative flex cursor-pointer items-center gap-2.5 truncate">
-                    <input
-                      checked={server.enabled}
-                      type="checkbox"
-                      className="peer sr-only"
-                      onChange={event => void toggleMcpServerEnabled(server.id, event.target.checked)}
-                    />
-                    <div className="relative h-4.5 w-8 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-green-500/80 after:absolute after:top-0.5 after:left-[2px] after:h-3.5 after:w-3.5 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-3.5" />
-                    <span className="text-12px font-600 text-black/40 truncate whitespace-nowrap">
-                      {statusLabel}
-                    </span>
-                  </label>
-                </div>
-                <div className="asset-card-meta">
-                  <span className="micro-pill">
-                    {server.command ? `命令: ${server.command}` : '未配置安装命令'}
-                  </span>
-                  <span className="micro-pill">{server.args || '无参数'}</span>
-                  {server.env.trim() !== '{}' ? (
-                    <span className="micro-pill">已配置环境变量</span>
-                  ) : null}
-                  {server.lastCheckedAt ? (
-                    <span className="micro-pill">{`最近验证: ${formatTimestamp(server.lastCheckedAt)}`}</span>
-                  ) : null}
-                </div>
-                <div
-                  className={`provider-feedback ${
-                    feedbackTone === 'success'
-                      ? 'success'
-                      : feedbackTone === 'error'
-                        ? 'error'
-                        : ''
-                  }`}
-                >
-                  <strong>{feedbackMessage}</strong>
-                  {server.healthStatus === 'unknown' ? (
-                    <div className="mt-1 text-12px opacity-80">
-                      现在保存配置不会自动代表可用，测试通过后才会加入工具池。
-                    </div>
-                  ) : null}
-                  {feedbackTools.length ? (
-                    <div className="mcp-tool-chip-list">
-                      {feedbackTools.map(tool => (
-                        <div key={`${server.id}-${tool.name}`} className="mcp-tool-chip-group">
-                          <span className="mcp-tool-chip">
-                            {tool.name}
-                          </span>
-                          <div className="mcp-tool-tooltip">
-                            {tool.description}
-                          </div>
+                      <div className="asset-card-head">
+                        <div>
+                          <strong>{server.name}</strong>
+                          <p>{server.description || server.command || '尚未添加描述'}</p>
                         </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="header-actions">
-                  <button
-                    className="secondary-button"
-                    disabled={testingMcpServerId === server.id}
-                    onClick={() => void testMcpServer(server.id, { persistResult: true })}
-                  >
-                    <RefreshCw
-                      size={14}
-                      className={testingMcpServerId === server.id ? 'spin-icon' : undefined}
-                    />
-                    测试连接
-                  </button>
-                  <button
-                    className="secondary-button"
-                    onClick={() => void openMcpEditorWindow(server.id)}
-                  >
-                    编辑
-                  </button>
-                  {!server.isDefault && (
-                    <button
-                      className="p-2 rounded-xl text-black/40 hover:text-red-500 hover:bg-red-50 transition-all ml-auto"
-                      onClick={() => setMcpToDelete({ id: server.id, name: server.name })}
-                      title="删除 MCP 配置"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  )}
-                </div>
+                        <label className="relative flex cursor-pointer items-center gap-2.5 truncate">
+                          <input
+                            checked={server.enabled}
+                            type="checkbox"
+                            className="peer sr-only"
+                            onChange={event => void toggleMcpServerEnabled(server.id, event.target.checked)}
+                          />
+                          <div className="relative h-4.5 w-8 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-green-500/80 after:absolute after:top-0.5 after:left-[2px] after:h-3.5 after:w-3.5 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-3.5" />
+                          <span className="text-12px font-600 text-black/40 truncate whitespace-nowrap">
+                            {statusLabel}
+                          </span>
+                        </label>
+                      </div>
+                      <div className="asset-card-meta">
+                        <span className="micro-pill">
+                          {server.command ? `命令: ${server.command}` : '未配置安装命令'}
+                        </span>
+                        <span className="micro-pill">{server.args || '无参数'}</span>
+                        {server.env.trim() !== '{}' ? (
+                          <span className="micro-pill">已配置环境变量</span>
+                        ) : null}
+                        {server.lastCheckedAt ? (
+                          <span className="micro-pill">{`最近验证: ${formatTimestamp(server.lastCheckedAt)}`}</span>
+                        ) : null}
+                      </div>
+                      <div
+                        className={`provider-feedback ${feedbackTone === 'success'
+                            ? 'success'
+                            : feedbackTone === 'error'
+                              ? 'error'
+                              : ''
+                          }`}
+                      >
+                        <strong>{feedbackMessage}</strong>
+                        {server.healthStatus === 'unknown' ? (
+                          <div className="mt-1 text-12px opacity-80">
+                            现在保存配置不会自动代表可用，测试通过后才会加入工具池。
+                          </div>
+                        ) : null}
+                        {feedbackTools.length ? (
+                          <div className="mcp-tool-chip-list">
+                            {feedbackTools.map(tool => (
+                              <div key={`${server.id}-${tool.name}`} className="mcp-tool-chip-group">
+                                <span className="mcp-tool-chip">
+                                  {tool.name}
+                                </span>
+                                <div className="mcp-tool-tooltip">
+                                  {tool.description}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="header-actions">
+                        <button
+                          className="secondary-button"
+                          disabled={testingMcpServerId === server.id}
+                          onClick={() => void testMcpServer(server.id, { persistResult: true })}
+                        >
+                          <RefreshCw
+                            size={14}
+                            className={testingMcpServerId === server.id ? 'spin-icon' : undefined}
+                          />
+                          测试连接
+                        </button>
+                        <button
+                          className="secondary-button"
+                          onClick={() => void openMcpEditorWindow(server.id)}
+                        >
+                          编辑
+                        </button>
+                        {!server.isDefault && (
+                          <button
+                            className="p-2 rounded-xl text-black/40 hover:text-red-500 hover:bg-red-50 transition-all ml-auto"
+                            onClick={() => setMcpToDelete({ id: server.id, name: server.name })}
+                            title="删除 MCP 配置"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
+                      </div>
                     </>
                   )
                 })()}

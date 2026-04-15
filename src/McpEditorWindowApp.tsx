@@ -334,11 +334,10 @@ export function McpEditorWindowApp() {
                 </div>
                 {importState ? (
                   <div
-                    className={`mt-3 rounded-xl border px-4 py-3 text-12px ${
-                      importState.tone === 'success'
+                    className={`mt-3 rounded-xl border px-4 py-3 text-12px ${importState.tone === 'success'
                         ? 'border-green-100 bg-green-50/60 text-green-700'
                         : 'border-red-100 bg-red-50/60 text-red-700'
-                    }`}
+                      }`}
                   >
                     {importState.message}
                   </div>
@@ -439,11 +438,10 @@ export function McpEditorWindowApp() {
 
             {/* Test Connection Output */}
             {testResult && (
-              <div className={`rounded-2xl border p-5 animate-slide-up ${
-                testResult.tone === 'success' 
-                  ? 'border-green-100 bg-green-50/50 text-green-800' 
+              <div className={`rounded-2xl border p-5 animate-slide-up ${testResult.tone === 'success'
+                  ? 'border-green-100 bg-green-50/50 text-green-800'
                   : 'border-red-100 bg-red-50/50 text-red-800'
-              }`}>
+                }`}>
                 <div className="flex items-center gap-2.5 mb-4">
                   {testResult.tone === 'success' ? <Check size={14} className="text-green-600" /> : <RefreshCw size={14} className="text-red-600" />}
                   <strong className="text-13px font-700">{testResult.message}</strong>
@@ -472,7 +470,7 @@ export function McpEditorWindowApp() {
       <footer className="shrink-0 flex justify-center py-6 px-10 bg-gradient-to-t from-[#f6f6f6] via-[#f6f6f6]/95 to-transparent absolute bottom-0 left-0 right-0 pointer-events-none">
         <div className="pointer-events-auto flex items-center gap-2 p-1.5 rounded-2xl bg-white/90 border border-black/5 shadow-2xl shadow-black/10 backdrop-blur-xl">
           {editingServerId && (
-            <button 
+            <button
               className="h-9 px-4 text-12px font-700 text-red-500 hover:bg-red-50 rounded-xl transition-colors"
               onClick={() => void deleteServer()}
             >
@@ -480,17 +478,16 @@ export function McpEditorWindowApp() {
             </button>
           )}
           {editingServerId && <div className="w-px h-4 bg-black/5 mx-1" />}
-          <button 
-            className={`h-9 flex items-center gap-2 px-4 text-12px font-700 rounded-xl transition-all ${
-              isTesting ? 'text-black/30' : 'text-black/60 hover:bg-black/4'
-            }`}
+          <button
+            className={`h-9 flex items-center gap-2 px-4 text-12px font-700 rounded-xl transition-all ${isTesting ? 'text-black/30' : 'text-black/60 hover:bg-black/4'
+              }`}
             disabled={isTesting}
             onClick={() => void testServer()}
           >
             <RefreshCw size={13} className={isTesting ? 'animate-spin' : ''} />
             {isTesting ? '测试中...' : '测试连接'}
           </button>
-          <button 
+          <button
             className="h-9 px-6 text-12px font-700 bg-[var(--accent-soft-strong)] text-white rounded-xl shadow-lg shadow-[#4f7b74]/20 hover:brightness-110 active:scale-95 transition-all"
             onClick={() => void saveServer()}
           >

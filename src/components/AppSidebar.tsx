@@ -130,7 +130,7 @@ function SessionRow({
       ) : null} */}
 
       <div
-        className={`flex w-full min-w-0 flex-1 items-center justify-between py-2 ${paddingLeft} pr-2`}
+        className={`flex w-full min-w-0 flex-1 items-center justify-between py-1.5 ${paddingLeft} pr-2`}
         onClick={() => onOpenSession(session.id)}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
@@ -386,13 +386,13 @@ export function AppSidebar({
         <div className="custom-scrollbar flex-1 overflow-y-auto px-2 pb-4">
           <DroppableSection
             id="ungrouped"
-            className="rounded-xl transition-colors mb-4"
+            className="rounded-xl transition-colors mb-0.5"
             activeClassName="bg-[rgba(79,123,116,0.08)]"
           >
             {/* <div className="px-3 py-1.5 text-[11px] font-600 text-[var(--text-secondary)] opacity-70 mb-1">
               未分组
             </div> */}
-            <div className="flex flex-col gap-0.5">
+            <div className="flex flex-col gap-px">
               {ungroupedSessions.length > 0 ? (
                 ungroupedSessions.map(session => (
                   <SessionRow
@@ -411,7 +411,7 @@ export function AppSidebar({
           </DroppableSection>
 
           {sessionFolders.length > 0 ? (
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-0.5">
               {sessionFolders.map(folder => {
                 const folderSessions = sessionsByFolderId.get(folder.id) || []
 
@@ -419,7 +419,7 @@ export function AppSidebar({
                   <DroppableSection
                     key={folder.id}
                     id={`folder:${folder.id}`}
-                    className="rounded-xl transition-colors pb-1"
+                    className="rounded-xl transition-colors"
                     activeClassName="bg-[rgba(79,123,116,0.08)]"
                   >
                     <div className="group flex items-center justify-between rounded-lg px-2 py-1.5 transition-colors hover:bg-[rgba(0,0,0,0.03)]">
@@ -460,7 +460,7 @@ export function AppSidebar({
                     </div>
 
                     {folder.expanded ? (
-                      <div className="mt-0.5 flex flex-col gap-0.5">
+                      <div className="mt-px flex flex-col gap-px">
                         {folderSessions.length > 0 ? (
                           folderSessions.map(session => (
                             <SessionRow

@@ -428,19 +428,19 @@ async function materializeDraftAttachments(
         ? await importAttachmentFromPath(workspacePath, attachment.path)
         : attachment.bytesBase64
           ? await writeAttachmentBytes(
-              workspacePath,
-              attachment.name,
-              attachment.bytesBase64,
-            )
+            workspacePath,
+            attachment.name,
+            attachment.bytesBase64,
+          )
           : attachment.file
             ? await writeAttachmentBytes(
-                workspacePath,
-                attachment.name,
-                arrayBufferToBase64(await attachment.file.arrayBuffer()),
-              )
+              workspacePath,
+              attachment.name,
+              arrayBufferToBase64(await attachment.file.arrayBuffer()),
+            )
             : await Promise.reject(
-                new Error(`附件“${attachment.name}”缺少可写入的数据，请重新添加后再试。`),
-              )
+              new Error(`附件“${attachment.name}”缺少可写入的数据，请重新添加后再试。`),
+            )
 
       return {
         id: attachment.id,
@@ -552,10 +552,10 @@ function presentToolEventTitle(event: ToolEvent) {
 function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
   const kind =
     event.source === 'subagent'
-        ? 'subagent'
-        : event.name.toLowerCase().includes('shell')
-          ? 'shell'
-          : 'tool'
+      ? 'subagent'
+      : event.name.toLowerCase().includes('shell')
+        ? 'shell'
+        : 'tool'
 
   return {
     id: event.id,
@@ -840,7 +840,7 @@ function buildCapabilityPanelItems(
     projectOverride: workspaceOverrides.mcp[server.id] || 'inherit',
     effectiveEnabled:
       server.healthStatus === 'ok' &&
-      workspaceOverrides.mcp[server.id] === 'on'
+        workspaceOverrides.mcp[server.id] === 'on'
         ? true
         : workspaceOverrides.mcp[server.id] === 'off' || server.healthStatus !== 'ok'
           ? false
@@ -1205,8 +1205,8 @@ export function MainWindowApp() {
         updateSession(sessionId, session => ({
           ...session,
           messages: session.messages.map(message =>
-                message.id === binding.messageId
-                  ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
+            message.id === binding.messageId
+              ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
                 ...currentVariant,
                 content:
                   snapshot.message ||
@@ -1683,9 +1683,9 @@ export function MainWindowApp() {
       current.map(folder =>
         folder.id === folderId
           ? {
-              ...folder,
-              name: nextName,
-            }
+            ...folder,
+            name: nextName,
+          }
           : folder,
       ),
     )
@@ -1696,9 +1696,9 @@ export function MainWindowApp() {
       current.map(folder =>
         folder.id === folderId
           ? {
-              ...folder,
-              expanded: !folder.expanded,
-            }
+            ...folder,
+            expanded: !folder.expanded,
+          }
           : folder,
       ),
     )
@@ -1710,9 +1710,9 @@ export function MainWindowApp() {
       current.map(session =>
         session.folderId === folderId
           ? {
-              ...session,
-              folderId: undefined,
-            }
+            ...session,
+            folderId: undefined,
+          }
           : session,
       ),
     )
@@ -1728,9 +1728,9 @@ export function MainWindowApp() {
       current.map(session =>
         session.id === sessionId
           ? {
-              ...session,
-              folderId: normalizedFolderId,
-            }
+            ...session,
+            folderId: normalizedFolderId,
+          }
           : session,
       ),
     )
@@ -1868,9 +1868,9 @@ export function MainWindowApp() {
     const materializedAttachments = options?.attachmentsOverride
       ? options.attachmentsOverride
       : await materializeDraftAttachments(workspacePath, draftAttachments).catch(caught => {
-          setError(getErrorMessage(caught, '导入附件到当前会话失败。'))
-          return null
-        })
+        setError(getErrorMessage(caught, '导入附件到当前会话失败。'))
+        return null
+      })
 
     if (!materializedAttachments) {
       return
@@ -2365,17 +2365,17 @@ export function MainWindowApp() {
               },
               currentVariant =>
                 currentVariant.activity &&
-                (currentVariant.activity.status === 'running' ||
-                  currentVariant.activity.status === 'queued' ||
-                  currentVariant.activity.status === 'awaiting_approval')
+                  (currentVariant.activity.status === 'running' ||
+                    currentVariant.activity.status === 'queued' ||
+                    currentVariant.activity.status === 'awaiting_approval')
                   ? {
-                      ...currentVariant,
-                      activity: {
-                        ...currentVariant.activity,
-                        status: 'failed',
-                        finishedAt: Date.now(),
-                      },
-                    }
+                    ...currentVariant,
+                    activity: {
+                      ...currentVariant.activity,
+                      status: 'failed',
+                      finishedAt: Date.now(),
+                    },
+                  }
                   : currentVariant,
             ),
             pendingAssistantVariant,
