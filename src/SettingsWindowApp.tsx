@@ -1607,6 +1607,30 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
+            <div className="section-title">Agent 架构</div>
+            <div className="settings-mode-stack">
+              <label className="toggle-inline">
+                <input checked type="radio" readOnly />
+                <div className="flex flex-col">
+                  <strong>标准模式</strong>
+                  <span className="muted">
+                    当前默认执行方案 A：优先直接回答，并按需挂载最小工具集。
+                  </span>
+                </div>
+              </label>
+              <label className="toggle-inline disabled">
+                <input disabled type="radio" />
+                <div className="flex flex-col">
+                  <strong>编排模式</strong>
+                  <span className="muted">
+                    为方案 B 预留入口。规划-执行-审查编排仍在开发中，当前暂未开放切换。
+                  </span>
+                </div>
+              </label>
+            </div>
+          </section>
+
+          <section className="dashboard-card">
             <div className="section-title">任务轮数</div>
             <p className="muted">
               普通模式下，Agent 每完成一轮“模型判断 + 工具调用 + 继续推理”都会消耗一次轮数。

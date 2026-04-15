@@ -2,6 +2,15 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { selectTurnCapabilities } from './capabilitySelector.mjs'
 import { createAdvancedTools } from './advancedTools.mjs'
+import {
+  buildCapabilityExposureNote as buildAgentCapabilityExposureNote,
+  buildRouteFirstSystemPrompt,
+} from './agentPrompting.mjs'
+import {
+  applyRouteToolBudgets,
+  filterToolsForRouteState,
+  inferRouteState,
+} from './agentRouting.mjs'
 import { closeHeadlessBrowserSession } from './browserRuntime.mjs'
 import { buildSkillPrompt, loadPluginTools, loadSkillCatalog } from './extensions.mjs'
 import { connectMcpTools } from './mcp.mjs'
@@ -179,89 +188,6 @@ function normalizeFinalAnswer(message) {
   return (message || '').trim()
 }
 
-function latestUserIntent(messages) {
-  return [...messages]
-    .reverse()
-    .find(message => message.role === 'user')
-    ?.content?.toLowerCase() || ''
-}
-
-function looksLikeInformationalQuestion(intent) {
-  if (!intent) {
-    return false
-  }
-
-  return [
-    '我想知道',
-    '想知道',
-    '请问',
-    '是否可以',
-    '可不可以',
-    '能不能',
-    '能否',
-    '是不是',
-    '有没有',
-    '是什么',
-    '什么意思',
-    '怎么理解',
-    '为什么',
-    'can i ',
-    'could i ',
-    'whether ',
-    'what is ',
-    'why ',
-  ].some(keyword => intent.includes(keyword))
-}
-
-function taskNeedsExecution(messages) {
-  const intent = latestUserIntent(messages)
-  if (!intent) {
-    return false
-  }
-
-  // Questions about whether something is possible should not be treated as
-  // requests that require tool execution.
-  if (looksLikeInformationalQuestion(intent)) {
-    return false
-  }
-
-  return [
-    'install',
-    'configure',
-    'setup',
-    'set up',
-    'download',
-    'create',
-    'update',
-    'modify',
-    'edit',
-    'write',
-    'fix',
-    'enable',
-    'disable',
-    'remove',
-    'delete',
-    'add',
-    'run',
-    'repair',
-    '安装',
-    '配置',
-    '接入',
-    '下载',
-    '创建',
-    '修改',
-    '编辑',
-    '写入',
-    '修复',
-    '启用',
-    '关闭',
-    '删除',
-    '增加',
-    '运行',
-    '新增',
-  ].some(keyword => intent.includes(keyword))
-}
-
 function resultClaimsExecution(message) {
   const normalized = normalizeFinalAnswer(message).toLowerCase()
   if (!normalized) {
@@ -295,8 +221,10 @@ function resultClaimsExecution(message) {
   ].some(keyword => normalized.includes(keyword))
 }
 
-function enforceEvidencePolicy(messages, result, toolEvents) {
-  if (!taskNeedsExecution(messages) || toolEvents.length > 0) {
+function enforceEvidencePolicy(result, toolEvents, routeState) {
+  const requiresExecutionEvidence = routeState?.answerMode === 'execute'
+
+  if (!requiresExecutionEvidence || toolEvents.length > 0) {
     return result
   }
 
@@ -468,191 +396,6 @@ function createTaskTracker(hooks, rootTitle) {
   }
 }
 
-function buildCapabilityExposureNote(snapshot) {
-  const lines = ['Only task-relevant optional capabilities are exposed for this turn.']
-  const items = [
-    snapshot?.skills?.length ? `skills ${snapshot.skills.length}` : null,
-    snapshot?.plugins?.length ? `plugins ${snapshot.plugins.length}` : null,
-    snapshot?.mcpServers?.length ? `mcp ${snapshot.mcpServers.length}` : null,
-  ]
-    .filter(Boolean)
-    .join(', ')
-
-  if (items) {
-    lines.push(`Selected optional capabilities: ${items}.`)
-  }
-
-  if (snapshot?.mcpServers?.length) {
-    const names = snapshot.mcpServers.map(server => server.name).filter(Boolean).join(', ')
-    lines.push(
-      `Selected MCP servers for this turn: ${names}. Their tools are already mounted in the tool list for this turn, so call them directly when relevant instead of saying MCP must be invoked by an external client.`,
-    )
-  }
-
-  return lines.join('\n')
-}
-
-function getBrowserSourceLabel(source) {
-  switch (source) {
-    case 'managed-chrome':
-      return 'Aura managed browser'
-    case 'custom-executable':
-      return 'custom browser executable'
-    case 'system-chrome':
-    default:
-      return 'system Chrome'
-  }
-}
-
-function buildCurrentDateContext() {
-  const now = new Date()
-  const timezone =
-    Intl.DateTimeFormat().resolvedOptions().timeZone || 'system local timezone'
-  const absoluteDate = new Intl.DateTimeFormat('en-US', {
-    dateStyle: 'full',
-    timeStyle: 'long',
-    timeZone: timezone,
-  }).format(now)
-  const isoDate = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(now)
-
-  return [
-    `Current local datetime: ${absoluteDate}.`,
-    `Current local date: ${isoDate}.`,
-    `Current timezone: ${timezone}.`,
-    'When the user says today, tomorrow, yesterday, latest, current, or this week, resolve it from the current local date above instead of relying on model-internal dates.',
-  ].join('\n')
-}
-
-function isBrowserSourceAvailable(settings) {
-  const source = settings.browser?.source
-  const status = settings.browserRuntimeStatus
-  if (!status || !source) {
-    return null
-  }
-
-  switch (source) {
-    case 'managed-chrome':
-      return status.managedChromeInstalled === true
-    case 'custom-executable':
-      return status.customExecutableValid === true
-    case 'system-chrome':
-    default:
-      return status.systemChromeDetected === true
-  }
-}
-
-function buildSystemPrompt(settings, skillPrompt, exposureNote) {
-  const sections = [
-    'You are Aura, a local-first desktop coding agent.',
-    `The active workspace is: ${settings.cwd}`,
-    buildCurrentDateContext(),
-    'Use tools when they reduce uncertainty or let you act directly inside the workspace.',
-    'Prefer concrete changes and verification steps over abstract advice.',
-    'If the user asks for any real-world action such as editing files, changing configuration, installing capabilities, or downloading assets, you must use tools and verify the result before claiming success.',
-    'Do not say that something is done, installed, configured, created, or fixed unless tool output in this run gives direct evidence.',
-    'Do not access paths outside the configured workspace root.',
-    'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
-  ]
-
-  const approvalPolicy = [
-    `Approval policy: shell is ${settings.autoApproveShell ? 'auto-approved' : 'approval-required'}.`,
-    `Approval policy: file writes are ${settings.autoApproveFileWrite ? 'auto-approved' : 'approval-required'}.`,
-    `Approval policy: computer use is ${settings.autoApproveComputerUse ? 'auto-approved' : 'approval-required'}.`,
-  ]
-  if (settings.enableChromeAutomation) {
-    approvalPolicy.push(
-      `Approval policy: chrome automation is ${settings.autoApproveChromeAutomation ? 'auto-approved' : 'approval-required'}.`,
-    )
-  }
-  sections.push(approvalPolicy.join('\n'))
-  sections.push(
-    settings.autoApproveFileWrite
-      ? 'When file writes are auto-approved, do not ask the user for permission to modify files. Read the relevant file, make the edit with file-writing tools, and verify the result directly.'
-      : 'When file writes require approval, you may proceed to the write tool and let the app request approval instead of asking the user in natural language first.',
-  )
-
-  const reasoningInstructions = {
-    // 思考程度：关闭。倾向于快速、简明的回答，除非任务明确要求，否则避免进行过多的内部探索与展开。
-    off: 'Reasoning intensity: off. Prefer fast, concise answers and avoid extended internal exploration unless the task clearly requires it.',
-    // 思考程度：低。为速度进行优化，并保持思考过程的轻量化。
-    low: 'Reasoning intensity: low. Optimize for speed and keep reasoning lightweight.',
-    // 思考程度：中。在响应速度和推理深度之间取得平衡。
-    medium: 'Reasoning intensity: medium. Balance speed and reasoning depth.',
-    // 思考程度：高。在采取行动之前投入更多的精力进行分析，特别适用于复杂的任务。
-    high: 'Reasoning intensity: high. Spend more effort on analysis before acting, especially for complex tasks.',
-    // 思考程度：最大化。在处理困难任务时使用你力所能及的最深度的推理能力，同时依然要避免无意义的冗余重复。
-    max: 'Reasoning intensity: maximum. Use your deepest available reasoning for difficult tasks, while still avoiding unnecessary repetition.',
-  }
-  sections.push(reasoningInstructions[settings.reasoningEffort] || reasoningInstructions.medium)
-
-  const capabilities = []
-  if (settings.enableMultiAgent) {
-    capabilities.push('- You may delegate sharply scoped subtasks with spawn_subagent.')
-  }
-  if (settings.enableComputerUse) {
-    capabilities.push(
-      '- You may control the local desktop through computer_* tools on macOS.',
-    )
-  }
-  if (settings.browser?.enabled) {
-    capabilities.push(
-      '- Prefer browser_* tools for normal web tasks. They run inside the Aura browser runtime with an isolated profile and do not need the frontmost Chrome window.',
-    )
-  }
-  if (settings.enableChromeAutomation) {
-    capabilities.push(
-      settings.browser?.allowChromeAutomationFallback
-        ? '- chrome_* tools are a backup mode for interacting with the user\'s frontmost Google Chrome window on macOS. Use them only when the user explicitly requests system Chrome, or when browser_* fails because the Aura browser runtime is unavailable.'
-        : '- chrome_* tools are only for explicit requests to interact with the user\'s frontmost Google Chrome window on macOS. Do not use them as an automatic fallback.',
-    )
-  }
-  if (capabilities.length > 0) {
-    sections.push(`Available advanced capabilities:\n${capabilities.join('\n')}`)
-  }
-
-  if (settings.browser?.enabled) {
-    const browserSource = settings.browser.source || 'system-chrome'
-    const availability = isBrowserSourceAvailable(settings)
-    const statusLabel =
-      availability === null ? 'unknown' : availability ? 'available' : 'unavailable'
-    const browserRoutingPolicy = [
-      `Aura browser source: ${getBrowserSourceLabel(browserSource)} (${statusLabel}).`,
-      'Routing policy: use browser_* for all normal web work. Do not switch to chrome_* just because a site needs login, MFA, CAPTCHA, consent, or other interactive steps; use browser_takeover_visible instead.',
-    ]
-
-    if (settings.enableChromeAutomation) {
-      browserRoutingPolicy.push(
-        settings.browser.allowChromeAutomationFallback
-          ? 'Fallback rule: chrome_* is allowed only after the Aura browser runtime is unavailable/disabled/missing, or when the user explicitly asks to operate system Chrome.'
-          : 'Fallback rule: if the Aura browser runtime is unavailable, do not switch to chrome_* unless the user explicitly asks to operate system Chrome.',
-      )
-    }
-
-    sections.push(browserRoutingPolicy.join('\n'))
-    sections.push(
-      'When a browser_* tool output includes blocker.detected=true, treat that as a real user-blocking state. Prefer calling browser_takeover_visible when the workflow cannot continue headlessly, then wait for user confirmation before proceeding.',
-    )
-  }
-
-  if (skillPrompt.trim()) {
-    sections.push('Selected skill summaries:\n' + skillPrompt)
-    sections.push(
-      'If one of these selected skills is relevant and you need its exact instructions, read it on demand with aura_read_skill instead of guessing from the summary.',
-    )
-  }
-
-  if (exposureNote?.trim()) {
-    sections.push(exposureNote)
-  }
-
-  return sections.join('\n\n')
-}
-
 export async function runAgent(request) {
   const { settings, messages, runtime = {}, hooks = {}, capabilities } = request
   hooks?.onPhaseChange?.('preparing')
@@ -715,17 +458,27 @@ export async function runAgent(request) {
     ...pluginTools,
     ...mcp.tools,
   ]
+  const routeState = inferRouteState(messages)
+  const routedTools = applyRouteToolBudgets(
+    filterToolsForRouteState(availableTools, routeState),
+    routeState,
+  )
   const selectedCapabilities = selectTurnCapabilities({
     messages,
     runtimeCapabilities: capabilities,
     skillEntries: skillCatalog,
-    tools: availableTools,
+    tools: routedTools,
   })
   const skillPrompt = buildSkillPrompt(selectedCapabilities.selectedSkills)
-  const systemPrompt = buildSystemPrompt(
+  const exposureNote = buildAgentCapabilityExposureNote(
+    selectedCapabilities.capabilitySnapshot,
+    routeState,
+  )
+  const systemPrompt = buildRouteFirstSystemPrompt(
     settings,
     skillPrompt,
-    buildCapabilityExposureNote(selectedCapabilities.capabilitySnapshot),
+    exposureNote,
+    routeState,
   )
   const allTools = selectedCapabilities.selectedTools
 
@@ -745,7 +498,7 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
-      result = enforceEvidencePolicy(messages, result, toolEvents)
+      result = enforceEvidencePolicy(result, toolEvents, routeState)
       const resolvedMessages = result.messages || messages
 
       if (shouldRunFinalization(result)) {
@@ -808,7 +561,7 @@ export async function runAgent(request) {
           currentTaskId,
         },
       })
-      result = enforceEvidencePolicy(messages, result, toolEvents)
+      result = enforceEvidencePolicy(result, toolEvents, routeState)
       const resolvedMessages = result.messages || messages
 
       if (shouldRunFinalization(result)) {

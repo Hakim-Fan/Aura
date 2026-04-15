@@ -1172,6 +1172,10 @@ export async function runOpenAiCompatibleAgent({
             content += text
             attemptState.receivedOutput = true
             attemptState.partialMessage += text
+            hooks?.onTextDelta?.(text, {
+              blockId: reasoningBlockId,
+              order: reasoningOrder,
+            })
           },
           onReasoning(text) {
             providerReasoning += text
@@ -1262,11 +1266,6 @@ export async function runOpenAiCompatibleAgent({
       const queuedInputs = drainAppendedInputs(hooks)
       if (queuedInputs.length > 0) {
         if (content.trim()) {
-          hooks?.onTextDelta?.(content, {
-            blockId: reasoningBlockId,
-            order: reasoningOrder,
-            target: 'phase',
-          })
           transcript.push({
             role: 'assistant',
             content,
@@ -1315,14 +1314,6 @@ export async function runOpenAiCompatibleAgent({
         role: 'assistant',
         content,
       })
-
-      if (content.trim()) {
-        hooks?.onTextDelta?.(content, {
-          blockId: reasoningBlockId,
-          order: reasoningOrder,
-          target: 'phase',
-        })
-      }
 
       hooks?.onPhaseChange?.('tool_running')
       for (const toolCall of finalizedToolCalls) {
@@ -1450,6 +1441,10 @@ export async function runGoogleAgent({
             content += text
             attemptState.receivedOutput = true
             attemptState.partialMessage += text
+            hooks?.onTextDelta?.(text, {
+              blockId: reasoningBlockId,
+              order: reasoningOrder,
+            })
           },
           onReasoning(text) {
             providerReasoning += text
@@ -1536,11 +1531,6 @@ export async function runGoogleAgent({
       const queuedInputs = drainAppendedInputs(hooks)
       if (queuedInputs.length > 0) {
         if (content.trim()) {
-          hooks?.onTextDelta?.(content, {
-            blockId: reasoningBlockId,
-            order: reasoningOrder,
-            target: 'phase',
-          })
           transcript.push({
             role: 'model',
             parts: [{ text: content }],
@@ -1596,14 +1586,6 @@ export async function runGoogleAgent({
         role: 'assistant',
         content,
       })
-
-      if (content.trim()) {
-        hooks?.onTextDelta?.(content, {
-          blockId: reasoningBlockId,
-          order: reasoningOrder,
-          target: 'phase',
-        })
-      }
 
       hooks?.onPhaseChange?.('tool_running')
       const toolResponses = []
