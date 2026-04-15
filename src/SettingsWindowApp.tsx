@@ -1610,7 +1610,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <div className="section-title">Agent 架构</div>
             <div className="settings-mode-stack">
               <label className="toggle-inline">
-                <input checked type="radio" readOnly />
+                <input
+                  checked={draftSettings.agentArchitectureMode === 'route-first'}
+                  type="radio"
+                  onChange={() => handleSettingsChange('agentArchitectureMode', 'route-first')}
+                />
                 <div className="flex flex-col">
                   <strong>标准模式</strong>
                   <span className="muted">
@@ -1619,7 +1623,12 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 </div>
               </label>
               <label className="toggle-inline disabled">
-                <input disabled type="radio" />
+                <input
+                  disabled
+                  checked={draftSettings.agentArchitectureMode === 'orchestrated'}
+                  type="radio"
+                  readOnly
+                />
                 <div className="flex flex-col">
                   <strong>编排模式</strong>
                   <span className="muted">

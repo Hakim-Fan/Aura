@@ -404,6 +404,21 @@ rl.on('line', (line) => {
           typeof error.retryInfo === 'object'
             ? error.retryInfo
             : undefined,
+        agentMode:
+          error &&
+          typeof error === 'object' &&
+          'agentMode' in error &&
+          typeof error.agentMode === 'string'
+            ? error.agentMode
+            : undefined,
+        routeDecision:
+          error &&
+          typeof error === 'object' &&
+          'routeDecision' in error &&
+          error.routeDecision &&
+          typeof error.routeDecision === 'object'
+            ? error.routeDecision
+            : undefined,
       })
       process.exitCode = 1
     })

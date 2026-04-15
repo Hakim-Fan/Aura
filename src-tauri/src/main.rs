@@ -38,6 +38,10 @@ struct AgentTaskSnapshot {
     usage: Option<serde_json::Value>,
     #[serde(rename = "capabilitySnapshot")]
     capability_snapshot: Option<serde_json::Value>,
+    #[serde(rename = "agentMode")]
+    agent_mode: Option<String>,
+    #[serde(rename = "routeDecision")]
+    route_decision: Option<serde_json::Value>,
     #[serde(rename = "retryInfo")]
     retry_info: Option<serde_json::Value>,
     phase: Option<String>,
@@ -1715,6 +1719,8 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               error TEXT,
               error_info_json TEXT,
               appended_inputs_json TEXT NOT NULL,
+              agent_mode TEXT,
+              route_decision_json TEXT,
               model_info_json TEXT,
               UNIQUE(message_id, version_index),
               FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
@@ -1759,6 +1765,30 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
         let message = error.to_string();
         if !message.contains("duplicate column name") {
             return Err(format!("Failed to migrate SQLite sessions table: {error}"));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN agent_mode TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions agent_mode column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN route_decision_json TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions route_decision_json column: {error}"
+            ));
         }
     }
 
@@ -2331,6 +2361,8 @@ fn spawn_agent_task<R: Runtime>(
         reasoning: Vec::new(),
         usage: None,
         capability_snapshot: None,
+        agent_mode: None,
+        route_decision: None,
         retry_info: None,
         phase: Some("preparing".into()),
         phase_started_at: None,
@@ -2510,6 +2542,11 @@ fn spawn_agent_task<R: Runtime>(
                         current.usage = extract_object(result.get("usage"));
                         current.capability_snapshot =
                             extract_object(result.get("capabilitySnapshot"));
+                        current.agent_mode = result
+                            .get("agentMode")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string());
+                        current.route_decision = extract_object(result.get("routeDecision"));
                         current.retry_info = extract_object(result.get("retryInfo"));
                     }
                 }),
@@ -2521,6 +2558,11 @@ fn spawn_agent_task<R: Runtime>(
                         .and_then(|value| value.as_str())
                         .map(|value| value.to_string());
                     current.error_info = extract_object(event.get("errorInfo"));
+                    current.agent_mode = event
+                        .get("agentMode")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    current.route_decision = extract_object(event.get("routeDecision"));
                     current.error_code = event
                         .get("code")
                         .and_then(|value| value.as_str())
@@ -2971,7 +3013,8 @@ fn load_persisted_app_state<R: Runtime>(
             let mut versions_statement = connection
                 .prepare(
                     "SELECT version_index, content, parts_json, status, created_at, attachments_json, reasoning_json, usage_json,
-                            capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json, appended_inputs_json, model_info_json
+                            capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json, appended_inputs_json,
+                            agent_mode, route_decision_json, model_info_json
                      FROM message_versions
                      WHERE message_id = ?1
                      ORDER BY version_index ASC",
@@ -2995,7 +3038,9 @@ fn load_persisted_app_state<R: Runtime>(
                         "error": row.get::<_, Option<String>>(12)?,
                         "errorInfo": parse_json_object_column(row.get::<_, Option<String>>(13)?),
                         "appendedInputs": parse_json_array_column(row.get::<_, String>(14)?),
-                        "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(15)?),
+                        "agentMode": row.get::<_, Option<String>>(15)?,
+                        "routeDecision": parse_json_object_column(row.get::<_, Option<String>>(16)?),
+                        "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(17)?),
                     }))
                 })
                 .map_err(|error| format!("Failed to read message versions from SQLite: {error}"))?;
@@ -3184,8 +3229,8 @@ fn upsert_message_version_sqlite<R: Runtime>(
             "INSERT INTO message_versions (
                 id, message_id, version_index, content, parts_json, status, created_at, attachments_json, reasoning_json,
                 usage_json, capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json,
-                appended_inputs_json, model_info_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                appended_inputs_json, agent_mode, route_decision_json, model_info_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
              ON CONFLICT(message_id, version_index) DO UPDATE SET
                 content = excluded.content,
                 parts_json = excluded.parts_json,
@@ -3201,6 +3246,8 @@ fn upsert_message_version_sqlite<R: Runtime>(
                 error = excluded.error,
                 error_info_json = excluded.error_info_json,
                 appended_inputs_json = excluded.appended_inputs_json,
+                agent_mode = excluded.agent_mode,
+                route_decision_json = excluded.route_decision_json,
                 model_info_json = excluded.model_info_json",
             params![
                 version_id,
@@ -3232,6 +3279,15 @@ fn upsert_message_version_sqlite<R: Runtime>(
                     if error_info.is_null() { None } else { Some(value_to_json_string(&error_info)?) }
                 },
                 value_to_json_string(&get_json_array_field(&version, "appendedInputs"))?,
+                version.get("agentMode").and_then(|value| value.as_str()),
+                {
+                    let route_decision = get_json_object_field(&version, "routeDecision");
+                    if route_decision.is_null() {
+                        None
+                    } else {
+                        Some(value_to_json_string(&route_decision)?)
+                    }
+                },
                 {
                     let model_info = get_json_object_field(&version, "modelInfo");
                     if model_info.is_null() { None } else { Some(value_to_json_string(&model_info)?) }

@@ -666,6 +666,8 @@ function toMessageVariant(message: ChatMessage): ChatMessageVariant {
     retryInfo: message.retryInfo,
     appendedInputs: message.appendedInputs,
     modelInfo: message.modelInfo,
+    agentMode: message.agentMode,
+    routeDecision: message.routeDecision,
   }
 }
 
@@ -696,6 +698,8 @@ function applyMessageVariant(
     retryInfo: activeVariant.retryInfo,
     appendedInputs: activeVariant.appendedInputs,
     modelInfo: activeVariant.modelInfo,
+    agentMode: activeVariant.agentMode,
+    routeDecision: activeVariant.routeDecision,
     versions: variants,
     activeVersionIndex: safeIndex,
   }
@@ -1252,6 +1256,8 @@ export function MainWindowApp() {
                 error: snapshot.error,
                 errorInfo: snapshot.errorInfo,
                 retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
+                agentMode: snapshot.agentMode || currentVariant.agentMode,
+                routeDecision: snapshot.routeDecision || currentVariant.routeDecision,
               }))
               : message,
           ),
@@ -1308,6 +1314,9 @@ export function MainWindowApp() {
                               ? snapshot.errorInfo
                               : undefined,
                           retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
+                          agentMode: snapshot.agentMode || currentVariant.agentMode,
+                          routeDecision:
+                            snapshot.routeDecision || currentVariant.routeDecision,
                         }))
                         : message,
                     ),

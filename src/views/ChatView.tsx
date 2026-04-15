@@ -59,6 +59,7 @@ import type {
   MessageUsage,
   ProviderMode,
   ReasoningEffort,
+  RouteDecisionSnapshot,
   TaskNode,
   ToolEvent,
   WorkspaceNode,
@@ -411,6 +412,92 @@ function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], withLimit = true
   return withLimit
     ? `${stageLabel}已自动重试 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次`
     : `${stageLabel}重试 ${retryInfo.attemptedRetries} 次`
+}
+
+function routeAnswerModeLabel(answerMode?: RouteDecisionSnapshot['answerMode']) {
+  switch (answerMode) {
+    case 'advise':
+      return '建议'
+    case 'diagnose':
+      return '诊断'
+    case 'execute':
+      return '执行'
+    default:
+      return ''
+  }
+}
+
+function routeCapabilityTierLabel(capabilityTier?: RouteDecisionSnapshot['capabilityTier']) {
+  switch (capabilityTier) {
+    case 'none':
+      return '无工具'
+    case 'local-readonly':
+      return '本地只读'
+    case 'local-write':
+      return '本地可写'
+    case 'web-lookup':
+      return '联网查询'
+    case 'browser-interactive':
+      return '浏览器交互'
+    default:
+      return ''
+  }
+}
+
+function buildRouteSummary(routeDecision?: RouteDecisionSnapshot) {
+  if (!routeDecision) {
+    return null
+  }
+
+  const summary = [
+    routeAnswerModeLabel(routeDecision.answerMode),
+    routeCapabilityTierLabel(routeDecision.capabilityTier),
+    typeof routeDecision.escalationCount === 'number' && routeDecision.escalationCount > 0
+      ? `升级 ${routeDecision.escalationCount} 次`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+
+  return summary || null
+}
+
+function buildRouteTooltip(routeDecision?: RouteDecisionSnapshot) {
+  if (!routeDecision) {
+    return ''
+  }
+
+  const stopReasonLabel =
+    routeDecision.stopReason === 'completed'
+      ? '已形成可交付回答'
+      : routeDecision.stopReason === 'completed_with_evidence'
+        ? '已完成执行并拿到证据'
+        : routeDecision.stopReason === 'no_incremental_progress'
+          ? '升级后无新增信息，已收束'
+          : routeDecision.stopReason === 'budget_exhausted'
+            ? '升级预算或可用路径已耗尽'
+            : routeDecision.stopReason === 'runtime_pass_limit'
+              ? '达到路由运行上限'
+              : null
+
+  return [
+    `回答模式：${routeAnswerModeLabel(routeDecision.answerMode) || routeDecision.answerMode}`,
+    `当前层级：${routeCapabilityTierLabel(routeDecision.capabilityTier) || routeDecision.capabilityTier}`,
+    routeDecision.tierHistory && routeDecision.tierHistory.length > 0
+      ? `层级路径：${routeDecision.tierHistory
+          .map(tier => routeCapabilityTierLabel(tier) || tier)
+          .join(' -> ')}`
+      : null,
+    routeDecision.budgets
+      ? `预算：搜索 ${routeDecision.budgets.searchesRemaining}，写升级 ${routeDecision.budgets.writeEscalationsRemaining}，浏览器升级 ${routeDecision.budgets.browserEscalationsRemaining}`
+      : null,
+    routeDecision.availableEscalations && routeDecision.availableEscalations.length > 0
+      ? `仍可升级到：${routeDecision.availableEscalations.join(' / ')}`
+      : null,
+    stopReasonLabel ? `停止原因：${stopReasonLabel}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 function eventKindLabel(event: MessageEvent) {
@@ -1625,6 +1712,8 @@ function AssistantMessageCard({
       .join(' · ')
     : null
   const retrySummary = formatRetryLabel(message.retryInfo, false)
+  const routeSummary = buildRouteSummary(message.routeDecision)
+  const routeTooltip = buildRouteTooltip(message.routeDecision)
   const messageModelLabel =
     message.modelInfo?.label ||
     (activeModelId.split('/').filter(Boolean).at(-1) || activeModelId || '未记录模型')
@@ -1694,6 +1783,14 @@ function AssistantMessageCard({
                     {messageModelLabel}
                   </span>
                   <span>{activitySummary}</span>
+                  {routeSummary ? (
+                    <span
+                      className="rounded-full border border-[rgba(69,119,108,0.16)] bg-[rgba(69,119,108,0.06)] px-2 py-0.5 text-[11px] font-600 text-[var(--accent-soft-strong)]"
+                      title={routeTooltip}
+                    >
+                      {routeSummary}
+                    </span>
+                  ) : null}
                   {retrySummary ? (
                     <span className="text-[11px] text-[var(--text-secondary)] opacity-75">
                       {retrySummary}

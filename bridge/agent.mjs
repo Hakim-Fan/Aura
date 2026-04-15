@@ -8,7 +8,9 @@ import {
 } from './agentPrompting.mjs'
 import {
   applyRouteToolBudgets,
+  escalateRouteState,
   filterToolsForRouteState,
+  getRouteEscalationTargets,
   inferRouteState,
 } from './agentRouting.mjs'
 import { closeHeadlessBrowserSession } from './browserRuntime.mjs'
@@ -22,8 +24,18 @@ import {
 } from './providers.mjs'
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 import { createBuiltinTools } from './tools.mjs'
+import {
+  buildRouteStopMessage,
+  determineRouteStopReason,
+  summarizeRouteTurn,
+} from './agentGovernor.mjs'
+import { enforceEvidencePolicy } from './agentEvidence.mjs'
+import { runOrchestratedAgent } from './agentModes/orchestrated.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const ROUTE_ESCALATION_TOOL_NAME = 'route_request_escalation'
+const ROUTE_ESCALATION_REQUEST_CODE = 'ROUTE_ESCALATION_REQUEST'
+const MAX_ROUTE_RUNTIME_PASSES = 5
 
 function createId(prefix = 'task') {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -31,6 +43,230 @@ function createId(prefix = 'task') {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
+}
+
+function truncateText(value, maxLength = 280) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return ''
+  }
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength)}...`
+    : normalized
+}
+
+function createRouteEscalationError({ targetTier, reason, routeState }) {
+  const detail = [
+    `Route escalation requested from "${routeState?.capabilityTier}" to "${targetTier}".`,
+    reason ? `Reason: ${truncateText(reason)}` : null,
+  ]
+    .filter(Boolean)
+    .join(' ')
+  const error = createStructuredError(`请求升级到 ${targetTier} 能力层级。`, {
+    source: 'system',
+    category: 'execution_failed',
+    code: ROUTE_ESCALATION_REQUEST_CODE,
+    detail,
+    suggestedAction: '重新挂载更高一层能力后继续完成本轮任务。',
+  })
+  error.routeEscalation = {
+    targetTier,
+    reason: typeof reason === 'string' ? reason.trim() : '',
+    fromTier: routeState?.capabilityTier,
+  }
+  return error
+}
+
+function extractRouteEscalationRequest(error) {
+  if (
+    error &&
+    typeof error === 'object' &&
+    error.code === ROUTE_ESCALATION_REQUEST_CODE &&
+    error.routeEscalation &&
+    typeof error.routeEscalation === 'object'
+  ) {
+    return error.routeEscalation
+  }
+  return null
+}
+
+function buildRouteEscalationEvidence(toolEvents) {
+  const evidenceLines = (toolEvents || [])
+    .slice(-4)
+    .map((event, index) => {
+      const detail =
+        summarizeToolOutput(event.output) ||
+        event.errorInfo?.summary ||
+        summarizeToolOutput(event.error, 180) ||
+        event.summary ||
+        event.name
+      return `${index + 1}. ${event.name}: ${detail}`
+    })
+
+  if (evidenceLines.length === 0) {
+    return 'No concrete tool evidence was produced before this escalation.'
+  }
+
+  return `Evidence already collected in the previous tier:\n${evidenceLines.join('\n')}`
+}
+
+function buildRouteEscalationNote({ fromTier, toTier, reason, toolEvents }) {
+  return [
+    `Route runtime note: the previous tier ${fromTier} has been escalated to ${toTier}.`,
+    truncateText(reason) ? `Escalation reason: ${truncateText(reason)}.` : null,
+    buildRouteEscalationEvidence(toolEvents),
+    'Continue from this evidence and avoid repeating identical inspection steps unless the new tier needs fresh verification.',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function appendRouteNotesToPrompt(systemPrompt, routeNotes) {
+  if (!Array.isArray(routeNotes) || routeNotes.length === 0) {
+    return systemPrompt
+  }
+
+  return [systemPrompt, ...routeNotes.slice(-2)].join('\n\n')
+}
+
+function buildRouteDecisionSnapshot({
+  routeState,
+  selectedCapabilities,
+  selectedTools,
+  escalationCount,
+  availableEscalations,
+  tierHistory,
+  stopReason,
+}) {
+  return {
+    answerMode: routeState.answerMode,
+    capabilityTier: routeState.capabilityTier,
+    budgets: {
+      searchesRemaining: routeState.budgets?.searchesRemaining ?? 0,
+      browserEscalationsRemaining:
+        routeState.budgets?.browserEscalationsRemaining ?? 0,
+      writeEscalationsRemaining: routeState.budgets?.writeEscalationsRemaining ?? 0,
+    },
+    allowEscalationTo: Array.isArray(routeState.allowEscalationTo)
+      ? [...routeState.allowEscalationTo]
+      : [],
+    availableEscalations: Array.isArray(availableEscalations)
+      ? [...availableEscalations]
+      : [],
+    escalationCount,
+    tierHistory: Array.isArray(tierHistory) ? [...tierHistory] : [],
+    stopReason: stopReason || undefined,
+    mountedCapabilities: {
+      skills: (selectedCapabilities?.capabilitySnapshot?.skills || [])
+        .map(entry => entry.name || entry.id)
+        .filter(Boolean),
+      plugins: (selectedCapabilities?.capabilitySnapshot?.plugins || [])
+        .map(entry => entry.name || entry.id)
+        .filter(Boolean),
+      mcpServers: (selectedCapabilities?.capabilitySnapshot?.mcpServers || [])
+        .map(entry => entry.name || entry.id)
+        .filter(Boolean),
+      tools: (selectedTools || [])
+        .map(tool => tool?.name)
+        .filter(Boolean),
+    },
+  }
+}
+
+function inferRouteEscalationFromMessage(message, availableEscalations) {
+  if (!Array.isArray(availableEscalations) || availableEscalations.length === 0) {
+    return null
+  }
+
+  const normalized = normalizeFinalAnswer(message).toLowerCase()
+  if (
+    !normalized ||
+    !/(need|would need|require|lack|cannot|can't|unable|需要|缺少|无法|不能|没法)/u.test(
+      normalized,
+    )
+  ) {
+    return null
+  }
+
+  if (
+    availableEscalations.includes('browser-interactive') &&
+    /(browser|website|page|login|captcha|click|form|网页|浏览器|页面|登录|点击|表单|验证码)/u.test(
+      normalized,
+    )
+  ) {
+    return 'browser-interactive'
+  }
+
+  if (
+    availableEscalations.includes('web-lookup') &&
+    /(latest|current|today|official docs|official documentation|web|online|最新|当前|今天|官网|官方文档|联网)/u.test(
+      normalized,
+    )
+  ) {
+    return 'web-lookup'
+  }
+
+  if (
+    availableEscalations.includes('local-write') &&
+    /(write access|edit|modify|change files|run command|write to|修改文件|写入|改动|执行命令|运行命令)/u.test(
+      normalized,
+    )
+  ) {
+    return 'local-write'
+  }
+
+  return null
+}
+
+function createRouteEscalationTool(routeState, availableEscalations) {
+  if (!Array.isArray(availableEscalations) || availableEscalations.length === 0) {
+    return null
+  }
+
+  return {
+    source: 'builtin',
+    name: ROUTE_ESCALATION_TOOL_NAME,
+    description:
+      'Request a route-first capability upgrade when the current tier is genuinely insufficient for the user goal.',
+    internalOnly: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targetTier: {
+          type: 'string',
+          enum: availableEscalations,
+          description: 'The higher capability tier needed to continue.',
+        },
+        reason: {
+          type: 'string',
+          description:
+            'Why the current tier cannot honestly complete the task and why the target tier would materially help.',
+        },
+      },
+      required: ['targetTier', 'reason'],
+      additionalProperties: false,
+    },
+    async run(args, runtime = {}) {
+      runtime.throwIfAborted?.()
+      const targetTier = typeof args?.targetTier === 'string' ? args.targetTier : ''
+      const reason = typeof args?.reason === 'string' ? args.reason : ''
+
+      if (!availableEscalations.includes(targetTier)) {
+        return {
+          granted: false,
+          allowedTargets: availableEscalations,
+          message:
+            'The requested route escalation is not available in this turn. Continue within the current tier or finish with an honest bounded answer.',
+        }
+      }
+
+      throw createRouteEscalationError({
+        targetTier,
+        reason,
+        routeState,
+      })
+    },
+  }
 }
 
 function summarizeMessages(messages) {
@@ -188,57 +424,6 @@ function normalizeFinalAnswer(message) {
   return (message || '').trim()
 }
 
-function resultClaimsExecution(message) {
-  const normalized = normalizeFinalAnswer(message).toLowerCase()
-  if (!normalized) {
-    return false
-  }
-
-  return [
-    'done',
-    'completed',
-    'already done',
-    'installed',
-    'configured',
-    'created',
-    'updated',
-    'downloaded',
-    'enabled',
-    'wrote',
-    'fixed',
-    '已完成',
-    '已经为你',
-    '已经帮你',
-    '完成',
-    '已为你',
-    '已帮你',
-    '装好了',
-    '配置好了',
-    '创建了',
-    '写入了',
-    '修复了',
-    '启用了',
-  ].some(keyword => normalized.includes(keyword))
-}
-
-function enforceEvidencePolicy(result, toolEvents, routeState) {
-  const requiresExecutionEvidence = routeState?.answerMode === 'execute'
-
-  if (!requiresExecutionEvidence || toolEvents.length > 0) {
-    return result
-  }
-
-  if (!resultClaimsExecution(result.message)) {
-    return result
-  }
-
-  return {
-    ...result,
-    message:
-      '我还没有执行任何工具，所以现在不能确认这项实际操作已经完成。要完成这类任务，我需要先运行相应工具并验证结果，然后再向你确认完成。',
-  }
-}
-
 function shouldRunFinalization(result) {
   const finalMessage = normalizeFinalAnswer(result.message)
   const providerReasoning = extractProviderReasoning(result.reasoning || [])
@@ -253,6 +438,116 @@ function shouldRunFinalization(result) {
     return false
   }
   return providerReasoning.length > 200 && !/[。！？!?\n]/u.test(finalMessage.slice(60))
+}
+
+async function runProviderTurn({
+  settings,
+  systemPrompt,
+  messages,
+  tools,
+  toolEvents,
+  hooks,
+  taskTracker,
+  currentTaskId,
+}) {
+  const providerHooks = {
+    ...hooks,
+    settings,
+    taskTracker,
+    currentTaskId,
+  }
+
+  if (settings.provider === 'google') {
+    hooks?.onPhaseChange?.('model_connecting')
+    let result = await runGoogleAgent({
+      settings,
+      systemPrompt,
+      messages,
+      tools,
+      toolEvents,
+      hooks: providerHooks,
+    })
+    const resolvedMessages = result.messages || messages
+
+    if (shouldRunFinalization(result)) {
+      try {
+        hooks?.onPhaseChange?.('finalizing')
+        const finalized = await finalizeGoogleAnswer({
+          settings,
+          systemPrompt,
+          messages: resolvedMessages,
+          toolEvents,
+          reasoningText: extractProviderReasoning(result.reasoning || []),
+          draftMessage: result.message,
+          stage: 'finalization',
+        })
+        if (finalized.message.trim()) {
+          result = {
+            ...result,
+            message: finalized.message,
+            retryInfo: finalized.retryInfo || result.retryInfo,
+          }
+        }
+      } catch {
+        // 如果收尾补答失败，回退到原始结果，避免把整轮执行直接打成失败。
+      }
+    }
+
+    return {
+      result,
+      resolvedMessages,
+    }
+  }
+
+  if (settings.provider === 'openai' || settings.provider === 'custom') {
+    hooks?.onPhaseChange?.('model_connecting')
+    let result = await runOpenAiCompatibleAgent({
+      settings,
+      systemPrompt,
+      messages,
+      tools,
+      toolEvents,
+      hooks: providerHooks,
+    })
+    const resolvedMessages = result.messages || messages
+
+    if (shouldRunFinalization(result)) {
+      try {
+        hooks?.onPhaseChange?.('finalizing')
+        const finalized = await finalizeOpenAiCompatibleAnswer({
+          settings,
+          systemPrompt,
+          messages: resolvedMessages,
+          toolEvents,
+          reasoningText: extractProviderReasoning(result.reasoning || []),
+          draftMessage: result.message,
+          stage: 'finalization',
+        })
+        if (finalized.message.trim()) {
+          result = {
+            ...result,
+            message: finalized.message,
+            retryInfo: finalized.retryInfo || result.retryInfo,
+          }
+        }
+      } catch {
+        // 如果收尾补答失败，回退到原始结果，避免把整轮执行直接打成失败。
+      }
+    }
+
+    return {
+      result,
+      resolvedMessages,
+    }
+  }
+
+  throw createStructuredError(`模型调用失败，当前 Provider "${settings.provider}" 不受支持。`, {
+    source: 'provider',
+    category: 'unsupported',
+    code: 'UNSUPPORTED_PROVIDER',
+    detail: `Unsupported provider: ${settings.provider}`,
+    suggestedAction: '请切换到已支持的 Provider 后再试。',
+  })
 }
 
 function normalizeAgentError(error) {
@@ -396,7 +691,7 @@ function createTaskTracker(hooks, rootTitle) {
   }
 }
 
-export async function runAgent(request) {
+export async function runRouteFirstAgent(request) {
   const { settings, messages, runtime = {}, hooks = {}, capabilities } = request
   hooks?.onPhaseChange?.('preparing')
   if (!settings?.apiKey?.trim()) {
@@ -458,75 +753,201 @@ export async function runAgent(request) {
     ...pluginTools,
     ...mcp.tools,
   ]
-  const routeState = inferRouteState(messages)
-  const routedTools = applyRouteToolBudgets(
-    filterToolsForRouteState(availableTools, routeState),
-    routeState,
-  )
-  const selectedCapabilities = selectTurnCapabilities({
-    messages,
-    runtimeCapabilities: capabilities,
-    skillEntries: skillCatalog,
-    tools: routedTools,
-  })
-  const skillPrompt = buildSkillPrompt(selectedCapabilities.selectedSkills)
-  const exposureNote = buildAgentCapabilityExposureNote(
-    selectedCapabilities.capabilitySnapshot,
-    routeState,
-  )
-  const systemPrompt = buildRouteFirstSystemPrompt(
-    settings,
-    skillPrompt,
-    exposureNote,
-    routeState,
-  )
-  const allTools = selectedCapabilities.selectedTools
+  let routeState = inferRouteState(messages)
+  const visitedTiers = new Set([routeState.capabilityTier])
+  const routeNotes = []
+  const routeHistory = []
+  let lastSelectedCapabilities = null
+  let lastSystemPrompt = ''
+  let lastRouteDecision = {
+    answerMode: routeState.answerMode,
+    capabilityTier: routeState.capabilityTier,
+    budgets: {
+      searchesRemaining: routeState.budgets?.searchesRemaining ?? 0,
+      browserEscalationsRemaining: routeState.budgets?.browserEscalationsRemaining ?? 0,
+      writeEscalationsRemaining: routeState.budgets?.writeEscalationsRemaining ?? 0,
+    },
+    allowEscalationTo: Array.isArray(routeState.allowEscalationTo)
+      ? [...routeState.allowEscalationTo]
+      : [],
+    availableEscalations: [],
+    escalationCount: 0,
+    tierHistory: [routeState.capabilityTier],
+  }
 
   try {
-    if (settings.provider === 'google') {
-      hooks?.onPhaseChange?.('model_connecting')
-      let result = await runGoogleAgent({
-        settings,
-        systemPrompt,
+    for (let pass = 0; pass < MAX_ROUTE_RUNTIME_PASSES; pass += 1) {
+      const availableEscalations = getRouteEscalationTargets(routeState, {
+        visitedTiers,
+      })
+      const promptRouteState = {
+        ...routeState,
+        availableEscalations,
+      }
+      const routedTools = applyRouteToolBudgets(
+        filterToolsForRouteState(availableTools, routeState),
+        routeState,
+      )
+      const selectedCapabilities = selectTurnCapabilities({
         messages,
-        tools: allTools,
-        toolEvents,
-        hooks: {
-          ...hooks,
+        runtimeCapabilities: capabilities,
+        skillEntries: skillCatalog,
+        tools: routedTools,
+      })
+      lastSelectedCapabilities = selectedCapabilities
+      const skillPrompt = buildSkillPrompt(selectedCapabilities.selectedSkills)
+      const exposureNote = buildAgentCapabilityExposureNote(
+        selectedCapabilities.capabilitySnapshot,
+        promptRouteState,
+      )
+      lastSystemPrompt = appendRouteNotesToPrompt(
+        buildRouteFirstSystemPrompt(
           settings,
+          skillPrompt,
+          exposureNote,
+          promptRouteState,
+        ),
+        routeNotes,
+      )
+      const escalationTool = createRouteEscalationTool(
+        promptRouteState,
+        availableEscalations,
+      )
+      const allTools = escalationTool
+        ? [...selectedCapabilities.selectedTools, escalationTool]
+        : selectedCapabilities.selectedTools
+      lastRouteDecision = buildRouteDecisionSnapshot({
+        routeState: promptRouteState,
+        selectedCapabilities,
+        selectedTools: selectedCapabilities.selectedTools,
+        escalationCount: routeNotes.length,
+        availableEscalations,
+        tierHistory: [...routeHistory.map(entry => entry.capabilityTier), routeState.capabilityTier],
+      })
+      const turnToolEventStart = toolEvents.length
+
+      let turnResult
+      try {
+        turnResult = await runProviderTurn({
+          settings,
+          systemPrompt: lastSystemPrompt,
+          messages,
+          tools: allTools,
+          toolEvents,
+          hooks: {
+            ...hooks,
+            rethrowToolError(error) {
+              return extractRouteEscalationRequest(error) !== null
+            },
+          },
           taskTracker,
           currentTaskId,
-        },
-      })
-      result = enforceEvidencePolicy(result, toolEvents, routeState)
-      const resolvedMessages = result.messages || messages
+        })
+      } catch (error) {
+        const escalationRequest = extractRouteEscalationRequest(error)
+        if (escalationRequest) {
+          const nextRouteState = escalateRouteState(
+            routeState,
+            escalationRequest.targetTier,
+          )
+          routeNotes.push(
+            buildRouteEscalationNote({
+              fromTier: routeState.capabilityTier,
+              toTier: nextRouteState.capabilityTier,
+              reason: escalationRequest.reason,
+              toolEvents: toolEvents.slice(turnToolEventStart),
+            }),
+          )
+          routeState = nextRouteState
+          visitedTiers.add(routeState.capabilityTier)
+          taskTracker.setStatus(
+            currentTaskId,
+            'running',
+            `能力升级到 ${routeState.capabilityTier}`,
+          )
+          hooks?.onPhaseChange?.('preparing')
+          continue
+        }
+        throw error
+      }
 
-      if (shouldRunFinalization(result)) {
-        try {
-          hooks?.onPhaseChange?.('finalizing')
-          const finalized = await finalizeGoogleAnswer({
-            settings,
-            systemPrompt,
-            messages: resolvedMessages,
-            toolEvents,
-            reasoningText: extractProviderReasoning(result.reasoning || []),
-            draftMessage: result.message,
-            stage: 'finalization',
-          })
-          if (finalized.message.trim()) {
-            result = {
-              ...result,
-              message: finalized.message,
-              retryInfo: finalized.retryInfo || result.retryInfo,
-            }
-          }
-        } catch {
-          // 如果收尾补答失败，回退到原始结果，避免把整轮执行直接打成失败。
+      let result = enforceEvidencePolicy(
+        turnResult.result,
+        toolEvents,
+        promptRouteState,
+      )
+      const desiredEscalation = inferRouteEscalationFromMessage(
+        result.message,
+        routeState.allowEscalationTo,
+      )
+      const turnSummary = summarizeRouteTurn({
+        routeState: promptRouteState,
+        resultMessage: result.message,
+        toolEvents,
+        eventStartIndex: turnToolEventStart,
+      })
+      const routeStopReason = determineRouteStopReason({
+        routeHistory,
+        currentTurn: turnSummary,
+        desiredEscalationTarget: desiredEscalation,
+        availableEscalations,
+      })
+
+      if (routeStopReason) {
+        result = {
+          ...result,
+          message: buildRouteStopMessage({
+            stopReason: routeStopReason,
+            message: result.message,
+            routeState,
+            desiredEscalationTarget: desiredEscalation,
+          }),
         }
       }
 
+      routeHistory.push(turnSummary)
+      lastRouteDecision = buildRouteDecisionSnapshot({
+        routeState: promptRouteState,
+        selectedCapabilities,
+        selectedTools: selectedCapabilities.selectedTools,
+        escalationCount: routeNotes.length,
+        availableEscalations,
+        tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),
+        stopReason:
+          routeStopReason ||
+          (toolEvents.length > 0 && routeState.completionPolicy?.requiresEvidenceForDone
+            ? 'completed_with_evidence'
+            : 'completed'),
+      })
+
+      const inferredEscalation = inferRouteEscalationFromMessage(
+        result.message,
+        availableEscalations,
+      )
+
+      if (inferredEscalation && !routeStopReason) {
+        const nextRouteState = escalateRouteState(routeState, inferredEscalation)
+        routeNotes.push(
+          buildRouteEscalationNote({
+            fromTier: routeState.capabilityTier,
+            toTier: nextRouteState.capabilityTier,
+            reason: result.message,
+            toolEvents: toolEvents.slice(turnToolEventStart),
+          }),
+        )
+        routeState = nextRouteState
+        visitedTiers.add(routeState.capabilityTier)
+        taskTracker.setStatus(
+          currentTaskId,
+          'running',
+          `能力升级到 ${routeState.capabilityTier}`,
+        )
+        hooks?.onPhaseChange?.('preparing')
+        continue
+      }
+
       const summaryReasoning = summarizeReasoning(
-        resolvedMessages,
+        turnResult.resolvedMessages,
         toolEvents,
         result.message,
       )
@@ -538,6 +959,8 @@ export async function runAgent(request) {
       taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
+        agentMode: 'route-first',
+        routeDecision: lastRouteDecision,
         capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
         reasoning,
         retryInfo: result.retryInfo,
@@ -546,74 +969,12 @@ export async function runAgent(request) {
       }
     }
 
-    if (settings.provider === 'openai' || settings.provider === 'custom') {
-      hooks?.onPhaseChange?.('model_connecting')
-      let result = await runOpenAiCompatibleAgent({
-        settings,
-        systemPrompt,
-        messages,
-        tools: allTools,
-        toolEvents,
-        hooks: {
-          ...hooks,
-          settings,
-          taskTracker,
-          currentTaskId,
-        },
-      })
-      result = enforceEvidencePolicy(result, toolEvents, routeState)
-      const resolvedMessages = result.messages || messages
-
-      if (shouldRunFinalization(result)) {
-        try {
-          hooks?.onPhaseChange?.('finalizing')
-          const finalized = await finalizeOpenAiCompatibleAnswer({
-            settings,
-            systemPrompt,
-            messages: resolvedMessages,
-            toolEvents,
-            reasoningText: extractProviderReasoning(result.reasoning || []),
-            draftMessage: result.message,
-            stage: 'finalization',
-          })
-          if (finalized.message.trim()) {
-            result = {
-              ...result,
-              message: finalized.message,
-              retryInfo: finalized.retryInfo || result.retryInfo,
-            }
-          }
-        } catch {
-          // 如果收尾补答失败，回退到原始结果，避免把整轮执行直接打成失败。
-        }
-      }
-
-      const summaryReasoning = summarizeReasoning(
-        resolvedMessages,
-        toolEvents,
-        result.message,
-      )
-      hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
-        blockId: summaryReasoning[0].id,
-        kind: summaryReasoning[0].kind,
-      })
-      const reasoning = [...summaryReasoning, ...(result.reasoning || [])]
-      taskTracker.completeTask(currentTaskId, '生成最终回答')
-      return {
-        ...result,
-        capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
-        reasoning,
-        retryInfo: result.retryInfo,
-        status: 'completed',
-        taskTree: taskTracker.getTree(),
-      }
-    }
-    throw createStructuredError(`模型调用失败，当前 Provider "${settings.provider}" 不受支持。`, {
-      source: 'provider',
-      category: 'unsupported',
-      code: 'UNSUPPORTED_PROVIDER',
-      detail: `Unsupported provider: ${settings.provider}`,
-      suggestedAction: '请切换到已支持的 Provider 后再试。',
+    throw createStructuredError('Route-first 执行在多次能力升级后仍未收敛到最终回答。', {
+      source: 'system',
+      category: 'execution_failed',
+      code: 'ROUTE_RUNTIME_EXHAUSTED',
+      detail: `Route runtime exceeded ${MAX_ROUTE_RUNTIME_PASSES} passes without converging.`,
+      suggestedAction: '请缩小任务范围，或调整任务指令后再试。',
     })
   } catch (error) {
     const normalized = normalizeAgentError(error)
@@ -635,7 +996,7 @@ export async function runAgent(request) {
           settings.provider === 'google'
             ? await finalizeGoogleAnswer({
                 settings,
-                systemPrompt,
+                systemPrompt: lastSystemPrompt,
                 messages,
                 toolEvents,
                 reasoningText: partialReasoning,
@@ -644,7 +1005,7 @@ export async function runAgent(request) {
               })
             : await finalizeOpenAiCompatibleAnswer({
                 settings,
-                systemPrompt,
+                systemPrompt: lastSystemPrompt,
                 messages,
                 toolEvents,
                 reasoningText: partialReasoning,
@@ -662,7 +1023,9 @@ export async function runAgent(request) {
           return {
             message: recovered.message,
             toolEvents,
-            capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
+            agentMode: 'route-first',
+            routeDecision: lastRouteDecision,
+            capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
             reasoning: summaryReasoning,
             retryInfo: recovered.retryInfo
               ? {
@@ -694,7 +1057,9 @@ export async function runAgent(request) {
       return {
         message: fallbackMessage,
         toolEvents,
-        capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
+        agentMode: 'route-first',
+        routeDecision: lastRouteDecision,
+        capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
         reasoning: summaryReasoning,
         retryInfo: recoveryRetryInfo || retryInfo,
         usage: undefined,
@@ -710,9 +1075,32 @@ export async function runAgent(request) {
     enriched.rawMessage = normalized.rawMessage
     enriched.errorInfo = normalized.errorInfo
     enriched.retryInfo = retryInfo
+    enriched.agentMode = 'route-first'
+    enriched.routeDecision = {
+      ...lastRouteDecision,
+      stopReason:
+        lastRouteDecision?.stopReason ||
+        (normalized.code === 'ROUTE_RUNTIME_EXHAUSTED'
+          ? 'runtime_pass_limit'
+          : lastRouteDecision?.stopReason),
+    }
     throw enriched
   } finally {
     await closeHeadlessBrowserSession().catch(() => {})
     await mcp.close()
   }
+}
+
+function resolveAgentMode(settings) {
+  return settings?.agentArchitectureMode === 'orchestrated'
+    ? 'orchestrated'
+    : 'route-first'
+}
+
+export async function runAgent(request) {
+  const agentMode = resolveAgentMode(request?.settings)
+  if (agentMode === 'orchestrated') {
+    return runOrchestratedAgent(request)
+  }
+  return runRouteFirstAgent(request)
 }

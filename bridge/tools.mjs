@@ -1521,6 +1521,7 @@ function emitToolEvent(event, toolEvents, hooks) {
 
 export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   const eventId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const shouldEmitEvent = tool.internalOnly !== true
   const baseEvent = {
     id: eventId,
     source: tool.source,
@@ -1537,6 +1538,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   }
 
   function updateEvent(partial) {
+    if (!shouldEmitEvent) {
+      return
+    }
     emitToolEvent(
       {
         ...baseEvent,
@@ -1625,6 +1629,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
             : 'tool',
       operationLabel: tool.description || tool.name,
     })
+    if (hooks.rethrowToolError?.(error, normalized, tool) === true) {
+      throw error
+    }
     updateEvent({
       status: 'error',
       error: detail,

@@ -92,6 +92,19 @@ export function buildCapabilityExposureNote(snapshot, routeState) {
         `Budget status: searches remaining ${routeState.budgets.searchesRemaining}.`,
       )
     }
+    if (routeState.budgets?.writeEscalationsRemaining >= 0) {
+      lines.push(
+        `Budget status: write escalations remaining ${routeState.budgets.writeEscalationsRemaining}.`,
+      )
+    }
+    if (routeState.budgets?.browserEscalationsRemaining >= 0) {
+      lines.push(
+        `Budget status: browser escalations remaining ${routeState.budgets.browserEscalationsRemaining}.`,
+      )
+    }
+    if (Array.isArray(routeState.availableEscalations) && routeState.availableEscalations.length > 0) {
+      lines.push(`Allowed route escalations for this turn: ${routeState.availableEscalations.join(', ')}.`)
+    }
   }
 
   const items = [
@@ -136,8 +149,19 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
         `Current answer mode: ${routeState.answerMode}.`,
         `Current capability tier: ${routeState.capabilityTier}.`,
         `Current search budget remaining: ${routeState.budgets?.searchesRemaining ?? 0}.`,
+        `Current write escalation budget remaining: ${routeState.budgets?.writeEscalationsRemaining ?? 0}.`,
+        `Current browser escalation budget remaining: ${routeState.budgets?.browserEscalationsRemaining ?? 0}.`,
       ].join('\n'),
     )
+
+    if (Array.isArray(routeState.availableEscalations) && routeState.availableEscalations.length > 0) {
+      sections.push(
+        `Allowed escalation targets for this turn: ${routeState.availableEscalations.join(', ')}.`,
+      )
+      sections.push(
+        'If the current tier is genuinely insufficient and an allowed higher tier would materially help, use route_request_escalation instead of writing a speculative or blocked final answer.',
+      )
+    }
 
     if (routeState.answerMode === 'execute') {
       sections.push(

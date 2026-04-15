@@ -6,6 +6,7 @@ import type {
   BrowserSearchPreferences,
   CapabilityOverrideMode,
   CapabilityUsageSnapshot,
+  AgentArchitectureMode,
   ChatMessageVariant,
   ChromeImportSource,
   ExecutionMode,
@@ -17,6 +18,7 @@ import type {
   ProviderProfile,
   ProviderRetryStage,
   ReasoningEffort,
+  RouteDecisionSnapshot,
   Session,
   SessionFolder,
   WorkspaceCapabilityOverrides,
@@ -126,6 +128,7 @@ export const defaultSettings: AgentSettings = {
   model: '',
   activeProviderProfileId: 'profile-openai',
   providerProfiles: defaultProfiles(),
+  agentArchitectureMode: 'route-first',
   cwd: '',
   maxSteps: 8,
   executionMode: 'bounded',
@@ -313,6 +316,116 @@ function normalizeProviderRetryInfo(value: unknown) {
     stage,
     stageLabel: typeof retryInfo.stageLabel === 'string' ? retryInfo.stageLabel : undefined,
     recovered: retryInfo.recovered === true,
+  }
+}
+
+function normalizeAgentMode(value: unknown): AgentArchitectureMode | undefined {
+  return value === 'route-first' || value === 'orchestrated' ? value : undefined
+}
+
+function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const routeDecision = value as Partial<RouteDecisionSnapshot>
+  const answerMode =
+    routeDecision.answerMode === 'advise' ||
+    routeDecision.answerMode === 'diagnose' ||
+    routeDecision.answerMode === 'execute'
+      ? routeDecision.answerMode
+      : undefined
+  const capabilityTier =
+    routeDecision.capabilityTier === 'none' ||
+    routeDecision.capabilityTier === 'local-readonly' ||
+    routeDecision.capabilityTier === 'local-write' ||
+    routeDecision.capabilityTier === 'web-lookup' ||
+    routeDecision.capabilityTier === 'browser-interactive'
+      ? routeDecision.capabilityTier
+      : undefined
+
+  if (!answerMode || !capabilityTier) {
+    return undefined
+  }
+
+  function normalizeEscalationTargets(targets: unknown) {
+    if (!Array.isArray(targets)) {
+      return []
+    }
+    return targets.filter(
+      (target): target is NonNullable<RouteDecisionSnapshot['allowEscalationTo']>[number] =>
+        target === 'local-write' ||
+        target === 'web-lookup' ||
+        target === 'browser-interactive',
+    )
+  }
+
+  function normalizeStrings(values: unknown) {
+    if (!Array.isArray(values)) {
+      return []
+    }
+    return values.filter(
+      (value): value is string =>
+        typeof value === 'string' && value.trim().length > 0,
+    )
+  }
+
+  function normalizeTierHistory(values: unknown) {
+    if (!Array.isArray(values)) {
+      return []
+    }
+    return values.filter(
+      (value): value is NonNullable<RouteDecisionSnapshot['tierHistory']>[number] =>
+        value === 'none' ||
+        value === 'local-readonly' ||
+        value === 'local-write' ||
+        value === 'web-lookup' ||
+        value === 'browser-interactive',
+    )
+  }
+
+  return {
+    answerMode,
+    capabilityTier,
+    budgets:
+      routeDecision.budgets &&
+      typeof routeDecision.budgets === 'object' &&
+      typeof routeDecision.budgets.searchesRemaining === 'number' &&
+      typeof routeDecision.budgets.browserEscalationsRemaining === 'number' &&
+      typeof routeDecision.budgets.writeEscalationsRemaining === 'number'
+        ? {
+            searchesRemaining: routeDecision.budgets.searchesRemaining,
+            browserEscalationsRemaining:
+              routeDecision.budgets.browserEscalationsRemaining,
+            writeEscalationsRemaining: routeDecision.budgets.writeEscalationsRemaining,
+          }
+        : undefined,
+    allowEscalationTo: normalizeEscalationTargets(routeDecision.allowEscalationTo),
+    availableEscalations: normalizeEscalationTargets(routeDecision.availableEscalations),
+    escalationCount:
+      typeof routeDecision.escalationCount === 'number' &&
+      Number.isFinite(routeDecision.escalationCount)
+        ? Math.max(0, Math.round(routeDecision.escalationCount))
+        : undefined,
+    tierHistory: normalizeTierHistory(routeDecision.tierHistory),
+    stopReason:
+      routeDecision.stopReason === 'completed' ||
+      routeDecision.stopReason === 'completed_with_evidence' ||
+      routeDecision.stopReason === 'no_incremental_progress' ||
+      routeDecision.stopReason === 'budget_exhausted' ||
+      routeDecision.stopReason === 'runtime_pass_limit'
+        ? routeDecision.stopReason
+        : undefined,
+    mountedCapabilities:
+      routeDecision.mountedCapabilities &&
+      typeof routeDecision.mountedCapabilities === 'object'
+        ? {
+            skills: normalizeStrings(routeDecision.mountedCapabilities.skills),
+            plugins: normalizeStrings(routeDecision.mountedCapabilities.plugins),
+            mcpServers: normalizeStrings(routeDecision.mountedCapabilities.mcpServers),
+            tools: normalizeStrings(routeDecision.mountedCapabilities.tools),
+          }
+        : undefined,
   }
 }
 
@@ -518,6 +631,8 @@ function normalizeMessageVariant(
         ? variant.errorInfo
         : undefined,
     retryInfo: normalizeProviderRetryInfo(variant.retryInfo),
+    agentMode: normalizeAgentMode(variant.agentMode),
+    routeDecision: normalizeRouteDecision(variant.routeDecision),
     modelInfo:
       variant.modelInfo &&
       typeof variant.modelInfo === 'object' &&
@@ -919,6 +1034,7 @@ function parseSettings(raw: string | null): AgentSettings {
       ...parsed,
       providerProfiles,
       activeProviderProfileId,
+      agentArchitectureMode: normalizeAgentArchitectureMode(parsed.agentArchitectureMode),
       maxSteps: normalizeMaxSteps(parsed.maxSteps),
       executionMode: normalizeExecutionMode(parsed.executionMode),
       memoryMode: normalizeMemoryMode(parsed.memoryMode),
@@ -936,6 +1052,10 @@ function parseSettings(raw: string | null): AgentSettings {
   } catch {
     return defaultSettings
   }
+}
+
+function normalizeAgentArchitectureMode(value: unknown): AgentArchitectureMode {
+  return value === 'orchestrated' ? 'orchestrated' : 'route-first'
 }
 
 function normalizeExecutionMode(value: unknown): ExecutionMode {
@@ -1231,6 +1351,8 @@ function parseSessions(raw: string | null): Session[] {
                 ? message.errorInfo
                 : undefined,
             retryInfo: normalizeProviderRetryInfo(message.retryInfo),
+            agentMode: normalizeAgentMode(message.agentMode),
+            routeDecision: normalizeRouteDecision(message.routeDecision),
             modelInfo:
               message.modelInfo &&
               typeof message.modelInfo === 'object' &&
@@ -1286,6 +1408,8 @@ function parseSessions(raw: string | null): Session[] {
             error: activeVariant.error,
             errorInfo: activeVariant.errorInfo,
             retryInfo: activeVariant.retryInfo,
+            agentMode: activeVariant.agentMode,
+            routeDecision: activeVariant.routeDecision,
             appendedInputs: activeVariant.appendedInputs,
             modelInfo: activeVariant.modelInfo,
             versions,
@@ -1453,6 +1577,8 @@ function sessionHasPendingPersistence(session: PersistedSessionRecord) {
               error: message.error,
               errorInfo: message.errorInfo,
               retryInfo: message.retryInfo,
+              agentMode: message.agentMode,
+              routeDecision: message.routeDecision,
               appendedInputs: message.appendedInputs || [],
               modelInfo: message.modelInfo,
             },
@@ -1494,6 +1620,8 @@ function persistedMessageVersions(message: PersistedSessionRecord['messages'][nu
       error: message.error,
       errorInfo: message.errorInfo,
       retryInfo: message.retryInfo,
+      agentMode: message.agentMode,
+      routeDecision: message.routeDecision,
       appendedInputs: message.appendedInputs || [],
       modelInfo: message.modelInfo,
     },

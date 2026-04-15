@@ -177,6 +177,52 @@ export type CapabilityUsageSnapshot = {
   mcpServers: CapabilityUsageEntry[]
 }
 
+export type AgentArchitectureMode = 'route-first' | 'orchestrated'
+
+export type RouteAnswerMode = 'advise' | 'diagnose' | 'execute'
+
+export type RouteCapabilityTier =
+  | 'none'
+  | 'local-readonly'
+  | 'local-write'
+  | 'web-lookup'
+  | 'browser-interactive'
+
+export type RouteEscalationTarget =
+  | 'local-write'
+  | 'web-lookup'
+  | 'browser-interactive'
+
+export type RouteBudgetSnapshot = {
+  searchesRemaining: number
+  browserEscalationsRemaining: number
+  writeEscalationsRemaining: number
+}
+
+export type RouteMountedCapabilitiesSnapshot = {
+  skills: string[]
+  plugins: string[]
+  mcpServers: string[]
+  tools: string[]
+}
+
+export type RouteDecisionSnapshot = {
+  answerMode: RouteAnswerMode
+  capabilityTier: RouteCapabilityTier
+  budgets?: RouteBudgetSnapshot
+  allowEscalationTo?: RouteEscalationTarget[]
+  availableEscalations?: RouteEscalationTarget[]
+  escalationCount?: number
+  tierHistory?: RouteCapabilityTier[]
+  stopReason?:
+    | 'completed'
+    | 'completed_with_evidence'
+    | 'no_incremental_progress'
+    | 'budget_exhausted'
+    | 'runtime_pass_limit'
+  mountedCapabilities?: RouteMountedCapabilitiesSnapshot
+}
+
 export type ResolvedSkillCapability = CapabilityUsageEntry & {
   promptPath?: string
 }
@@ -244,6 +290,8 @@ export type ChatMessageVariant = {
   retryInfo?: ProviderRetryInfo
   appendedInputs?: AppendedInput[]
   modelInfo?: MessageModelInfo
+  agentMode?: AgentArchitectureMode
+  routeDecision?: RouteDecisionSnapshot
 }
 
 export type ChatMessage = {
@@ -267,6 +315,8 @@ export type ChatMessage = {
   retryInfo?: ProviderRetryInfo
   appendedInputs?: AppendedInput[]
   modelInfo?: MessageModelInfo
+  agentMode?: AgentArchitectureMode
+  routeDecision?: RouteDecisionSnapshot
   versions?: ChatMessageVariant[]
   activeVersionIndex?: number
 }
@@ -433,6 +483,7 @@ export type AgentSettings = {
   model: string
   activeProviderProfileId: string
   providerProfiles: ProviderProfile[]
+  agentArchitectureMode: AgentArchitectureMode
   cwd: string
   maxSteps: number
   executionMode: ExecutionMode
@@ -488,6 +539,8 @@ export type AgentResponse = {
   usage?: MessageUsage
   capabilitySnapshot?: CapabilityUsageSnapshot
   retryInfo?: ProviderRetryInfo
+  agentMode?: AgentArchitectureMode
+  routeDecision?: RouteDecisionSnapshot
 }
 
 export type AgentTaskSnapshot = {
@@ -513,6 +566,8 @@ export type AgentTaskSnapshot = {
   errorCode?: string
   errorSource?: string
   rawError?: string
+  agentMode?: AgentArchitectureMode
+  routeDecision?: RouteDecisionSnapshot
 }
 
 export type WorkspaceNodeKind = 'file' | 'directory'
