@@ -93,6 +93,7 @@ function SessionRow({
   onOpenSession,
   onStartRename,
   onRequestDelete,
+  level = 0,
 }: {
   session: Session
   isActive: boolean
@@ -100,6 +101,7 @@ function SessionRow({
   onOpenSession: (sessionId: string) => void
   onStartRename: (session: Session) => void
   onRequestDelete: (session: Session) => void
+  level?: number
 }) {
   const latestMessageTimestamp = session.messages.at(-1)?.createdAt || session.updatedAt
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -109,6 +111,9 @@ function SessionRow({
     },
   })
 
+  // Level 0: top level (root), Level 1: inside folder
+  const paddingLeft = level === 0 ? 'pl-3' : 'pl-6'
+
   return (
     <div
       ref={setNodeRef}
@@ -117,56 +122,62 @@ function SessionRow({
       }}
       {...attributes}
       {...listeners}
-      className={`group relative flex cursor-grab items-center rounded-xl transition-colors active:cursor-grabbing ${isActive ? 'bg-[var(--bg-sidebar-active)]' : 'hover:bg-[rgba(0,0,0,0.03)]'
+      className={`group relative flex cursor-grab items-center rounded-lg transition-colors active:cursor-grabbing ${isActive ? 'bg-[var(--bg-sidebar-active)]' : 'hover:bg-[rgba(0,0,0,0.04)]'
         } ${isDragging ? 'z-10 opacity-45 shadow-lg' : ''}`}
     >
-      {isActive ? (
-        <div className="absolute left-0 h-full w-1 rounded-l-xl bg-[var(--bg-user-bubble)]" />
-      ) : null}
-      <button
-        className="flex flex-1 flex-col items-start overflow-hidden py-3 pl-4 pr-2 text-left"
+      {/* {isActive ? (
+        <div className="absolute left-0 h-4 w-[3px] rounded-r-full bg-[var(--bg-user-bubble)]" />
+      ) : null} */}
+
+      <div
+        className={`flex w-full min-w-0 flex-1 items-center justify-between py-2 ${paddingLeft} pr-2`}
         onClick={() => onOpenSession(session.id)}
-        title={session.title}
       >
-        <div className="mb-0.5 w-full truncate text-14px font-500 text-[var(--text-primary)]">
-          {session.title}
-        </div>
-        <div className="flex w-full items-center justify-between gap-2 text-11px text-[var(--text-secondary)] opacity-70">
-          <span>{formatConversationTimestamp(latestMessageTimestamp)}</span>
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="truncate text-13px font-500 text-[var(--text-primary)]">
+            {session.title}
+          </span>
           {isRunning ? (
             <span
-              className="h-2 w-2 shrink-0 rounded-full bg-[var(--accent-soft-strong)] animate-pulse"
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent-soft-strong)] animate-pulse"
               title="当前会话正在执行任务"
             />
           ) : null}
         </div>
-      </button>
 
-      <div className="absolute right-2 bottom-0 flex items-center gap-0.5 opacity-0 transition-all group-hover:opacity-100">
-        <button
-          className="rounded-md p-1 text-[var(--text-secondary)] hover:bg-[rgba(0,0,0,0.05)]"
-          aria-label={`重命名会话 ${session.title}`}
-          title="重命名会话"
-          onClick={event => {
-            event.stopPropagation()
-            onStartRename(session)
-          }}
-          type="button"
-        >
-          <Pencil size={14} />
-        </button>
-        <button
-          className="rounded-md p-1 text-[var(--text-secondary)] hover:bg-[rgba(255,0,0,0.05)] hover:text-red-500"
-          aria-label={`删除会话 ${session.title}`}
-          title="删除会话"
-          onClick={event => {
-            event.stopPropagation()
-            onRequestDelete(session)
-          }}
-          type="button"
-        >
-          <Trash2 size={14} />
-        </button>
+        {/* Pure Fluid Section: Dynamic width fits content, zero blank gaps */}
+        <div className="ml-1.5 flex h-6 shrink-0 items-center justify-end">
+          {/* Default view: Date */}
+          <span className="text-[10px] tracking-wide text-[var(--text-secondary)] opacity-60 group-hover:hidden">
+            {formatConversationTimestamp(latestMessageTimestamp)}
+          </span>
+
+          {/* Hover view: Action Buttons */}
+          <div className="hidden items-center gap-0.5 group-hover:flex">
+            <button
+              className="rounded-md p-1.5 text-[var(--text-secondary)] transition-colors hover:bg-[rgba(0,0,0,0.06)] hover:text-[var(--text-primary)]"
+              aria-label={`重命名会话`}
+              onClick={event => {
+                event.stopPropagation()
+                onStartRename(session)
+              }}
+              type="button"
+            >
+              <Pencil size={13} />
+            </button>
+            <button
+              className="rounded-md p-1.5 text-[var(--text-secondary)] transition-colors hover:bg-[rgba(255,0,0,0.08)] hover:text-red-600"
+              aria-label={`删除会话`}
+              onClick={event => {
+                event.stopPropagation()
+                onRequestDelete(session)
+              }}
+              type="button"
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -372,16 +383,16 @@ export function AppSidebar({
         onDragEnd={handleDragEnd}
         onDragCancel={handleDragCancel}
       >
-        <div className="custom-scrollbar flex-1 overflow-y-auto px-3 pb-3">
+        <div className="custom-scrollbar flex-1 overflow-y-auto px-2 pb-4">
           <DroppableSection
             id="ungrouped"
-            className="rounded-2xl px-1 py-1 transition-colors"
+            className="rounded-xl transition-colors mb-4"
             activeClassName="bg-[rgba(79,123,116,0.08)]"
           >
-            <div className="px-3 py-2 text-[10px] font-700 uppercase tracking-[0.14em] text-[var(--text-secondary)] opacity-70">
+            {/* <div className="px-3 py-1.5 text-[11px] font-600 text-[var(--text-secondary)] opacity-70 mb-1">
               未分组
-            </div>
-            <div className="flex flex-col gap-1">
+            </div> */}
+            <div className="flex flex-col gap-0.5">
               {ungroupedSessions.length > 0 ? (
                 ungroupedSessions.map(session => (
                   <SessionRow
@@ -392,18 +403,15 @@ export function AppSidebar({
                     onOpenSession={onOpenSession}
                     onStartRename={startRename}
                     onRequestDelete={handleSessionDeleteRequest}
+                    level={0}
                   />
                 ))
-              ) : (
-                <div className="rounded-xl px-3 py-3 text-12px text-[var(--text-secondary)] opacity-65">
-                  暂无未分组会话
-                </div>
-              )}
+              ) : null}
             </div>
           </DroppableSection>
 
           {sessionFolders.length > 0 ? (
-            <div className="mt-4 flex flex-col gap-3">
+            <div className="flex flex-col gap-2">
               {sessionFolders.map(folder => {
                 const folderSessions = sessionsByFolderId.get(folder.id) || []
 
@@ -411,38 +419,38 @@ export function AppSidebar({
                   <DroppableSection
                     key={folder.id}
                     id={`folder:${folder.id}`}
-                    className="rounded-2xl border border-[rgba(15,23,42,0.05)] bg-white/55 px-1 py-1 transition-colors"
-                    activeClassName="border-[rgba(79,123,116,0.24)] bg-[rgba(79,123,116,0.08)]"
+                    className="rounded-xl transition-colors pb-1"
+                    activeClassName="bg-[rgba(79,123,116,0.08)]"
                   >
-                    <div className="flex items-center gap-1 px-2 py-1.5">
+                    <div className="group flex items-center justify-between rounded-lg px-2 py-1.5 transition-colors hover:bg-[rgba(0,0,0,0.03)]">
                       <button
-                        className="flex min-w-0 flex-1 items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-[rgba(15,23,42,0.03)]"
+                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
                         onClick={() => onToggleSessionFolder(folder.id)}
                         title={folder.name}
                       >
                         {folder.expanded ? (
-                          <ChevronDown size={14} className="shrink-0 text-[var(--text-secondary)]" />
+                          <ChevronDown size={14} className="shrink-0 text-[var(--text-secondary)] opacity-60" />
                         ) : (
-                          <ChevronRight size={14} className="shrink-0 text-[var(--text-secondary)]" />
+                          <ChevronRight size={14} className="shrink-0 text-[var(--text-secondary)] opacity-60" />
                         )}
-                        <Folder size={14} className="shrink-0 text-[var(--accent-soft-strong)]" />
-                        <span className="truncate text-13px font-600 text-[var(--text-primary)]">
+                        <Folder size={14} className="shrink-0 text-[var(--accent-soft-strong)] opacity-80" />
+                        <span className="truncate text-12px font-600 text-[var(--text-secondary)]">
                           {folder.name}
                         </span>
-                        <span className="shrink-0 rounded-full bg-[rgba(15,23,42,0.04)] px-1.5 py-0.5 text-[10px] font-700 text-[var(--text-secondary)] opacity-70">
+                        <span className="ml-1 shrink-0 text-[10px] font-600 text-[var(--text-secondary)] opacity-50">
                           {folderSessions.length}
                         </span>
                       </button>
-                      <div className="flex items-center gap-0.5">
+                      <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                         <button
-                          className="rounded-md p-1.5 text-[var(--text-secondary)] hover:bg-[rgba(0,0,0,0.05)]"
+                          className="rounded-md p-1.5 text-[var(--text-secondary)] transition-colors hover:bg-[rgba(0,0,0,0.06)] hover:text-[var(--text-primary)]"
                           title="重命名文件夹"
                           onClick={() => startRenameFolder(folder)}
                         >
                           <Pencil size={13} />
                         </button>
                         <button
-                          className="rounded-md p-1.5 text-[var(--text-secondary)] hover:bg-[rgba(255,0,0,0.05)] hover:text-red-500"
+                          className="rounded-md p-1.5 text-[var(--text-secondary)] transition-colors hover:bg-[rgba(255,0,0,0.08)] hover:text-red-500"
                           title="删除文件夹"
                           onClick={() => setDeleteFolderId(folder.id)}
                         >
@@ -452,7 +460,7 @@ export function AppSidebar({
                     </div>
 
                     {folder.expanded ? (
-                      <div className="flex flex-col gap-1 px-1 pb-1">
+                      <div className="mt-0.5 flex flex-col gap-0.5">
                         {folderSessions.length > 0 ? (
                           folderSessions.map(session => (
                             <SessionRow
@@ -463,13 +471,10 @@ export function AppSidebar({
                               onOpenSession={onOpenSession}
                               onStartRename={startRename}
                               onRequestDelete={handleSessionDeleteRequest}
+                              level={1}
                             />
                           ))
-                        ) : (
-                          <div className="rounded-xl px-3 py-3 text-12px text-[var(--text-secondary)] opacity-65">
-                            文件夹里还没有会话
-                          </div>
-                        )}
+                        ) : null}
                       </div>
                     ) : null}
                   </DroppableSection>
