@@ -89,6 +89,7 @@ export type MessageEvent = {
   kind: MessageEventKind
   title: string
   summary: string
+  toolName?: string
   order?: number
   source?: 'builtin' | 'mcp' | 'plugin' | 'subagent'
   status: MessageEventStatus

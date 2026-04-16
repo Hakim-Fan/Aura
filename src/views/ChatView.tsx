@@ -832,18 +832,295 @@ function PhaseOutputCard({ content }: { content: string }) {
   )
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function browserTargetLabel(target: unknown) {
+  if (!isRecord(target)) {
+    return ''
+  }
+
+  const kind = typeof target.kind === 'string' ? target.kind : ''
+  const value = typeof target.value === 'string' ? target.value : ''
+  if (!kind && !value) {
+    return ''
+  }
+  return kind && value ? `${kind}: ${value}` : value || kind
+}
+
+function browserArtifactSummary(artifact: unknown) {
+  if (!isRecord(artifact)) {
+    return null
+  }
+
+  return {
+    kind: typeof artifact.kind === 'string' ? artifact.kind : 'artifact',
+    summary: typeof artifact.summary === 'string' ? artifact.summary : '',
+    savedTo: typeof artifact.savedTo === 'string' ? artifact.savedTo : '',
+    sessionId: typeof artifact.sessionId === 'string' ? artifact.sessionId : '',
+  }
+}
+
+function BrowserStructuredEventCard({
+  event,
+  output,
+  onCopyText,
+}: {
+  event: MessageEvent
+  output: Record<string, unknown>
+  onCopyText?: (value: string) => void
+}) {
+  const snapshot = isRecord(output.snapshot) ? output.snapshot : null
+  const receipt = isRecord(output.receipt) ? output.receipt : null
+  const blocker = isRecord(output.blocker) ? output.blocker : null
+  const inspectedElement = isRecord(output.inspectedElement) ? output.inspectedElement : null
+  const storage = isRecord(output.storage) ? output.storage : null
+  const trace = isRecord(output.trace) ? output.trace : null
+  const video = isRecord(output.video) ? output.video : null
+  const consoleEntries = Array.isArray(output.console) ? output.console.slice(0, 6) : []
+  const networkEntries = Array.isArray(output.network) ? output.network.slice(0, 6) : []
+  const sessions = Array.isArray(output.sessions) ? output.sessions.slice(0, 6) : []
+  const refs = Array.isArray(snapshot?.refs) ? snapshot.refs.slice(0, 8) : []
+  const artifacts = Array.isArray(output.artifacts)
+    ? output.artifacts.map(browserArtifactSummary).filter(Boolean)
+    : []
+
+  const sessionLabel =
+    typeof output.sessionLabel === 'string' && output.sessionLabel
+      ? output.sessionLabel
+      : typeof output.sessionId === 'string'
+        ? output.sessionId
+        : ''
+  const modeLabel =
+    output.visible === true ? 'visible' : output.headless === true ? 'headless' : ''
+
+  return (
+    <div className="mt-2 flex flex-col gap-2 rounded-xl border border-[rgba(79,123,116,0.12)] bg-[rgba(79,123,116,0.05)] p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        {sessionLabel ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-white/85 px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Session
+            <span className="normal-case tracking-normal text-[var(--text-primary)]">{sessionLabel}</span>
+          </span>
+        ) : null}
+        {modeLabel ? (
+          <span className="rounded-full bg-[rgba(15,23,42,0.05)] px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--text-secondary)]">
+            {modeLabel}
+          </span>
+        ) : null}
+        {typeof output.url === 'string' && output.url ? (
+          <span className="max-w-full truncate text-[11px] text-[var(--text-secondary)]">{output.url}</span>
+        ) : null}
+      </div>
+
+      {receipt ? (
+        <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
+          <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Receipt
+          </div>
+          <div className="text-[12px] leading-relaxed text-[var(--text-primary)]">
+            {typeof receipt.action === 'string' ? receipt.action : 'action'}
+            {browserTargetLabel(receipt.target) ? ` · ${browserTargetLabel(receipt.target)}` : ''}
+            {receipt.success === true ? ' · success' : ''}
+            {receipt.snapshotChanged === true ? ' · page changed' : ''}
+          </div>
+          {(typeof receipt.urlAfter === 'string' && receipt.urlAfter) ||
+          (typeof receipt.titleAfter === 'string' && receipt.titleAfter) ? (
+            <div className="mt-1 text-[11px] text-[var(--text-secondary)]">
+              {typeof receipt.titleAfter === 'string' && receipt.titleAfter ? receipt.titleAfter : ''}
+              {typeof receipt.urlAfter === 'string' && receipt.urlAfter ? ` · ${receipt.urlAfter}` : ''}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {blocker?.detected === true ? (
+        <div className="rounded-lg border border-amber-200 bg-[rgba(255,248,235,0.88)] px-3 py-2 text-[12px] leading-relaxed text-amber-800">
+          {typeof blocker.reason === 'string' && blocker.reason ? blocker.reason : '检测到浏览器阻塞。'}
+        </div>
+      ) : null}
+
+      {snapshot ? (
+        <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
+          <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Snapshot
+          </div>
+          <div className="mb-2 text-[11px] text-[var(--text-secondary)]">
+            {typeof snapshot.mode === 'string' ? snapshot.mode : 'snapshot'}
+            {typeof snapshot.refs === 'object' && Array.isArray(snapshot.refs) ? ` · ${snapshot.refs.length} refs` : ''}
+          </div>
+          {refs.length > 0 ? (
+            <div className="flex flex-col gap-1.5">
+              {refs.map((entry, index) => {
+                if (!isRecord(entry)) {
+                  return null
+                }
+                const ref = typeof entry.ref === 'string' ? entry.ref : `ref-${index}`
+                const summary =
+                  (typeof entry.label === 'string' && entry.label) ||
+                  (typeof entry.text === 'string' && entry.text) ||
+                  (typeof entry.placeholder === 'string' && entry.placeholder) ||
+                  (typeof entry.href === 'string' && entry.href) ||
+                  ''
+                return (
+                  <div key={`${ref}-${index}`} className="flex items-start gap-2 rounded-md bg-[rgba(15,23,42,0.03)] px-2 py-1.5">
+                    <code className="shrink-0 text-[10px] text-[var(--accent-soft-strong)]">{ref}</code>
+                    <div className="min-w-0 text-[11px] text-[var(--text-primary)]">
+                      <div>
+                        {typeof entry.tag === 'string' ? `<${entry.tag}>` : 'element'}
+                        {typeof entry.role === 'string' && entry.role ? ` · ${entry.role}` : ''}
+                      </div>
+                      {summary ? (
+                        <div className="truncate text-[var(--text-secondary)]">{summary}</div>
+                      ) : null}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {inspectedElement ? (
+        <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
+          <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Element
+          </div>
+          <div className="text-[12px] text-[var(--text-primary)]">
+            {typeof inspectedElement.tag === 'string' ? `<${inspectedElement.tag}>` : 'element'}
+            {typeof inspectedElement.ref === 'string' ? ` · ${inspectedElement.ref}` : ''}
+          </div>
+          {typeof inspectedElement.text === 'string' && inspectedElement.text ? (
+            <div className="mt-1 text-[11px] text-[var(--text-secondary)]">{inspectedElement.text}</div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {Array.isArray(sessions) && sessions.length > 0 ? (
+        <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
+          <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Sessions
+          </div>
+          <div className="flex flex-col gap-1">
+            {sessions.map((entry, index) => {
+              if (!isRecord(entry)) {
+                return null
+              }
+              return (
+                <div key={index} className="text-[11px] text-[var(--text-primary)]">
+                  {typeof entry.id === 'string' ? entry.id : 'session'}
+                  {entry.active === true ? ' · active' : ''}
+                  {typeof entry.activePageTitle === 'string' && entry.activePageTitle ? ` · ${entry.activePageTitle}` : ''}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      {storage ? (
+        <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
+          <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Storage
+          </div>
+          <pre className="whitespace-pre-wrap text-[11px] leading-relaxed text-[var(--text-secondary)]">
+            {JSON.stringify(storage, null, 2)}
+          </pre>
+        </div>
+      ) : null}
+
+      {consoleEntries.length > 0 ? (
+        <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
+          <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Console
+          </div>
+          <div className="flex flex-col gap-1">
+            {consoleEntries.map((entry, index) => (
+              <div key={index} className="text-[11px] text-[var(--text-secondary)]">
+                {isRecord(entry) && typeof entry.type === 'string' ? `${entry.type}: ` : ''}
+                {isRecord(entry) && typeof entry.text === 'string' ? entry.text : ''}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {networkEntries.length > 0 ? (
+        <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
+          <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Network
+          </div>
+          <div className="flex flex-col gap-1">
+            {networkEntries.map((entry, index) => (
+              <div key={index} className="text-[11px] text-[var(--text-secondary)]">
+                {isRecord(entry) && typeof entry.status === 'number' ? `${entry.status} · ` : ''}
+                {isRecord(entry) && typeof entry.method === 'string' ? `${entry.method} · ` : ''}
+                {isRecord(entry) && typeof entry.url === 'string' ? entry.url : ''}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {trace || video || artifacts.length > 0 ? (
+        <div className="rounded-lg border border-white/80 bg-white/80 px-3 py-2">
+          <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Artifacts
+          </div>
+          {trace ? (
+            <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
+              Trace {trace.active === true ? 'running' : 'saved'}
+              {typeof trace.savedTo === 'string' && trace.savedTo ? ` · ${trace.savedTo}` : ''}
+            </div>
+          ) : null}
+          {video ? (
+            <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
+              Video {video.active === true ? 'recording' : 'saved'}
+              {Array.isArray(video.files) && video.files.length > 0 ? ` · ${video.files.length} file(s)` : ''}
+            </div>
+          ) : null}
+          {artifacts.map((artifact, index) => (
+            <div key={`${artifact?.kind || 'artifact'}-${index}`} className="mb-1 last:mb-0 flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">
+              <span className="rounded-full bg-[rgba(15,23,42,0.05)] px-1.5 py-0.5 text-[10px] uppercase">{artifact?.kind}</span>
+              <span className="truncate">{artifact?.summary || artifact?.savedTo}</span>
+              {artifact?.savedTo ? (
+                <button
+                  className="rounded-md px-1.5 py-0.5 text-[10px] text-[var(--accent-soft-strong)] hover:bg-[rgba(79,123,116,0.08)]"
+                  onClick={() => onCopyText?.(artifact.savedTo)}
+                  type="button"
+                >
+                  复制路径
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function MessageEventCard({
   event,
   onHandleApproval,
   onCancelCurrentStep,
+  onCopyText,
 }: {
   event: MessageEvent
   onHandleApproval?: (decision: 'approve' | 'deny') => void
   onCancelCurrentStep?: () => void
+  onCopyText?: (value: string) => void
 }) {
   const isShellLog = event.kind === 'shell'
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
   const isApproval = event.kind === 'approval' && event.status === 'awaiting_approval'
+  const parsedOutput = parseJsonOutput(event.output)
+  const isStructuredBrowserEvent =
+    typeof event.toolName === 'string' &&
+    event.toolName.startsWith('browser_') &&
+    Boolean(parsedOutput)
   const failureSummary =
     event.status === 'error'
       ? event.errorInfo?.summary || summarizeFailureReason(event.error || event.output || event.summary)
@@ -905,6 +1182,9 @@ function MessageEventCard({
         </div>
       </div>
       <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
+      {!isApproval && isStructuredBrowserEvent && parsedOutput ? (
+        <BrowserStructuredEventCard event={event} output={parsedOutput} onCopyText={onCopyText} />
+      ) : null}
       {isApproval ? (
         <div className="mt-2 rounded-xl border border-amber-200 bg-white p-3">
           {event.input ? (
@@ -1934,6 +2214,7 @@ function AssistantMessageCard({
                       event={item.event}
                       onHandleApproval={onHandleApproval}
                       onCancelCurrentStep={onCancelCurrentStep}
+                      onCopyText={onCopyText}
                     />
                   ),
                 )}

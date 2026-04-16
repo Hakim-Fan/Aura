@@ -562,6 +562,7 @@ function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
     kind,
     title: presentToolEventTitle(event),
     summary: event.summary,
+    toolName: event.name,
     order: event.order,
     source: event.source,
     status:
@@ -951,6 +952,9 @@ export function MainWindowApp() {
       } finally {
         if (!cancelled) {
           setStorageReady(true)
+          // Dismiss splash screen after hydration is complete.
+          // __dismissSplash enforces min display time + double-rAF paint verification.
+          ;(window as unknown as { __dismissSplash?: () => void }).__dismissSplash?.()
         }
       }
     })()
