@@ -1,4 +1,5 @@
 import type {
+  AgentArchitectureMode,
   AgentSettings,
   BrowserBehaviorPreferences,
   BrowserRuntimeSettings,
@@ -6,10 +7,11 @@ import type {
   BrowserSearchPreferences,
   CapabilityOverrideMode,
   CapabilityUsageSnapshot,
-  AgentArchitectureMode,
   ChatMessageVariant,
   ChromeImportSource,
+  CompletionState,
   ExecutionMode,
+  ExecutionEvidenceSummary,
   ImportedChromeSite,
   MemoryMode,
   ProjectCapabilityOverrides,
@@ -323,6 +325,92 @@ function normalizeAgentMode(value: unknown): AgentArchitectureMode | undefined {
   return value === 'route-first' || value === 'orchestrated' ? value : undefined
 }
 
+function normalizeCompletionState(value: unknown): CompletionState | undefined {
+  return value === 'not_executed' ||
+    value === 'executed_unverified' ||
+    value === 'executed_verified' ||
+    value === 'blocked_by_approval' ||
+    value === 'blocked_by_capability' ||
+    value === 'failed_after_execution'
+    ? value
+    : undefined
+}
+
+function normalizeEvidenceSummary(value: unknown): ExecutionEvidenceSummary | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const summary = value as Partial<ExecutionEvidenceSummary>
+  const records = Array.isArray(summary.records)
+    ? summary.records
+        .map(record => {
+          if (!record || typeof record !== 'object') {
+            return null
+          }
+
+          return {
+            toolName: typeof record.toolName === 'string' ? record.toolName : '',
+            source:
+              record.source === 'builtin' ||
+              record.source === 'plugin' ||
+              record.source === 'mcp' ||
+              record.source === 'subagent'
+                ? record.source
+                : 'builtin',
+            status:
+              record.status === 'success' ||
+              record.status === 'error' ||
+              record.status === 'denied'
+                ? record.status
+                : 'success',
+            effectTypes: Array.isArray(record.effectTypes)
+              ? record.effectTypes.filter(
+                  (entry): entry is NonNullable<typeof record.effectTypes>[number] =>
+                    entry === 'read' ||
+                    entry === 'write' ||
+                    entry === 'execute' ||
+                    entry === 'browser' ||
+                    entry === 'plan',
+                )
+              : [],
+            producedEvidence: Array.isArray(record.producedEvidence)
+              ? record.producedEvidence.filter(
+                  (entry): entry is NonNullable<typeof record.producedEvidence>[number] =>
+                    entry === 'file_mutation' ||
+                    entry === 'command_exit_0' ||
+                    entry === 'command_output' ||
+                    entry === 'test_pass' ||
+                    entry === 'test_fail' ||
+                    entry === 'page_state' ||
+                    entry === 'search_result' ||
+                    entry === 'user_denied',
+                )
+              : [],
+            verificationLevel:
+              record.verificationLevel === 'none' ||
+              record.verificationLevel === 'partial' ||
+              record.verificationLevel === 'verified'
+                ? record.verificationLevel
+                : 'none',
+            detail: typeof record.detail === 'string' ? record.detail : undefined,
+          }
+        })
+        .filter((record): record is NonNullable<typeof record> => Boolean(record))
+    : []
+
+  return {
+    records,
+    hasAnyExecution: summary.hasAnyExecution === true,
+    hasWriteEffect: summary.hasWriteEffect === true,
+    hasBrowserEffect: summary.hasBrowserEffect === true,
+    hasVerifiedEvidence: summary.hasVerifiedEvidence === true,
+    hasApprovalBlock: summary.hasApprovalBlock === true,
+    hasCapabilityBlock: summary.hasCapabilityBlock === true,
+    hasExecutionFailure: summary.hasExecutionFailure === true,
+  }
+}
+
 function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefined {
   if (!value || typeof value !== 'object') {
     return undefined
@@ -633,6 +721,10 @@ function normalizeMessageVariant(
     retryInfo: normalizeProviderRetryInfo(variant.retryInfo),
     agentMode: normalizeAgentMode(variant.agentMode),
     routeDecision: normalizeRouteDecision(variant.routeDecision),
+    completionState: normalizeCompletionState(variant.completionState),
+    evidenceSummary: normalizeEvidenceSummary(variant.evidenceSummary),
+    deliveryNote:
+      typeof variant.deliveryNote === 'string' ? variant.deliveryNote : undefined,
     modelInfo:
       variant.modelInfo &&
       typeof variant.modelInfo === 'object' &&

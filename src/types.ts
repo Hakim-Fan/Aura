@@ -223,6 +223,44 @@ export type RouteDecisionSnapshot = {
   mountedCapabilities?: RouteMountedCapabilitiesSnapshot
 }
 
+export type CompletionState =
+  | 'not_executed'
+  | 'executed_unverified'
+  | 'executed_verified'
+  | 'blocked_by_approval'
+  | 'blocked_by_capability'
+  | 'failed_after_execution'
+
+export type EvidenceRecord = {
+  toolName: string
+  source: 'builtin' | 'plugin' | 'mcp' | 'subagent'
+  status: 'success' | 'error' | 'denied'
+  effectTypes: Array<'read' | 'write' | 'execute' | 'browser' | 'plan'>
+  producedEvidence: Array<
+    | 'file_mutation'
+    | 'command_exit_0'
+    | 'command_output'
+    | 'test_pass'
+    | 'test_fail'
+    | 'page_state'
+    | 'search_result'
+    | 'user_denied'
+  >
+  verificationLevel: 'none' | 'partial' | 'verified'
+  detail?: string
+}
+
+export type ExecutionEvidenceSummary = {
+  records: EvidenceRecord[]
+  hasAnyExecution: boolean
+  hasWriteEffect: boolean
+  hasBrowserEffect: boolean
+  hasVerifiedEvidence: boolean
+  hasApprovalBlock: boolean
+  hasCapabilityBlock: boolean
+  hasExecutionFailure: boolean
+}
+
 export type ResolvedSkillCapability = CapabilityUsageEntry & {
   promptPath?: string
 }
@@ -292,6 +330,9 @@ export type ChatMessageVariant = {
   modelInfo?: MessageModelInfo
   agentMode?: AgentArchitectureMode
   routeDecision?: RouteDecisionSnapshot
+  completionState?: CompletionState
+  evidenceSummary?: ExecutionEvidenceSummary
+  deliveryNote?: string
 }
 
 export type ChatMessage = {
@@ -317,6 +358,9 @@ export type ChatMessage = {
   modelInfo?: MessageModelInfo
   agentMode?: AgentArchitectureMode
   routeDecision?: RouteDecisionSnapshot
+  completionState?: CompletionState
+  evidenceSummary?: ExecutionEvidenceSummary
+  deliveryNote?: string
   versions?: ChatMessageVariant[]
   activeVersionIndex?: number
 }
@@ -541,6 +585,9 @@ export type AgentResponse = {
   retryInfo?: ProviderRetryInfo
   agentMode?: AgentArchitectureMode
   routeDecision?: RouteDecisionSnapshot
+  completionState?: CompletionState
+  evidenceSummary?: ExecutionEvidenceSummary
+  deliveryNote?: string
 }
 
 export type AgentTaskSnapshot = {
@@ -568,6 +615,9 @@ export type AgentTaskSnapshot = {
   rawError?: string
   agentMode?: AgentArchitectureMode
   routeDecision?: RouteDecisionSnapshot
+  completionState?: CompletionState
+  evidenceSummary?: ExecutionEvidenceSummary
+  deliveryNote?: string
 }
 
 export type WorkspaceNodeKind = 'file' | 'directory'

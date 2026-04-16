@@ -15,6 +15,7 @@ import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mj
 
 const execFileAsync = promisify(execFile)
 const ALWAYS_ON_SKILL_IDS = new Set([
+  'aura-browser-operator',
   'desktop-operator',
   'repair-planner',
   'repo-reviewer',

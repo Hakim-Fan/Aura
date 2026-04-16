@@ -1,5 +1,6 @@
 import { invokeTool } from './tools.mjs'
 import { createStructuredError } from './runtimeErrors.mjs'
+import { buildDeliveryPolicy } from './agentEvidence.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
 
 function flattenOpenAiMessageContent(content) {
@@ -203,7 +204,13 @@ function appendQueuedInputsToGeminiTranscript(transcript, messages, hooks) {
   return queuedInputs.length
 }
 
-function buildFinalizerPrompt({ toolEvents, reasoningText, draftMessage }) {
+function buildFinalizerPrompt({
+  toolEvents,
+  reasoningText,
+  draftMessage,
+  completionState,
+  deliveryPolicy,
+}) {
   const toolDigest = toolEvents
     .slice(-8)
     .map(event => {
@@ -220,6 +227,10 @@ function buildFinalizerPrompt({ toolEvents, reasoningText, draftMessage }) {
     '请基于当前对话和以下执行结果，直接输出给用户的最终回答。',
     '不要继续思考，不要调用工具，不要输出 <think> 标签。',
     '如果前面已经写了一句开场白，请直接补成完整、可交付的最终回答。',
+    completionState ? `System completion state: ${completionState}` : null,
+    deliveryPolicy?.allowedWording
+      ? `Allowed wording: ${deliveryPolicy.allowedWording}`
+      : null,
     draftMessage?.trim() ? `当前已有但不完整的回答：\n${draftMessage}` : null,
     toolDigest ? `本轮工具结果摘要：\n${toolDigest}` : null,
     reasoningText?.trim() ? `本轮原始思考流（仅供你整理最终回答，不要照抄）：\n${reasoningText.slice(0, 6000)}` : null,
@@ -942,6 +953,8 @@ export async function finalizeOpenAiCompatibleAnswer({
   toolEvents,
   reasoningText,
   draftMessage,
+  completionState,
+  deliveryPolicy = completionState ? buildDeliveryPolicy(completionState) : undefined,
   stage = 'finalization',
 }) {
   const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
@@ -963,6 +976,8 @@ export async function finalizeOpenAiCompatibleAnswer({
           toolEvents,
           reasoningText,
           draftMessage,
+          completionState,
+          deliveryPolicy,
         }),
       },
     ])
@@ -1019,6 +1034,8 @@ export async function finalizeGoogleAnswer({
   toolEvents,
   reasoningText,
   draftMessage,
+  completionState,
+  deliveryPolicy = completionState ? buildDeliveryPolicy(completionState) : undefined,
   stage = 'finalization',
 }) {
   const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
@@ -1055,6 +1072,8 @@ export async function finalizeGoogleAnswer({
                 toolEvents,
                 reasoningText,
                 draftMessage,
+                completionState,
+                deliveryPolicy,
               }),
             },
           ]),

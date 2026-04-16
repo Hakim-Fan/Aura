@@ -42,6 +42,12 @@ struct AgentTaskSnapshot {
     agent_mode: Option<String>,
     #[serde(rename = "routeDecision")]
     route_decision: Option<serde_json::Value>,
+    #[serde(rename = "completionState")]
+    completion_state: Option<String>,
+    #[serde(rename = "evidenceSummary")]
+    evidence_summary: Option<serde_json::Value>,
+    #[serde(rename = "deliveryNote")]
+    delivery_note: Option<String>,
     #[serde(rename = "retryInfo")]
     retry_info: Option<serde_json::Value>,
     phase: Option<String>,
@@ -1721,6 +1727,9 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               appended_inputs_json TEXT NOT NULL,
               agent_mode TEXT,
               route_decision_json TEXT,
+              completion_state TEXT,
+              evidence_summary_json TEXT,
+              delivery_note TEXT,
               model_info_json TEXT,
               UNIQUE(message_id, version_index),
               FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
@@ -1788,6 +1797,42 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
         if !message.contains("duplicate column name") {
             return Err(format!(
                 "Failed to migrate SQLite message_versions route_decision_json column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN completion_state TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions completion_state column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN evidence_summary_json TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions evidence_summary_json column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN delivery_note TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions delivery_note column: {error}"
             ));
         }
     }
@@ -2363,6 +2408,9 @@ fn spawn_agent_task<R: Runtime>(
         capability_snapshot: None,
         agent_mode: None,
         route_decision: None,
+        completion_state: None,
+        evidence_summary: None,
+        delivery_note: None,
         retry_info: None,
         phase: Some("preparing".into()),
         phase_started_at: None,
@@ -2547,6 +2595,15 @@ fn spawn_agent_task<R: Runtime>(
                             .and_then(|value| value.as_str())
                             .map(|value| value.to_string());
                         current.route_decision = extract_object(result.get("routeDecision"));
+                        current.completion_state = result
+                            .get("completionState")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string());
+                        current.evidence_summary = extract_object(result.get("evidenceSummary"));
+                        current.delivery_note = result
+                            .get("deliveryNote")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string());
                         current.retry_info = extract_object(result.get("retryInfo"));
                     }
                 }),
@@ -2563,6 +2620,15 @@ fn spawn_agent_task<R: Runtime>(
                         .and_then(|value| value.as_str())
                         .map(|value| value.to_string());
                     current.route_decision = extract_object(event.get("routeDecision"));
+                    current.completion_state = event
+                        .get("completionState")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    current.evidence_summary = extract_object(event.get("evidenceSummary"));
+                    current.delivery_note = event
+                        .get("deliveryNote")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
                     current.error_code = event
                         .get("code")
                         .and_then(|value| value.as_str())
@@ -3014,7 +3080,7 @@ fn load_persisted_app_state<R: Runtime>(
                 .prepare(
                     "SELECT version_index, content, parts_json, status, created_at, attachments_json, reasoning_json, usage_json,
                             capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json, appended_inputs_json,
-                            agent_mode, route_decision_json, model_info_json
+                            agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json
                      FROM message_versions
                      WHERE message_id = ?1
                      ORDER BY version_index ASC",
@@ -3040,7 +3106,10 @@ fn load_persisted_app_state<R: Runtime>(
                         "appendedInputs": parse_json_array_column(row.get::<_, String>(14)?),
                         "agentMode": row.get::<_, Option<String>>(15)?,
                         "routeDecision": parse_json_object_column(row.get::<_, Option<String>>(16)?),
-                        "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(17)?),
+                        "completionState": row.get::<_, Option<String>>(17)?,
+                        "evidenceSummary": parse_json_object_column(row.get::<_, Option<String>>(18)?),
+                        "deliveryNote": row.get::<_, Option<String>>(19)?,
+                        "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(20)?),
                     }))
                 })
                 .map_err(|error| format!("Failed to read message versions from SQLite: {error}"))?;
@@ -3229,8 +3298,8 @@ fn upsert_message_version_sqlite<R: Runtime>(
             "INSERT INTO message_versions (
                 id, message_id, version_index, content, parts_json, status, created_at, attachments_json, reasoning_json,
                 usage_json, capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json,
-                appended_inputs_json, agent_mode, route_decision_json, model_info_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                appended_inputs_json, agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
              ON CONFLICT(message_id, version_index) DO UPDATE SET
                 content = excluded.content,
                 parts_json = excluded.parts_json,
@@ -3248,6 +3317,9 @@ fn upsert_message_version_sqlite<R: Runtime>(
                 appended_inputs_json = excluded.appended_inputs_json,
                 agent_mode = excluded.agent_mode,
                 route_decision_json = excluded.route_decision_json,
+                completion_state = excluded.completion_state,
+                evidence_summary_json = excluded.evidence_summary_json,
+                delivery_note = excluded.delivery_note,
                 model_info_json = excluded.model_info_json",
             params![
                 version_id,
@@ -3288,6 +3360,16 @@ fn upsert_message_version_sqlite<R: Runtime>(
                         Some(value_to_json_string(&route_decision)?)
                     }
                 },
+                version.get("completionState").and_then(|value| value.as_str()),
+                {
+                    let evidence_summary = get_json_object_field(&version, "evidenceSummary");
+                    if evidence_summary.is_null() {
+                        None
+                    } else {
+                        Some(value_to_json_string(&evidence_summary)?)
+                    }
+                },
+                version.get("deliveryNote").and_then(|value| value.as_str()),
                 {
                     let model_info = get_json_object_field(&version, "modelInfo");
                     if model_info.is_null() { None } else { Some(value_to_json_string(&model_info)?) }

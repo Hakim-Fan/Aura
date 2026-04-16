@@ -29,7 +29,12 @@ import {
   determineRouteStopReason,
   summarizeRouteTurn,
 } from './agentGovernor.mjs'
-import { enforceEvidencePolicy } from './agentEvidence.mjs'
+import {
+  buildDeliveryPolicy,
+  collectEvidenceFromToolEvents,
+  deriveCompletionState,
+  enforceEvidencePolicy,
+} from './agentEvidence.mjs'
 import { runOrchestratedAgent } from './agentModes/orchestrated.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -127,6 +132,34 @@ function appendRouteNotesToPrompt(systemPrompt, routeNotes) {
   }
 
   return [systemPrompt, ...routeNotes.slice(-2)].join('\n\n')
+}
+
+function buildRuntimeBlocks(routeStopReason) {
+  return {
+    hasCapabilityBlock:
+      routeStopReason === 'budget_exhausted' || routeStopReason === 'runtime_pass_limit',
+  }
+}
+
+function buildCompletionContext(routeState, toolEvents, runtimeBlocks = {}) {
+  const evidenceSummary = collectEvidenceFromToolEvents(toolEvents)
+  const mergedEvidenceSummary = {
+    ...evidenceSummary,
+    hasApprovalBlock:
+      runtimeBlocks.hasApprovalBlock === true || evidenceSummary.hasApprovalBlock,
+    hasCapabilityBlock:
+      runtimeBlocks.hasCapabilityBlock === true || evidenceSummary.hasCapabilityBlock,
+  }
+  const completionState = deriveCompletionState(
+    routeState,
+    mergedEvidenceSummary,
+    runtimeBlocks,
+  )
+  return {
+    completionState,
+    evidenceSummary: mergedEvidenceSummary,
+    deliveryPolicy: buildDeliveryPolicy(completionState),
+  }
 }
 
 function buildRouteDecisionSnapshot({
@@ -446,6 +479,7 @@ async function runProviderTurn({
   messages,
   tools,
   toolEvents,
+  routeState,
   hooks,
   taskTracker,
   currentTaskId,
@@ -471,6 +505,7 @@ async function runProviderTurn({
 
     if (shouldRunFinalization(result)) {
       try {
+        const completionContext = buildCompletionContext(routeState, toolEvents)
         hooks?.onPhaseChange?.('finalizing')
         const finalized = await finalizeGoogleAnswer({
           settings,
@@ -479,6 +514,8 @@ async function runProviderTurn({
           toolEvents,
           reasoningText: extractProviderReasoning(result.reasoning || []),
           draftMessage: result.message,
+          completionState: completionContext.completionState,
+          deliveryPolicy: completionContext.deliveryPolicy,
           stage: 'finalization',
         })
         if (finalized.message.trim()) {
@@ -513,6 +550,7 @@ async function runProviderTurn({
 
     if (shouldRunFinalization(result)) {
       try {
+        const completionContext = buildCompletionContext(routeState, toolEvents)
         hooks?.onPhaseChange?.('finalizing')
         const finalized = await finalizeOpenAiCompatibleAnswer({
           settings,
@@ -521,6 +559,8 @@ async function runProviderTurn({
           toolEvents,
           reasoningText: extractProviderReasoning(result.reasoning || []),
           draftMessage: result.message,
+          completionState: completionContext.completionState,
+          deliveryPolicy: completionContext.deliveryPolicy,
           stage: 'finalization',
         })
         if (finalized.message.trim()) {
@@ -834,6 +874,7 @@ export async function runRouteFirstAgent(request) {
           messages,
           tools: allTools,
           toolEvents,
+          routeState: promptRouteState,
           hooks: {
             ...hooks,
             rethrowToolError(error) {
@@ -871,11 +912,7 @@ export async function runRouteFirstAgent(request) {
         throw error
       }
 
-      let result = enforceEvidencePolicy(
-        turnResult.result,
-        toolEvents,
-        promptRouteState,
-      )
+      let result = turnResult.result
       const desiredEscalation = inferRouteEscalationFromMessage(
         result.message,
         routeState.allowEscalationTo,
@@ -905,6 +942,9 @@ export async function runRouteFirstAgent(request) {
         }
       }
 
+      const runtimeBlocks = buildRuntimeBlocks(routeStopReason)
+      result = enforceEvidencePolicy(result, toolEvents, promptRouteState, runtimeBlocks)
+
       routeHistory.push(turnSummary)
       lastRouteDecision = buildRouteDecisionSnapshot({
         routeState: promptRouteState,
@@ -915,7 +955,8 @@ export async function runRouteFirstAgent(request) {
         tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),
         stopReason:
           routeStopReason ||
-          (toolEvents.length > 0 && routeState.completionPolicy?.requiresEvidenceForDone
+          (result.completionState === 'executed_verified' &&
+          routeState.completionPolicy?.requiresEvidenceForDone
             ? 'completed_with_evidence'
             : 'completed'),
       })
@@ -990,6 +1031,11 @@ export async function runRouteFirstAgent(request) {
       hasRecoveryContext
     ) {
       let recoveryRetryInfo
+      const recoveryCompletionContext = buildCompletionContext(
+        routeState,
+        toolEvents,
+        buildRuntimeBlocks(lastRouteDecision?.stopReason),
+      )
       try {
         hooks?.onPhaseChange?.('recovering')
         const recovered =
@@ -1001,6 +1047,8 @@ export async function runRouteFirstAgent(request) {
                 toolEvents,
                 reasoningText: partialReasoning,
                 draftMessage: partialMessage,
+                completionState: recoveryCompletionContext.completionState,
+                deliveryPolicy: recoveryCompletionContext.deliveryPolicy,
                 stage: 'recovery',
               })
             : await finalizeOpenAiCompatibleAnswer({
@@ -1010,10 +1058,18 @@ export async function runRouteFirstAgent(request) {
                 toolEvents,
                 reasoningText: partialReasoning,
                 draftMessage: partialMessage,
+                completionState: recoveryCompletionContext.completionState,
+                deliveryPolicy: recoveryCompletionContext.deliveryPolicy,
                 stage: 'recovery',
               })
 
         if (recovered.message.trim()) {
+          const recoveredResult = enforceEvidencePolicy(
+            recovered,
+            toolEvents,
+            routeState,
+            buildRuntimeBlocks(lastRouteDecision?.stopReason),
+          )
           const summaryReasoning = summarizeReasoning(messages, toolEvents, recovered.message)
           hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
             blockId: summaryReasoning[0].id,
@@ -1021,7 +1077,7 @@ export async function runRouteFirstAgent(request) {
           })
           taskTracker.completeTask(currentTaskId, '生成最终回答')
           return {
-            message: recovered.message,
+            ...recoveredResult,
             toolEvents,
             agentMode: 'route-first',
             routeDecision: lastRouteDecision,
@@ -1048,6 +1104,12 @@ export async function runRouteFirstAgent(request) {
         normalized,
         partialMessage,
       )
+      const fallbackResult = enforceEvidencePolicy(
+        { message: fallbackMessage },
+        toolEvents,
+        routeState,
+        buildRuntimeBlocks(lastRouteDecision?.stopReason),
+      )
       const summaryReasoning = summarizeReasoning(messages, toolEvents, fallbackMessage)
       hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
         blockId: summaryReasoning[0].id,
@@ -1055,7 +1117,7 @@ export async function runRouteFirstAgent(request) {
       })
       taskTracker.completeTask(currentTaskId, '生成部分恢复回答')
       return {
-        message: fallbackMessage,
+        ...fallbackResult,
         toolEvents,
         agentMode: 'route-first',
         routeDecision: lastRouteDecision,

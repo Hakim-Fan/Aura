@@ -52,6 +52,7 @@ import type {
   CapabilityUsageSnapshot,
   ChatMessage,
   ChatMessageVariant,
+  CompletionState,
   MessageAttachment,
   MessageEvent,
   MessagePhaseOutput,
@@ -498,6 +499,42 @@ function buildRouteTooltip(routeDecision?: RouteDecisionSnapshot) {
   ]
     .filter(Boolean)
     .join('\n')
+}
+
+function completionStateLabel(completionState?: CompletionState) {
+  switch (completionState) {
+    case 'not_executed':
+      return '未执行'
+    case 'executed_unverified':
+      return '已执行未验证'
+    case 'executed_verified':
+      return '已验证完成'
+    case 'blocked_by_approval':
+      return '等待审批'
+    case 'blocked_by_capability':
+      return '能力受限'
+    case 'failed_after_execution':
+      return '执行失败'
+    default:
+      return ''
+  }
+}
+
+function completionStateTone(completionState?: CompletionState) {
+  switch (completionState) {
+    case 'executed_verified':
+      return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    case 'executed_unverified':
+      return 'border-amber-200 bg-amber-50 text-amber-700'
+    case 'blocked_by_approval':
+    case 'blocked_by_capability':
+      return 'border-orange-200 bg-orange-50 text-orange-700'
+    case 'failed_after_execution':
+      return 'border-red-200 bg-red-50 text-red-700'
+    case 'not_executed':
+    default:
+      return 'border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.03)] text-[var(--text-secondary)]'
+  }
 }
 
 function eventKindLabel(event: MessageEvent) {
@@ -1714,6 +1751,25 @@ function AssistantMessageCard({
   const retrySummary = formatRetryLabel(message.retryInfo, false)
   const routeSummary = buildRouteSummary(message.routeDecision)
   const routeTooltip = buildRouteTooltip(message.routeDecision)
+  const shouldShowCompletionState =
+    Boolean(message.completionState) &&
+    (message.routeDecision?.answerMode === 'execute' ||
+      message.completionState !== 'not_executed')
+  const completionSummary = shouldShowCompletionState
+    ? completionStateLabel(message.completionState)
+    : ''
+  const completionTooltip = message.evidenceSummary
+    ? [
+        `完成态：${completionSummary || message.completionState}`,
+        `执行：${message.evidenceSummary.hasAnyExecution ? '是' : '否'}`,
+        `验证证据：${message.evidenceSummary.hasVerifiedEvidence ? '有' : '无'}`,
+        `审批阻塞：${message.evidenceSummary.hasApprovalBlock ? '是' : '否'}`,
+        `能力阻塞：${message.evidenceSummary.hasCapabilityBlock ? '是' : '否'}`,
+        `执行失败：${message.evidenceSummary.hasExecutionFailure ? '是' : '否'}`,
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : completionSummary
   const messageModelLabel =
     message.modelInfo?.label ||
     (activeModelId.split('/').filter(Boolean).at(-1) || activeModelId || '未记录模型')
@@ -1789,6 +1845,14 @@ function AssistantMessageCard({
                       title={routeTooltip}
                     >
                       {routeSummary}
+                    </span>
+                  ) : null}
+                  {completionSummary ? (
+                    <span
+                      className={`rounded-full border px-2 py-0.5 text-[11px] font-600 ${completionStateTone(message.completionState)}`}
+                      title={completionTooltip}
+                    >
+                      {completionSummary}
                     </span>
                   ) : null}
                   {retrySummary ? (
@@ -1880,6 +1944,12 @@ function AssistantMessageCard({
                 ) : null}
               </div>
             </section>
+          ) : null}
+
+          {message.deliveryNote ? (
+            <div className="rounded-xl border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-4 py-3 text-13px leading-relaxed text-[var(--text-secondary)]">
+              {message.deliveryNote}
+            </div>
           ) : null}
 
           {message.error ? (

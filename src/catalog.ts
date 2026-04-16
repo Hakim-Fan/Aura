@@ -1,5 +1,10 @@
 export const builtinSkills = [
   {
+    id: 'aura-browser-operator',
+    name: 'Aura Browser Operator',
+    description: '在网页任务中优先用 Aura browser_* 工具，并按观察-操作-验证闭环推进。',
+  },
+  {
     id: 'repair-planner',
     name: 'Repair Planner',
     description: '先收敛问题和最小修复路径，再动手修改并验证。',

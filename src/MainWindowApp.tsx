@@ -668,6 +668,9 @@ function toMessageVariant(message: ChatMessage): ChatMessageVariant {
     modelInfo: message.modelInfo,
     agentMode: message.agentMode,
     routeDecision: message.routeDecision,
+    completionState: message.completionState,
+    evidenceSummary: message.evidenceSummary,
+    deliveryNote: message.deliveryNote,
   }
 }
 
@@ -700,6 +703,9 @@ function applyMessageVariant(
     modelInfo: activeVariant.modelInfo,
     agentMode: activeVariant.agentMode,
     routeDecision: activeVariant.routeDecision,
+    completionState: activeVariant.completionState,
+    evidenceSummary: activeVariant.evidenceSummary,
+    deliveryNote: activeVariant.deliveryNote,
     versions: variants,
     activeVersionIndex: safeIndex,
   }
@@ -1258,6 +1264,12 @@ export function MainWindowApp() {
                 retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
                 agentMode: snapshot.agentMode || currentVariant.agentMode,
                 routeDecision: snapshot.routeDecision || currentVariant.routeDecision,
+                completionState:
+                  snapshot.completionState || currentVariant.completionState,
+                evidenceSummary:
+                  snapshot.evidenceSummary || currentVariant.evidenceSummary,
+                deliveryNote:
+                  snapshot.deliveryNote || currentVariant.deliveryNote,
               }))
               : message,
           ),
@@ -1317,6 +1329,12 @@ export function MainWindowApp() {
                           agentMode: snapshot.agentMode || currentVariant.agentMode,
                           routeDecision:
                             snapshot.routeDecision || currentVariant.routeDecision,
+                          completionState:
+                            snapshot.completionState || currentVariant.completionState,
+                          evidenceSummary:
+                            snapshot.evidenceSummary || currentVariant.evidenceSummary,
+                          deliveryNote:
+                            snapshot.deliveryNote || currentVariant.deliveryNote,
                         }))
                         : message,
                     ),
