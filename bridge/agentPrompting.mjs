@@ -204,6 +204,12 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       sections.push(
         'If a browser_* tool reports a real blocker such as login, MFA, CAPTCHA, or consent, use browser_takeover_visible when mounted instead of switching to unrelated tools.',
       )
+      sections.push(
+        'Prefer the snapshot-first browser flow: inspect with browser_snapshot or browser_get_page(format=snapshot), act with ref-based browser_click/browser_type when possible, then verify with browser_wait_for, browser_inspect_element, browser_get_page, or browser_screenshot.',
+      )
+      sections.push(
+        'If the browser flow stalls, gather structured evidence before guessing again: browser_console_get, browser_network_get, browser_storage_list/get, and when needed browser_trace_start/browser_trace_stop or browser_video_start/browser_video_stop.',
+      )
     }
   }
 

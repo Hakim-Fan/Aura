@@ -88,6 +88,9 @@ export function McpEditorWindowApp() {
         // Continue with cached settings if Aura hydration is unavailable.
       }
 
+      // Dismiss splash after hydration
+      ;(window as unknown as { __dismissSplash?: () => void }).__dismissSplash?.()
+
       unlistenOpen = await listen<{ serverId: string | null }>('mcp-editor:open', event => {
         const nextServerId = event.payload.serverId
         const settings = loadSettings()

@@ -310,6 +310,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
         )
       })
 
+      // Dismiss splash after full hydration
+      ;(window as unknown as { __dismissSplash?: () => void }).__dismissSplash?.()
+
       unlistenOpenTab = await listen<SettingsTab>('settings:open-tab', event => {
         setActiveTab(event.payload)
       })
