@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { AgentSettings } from '../types'
+import type { AgentSettings, ProviderModel } from '../types'
 
 export type ProviderActionResult = {
   ok: boolean
   message: string
-  models: string[]
+  models: ProviderModel[]
 }
 
 async function runProviderAction(

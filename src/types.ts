@@ -3,6 +3,8 @@ export type ProviderMode = 'openai' | 'google' | 'custom'
 export type ProviderModel = {
   id: string
   enabled: boolean
+  contextWindowTokens?: number
+  maxOutputTokens?: number
 }
 
 export type ProviderProfile = {
@@ -51,11 +53,25 @@ export type RuntimeErrorInfo = {
   retryable?: boolean
 }
 
+export type ProviderRetryStage = 'response' | 'finalization' | 'recovery'
+
 export type ProviderRetryInfo = {
   attemptedRetries: number
+  configuredMaxRetries?: number
   configuredMaxAttempts: number
+  stage?: ProviderRetryStage
+  stageLabel?: string
   recovered?: boolean
 }
+
+export type AgentExecutionPhase =
+  | 'preparing'
+  | 'model_connecting'
+  | 'model_streaming'
+  | 'tool_running'
+  | 'finalizing'
+  | 'recovering'
+  | 'awaiting_approval'
 
 export type AppendedInputStatus = 'queued' | 'consumed'
 
@@ -89,6 +105,11 @@ export type MessageActivity = {
   toolCount: number
   skillCount: number
   stepCount: number
+  phase?: AgentExecutionPhase
+  phaseStartedAt?: number
+  lastHeartbeatAt?: number
+  lastProgressAt?: number
+  stalled?: boolean
   expanded?: boolean
 }
 
@@ -154,6 +175,90 @@ export type CapabilityUsageSnapshot = {
   skills: CapabilityUsageEntry[]
   plugins: CapabilityUsageEntry[]
   mcpServers: CapabilityUsageEntry[]
+}
+
+export type AgentArchitectureMode = 'route-first' | 'orchestrated'
+
+export type RouteAnswerMode = 'advise' | 'diagnose' | 'execute'
+
+export type RouteCapabilityTier =
+  | 'none'
+  | 'local-readonly'
+  | 'local-write'
+  | 'web-lookup'
+  | 'browser-interactive'
+
+export type RouteEscalationTarget =
+  | 'local-write'
+  | 'web-lookup'
+  | 'browser-interactive'
+
+export type RouteBudgetSnapshot = {
+  searchesRemaining: number
+  browserEscalationsRemaining: number
+  writeEscalationsRemaining: number
+}
+
+export type RouteMountedCapabilitiesSnapshot = {
+  skills: string[]
+  plugins: string[]
+  mcpServers: string[]
+  tools: string[]
+}
+
+export type RouteDecisionSnapshot = {
+  answerMode: RouteAnswerMode
+  capabilityTier: RouteCapabilityTier
+  budgets?: RouteBudgetSnapshot
+  allowEscalationTo?: RouteEscalationTarget[]
+  availableEscalations?: RouteEscalationTarget[]
+  escalationCount?: number
+  tierHistory?: RouteCapabilityTier[]
+  stopReason?:
+    | 'completed'
+    | 'completed_with_evidence'
+    | 'no_incremental_progress'
+    | 'budget_exhausted'
+    | 'runtime_pass_limit'
+  mountedCapabilities?: RouteMountedCapabilitiesSnapshot
+}
+
+export type CompletionState =
+  | 'not_executed'
+  | 'executed_unverified'
+  | 'executed_verified'
+  | 'blocked_by_approval'
+  | 'blocked_by_capability'
+  | 'failed_after_execution'
+
+export type EvidenceRecord = {
+  toolName: string
+  source: 'builtin' | 'plugin' | 'mcp' | 'subagent'
+  status: 'success' | 'error' | 'denied'
+  effectTypes: Array<'read' | 'write' | 'execute' | 'browser' | 'plan'>
+  producedEvidence: Array<
+    | 'file_mutation'
+    | 'command_exit_0'
+    | 'command_output'
+    | 'test_pass'
+    | 'test_fail'
+    | 'page_state'
+    | 'search_result'
+    | 'user_denied'
+  >
+  verificationLevel: 'none' | 'partial' | 'verified'
+  detail?: string
+}
+
+export type ExecutionEvidenceSummary = {
+  records: EvidenceRecord[]
+  hasAnyExecution: boolean
+  hasWriteEffect: boolean
+  hasBrowserEffect: boolean
+  hasVerifiedEvidence: boolean
+  hasApprovalBlock: boolean
+  hasCapabilityBlock: boolean
+  hasExecutionFailure: boolean
 }
 
 export type ResolvedSkillCapability = CapabilityUsageEntry & {
@@ -223,6 +328,11 @@ export type ChatMessageVariant = {
   retryInfo?: ProviderRetryInfo
   appendedInputs?: AppendedInput[]
   modelInfo?: MessageModelInfo
+  agentMode?: AgentArchitectureMode
+  routeDecision?: RouteDecisionSnapshot
+  completionState?: CompletionState
+  evidenceSummary?: ExecutionEvidenceSummary
+  deliveryNote?: string
 }
 
 export type ChatMessage = {
@@ -246,6 +356,11 @@ export type ChatMessage = {
   retryInfo?: ProviderRetryInfo
   appendedInputs?: AppendedInput[]
   modelInfo?: MessageModelInfo
+  agentMode?: AgentArchitectureMode
+  routeDecision?: RouteDecisionSnapshot
+  completionState?: CompletionState
+  evidenceSummary?: ExecutionEvidenceSummary
+  deliveryNote?: string
   versions?: ChatMessageVariant[]
   activeVersionIndex?: number
 }
@@ -302,6 +417,10 @@ export type McpServerConfig = {
   env: string
   cwd: string
   enabled: boolean
+  healthStatus?: 'unknown' | 'ok' | 'error'
+  healthMessage?: string
+  lastCheckedAt?: number
+  toolCount?: number
   isDefault?: boolean
 }
 
@@ -408,6 +527,7 @@ export type AgentSettings = {
   model: string
   activeProviderProfileId: string
   providerProfiles: ProviderProfile[]
+  agentArchitectureMode: AgentArchitectureMode
   cwd: string
   maxSteps: number
   executionMode: ExecutionMode
@@ -438,6 +558,7 @@ export type Session = {
   providerProfileId: string
   provider: ProviderMode
   model: string
+  folderId?: string
   workspacePath: string
   workspaceRoot: string
   workspaceMode: 'explicit' | 'default'
@@ -445,6 +566,13 @@ export type Session = {
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]
   updatedAt: number
+}
+
+export type SessionFolder = {
+  id: string
+  name: string
+  expanded: boolean
+  createdAt: number
 }
 
 export type AgentResponse = {
@@ -455,6 +583,11 @@ export type AgentResponse = {
   usage?: MessageUsage
   capabilitySnapshot?: CapabilityUsageSnapshot
   retryInfo?: ProviderRetryInfo
+  agentMode?: AgentArchitectureMode
+  routeDecision?: RouteDecisionSnapshot
+  completionState?: CompletionState
+  evidenceSummary?: ExecutionEvidenceSummary
+  deliveryNote?: string
 }
 
 export type AgentTaskSnapshot = {
@@ -472,9 +605,19 @@ export type AgentTaskSnapshot = {
   error?: string
   errorInfo?: RuntimeErrorInfo
   retryInfo?: ProviderRetryInfo
+  phase?: AgentExecutionPhase
+  phaseStartedAt?: number
+  lastHeartbeatAt?: number
+  lastProgressAt?: number
+  stalled?: boolean
   errorCode?: string
   errorSource?: string
   rawError?: string
+  agentMode?: AgentArchitectureMode
+  routeDecision?: RouteDecisionSnapshot
+  completionState?: CompletionState
+  evidenceSummary?: ExecutionEvidenceSummary
+  deliveryNote?: string
 }
 
 export type WorkspaceNodeKind = 'file' | 'directory'

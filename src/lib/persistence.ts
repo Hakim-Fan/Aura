@@ -1,9 +1,17 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { AgentSettings, ChatMessage, ChatMessageVariant, ProjectCapabilityOverrides, Session } from '../types'
+import type {
+  AgentSettings,
+  ChatMessage,
+  ChatMessageVariant,
+  ProjectCapabilityOverrides,
+  Session,
+  SessionFolder,
+} from '../types'
 
 type PersistedAppState = {
   settings: unknown | null
   sessions: unknown[] | null
+  sessionFolders: unknown[] | null
   projectCapabilityOverrides: unknown | null
 }
 
@@ -19,6 +27,10 @@ export function savePersistedProjectCapabilityOverrides(
   overrides: ProjectCapabilityOverrides,
 ) {
   return invoke('save_project_capability_overrides_sqlite', { overrides })
+}
+
+export function savePersistedSessionFolders(sessionFolders: SessionFolder[]) {
+  return invoke('save_session_folders_sqlite', { sessionFolders })
 }
 
 export function upsertPersistedSession(session: Session) {

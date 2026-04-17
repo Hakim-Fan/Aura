@@ -41,7 +41,9 @@ import {
 } from 'lucide-react'
 import { WorkspaceExplorer } from '../components/WorkspaceExplorer'
 import { TaskTreeView } from '../components/TaskTreeView'
+import { formatConversationTimestamp } from '../lib/sessionMeta'
 import type {
+  AgentExecutionPhase,
   AgentSettings,
   AgentTaskSnapshot,
   AppendedInput,
@@ -50,6 +52,7 @@ import type {
   CapabilityUsageSnapshot,
   ChatMessage,
   ChatMessageVariant,
+  CompletionState,
   MessageAttachment,
   MessageEvent,
   MessagePhaseOutput,
@@ -57,6 +60,7 @@ import type {
   MessageUsage,
   ProviderMode,
   ReasoningEffort,
+  RouteDecisionSnapshot,
   TaskNode,
   ToolEvent,
   WorkspaceNode,
@@ -364,6 +368,172 @@ function activityStatusLabel(status?: string) {
       return '执行失败'
     default:
       return '空闲'
+  }
+}
+
+function activityPhaseLabel(phase?: AgentExecutionPhase, stalled = false) {
+  const suffix = stalled ? '，连接较慢' : ''
+  switch (phase) {
+    case 'preparing':
+      return `准备上下文${suffix}`
+    case 'model_connecting':
+      return `连接模型${suffix}`
+    case 'model_streaming':
+      return `接收回复${suffix}`
+    case 'tool_running':
+      return `执行工具${suffix}`
+    case 'finalizing':
+      return `整理最终回答${suffix}`
+    case 'recovering':
+      return `恢复回答${suffix}`
+    case 'awaiting_approval':
+      return '等待审批'
+    default:
+      return stalled ? '执行较慢' : ''
+  }
+}
+
+function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], withLimit = true) {
+  if (!retryInfo || retryInfo.attemptedRetries <= 0) {
+    return ''
+  }
+
+  const configuredMaxRetries =
+    typeof retryInfo.configuredMaxRetries === 'number'
+      ? retryInfo.configuredMaxRetries
+      : Math.max(0, retryInfo.configuredMaxAttempts - 1)
+  const stageLabel =
+    retryInfo.stageLabel ||
+    (retryInfo.stage === 'recovery'
+      ? '恢复回答'
+      : retryInfo.stage === 'finalization'
+        ? '补充整理'
+        : '主回答')
+
+  return withLimit
+    ? `${stageLabel}已自动重试 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次`
+    : `${stageLabel}重试 ${retryInfo.attemptedRetries} 次`
+}
+
+function routeAnswerModeLabel(answerMode?: RouteDecisionSnapshot['answerMode']) {
+  switch (answerMode) {
+    case 'advise':
+      return '建议'
+    case 'diagnose':
+      return '诊断'
+    case 'execute':
+      return '执行'
+    default:
+      return ''
+  }
+}
+
+function routeCapabilityTierLabel(capabilityTier?: RouteDecisionSnapshot['capabilityTier']) {
+  switch (capabilityTier) {
+    case 'none':
+      return '无工具'
+    case 'local-readonly':
+      return '本地只读'
+    case 'local-write':
+      return '本地可写'
+    case 'web-lookup':
+      return '联网查询'
+    case 'browser-interactive':
+      return '浏览器交互'
+    default:
+      return ''
+  }
+}
+
+function buildRouteSummary(routeDecision?: RouteDecisionSnapshot) {
+  if (!routeDecision) {
+    return null
+  }
+
+  const summary = [
+    routeAnswerModeLabel(routeDecision.answerMode),
+    routeCapabilityTierLabel(routeDecision.capabilityTier),
+    typeof routeDecision.escalationCount === 'number' && routeDecision.escalationCount > 0
+      ? `升级 ${routeDecision.escalationCount} 次`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+
+  return summary || null
+}
+
+function buildRouteTooltip(routeDecision?: RouteDecisionSnapshot) {
+  if (!routeDecision) {
+    return ''
+  }
+
+  const stopReasonLabel =
+    routeDecision.stopReason === 'completed'
+      ? '已形成可交付回答'
+      : routeDecision.stopReason === 'completed_with_evidence'
+        ? '已完成执行并拿到证据'
+        : routeDecision.stopReason === 'no_incremental_progress'
+          ? '升级后无新增信息，已收束'
+          : routeDecision.stopReason === 'budget_exhausted'
+            ? '升级预算或可用路径已耗尽'
+            : routeDecision.stopReason === 'runtime_pass_limit'
+              ? '达到路由运行上限'
+              : null
+
+  return [
+    `回答模式：${routeAnswerModeLabel(routeDecision.answerMode) || routeDecision.answerMode}`,
+    `当前层级：${routeCapabilityTierLabel(routeDecision.capabilityTier) || routeDecision.capabilityTier}`,
+    routeDecision.tierHistory && routeDecision.tierHistory.length > 0
+      ? `层级路径：${routeDecision.tierHistory
+          .map(tier => routeCapabilityTierLabel(tier) || tier)
+          .join(' -> ')}`
+      : null,
+    routeDecision.budgets
+      ? `预算：搜索 ${routeDecision.budgets.searchesRemaining}，写升级 ${routeDecision.budgets.writeEscalationsRemaining}，浏览器升级 ${routeDecision.budgets.browserEscalationsRemaining}`
+      : null,
+    routeDecision.availableEscalations && routeDecision.availableEscalations.length > 0
+      ? `仍可升级到：${routeDecision.availableEscalations.join(' / ')}`
+      : null,
+    stopReasonLabel ? `停止原因：${stopReasonLabel}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+function completionStateLabel(completionState?: CompletionState) {
+  switch (completionState) {
+    case 'not_executed':
+      return '未执行'
+    case 'executed_unverified':
+      return '已执行未验证'
+    case 'executed_verified':
+      return '已验证完成'
+    case 'blocked_by_approval':
+      return '等待审批'
+    case 'blocked_by_capability':
+      return '能力受限'
+    case 'failed_after_execution':
+      return '执行失败'
+    default:
+      return ''
+  }
+}
+
+function completionStateTone(completionState?: CompletionState) {
+  switch (completionState) {
+    case 'executed_verified':
+      return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    case 'executed_unverified':
+      return 'border-amber-200 bg-amber-50 text-amber-700'
+    case 'blocked_by_approval':
+    case 'blocked_by_capability':
+      return 'border-orange-200 bg-orange-50 text-orange-700'
+    case 'failed_after_execution':
+      return 'border-red-200 bg-red-50 text-red-700'
+    case 'not_executed':
+    default:
+      return 'border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.03)] text-[var(--text-secondary)]'
   }
 }
 
@@ -1515,6 +1685,7 @@ function AssistantMessageCard({
   onToggleActivity: (messageId: string) => void
 }) {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
+  const messageTimeLabel = formatConversationTimestamp(message.createdAt)
   const activity = message.activity
   const duration = activity
     ? (
@@ -1563,13 +1734,12 @@ function AssistantMessageCard({
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.suggestedAction
       : ''
-  const messageRetryDetail =
-    message.retryInfo && message.retryInfo.attemptedRetries > 0
-      ? `已自动重试 ${message.retryInfo.attemptedRetries}/${message.retryInfo.configuredMaxAttempts} 次`
-      : ''
+  const messageRetryDetail = formatRetryLabel(message.retryInfo, true)
+  const phaseSummary = activityPhaseLabel(activity?.phase, activity?.stalled === true)
   const activitySummary = activity
     ? [
       activityStatusLabel(activity.status),
+      phaseSummary || null,
       duration ? formatDuration(duration) : null,
       activity.toolCount > 0 ? `${activity.toolCount} 个工具` : null,
       activity.skillCount > 0 ? `${activity.skillCount} 个技能` : null,
@@ -1578,10 +1748,28 @@ function AssistantMessageCard({
       .filter(Boolean)
       .join(' · ')
     : null
-  const retrySummary =
-    message.retryInfo && message.retryInfo.attemptedRetries > 0
-      ? `自动重试 ${message.retryInfo.attemptedRetries} 次`
-      : ''
+  const retrySummary = formatRetryLabel(message.retryInfo, false)
+  const routeSummary = buildRouteSummary(message.routeDecision)
+  const routeTooltip = buildRouteTooltip(message.routeDecision)
+  const shouldShowCompletionState =
+    Boolean(message.completionState) &&
+    (message.routeDecision?.answerMode === 'execute' ||
+      message.completionState !== 'not_executed')
+  const completionSummary = shouldShowCompletionState
+    ? completionStateLabel(message.completionState)
+    : ''
+  const completionTooltip = message.evidenceSummary
+    ? [
+        `完成态：${completionSummary || message.completionState}`,
+        `执行：${message.evidenceSummary.hasAnyExecution ? '是' : '否'}`,
+        `验证证据：${message.evidenceSummary.hasVerifiedEvidence ? '有' : '无'}`,
+        `审批阻塞：${message.evidenceSummary.hasApprovalBlock ? '是' : '否'}`,
+        `能力阻塞：${message.evidenceSummary.hasCapabilityBlock ? '是' : '否'}`,
+        `执行失败：${message.evidenceSummary.hasExecutionFailure ? '是' : '否'}`,
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : completionSummary
   const messageModelLabel =
     message.modelInfo?.label ||
     (activeModelId.split('/').filter(Boolean).at(-1) || activeModelId || '未记录模型')
@@ -1651,6 +1839,22 @@ function AssistantMessageCard({
                     {messageModelLabel}
                   </span>
                   <span>{activitySummary}</span>
+                  {routeSummary ? (
+                    <span
+                      className="rounded-full border border-[rgba(69,119,108,0.16)] bg-[rgba(69,119,108,0.06)] px-2 py-0.5 text-[11px] font-600 text-[var(--accent-soft-strong)]"
+                      title={routeTooltip}
+                    >
+                      {routeSummary}
+                    </span>
+                  ) : null}
+                  {completionSummary ? (
+                    <span
+                      className={`rounded-full border px-2 py-0.5 text-[11px] font-600 ${completionStateTone(message.completionState)}`}
+                      title={completionTooltip}
+                    >
+                      {completionSummary}
+                    </span>
+                  ) : null}
                   {retrySummary ? (
                     <span className="text-[11px] text-[var(--text-secondary)] opacity-75">
                       {retrySummary}
@@ -1742,6 +1946,12 @@ function AssistantMessageCard({
             </section>
           ) : null}
 
+          {message.deliveryNote ? (
+            <div className="rounded-xl border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-4 py-3 text-13px leading-relaxed text-[var(--text-secondary)]">
+              {message.deliveryNote}
+            </div>
+          ) : null}
+
           {message.error ? (
             <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-2 text-13px text-red-500">
               <div>{message.error}</div>
@@ -1780,7 +1990,7 @@ function AssistantMessageCard({
           ) : (
             <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
               <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
-              正在整理信息并生成最终回答...
+              {phaseSummary || '正在整理信息并生成最终回答...'}
             </div>
           )}
 
@@ -1789,6 +1999,11 @@ function AssistantMessageCard({
           <div className="flex items-center justify-end pt-1">
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/88 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
+                {messageTimeLabel ? (
+                  <span className="px-1.5 text-11px text-[var(--text-secondary)] opacity-80">
+                    {messageTimeLabel}
+                  </span>
+                ) : null}
                 <button
                   className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
                   title="复制"
@@ -1878,6 +2093,8 @@ function UserMessageCard({
   onResend: (messageId: string) => void
   onOpenAttachment: (path: string) => void
 }) {
+  const messageTimeLabel = formatConversationTimestamp(message.createdAt)
+
   return (
     <article className="group flex flex-col items-end gap-2">
       {message.attachments?.length ? (
@@ -1912,6 +2129,11 @@ function UserMessageCard({
       </div>
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-1 rounded-xl border border-[rgba(15,23,42,0.06)] bg-white/90 p-1 opacity-0 shadow-sm backdrop-blur-md transition-all group-hover:opacity-100">
+          {messageTimeLabel ? (
+            <span className="px-1.5 text-11px text-[var(--text-secondary)] opacity-80">
+              {messageTimeLabel}
+            </span>
+          ) : null}
           <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制" onClick={() => onCopyText(message.content)}>
             <Copy size={14} />
           </button>

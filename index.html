@@ -1,25 +1,26 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0"
-    />
-    <title>Aura</title>
-    <style>
-      /* Anti-FOUC: hide until styles are ready */
-      #root {
-        opacity: 0;
-        transition: opacity 0.15s ease-in;
-      }
-      #root.ready {
-        opacity: 1;
-      }
-    </style>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-  </html>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aura</title>
+  <style>
+    /* Anti-FOUC: hide until styles are ready */
+    #root {
+      opacity: 0;
+      transition: opacity 0.5s ease-in;
+    }
+
+    #root.ready {
+      opacity: 1;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+
+</html>

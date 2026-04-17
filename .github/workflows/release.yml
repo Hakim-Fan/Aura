@@ -11,6 +11,14 @@ on:
         required: true
         default: 'v0.1.0'
 
+env:
+  # 综合防范各类网络超时和 DNS 解析失效等问题
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: "sparse"
+  CARGO_HTTP_TIMEOUT: "120"
+
 jobs:
   # 构建 macOS 版本
   build-macos:
@@ -44,6 +52,24 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Fetch Rust dependencies
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            cargo fetch --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.target }} && exit 0
+            if [ "$attempt" -eq 3 ]; then
+              echo "cargo fetch failed after ${attempt} attempts"
+              exit 1
+            fi
+            echo "cargo fetch failed on attempt ${attempt}; retrying in 15 seconds..."
+            sleep 15
+          done
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -79,6 +105,24 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Fetch Rust dependencies
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            cargo fetch --manifest-path src-tauri/Cargo.toml --locked && exit 0
+            if [ "$attempt" -eq 3 ]; then
+              echo "cargo fetch failed after ${attempt} attempts"
+              exit 1
+            fi
+            echo "cargo fetch failed on attempt ${attempt}; retrying in 15 seconds..."
+            sleep 15
+          done
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -121,6 +165,24 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Fetch Rust dependencies
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            cargo fetch --manifest-path src-tauri/Cargo.toml --locked && exit 0
+            if [ "$attempt" -eq 3 ]; then
+              echo "cargo fetch failed after ${attempt} attempts"
+              exit 1
+            fi
+            echo "cargo fetch failed on attempt ${attempt}; retrying in 15 seconds..."
+            sleep 15
+          done
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

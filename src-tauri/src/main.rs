@@ -38,8 +38,26 @@ struct AgentTaskSnapshot {
     usage: Option<serde_json::Value>,
     #[serde(rename = "capabilitySnapshot")]
     capability_snapshot: Option<serde_json::Value>,
+    #[serde(rename = "agentMode")]
+    agent_mode: Option<String>,
+    #[serde(rename = "routeDecision")]
+    route_decision: Option<serde_json::Value>,
+    #[serde(rename = "completionState")]
+    completion_state: Option<String>,
+    #[serde(rename = "evidenceSummary")]
+    evidence_summary: Option<serde_json::Value>,
+    #[serde(rename = "deliveryNote")]
+    delivery_note: Option<String>,
     #[serde(rename = "retryInfo")]
     retry_info: Option<serde_json::Value>,
+    phase: Option<String>,
+    #[serde(rename = "phaseStartedAt")]
+    phase_started_at: Option<u64>,
+    #[serde(rename = "lastHeartbeatAt")]
+    last_heartbeat_at: Option<u64>,
+    #[serde(rename = "lastProgressAt")]
+    last_progress_at: Option<u64>,
+    stalled: Option<bool>,
     #[serde(rename = "pendingApproval")]
     pending_approval: Option<serde_json::Value>,
     error: Option<String>,
@@ -968,6 +986,11 @@ fn canonical_display_path(path: &Path) -> String {
         .to_string()
 }
 
+fn canonicalize_existing_path(path: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(path)
+        .map_err(|error| format!("Failed to canonicalize path {}: {error}", path.display()))
+}
+
 fn resolve_app_bundle_executable(path: &Path) -> Option<PathBuf> {
     if !path.is_dir() || path.extension().and_then(|value| value.to_str()) != Some("app") {
         return None;
@@ -1665,6 +1688,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               provider_profile_id TEXT NOT NULL,
               provider TEXT NOT NULL,
               model TEXT NOT NULL,
+              folder_id TEXT NOT NULL DEFAULT '',
               workspace_path TEXT NOT NULL,
               workspace_root TEXT NOT NULL,
               workspace_mode TEXT NOT NULL,
@@ -1701,6 +1725,11 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               error TEXT,
               error_info_json TEXT,
               appended_inputs_json TEXT NOT NULL,
+              agent_mode TEXT,
+              route_decision_json TEXT,
+              completion_state TEXT,
+              evidence_summary_json TEXT,
+              delivery_note TEXT,
               model_info_json TEXT,
               UNIQUE(message_id, version_index),
               FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
@@ -1737,6 +1766,76 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
             "#,
         )
         .map_err(|error| format!("Failed to initialize SQLite schema: {error}"))?;
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE sessions ADD COLUMN folder_id TEXT NOT NULL DEFAULT ''",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!("Failed to migrate SQLite sessions table: {error}"));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN agent_mode TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions agent_mode column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN route_decision_json TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions route_decision_json column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN completion_state TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions completion_state column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN evidence_summary_json TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions evidence_summary_json column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN delivery_note TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions delivery_note column: {error}"
+            ));
+        }
+    }
 
     Ok(connection)
 }
@@ -2307,7 +2406,17 @@ fn spawn_agent_task<R: Runtime>(
         reasoning: Vec::new(),
         usage: None,
         capability_snapshot: None,
+        agent_mode: None,
+        route_decision: None,
+        completion_state: None,
+        evidence_summary: None,
+        delivery_note: None,
         retry_info: None,
+        phase: Some("preparing".into()),
+        phase_started_at: None,
+        last_heartbeat_at: None,
+        last_progress_at: None,
+        stalled: Some(false),
         pending_approval: None,
         error: None,
         error_info: None,
@@ -2357,6 +2466,7 @@ fn spawn_agent_task<R: Runtime>(
             match event.get("type").and_then(|value| value.as_str()) {
                 Some("started") => with_snapshot(&stdout_snapshot, |current| {
                     current.status = "running".into();
+                    current.phase = Some("preparing".into());
                     current.error = None;
                     current.error_code = None;
                     current.error_source = None;
@@ -2396,8 +2506,22 @@ fn spawn_agent_task<R: Runtime>(
                 Some("task_tree") => with_snapshot(&stdout_snapshot, |current| {
                     current.task_tree = extract_array(event.get("tree"));
                 }),
+                Some("runtime_status") => with_snapshot(&stdout_snapshot, |current| {
+                    current.phase = event
+                        .get("phase")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    current.phase_started_at =
+                        event.get("phaseStartedAt").and_then(|value| value.as_u64());
+                    current.last_heartbeat_at =
+                        event.get("lastHeartbeatAt").and_then(|value| value.as_u64());
+                    current.last_progress_at =
+                        event.get("lastProgressAt").and_then(|value| value.as_u64());
+                    current.stalled = event.get("stalled").and_then(|value| value.as_bool());
+                }),
                 Some("approval_required") => with_snapshot(&stdout_snapshot, |current| {
                     current.status = "awaiting_approval".into();
+                    current.phase = Some("awaiting_approval".into());
                     current.pending_approval = event.get("request").cloned();
                 }),
                 Some("app_action_request") => {
@@ -2466,6 +2590,20 @@ fn spawn_agent_task<R: Runtime>(
                         current.usage = extract_object(result.get("usage"));
                         current.capability_snapshot =
                             extract_object(result.get("capabilitySnapshot"));
+                        current.agent_mode = result
+                            .get("agentMode")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string());
+                        current.route_decision = extract_object(result.get("routeDecision"));
+                        current.completion_state = result
+                            .get("completionState")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string());
+                        current.evidence_summary = extract_object(result.get("evidenceSummary"));
+                        current.delivery_note = result
+                            .get("deliveryNote")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string());
                         current.retry_info = extract_object(result.get("retryInfo"));
                     }
                 }),
@@ -2477,6 +2615,20 @@ fn spawn_agent_task<R: Runtime>(
                         .and_then(|value| value.as_str())
                         .map(|value| value.to_string());
                     current.error_info = extract_object(event.get("errorInfo"));
+                    current.agent_mode = event
+                        .get("agentMode")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    current.route_decision = extract_object(event.get("routeDecision"));
+                    current.completion_state = event
+                        .get("completionState")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    current.evidence_summary = extract_object(event.get("evidenceSummary"));
+                    current.delivery_note = event
+                        .get("deliveryNote")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
                     current.error_code = event
                         .get("code")
                         .and_then(|value| value.as_str())
@@ -2838,9 +2990,18 @@ fn load_persisted_app_state<R: Runtime>(
             format!("Failed to load project capability overrides from SQLite: {error}")
         })?;
 
+    let session_folders_json: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM app_kv WHERE key = 'session_folders'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load session folders from SQLite: {error}"))?;
+
     let mut sessions_statement = connection
         .prepare(
-            "SELECT id, title, provider_profile_id, provider, model, workspace_path, workspace_root, workspace_mode, updated_at
+            "SELECT id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, updated_at
              FROM sessions
              ORDER BY updated_at DESC",
         )
@@ -2857,7 +3018,8 @@ fn load_persisted_app_state<R: Runtime>(
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, i64>(8)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
             ))
         })
         .map_err(|error| format!("Failed to read sessions from SQLite: {error}"))?;
@@ -2871,6 +3033,7 @@ fn load_persisted_app_state<R: Runtime>(
             provider_profile_id,
             provider,
             model,
+            folder_id,
             workspace_path,
             workspace_root,
             workspace_mode,
@@ -2916,7 +3079,8 @@ fn load_persisted_app_state<R: Runtime>(
             let mut versions_statement = connection
                 .prepare(
                     "SELECT version_index, content, parts_json, status, created_at, attachments_json, reasoning_json, usage_json,
-                            capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json, appended_inputs_json, model_info_json
+                            capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json, appended_inputs_json,
+                            agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json
                      FROM message_versions
                      WHERE message_id = ?1
                      ORDER BY version_index ASC",
@@ -2940,7 +3104,12 @@ fn load_persisted_app_state<R: Runtime>(
                         "error": row.get::<_, Option<String>>(12)?,
                         "errorInfo": parse_json_object_column(row.get::<_, Option<String>>(13)?),
                         "appendedInputs": parse_json_array_column(row.get::<_, String>(14)?),
-                        "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(15)?),
+                        "agentMode": row.get::<_, Option<String>>(15)?,
+                        "routeDecision": parse_json_object_column(row.get::<_, Option<String>>(16)?),
+                        "completionState": row.get::<_, Option<String>>(17)?,
+                        "evidenceSummary": parse_json_object_column(row.get::<_, Option<String>>(18)?),
+                        "deliveryNote": row.get::<_, Option<String>>(19)?,
+                        "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(20)?),
                     }))
                 })
                 .map_err(|error| format!("Failed to read message versions from SQLite: {error}"))?;
@@ -2970,6 +3139,7 @@ fn load_persisted_app_state<R: Runtime>(
             "providerProfileId": provider_profile_id,
             "provider": provider,
             "model": model,
+            "folderId": folder_id,
             "workspacePath": workspace_path,
             "workspaceRoot": workspace_root,
             "workspaceMode": workspace_mode,
@@ -2983,6 +3153,7 @@ fn load_persisted_app_state<R: Runtime>(
     Ok(serde_json::json!({
         "settings": parse_json_column(settings_json),
         "sessions": sessions,
+        "sessionFolders": parse_json_column(session_folders_json),
         "projectCapabilityOverrides": parse_json_column(project_overrides_json),
     }))
 }
@@ -3007,6 +3178,15 @@ fn save_project_capability_overrides_sqlite<R: Runtime>(
 }
 
 #[tauri::command]
+fn save_session_folders_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    session_folders: serde_json::Value,
+) -> Result<(), String> {
+    let connection = open_app_db(&app)?;
+    upsert_kv(&connection, "session_folders", &session_folders)
+}
+
+#[tauri::command]
 fn upsert_session_sqlite<R: Runtime>(
     app: tauri::AppHandle<R>,
     session: serde_json::Value,
@@ -3015,13 +3195,14 @@ fn upsert_session_sqlite<R: Runtime>(
     connection
         .execute(
             "INSERT INTO sessions (
-                id, title, provider_profile_id, provider, model, workspace_path, workspace_root, workspace_mode, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 provider_profile_id = excluded.provider_profile_id,
                 provider = excluded.provider,
                 model = excluded.model,
+                folder_id = excluded.folder_id,
                 workspace_path = excluded.workspace_path,
                 workspace_root = excluded.workspace_root,
                 workspace_mode = excluded.workspace_mode,
@@ -3032,6 +3213,7 @@ fn upsert_session_sqlite<R: Runtime>(
                 get_json_string_field(&session, "providerProfileId", ""),
                 get_json_string_field(&session, "provider", "openai"),
                 get_json_string_field(&session, "model", ""),
+                get_json_string_field(&session, "folderId", ""),
                 get_json_string_field(&session, "workspacePath", ""),
                 get_json_string_field(&session, "workspaceRoot", ""),
                 get_json_string_field(&session, "workspaceMode", "explicit"),
@@ -3116,8 +3298,8 @@ fn upsert_message_version_sqlite<R: Runtime>(
             "INSERT INTO message_versions (
                 id, message_id, version_index, content, parts_json, status, created_at, attachments_json, reasoning_json,
                 usage_json, capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json,
-                appended_inputs_json, model_info_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                appended_inputs_json, agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
              ON CONFLICT(message_id, version_index) DO UPDATE SET
                 content = excluded.content,
                 parts_json = excluded.parts_json,
@@ -3133,6 +3315,11 @@ fn upsert_message_version_sqlite<R: Runtime>(
                 error = excluded.error,
                 error_info_json = excluded.error_info_json,
                 appended_inputs_json = excluded.appended_inputs_json,
+                agent_mode = excluded.agent_mode,
+                route_decision_json = excluded.route_decision_json,
+                completion_state = excluded.completion_state,
+                evidence_summary_json = excluded.evidence_summary_json,
+                delivery_note = excluded.delivery_note,
                 model_info_json = excluded.model_info_json",
             params![
                 version_id,
@@ -3164,6 +3351,25 @@ fn upsert_message_version_sqlite<R: Runtime>(
                     if error_info.is_null() { None } else { Some(value_to_json_string(&error_info)?) }
                 },
                 value_to_json_string(&get_json_array_field(&version, "appendedInputs"))?,
+                version.get("agentMode").and_then(|value| value.as_str()),
+                {
+                    let route_decision = get_json_object_field(&version, "routeDecision");
+                    if route_decision.is_null() {
+                        None
+                    } else {
+                        Some(value_to_json_string(&route_decision)?)
+                    }
+                },
+                version.get("completionState").and_then(|value| value.as_str()),
+                {
+                    let evidence_summary = get_json_object_field(&version, "evidenceSummary");
+                    if evidence_summary.is_null() {
+                        None
+                    } else {
+                        Some(value_to_json_string(&evidence_summary)?)
+                    }
+                },
+                version.get("deliveryNote").and_then(|value| value.as_str()),
                 {
                     let model_info = get_json_object_field(&version, "modelInfo");
                     if model_info.is_null() { None } else { Some(value_to_json_string(&model_info)?) }
@@ -3955,7 +4161,10 @@ async fn write_attachment_bytes(
 }
 
 #[tauri::command]
-fn delete_workspace_directory(workspace_path: String) -> Result<(), String> {
+fn delete_workspace_directory<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    workspace_path: String,
+) -> Result<(), String> {
     let target = PathBuf::from(&workspace_path);
     if workspace_path.trim().is_empty() {
         return Ok(());
@@ -3967,6 +4176,16 @@ fn delete_workspace_directory(workspace_path: String) -> Result<(), String> {
         return Err(format!(
             "Workspace path is not a directory: {}",
             target.display()
+        ));
+    }
+
+    let aura_workspace_root = PathBuf::from(ensure_aura_layout(&app)?.workspace_dir);
+    let canonical_root = canonicalize_existing_path(&aura_workspace_root)?;
+    let canonical_target = canonicalize_existing_path(&target)?;
+    if canonical_target == canonical_root || !canonical_target.starts_with(&canonical_root) {
+        return Err(format!(
+            "Only workspaces inside {} can be deleted by Aura.",
+            canonical_root.display()
         ));
     }
 
@@ -4011,6 +4230,7 @@ fn main() {
             load_persisted_app_state,
             save_settings_sqlite,
             save_project_capability_overrides_sqlite,
+            save_session_folders_sqlite,
             upsert_session_sqlite,
             delete_session_sqlite,
             upsert_message_sqlite,

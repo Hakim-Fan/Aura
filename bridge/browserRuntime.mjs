@@ -767,6 +767,14 @@ class BrowserSessionManager {
 
 const browserSessionManager = new BrowserSessionManager()
 
+export async function closeHeadlessBrowserSession() {
+  if (!browserSessionManager.context || browserSessionManager.headless !== true) {
+    return false
+  }
+  await browserSessionManager.close()
+  return true
+}
+
 process.once('beforeExit', () => {
   return browserSessionManager.close()
 })

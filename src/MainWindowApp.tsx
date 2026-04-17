@@ -21,9 +21,11 @@ import {
   hydrateStorageFromAuraHome,
   hydrateProjectCapabilityOverridesFromAuraHome,
   loadSessions,
+  loadSessionFolders,
   loadSettings,
   loadProjectCapabilityOverrides,
   resolveCapabilitiesForWorkspace,
+  saveSessionFolders,
   saveSessions,
   saveSettings,
   saveProjectCapabilityOverrides,
@@ -57,6 +59,7 @@ import type {
   ProviderProfile,
   ReasoningEffort,
   Session,
+  SessionFolder,
   TaskNode,
   ToolEvent,
   WorkspaceNode,
@@ -66,6 +69,7 @@ import { HomeView } from './views/HomeView'
 import { checkForUpdates, type ReleaseInfo } from './lib/updater'
 import { UpdateModal } from './components/UpdateModal'
 import { getVersion } from '@tauri-apps/api/app'
+import { sortSessionsByRecentActivity } from './lib/sessionMeta'
 
 function createId() {
   return Math.random().toString(36).slice(2, 10)
@@ -424,19 +428,19 @@ async function materializeDraftAttachments(
         ? await importAttachmentFromPath(workspacePath, attachment.path)
         : attachment.bytesBase64
           ? await writeAttachmentBytes(
-              workspacePath,
-              attachment.name,
-              attachment.bytesBase64,
-            )
+            workspacePath,
+            attachment.name,
+            attachment.bytesBase64,
+          )
           : attachment.file
             ? await writeAttachmentBytes(
-                workspacePath,
-                attachment.name,
-                arrayBufferToBase64(await attachment.file.arrayBuffer()),
-              )
+              workspacePath,
+              attachment.name,
+              arrayBufferToBase64(await attachment.file.arrayBuffer()),
+            )
             : await Promise.reject(
-                new Error(`附件“${attachment.name}”缺少可写入的数据，请重新添加后再试。`),
-              )
+              new Error(`附件“${attachment.name}”缺少可写入的数据，请重新添加后再试。`),
+            )
 
       return {
         id: attachment.id,
@@ -548,10 +552,10 @@ function presentToolEventTitle(event: ToolEvent) {
 function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
   const kind =
     event.source === 'subagent'
-        ? 'subagent'
-        : event.name.toLowerCase().includes('shell')
-          ? 'shell'
-          : 'tool'
+      ? 'subagent'
+      : event.name.toLowerCase().includes('shell')
+        ? 'shell'
+        : 'tool'
 
   return {
     id: event.id,
@@ -593,6 +597,10 @@ function buildMessageActivity(
   startedAt: number,
   toolEvents: ToolEvent[],
   taskTree: TaskNode[],
+  runtimeStatus: Pick<
+    AgentTaskSnapshot,
+    'phase' | 'phaseStartedAt' | 'lastHeartbeatAt' | 'lastProgressAt' | 'stalled'
+  > = {},
   expanded = status !== 'completed',
 ): MessageActivity {
   return {
@@ -602,6 +610,11 @@ function buildMessageActivity(
     toolCount: toolEvents.length,
     skillCount: 0,
     stepCount: countTaskNodes(taskTree),
+    phase: runtimeStatus.phase,
+    phaseStartedAt: runtimeStatus.phaseStartedAt,
+    lastHeartbeatAt: runtimeStatus.lastHeartbeatAt,
+    lastProgressAt: runtimeStatus.lastProgressAt,
+    stalled: runtimeStatus.stalled,
     expanded,
   }
 }
@@ -624,6 +637,11 @@ function createPendingAssistantMessage(): ChatMessage {
       toolCount: 0,
       skillCount: 0,
       stepCount: 0,
+      phase: 'preparing',
+      phaseStartedAt: startedAt,
+      lastHeartbeatAt: startedAt,
+      lastProgressAt: startedAt,
+      stalled: false,
       expanded: true,
     },
   }
@@ -648,6 +666,11 @@ function toMessageVariant(message: ChatMessage): ChatMessageVariant {
     retryInfo: message.retryInfo,
     appendedInputs: message.appendedInputs,
     modelInfo: message.modelInfo,
+    agentMode: message.agentMode,
+    routeDecision: message.routeDecision,
+    completionState: message.completionState,
+    evidenceSummary: message.evidenceSummary,
+    deliveryNote: message.deliveryNote,
   }
 }
 
@@ -678,6 +701,11 @@ function applyMessageVariant(
     retryInfo: activeVariant.retryInfo,
     appendedInputs: activeVariant.appendedInputs,
     modelInfo: activeVariant.modelInfo,
+    agentMode: activeVariant.agentMode,
+    routeDecision: activeVariant.routeDecision,
+    completionState: activeVariant.completionState,
+    evidenceSummary: activeVariant.evidenceSummary,
+    deliveryNote: activeVariant.deliveryNote,
     versions: variants,
     activeVersionIndex: safeIndex,
   }
@@ -802,17 +830,25 @@ function buildCapabilityPanelItems(
     description: server.description || server.command || 'MCP server',
     source: 'user' as const,
     installed: true,
-    supported: Boolean(server.command.trim()),
-    supportMessage: server.command.trim() ? undefined : '尚未填写 MCP 启动命令。',
+    supported: Boolean(server.command.trim()) && server.healthStatus !== 'error',
+    supportMessage:
+      !server.command.trim()
+        ? '尚未填写 MCP 启动命令。'
+        : server.healthStatus === 'error'
+          ? server.healthMessage || '连接测试失败，暂不可启用。'
+          : server.healthStatus === 'unknown'
+            ? '尚未验证连接，测试通过后才会真正启用。'
+            : undefined,
     path: server.cwd || undefined,
     entryPath: undefined,
     readonly: Boolean(server.isDefault),
     globalEnabled: server.enabled,
     projectOverride: workspaceOverrides.mcp[server.id] || 'inherit',
     effectiveEnabled:
-      workspaceOverrides.mcp[server.id] === 'on'
+      server.healthStatus === 'ok' &&
+        workspaceOverrides.mcp[server.id] === 'on'
         ? true
-        : workspaceOverrides.mcp[server.id] === 'off'
+        : workspaceOverrides.mcp[server.id] === 'off' || server.healthStatus !== 'ok'
           ? false
           : server.enabled,
   }))
@@ -823,6 +859,7 @@ function buildCapabilityPanelItems(
 export function MainWindowApp() {
   const [settings, setSettings] = useState<AgentSettings>(() => loadSettings())
   const [sessions, setSessions] = useState<Session[]>(() => loadSessions())
+  const [sessionFolders, setSessionFolders] = useState<SessionFolder[]>(() => loadSessionFolders())
   const [auraHome, setAuraHome] = useState<AuraHomeState | null>(null)
   const [projectCapabilityOverrides, setProjectCapabilityOverrides] =
     useState<ProjectCapabilityOverrides>(() => loadProjectCapabilityOverrides())
@@ -905,6 +942,7 @@ export function MainWindowApp() {
         setAuraHome(hydrated.aura)
         setSettings(hydrated.settings)
         setSessions(hydrated.sessions)
+        setSessionFolders(hydrated.sessionFolders)
         setProjectCapabilityOverrides(hydratedProjectOverrides)
       } catch (caught) {
         if (!cancelled) {
@@ -999,6 +1037,13 @@ export function MainWindowApp() {
     }
     saveSessions(sessions)
   }, [sessions, storageReady])
+
+  useEffect(() => {
+    if (!storageReady) {
+      return
+    }
+    saveSessionFolders(sessionFolders)
+  }, [sessionFolders, storageReady])
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth))
@@ -1166,8 +1211,8 @@ export function MainWindowApp() {
         updateSession(sessionId, session => ({
           ...session,
           messages: session.messages.map(message =>
-                message.id === binding.messageId
-                  ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
+            message.id === binding.messageId
+              ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
                 ...currentVariant,
                 content:
                   snapshot.message ||
@@ -1210,12 +1255,21 @@ export function MainWindowApp() {
                   currentVariant.createdAt || Date.now(),
                   snapshot.toolEvents,
                   snapshot.taskTree,
+                  snapshot,
                   currentVariant.activity?.expanded ?? true,
                 ),
                 appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
                 error: snapshot.error,
                 errorInfo: snapshot.errorInfo,
                 retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
+                agentMode: snapshot.agentMode || currentVariant.agentMode,
+                routeDecision: snapshot.routeDecision || currentVariant.routeDecision,
+                completionState:
+                  snapshot.completionState || currentVariant.completionState,
+                evidenceSummary:
+                  snapshot.evidenceSummary || currentVariant.evidenceSummary,
+                deliveryNote:
+                  snapshot.deliveryNote || currentVariant.deliveryNote,
               }))
               : message,
           ),
@@ -1258,6 +1312,7 @@ export function MainWindowApp() {
                             currentVariant.createdAt || Date.now(),
                             snapshot.toolEvents,
                             snapshot.taskTree,
+                            snapshot,
                             snapshot.status !== 'completed',
                           ),
                           appendedInputs:
@@ -1271,6 +1326,15 @@ export function MainWindowApp() {
                               ? snapshot.errorInfo
                               : undefined,
                           retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
+                          agentMode: snapshot.agentMode || currentVariant.agentMode,
+                          routeDecision:
+                            snapshot.routeDecision || currentVariant.routeDecision,
+                          completionState:
+                            snapshot.completionState || currentVariant.completionState,
+                          evidenceSummary:
+                            snapshot.evidenceSummary || currentVariant.evidenceSummary,
+                          deliveryNote:
+                            snapshot.deliveryNote || currentVariant.deliveryNote,
                         }))
                         : message,
                     ),
@@ -1446,9 +1510,9 @@ export function MainWindowApp() {
 
   function updateSession(sessionId: string, updater: (session: Session) => Session) {
     setSessions(current =>
-      current
-        .map(session => (session.id === sessionId ? updater(session) : session))
-        .sort((a, b) => b.updatedAt - a.updatedAt),
+      sortSessionsByRecentActivity(
+        current.map(session => (session.id === sessionId ? updater(session) : session)),
+      ),
     )
   }
 
@@ -1610,6 +1674,86 @@ export function MainWindowApp() {
     setError('')
   }
 
+  function createSessionFolder(name: string) {
+    const nextName = name.trim()
+    if (!nextName) {
+      return
+    }
+
+    setSessionFolders(current => [
+      ...current,
+      {
+        id: createId(),
+        name: nextName,
+        expanded: true,
+        createdAt: Date.now(),
+      },
+    ])
+  }
+
+  function renameSessionFolder(folderId: string, name: string) {
+    const nextName = name.trim()
+    if (!nextName) {
+      return
+    }
+
+    setSessionFolders(current =>
+      current.map(folder =>
+        folder.id === folderId
+          ? {
+            ...folder,
+            name: nextName,
+          }
+          : folder,
+      ),
+    )
+  }
+
+  function toggleSessionFolder(folderId: string) {
+    setSessionFolders(current =>
+      current.map(folder =>
+        folder.id === folderId
+          ? {
+            ...folder,
+            expanded: !folder.expanded,
+          }
+          : folder,
+      ),
+    )
+  }
+
+  function deleteSessionFolder(folderId: string) {
+    setSessionFolders(current => current.filter(folder => folder.id !== folderId))
+    setSessions(current =>
+      current.map(session =>
+        session.folderId === folderId
+          ? {
+            ...session,
+            folderId: undefined,
+          }
+          : session,
+      ),
+    )
+  }
+
+  function moveSessionToFolder(sessionId: string, folderId?: string) {
+    const normalizedFolderId =
+      typeof folderId === 'string' && sessionFolders.some(folder => folder.id === folderId)
+        ? folderId
+        : undefined
+
+    setSessions(current =>
+      current.map(session =>
+        session.id === sessionId
+          ? {
+            ...session,
+            folderId: normalizedFolderId,
+          }
+          : session,
+      ),
+    )
+  }
+
   function renameSession(sessionId: string, title: string) {
     const nextTitle = title.trim()
     if (!nextTitle) {
@@ -1742,9 +1886,9 @@ export function MainWindowApp() {
     const materializedAttachments = options?.attachmentsOverride
       ? options.attachmentsOverride
       : await materializeDraftAttachments(workspacePath, draftAttachments).catch(caught => {
-          setError(getErrorMessage(caught, '导入附件到当前会话失败。'))
-          return null
-        })
+        setError(getErrorMessage(caught, '导入附件到当前会话失败。'))
+        return null
+      })
 
     if (!materializedAttachments) {
       return
@@ -2239,17 +2383,17 @@ export function MainWindowApp() {
               },
               currentVariant =>
                 currentVariant.activity &&
-                (currentVariant.activity.status === 'running' ||
-                  currentVariant.activity.status === 'queued' ||
-                  currentVariant.activity.status === 'awaiting_approval')
+                  (currentVariant.activity.status === 'running' ||
+                    currentVariant.activity.status === 'queued' ||
+                    currentVariant.activity.status === 'awaiting_approval')
                   ? {
-                      ...currentVariant,
-                      activity: {
-                        ...currentVariant.activity,
-                        status: 'failed',
-                        finishedAt: Date.now(),
-                      },
-                    }
+                    ...currentVariant,
+                    activity: {
+                      ...currentVariant.activity,
+                      status: 'failed',
+                      finishedAt: Date.now(),
+                    },
+                  }
                   : currentVariant,
             ),
             pendingAssistantVariant,
@@ -2756,10 +2900,17 @@ export function MainWindowApp() {
           sessionFilter={sessionFilter}
           onSessionFilterChange={setSessionFilter}
           sessions={filteredSessions}
+          sessionFolders={sessionFolders}
+          auraWorkspaceDir={auraHome?.workspaceDir || ''}
           runningSessionIds={Object.keys(runningTasksBySession)}
           activeSessionId={activeSession?.id || null}
           onOpenSession={openSession}
           onCreateSession={createFreshSession}
+          onCreateSessionFolder={createSessionFolder}
+          onRenameSessionFolder={renameSessionFolder}
+          onDeleteSessionFolder={deleteSessionFolder}
+          onToggleSessionFolder={toggleSessionFolder}
+          onMoveSessionToFolder={moveSessionToFolder}
           onRenameSession={renameSession}
           onDeleteSession={(sessionId, deleteWorkspace) =>
             void deleteSession(sessionId, deleteWorkspace)
