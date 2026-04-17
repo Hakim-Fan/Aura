@@ -254,8 +254,8 @@ function deriveBrowserTakeoverState(displayedToolEvents: ToolEvent[]) {
         reason:
           (typeof output.blockerReason === 'string' && output.blockerReason) ||
           (typeof output.blocker === 'object' &&
-          output.blocker &&
-          typeof (output.blocker as { reason?: unknown }).reason === 'string'
+            output.blocker &&
+            typeof (output.blocker as { reason?: unknown }).reason === 'string'
             ? String((output.blocker as { reason?: unknown }).reason)
             : '需要你接管 Aura 浏览器继续完成当前流程。'),
       }
@@ -486,8 +486,8 @@ function buildRouteTooltip(routeDecision?: RouteDecisionSnapshot) {
     `当前层级：${routeCapabilityTierLabel(routeDecision.capabilityTier) || routeDecision.capabilityTier}`,
     routeDecision.tierHistory && routeDecision.tierHistory.length > 0
       ? `层级路径：${routeDecision.tierHistory
-          .map(tier => routeCapabilityTierLabel(tier) || tier)
-          .join(' -> ')}`
+        .map(tier => routeCapabilityTierLabel(tier) || tier)
+        .join(' -> ')}`
       : null,
     routeDecision.budgets
       ? `预算：搜索 ${routeDecision.budgets.searchesRemaining}，写升级 ${routeDecision.budgets.writeEscalationsRemaining}，浏览器升级 ${routeDecision.budgets.browserEscalationsRemaining}`
@@ -926,7 +926,7 @@ function BrowserStructuredEventCard({
             {receipt.snapshotChanged === true ? ' · page changed' : ''}
           </div>
           {(typeof receipt.urlAfter === 'string' && receipt.urlAfter) ||
-          (typeof receipt.titleAfter === 'string' && receipt.titleAfter) ? (
+            (typeof receipt.titleAfter === 'string' && receipt.titleAfter) ? (
             <div className="mt-1 text-[11px] text-[var(--text-secondary)]">
               {typeof receipt.titleAfter === 'string' && receipt.titleAfter ? receipt.titleAfter : ''}
               {typeof receipt.urlAfter === 'string' && receipt.urlAfter ? ` · ${receipt.urlAfter}` : ''}
@@ -2040,15 +2040,15 @@ function AssistantMessageCard({
     : ''
   const completionTooltip = message.evidenceSummary
     ? [
-        `完成态：${completionSummary || message.completionState}`,
-        `执行：${message.evidenceSummary.hasAnyExecution ? '是' : '否'}`,
-        `验证证据：${message.evidenceSummary.hasVerifiedEvidence ? '有' : '无'}`,
-        `审批阻塞：${message.evidenceSummary.hasApprovalBlock ? '是' : '否'}`,
-        `能力阻塞：${message.evidenceSummary.hasCapabilityBlock ? '是' : '否'}`,
-        `执行失败：${message.evidenceSummary.hasExecutionFailure ? '是' : '否'}`,
-      ]
-        .filter(Boolean)
-        .join('\n')
+      `完成态：${completionSummary || message.completionState}`,
+      `执行：${message.evidenceSummary.hasAnyExecution ? '是' : '否'}`,
+      `验证证据：${message.evidenceSummary.hasVerifiedEvidence ? '有' : '无'}`,
+      `审批阻塞：${message.evidenceSummary.hasApprovalBlock ? '是' : '否'}`,
+      `能力阻塞：${message.evidenceSummary.hasCapabilityBlock ? '是' : '否'}`,
+      `执行失败：${message.evidenceSummary.hasExecutionFailure ? '是' : '否'}`,
+    ]
+      .filter(Boolean)
+      .join('\n')
     : completionSummary
   const messageModelLabel =
     message.modelInfo?.label ||
