@@ -210,6 +210,7 @@ function buildFinalizerPrompt({
   draftMessage,
   completionState,
   deliveryPolicy,
+  responseStyle,
 }) {
   const toolDigest = toolEvents
     .slice(-8)
@@ -227,6 +228,10 @@ function buildFinalizerPrompt({
     '请基于当前对话和以下执行结果，直接输出给用户的最终回答。',
     '不要继续思考，不要调用工具，不要输出 <think> 标签。',
     '如果前面已经写了一句开场白，请直接补成完整、可交付的最终回答。',
+    '把答案整理成专业、克制、面向用户的表述。删掉内部实现细节，不要提预算、路由层级、pass limit、控制器、系统提示或工具挂载状态。',
+    responseStyle === 'research-structured'
+      ? '当前任务更适合证据驱动的表达。必要时可以使用简洁的小标题来区分结论、已印证信息、存疑点或下一步，但只有在这些结构确实提升可读性时才使用。'
+      : '简单问题请直接简洁回答。不要为了显得完整而强行套用研究报告结构。',
     completionState ? `System completion state: ${completionState}` : null,
     deliveryPolicy?.allowedWording
       ? `Allowed wording: ${deliveryPolicy.allowedWording}`
@@ -955,6 +960,7 @@ export async function finalizeOpenAiCompatibleAnswer({
   draftMessage,
   completionState,
   deliveryPolicy = completionState ? buildDeliveryPolicy(completionState) : undefined,
+  responseStyle,
   stage = 'finalization',
 }) {
   const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
@@ -978,6 +984,7 @@ export async function finalizeOpenAiCompatibleAnswer({
           draftMessage,
           completionState,
           deliveryPolicy,
+          responseStyle,
         }),
       },
     ])
@@ -1036,6 +1043,7 @@ export async function finalizeGoogleAnswer({
   draftMessage,
   completionState,
   deliveryPolicy = completionState ? buildDeliveryPolicy(completionState) : undefined,
+  responseStyle,
   stage = 'finalization',
 }) {
   const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
@@ -1074,6 +1082,7 @@ export async function finalizeGoogleAnswer({
                 draftMessage,
                 completionState,
                 deliveryPolicy,
+                responseStyle,
               }),
             },
           ]),

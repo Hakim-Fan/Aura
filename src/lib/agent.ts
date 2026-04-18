@@ -19,6 +19,7 @@ export async function startAgentTask(
       role: message.role as ChatRole,
       content: message.content,
       parts: message.parts || [],
+      researchMode: message.researchMode,
     })),
   }
 
@@ -44,6 +45,7 @@ export async function appendInputToAgentTask(
     parts: ChatMessage['parts']
     attachments?: ChatMessage['attachments']
     createdAt: number
+    researchMode?: ChatMessage['researchMode']
   },
 ): Promise<void> {
   return invoke('append_input_to_agent_task', { taskId, input })

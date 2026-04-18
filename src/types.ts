@@ -75,6 +75,8 @@ export type AgentExecutionPhase =
 
 export type AppendedInputStatus = 'queued' | 'consumed'
 
+export type ResearchMode = 'auto' | 'deep'
+
 export type AppendedInput = {
   id: string
   content: string
@@ -82,6 +84,7 @@ export type AppendedInput = {
   attachments?: MessageAttachment[]
   createdAt: number
   status: AppendedInputStatus
+  researchMode?: ResearchMode
 }
 
 export type MessageEvent = {
@@ -319,6 +322,7 @@ export type ChatMessageVariant = {
   parts?: ChatContentPart[]
   status?: MessageStatus
   createdAt?: number
+  researchMode?: ResearchMode
   attachments?: MessageAttachment[]
   reasoning?: MessageReasoning[]
   phaseOutputs?: MessagePhaseOutput[]
@@ -347,6 +351,7 @@ export type ChatMessage = {
   parts?: ChatContentPart[]
   status?: MessageStatus
   createdAt?: number
+  researchMode?: ResearchMode
   attachments?: MessageAttachment[]
   reasoning?: MessageReasoning[]
   phaseOutputs?: MessagePhaseOutput[]
@@ -529,6 +534,8 @@ export type AgentSettings = {
   apiKey: string
   baseUrl: string
   model: string
+  analysisProviderProfileId: string
+  analysisModel: string
   activeProviderProfileId: string
   providerProfiles: ProviderProfile[]
   agentArchitectureMode: AgentArchitectureMode

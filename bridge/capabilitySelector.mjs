@@ -79,7 +79,7 @@ function buildConversationText(messages) {
   )
 }
 
-function inferTaskSignals(text) {
+function inferLocalTaskSignals(text) {
   return {
     isEditingTask: hasAny(text, [
       'fix',
@@ -216,6 +216,35 @@ function inferTaskSignals(text) {
       '子 agent',
       '多步骤',
     ]),
+  }
+}
+
+function inferTaskSignalsFromClassification(classification, text) {
+  const localSignals = inferLocalTaskSignals(text)
+
+  if (!classification || typeof classification !== 'object') {
+    return localSignals
+  }
+
+  return {
+    ...localSignals,
+    isEditingTask:
+      localSignals.isEditingTask ||
+      (classification.answerMode === 'execute' && classification.workspaceRelated === true),
+    isReviewTask:
+      localSignals.isReviewTask ||
+      (classification.answerMode === 'diagnose' && classification.workspaceRelated === true),
+    isBrowserTask:
+      localSignals.isBrowserTask ||
+      classification.webInteractionRequired === true ||
+      classification.systemChromeRequested === true,
+    isResearchTask:
+      localSignals.isResearchTask || classification.needsExternalFacts === true,
+    isComplexTask:
+      localSignals.isComplexTask ||
+      classification.taskComplexity === 'high' ||
+      classification.planDepth === 'multi_step' ||
+      classification.planDepth === 'long_horizon',
   }
 }
 
@@ -403,10 +432,7 @@ function scoreToolGroup(group, context) {
     if (group.id === 'advanced:computer-use' && context.signals.isDesktopTask) {
       score += 6
     }
-    if (
-      group.id === 'advanced:browser-runtime' &&
-      (context.signals.isBrowserTask || context.signals.isResearchTask)
-    ) {
+    if (group.id === 'advanced:browser-runtime' && context.signals.isBrowserTask) {
       score += 8
     }
     if (group.id === 'advanced:chrome-automation' && context.signals.isBrowserTask) {
@@ -494,11 +520,12 @@ export function selectTurnCapabilities({
   runtimeCapabilities,
   skillEntries,
   tools,
+  classification,
 }) {
   const text = buildConversationText(messages)
   const context = {
     text,
-    signals: inferTaskSignals(text),
+    signals: inferTaskSignalsFromClassification(classification, text),
   }
 
   const selectedSkills = skillEntries

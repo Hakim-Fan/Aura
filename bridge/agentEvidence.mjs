@@ -167,6 +167,7 @@ function collectProducedEvidence(event, effectTypes) {
   const producedEvidence = []
   const name = normalizeToolName(event?.name)
   const denied = isDeniedToolEvent(event)
+  const structuredOutput = parseStructuredOutput(event?.output)
 
   if (denied) {
     producedEvidence.push('user_denied')
@@ -190,14 +191,22 @@ function collectProducedEvidence(event, effectTypes) {
     }
 
     if (name === 'web_search') {
-      producedEvidence.push('web_search_result')
+      if (
+        structuredOutput?.noResults !== true &&
+        structuredOutput?.searchStopped !== true &&
+        structuredOutput?.budgetExhausted !== true &&
+        (!Array.isArray(structuredOutput?.results) || structuredOutput.results.length > 0)
+      ) {
+        producedEvidence.push('web_search_result')
+      }
     }
 
     if (name === 'web_fetch') {
-      const output = parseStructuredOutput(event?.output)
       const contentFormat =
-        output && typeof output === 'object' && typeof output.contentFormat === 'string'
-          ? output.contentFormat
+        structuredOutput &&
+        typeof structuredOutput === 'object' &&
+        typeof structuredOutput.contentFormat === 'string'
+          ? structuredOutput.contentFormat
           : ''
       producedEvidence.push(
         contentFormat === 'text' ? 'web_fetch_summary' : 'web_fetch_content',
@@ -326,9 +335,9 @@ export function buildDeliveryPolicy(completionState) {
     case 'blocked_by_capability':
       return {
         allowedWording:
-          'Explain the current capability or budget boundary and what remains blocked. Do not claim completion.',
+          'Summarize what you could establish from the available evidence, describe the remaining uncertainty in user-facing terms, and give the best next step. Do not mention internal budgets, route tiers, or pass limits. Do not claim completion.',
         deliveryNote:
-          '系统完成态：能力受限。当前路由层级或预算不足以继续推进，所以正文只能代表现有分析和已拿到的证据。',
+          '系统完成态：能力受限。当前只能基于已有证据收束回答；不要把内部预算、层级或路由机制暴露给用户。',
       }
     case 'failed_after_execution':
       return {

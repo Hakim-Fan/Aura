@@ -58,6 +58,7 @@ import type {
   ProjectCapabilityOverrides,
   ProviderProfile,
   ReasoningEffort,
+  ResearchMode,
   Session,
   SessionFolder,
   TaskNode,
@@ -346,6 +347,7 @@ type DraftAttachment = {
 type ComposerState = {
   draft: string
   attachments: DraftAttachment[]
+  researchMode: ResearchMode
 }
 
 type RunningTaskBinding = {
@@ -358,6 +360,7 @@ function createEmptyComposerState(): ComposerState {
   return {
     draft: '',
     attachments: [],
+    researchMode: 'auto',
   }
 }
 
@@ -654,6 +657,7 @@ function toMessageVariant(message: ChatMessage): ChatMessageVariant {
     parts: message.parts,
     status: message.status,
     createdAt: message.createdAt,
+    researchMode: message.researchMode,
     attachments: message.attachments,
     reasoning: message.reasoning,
     phaseOutputs: message.phaseOutputs,
@@ -689,6 +693,7 @@ function applyMessageVariant(
     parts: activeVariant.parts,
     status: activeVariant.status,
     createdAt: activeVariant.createdAt,
+    researchMode: activeVariant.researchMode,
     attachments: activeVariant.attachments,
     reasoning: activeVariant.reasoning,
     phaseOutputs: activeVariant.phaseOutputs,
@@ -976,6 +981,7 @@ export function MainWindowApp() {
     : createEmptyComposerState()
   const draft = activeComposerState.draft
   const draftAttachments = activeComposerState.attachments
+  const draftResearchMode = activeComposerState.researchMode
   const agentTask = activeSession ? agentTasksBySession[activeSession.id] || null : null
   const activeRunningTask = activeSession ? runningTasksBySession[activeSession.id] || null : null
 
@@ -1531,7 +1537,10 @@ export function MainWindowApp() {
   }
 
   function clearComposerState(sessionId: string) {
-    updateComposerState(sessionId, () => createEmptyComposerState())
+    updateComposerState(sessionId, current => ({
+      ...createEmptyComposerState(),
+      researchMode: current.researchMode,
+    }))
   }
 
   async function chooseExplicitWorkspaceForSession() {
@@ -1910,6 +1919,7 @@ export function MainWindowApp() {
       attachments: materializedAttachments,
       createdAt: Date.now(),
       status: 'queued',
+      researchMode: draftResearchMode,
     }
 
     try {
@@ -1919,6 +1929,7 @@ export function MainWindowApp() {
         parts: appendedInput.parts,
         attachments: appendedInput.attachments,
         createdAt: appendedInput.createdAt,
+        researchMode: appendedInput.researchMode,
       })
 
       setAgentTasksBySession(current => ({
@@ -2073,6 +2084,7 @@ export function MainWindowApp() {
       attachments: input.attachments || [],
       status: 'completed' as const,
       createdAt: input.createdAt,
+      researchMode: input.researchMode,
     }))
     const pendingAssistantVariant: ChatMessageVariant = {
       ...toMessageVariant(createPendingAssistantMessage()),
@@ -2186,6 +2198,7 @@ export function MainWindowApp() {
       appendUserVersion?: boolean
       providerProfileIdOverride?: string
       modelOverride?: string
+      researchModeOverride?: ResearchMode
     },
   ) {
     const content = rawContent.trim()
@@ -2279,6 +2292,7 @@ export function MainWindowApp() {
       parts: userMessageParts,
       status: 'completed',
       createdAt: messageCreatedAt,
+      researchMode: options?.researchModeOverride || draftResearchMode,
       attachments: materializedAttachments,
     }
     const projectWorkspaceRoot =
@@ -2636,6 +2650,7 @@ export function MainWindowApp() {
       appendUserVersion: false,
       providerProfileIdOverride: options?.providerProfileId,
       modelOverride: options?.modelId,
+      researchModeOverride: sourceUserMessage.researchMode,
     })
   }
 
@@ -2660,6 +2675,7 @@ export function MainWindowApp() {
       targetUserMessageId: message.id,
       targetAssistantMessageId: pairedAssistant?.role === 'assistant' ? pairedAssistant.id : undefined,
       attachmentsOverride: message.attachments || [],
+      researchModeOverride: message.researchMode,
     })
   }
 
@@ -2962,6 +2978,7 @@ export function MainWindowApp() {
               capabilitySnapshot={currentResolvedCapabilityUsage}
               modelGroups={enabledModelGroups}
               activeModelProfileId={activeProviderProfile?.id || ''}
+              researchMode={draftResearchMode}
               onDraftChange={value => {
                 if (!activeSession) {
                   return
@@ -2969,6 +2986,15 @@ export function MainWindowApp() {
                 updateComposerState(activeSession.id, current => ({
                   ...current,
                   draft: value,
+                }))
+              }}
+              onToggleResearchMode={() => {
+                if (!activeSession) {
+                  return
+                }
+                updateComposerState(activeSession.id, current => ({
+                  ...current,
+                  researchMode: current.researchMode === 'deep' ? 'auto' : 'deep',
                 }))
               }}
               onSetCapabilityOverride={setProjectCapabilityOverride}

@@ -61,6 +61,7 @@ import type {
   MessageUsage,
   ProviderMode,
   ReasoningEffort,
+  ResearchMode,
   RouteDecisionSnapshot,
   TaskNode,
   ToolEvent,
@@ -105,7 +106,9 @@ type Props = {
   capabilitySnapshot?: CapabilityUsageSnapshot
   modelGroups: ModelGroup[]
   activeModelProfileId: string
+  researchMode: ResearchMode
   onDraftChange: (value: string) => void
+  onToggleResearchMode: () => void
   onSetCapabilityOverride: (
     kind: 'skills' | 'plugins' | 'mcp',
     id: string,
@@ -477,7 +480,7 @@ function buildRouteTooltip(routeDecision?: RouteDecisionSnapshot) {
         : routeDecision.stopReason === 'no_incremental_progress'
           ? '升级后无新增信息，已收束'
           : routeDecision.stopReason === 'budget_exhausted'
-            ? '升级预算或可用路径已耗尽'
+            ? '当前路径已收束，基于现有证据回答'
             : routeDecision.stopReason === 'runtime_pass_limit'
               ? '达到路由运行上限'
               : null
@@ -2473,7 +2476,9 @@ export function ChatView({
   capabilitySnapshot,
   modelGroups,
   activeModelProfileId,
+  researchMode,
   onDraftChange,
+  onToggleResearchMode,
   onSetCapabilityOverride,
   onSubmit,
   onOpenProviders,
@@ -2610,6 +2615,7 @@ export function ChatView({
   const selectedReasoningOption =
     reasoningEffortOptions.find(option => option.value === settings.reasoningEffort) ||
     reasoningEffortOptions[2]
+  const deepResearchEnabled = researchMode === 'deep'
   const isMetaEnter = settings.sendShortcut === 'meta-enter'
   const composerMetaHint = settings.cwd
     ? isMetaEnter
@@ -2902,6 +2908,22 @@ export function ChatView({
                   <div className="flex items-center gap-1">
                     <button className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" onClick={onPickAttachment} title="上传附件">
                       <Paperclip size={16} />
+                    </button>
+                    <button
+                      className={`flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors ${
+                        deepResearchEnabled
+                          ? 'bg-[rgba(186,111,75,0.14)] text-[#9f4723]'
+                          : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'
+                      }`}
+                      onClick={onToggleResearchMode}
+                      title={
+                        deepResearchEnabled
+                          ? '已启用深度研究：更高搜索预算、更强推理强度、更多来源交叉验证'
+                          : '启用深度研究'
+                      }
+                    >
+                      <Brain size={15} />
+                      <span className="text-12px font-600">深度研究</span>
                     </button>
                     <div className="relative" ref={capabilityMenuRef}>
                       <button

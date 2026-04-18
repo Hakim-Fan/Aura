@@ -87,24 +87,12 @@ export function buildCapabilityExposureNote(snapshot, routeState) {
     lines.push(
       `Current answer mode: ${routeState.answerMode}. Current capability tier: ${routeState.capabilityTier}.`,
     )
-    if (routeState.budgets?.searchesRemaining >= 0) {
-      lines.push(
-        `Budget status: searches remaining ${routeState.budgets.searchesRemaining}.`,
-      )
-    }
-    if (routeState.budgets?.writeEscalationsRemaining >= 0) {
-      lines.push(
-        `Budget status: write escalations remaining ${routeState.budgets.writeEscalationsRemaining}.`,
-      )
-    }
-    if (routeState.budgets?.browserEscalationsRemaining >= 0) {
-      lines.push(
-        `Budget status: browser escalations remaining ${routeState.budgets.browserEscalationsRemaining}.`,
-      )
-    }
     if (Array.isArray(routeState.availableEscalations) && routeState.availableEscalations.length > 0) {
       lines.push(`Allowed route escalations for this turn: ${routeState.availableEscalations.join(', ')}.`)
     }
+    lines.push(
+      'Internal route budgets and pass limits exist for planning only. Never mention budgets, route tiers, or pass limits to the user.',
+    )
   }
 
   const items = [
@@ -148,11 +136,23 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       [
         `Current answer mode: ${routeState.answerMode}.`,
         `Current capability tier: ${routeState.capabilityTier}.`,
-        `Current search budget remaining: ${routeState.budgets?.searchesRemaining ?? 0}.`,
-        `Current write escalation budget remaining: ${routeState.budgets?.writeEscalationsRemaining ?? 0}.`,
-        `Current browser escalation budget remaining: ${routeState.budgets?.browserEscalationsRemaining ?? 0}.`,
+        routeState.researchMode === 'deep'
+          ? 'Research mode: deep.'
+          : 'Research mode: auto.',
+        'Internal budgets and route controls exist only for planning.',
+        'Never mention budgets, route tiers, pass limits, or internal controller decisions in the final answer.',
       ].join('\n'),
     )
+
+    if (routeState.responseStyle === 'research-structured') {
+      sections.push(
+        'This turn benefits from an evidence-led response. Use clear structure when it improves comprehension, especially for multi-source or uncertainty-heavy research. Do not force a rigid report format onto trivial questions.',
+      )
+    } else {
+      sections.push(
+        'Keep simple questions simple. Do not force headings like conclusion, corroboration, uncertainty, or next steps unless the task genuinely benefits from that structure.',
+      )
+    }
 
     if (Array.isArray(routeState.availableEscalations) && routeState.availableEscalations.length > 0) {
       sections.push(
@@ -184,10 +184,44 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       sections.push(
         'For research, latest info, docs, news, or source-finding tasks, prefer web_search first and then web_fetch for selected URLs. Do not jump to browser_search just to read public web content.',
       )
+      sections.push(
+        'For source selection, prefer high-signal domains when relevant: official docs for technical references, reputable finance sites for market data, and established news outlets for current events.',
+      )
+      sections.push(
+        'When calling web_search, prefer plain natural-language keywords. If you want to bias toward certain sites, prefer the domains field. Legacy operators like site:, intitle:, or quoted phrases are accepted, but they are less portable across providers than structured fields.',
+      )
+      sections.push(
+        'web_search returns ranking metadata such as rankScore, sourceQualityScore, noveltyScore, freshnessScore, domainCategory, and rankingSignals. Prefer higher rankScore links, but still diversify domains when the question benefits from comparison.',
+      )
+      sections.push(
+        'web_fetch returns structured evidence such as sourceAssessment, riskFlags, keyPoints, and evidenceBlocks. Prefer grounding your answer in those evidenceBlocks instead of paraphrasing the whole page blindly.',
+      )
+      sections.push(
+        'When multiple web_fetch calls are available, prefer crossSourceInsights to separate corroborated claims from mixed or conflicting signals before writing the conclusion.',
+      )
+      sections.push(
+        'Use a research loop that mirrors mature agents: one broad discovery search, then web_fetch on the best 1-3 links, then answer. Search again only if the fetched evidence is stale, contradictory, or still missing a key angle.',
+      )
+      if (routeState.researchMode === 'deep') {
+        sections.push(
+          'Deep research mode is enabled. You may spend extra search and reasoning steps when they materially improve evidence quality, source diversity, or conflict resolution.',
+        )
+      }
+      sections.push(
+        routeState.researchMode === 'deep'
+          ? 'Do not burn searches on minor query rewrites. In deep research mode you may spend a few extra discovery searches, but once strong candidates exist you should switch to web_fetch before searching again.'
+          : 'Do not burn searches on minor query rewrites. After two discovery searches without switching to reading, stop and move to web_fetch or a bounded answer.',
+      )
+      sections.push(
+        'When you stop searching, present it as a user-facing evidence boundary, not an internal budget boundary.',
+      )
     } else if (routeState.capabilityTier === 'browser-interactive') {
       sections.push('Interactive browser tools are mounted because the request explicitly requires web interaction. Stay focused on the requested workflow.')
       sections.push(
-        'When both web_* and browser_* are mounted, use web_search/web_fetch for structured lookup or page reading, and use browser_* only when the user explicitly wants browser interaction or the page truly requires interaction.',
+        'When both web_* and browser_* are mounted, use web_search/web_fetch for information gathering, source lookup, and page reading. Use browser_* only for actual browser operation such as open, login, click, type, submit, or page-state verification.',
+      )
+      sections.push(
+        'Do not use browser_search or browser page navigation as a substitute for ordinary research. Unless the task itself is to operate a browser workflow, gather information only through web_search and web_fetch.',
       )
       if (routeState.explicitSystemChromeRequest) {
         sections.push('The user explicitly asked to operate system Chrome. Prefer the mounted chrome_* tools over the Aura browser runtime for this turn.')

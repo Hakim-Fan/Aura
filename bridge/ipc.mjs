@@ -237,6 +237,7 @@ rl.on('line', (line) => {
           ? input.createdAt
           : Date.now(),
       status: 'queued',
+      researchMode: input.researchMode === 'deep' ? 'deep' : 'auto',
     })
     emitAppendedInputs()
     return
@@ -338,6 +339,7 @@ rl.on('line', (line) => {
         parts: Array.isArray(input.parts) ? input.parts : [],
         attachments: Array.isArray(input.attachments) ? input.attachments : [],
         createdAt: input.createdAt,
+        researchMode: input.researchMode === 'deep' ? 'deep' : 'auto',
       }))
     },
     createCurrentStepAbortController() {

@@ -79,9 +79,9 @@ export function buildRouteStopMessage({
   const baseMessage = String(message || '').trim()
   const stopNote =
     stopReason === 'no_incremental_progress'
-      ? `我已经升级到 ${routeState?.capabilityTier || '当前层级'}，但这一层没有带来新的增量信息，所以先在当前证据范围内收束，避免继续无效升级。`
+      ? '基于现有证据继续尝试也没有带来新的有效信息，所以我先在当前证据范围内收束回答，避免重复无效操作。'
       : stopReason === 'budget_exhausted'
-        ? `当前路由已经不能再升级到 ${desiredEscalationTarget || '更高能力层级'}，所以我会基于现有证据收束回答，而不是继续申请超出预算的能力。`
+        ? '继续沿当前方向扩展也很难带来明显增量，所以我先基于现有证据给出最稳妥的结论和下一步。'
         : ''
 
   if (!stopNote) {

@@ -9,6 +9,12 @@ function asText(value: unknown) {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+function asTextArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.map(entry => (typeof entry === 'string' ? entry.trim() : '')).filter(Boolean)
+    : []
+}
+
 function summarizeUrl(value: string) {
   try {
     const parsed = new URL(value)
@@ -42,9 +48,13 @@ export function WebSearchEventCard({
   const provider = asText(output.provider)
   const total = typeof output.total === 'number' ? output.total : 0
   const tookMs = typeof output.tookMs === 'number' ? output.tookMs : 0
+  const searchStopped = output.searchStopped === true
   const budgetExhausted = output.budgetExhausted === true
-  const budgetSummary = asText(output.summary)
-  const budgetAction = asText(output.suggestedAction)
+  const stopSummary = asText(output.summary)
+  const stopAction = asText(output.suggestedAction)
+  const recommendedResults = Array.isArray(output.recommendedResults)
+    ? output.recommendedResults.filter(isRecord).slice(0, 3)
+    : []
   const results = Array.isArray(output.results)
     ? output.results.filter(isRecord).slice(0, 8)
     : []
@@ -53,16 +63,56 @@ export function WebSearchEventCard({
     <div className="mt-2 flex flex-col gap-2 rounded-xl border border-[rgba(79,123,116,0.12)] bg-[rgba(79,123,116,0.05)] p-3">
       <div className="flex flex-wrap items-center gap-2">
         <MetaPill label="Query" value={query || 'Searching'} />
-        <MetaPill label="Provider" value={provider && provider !== 'route-budget' ? provider : undefined} />
+        <MetaPill
+          label="Provider"
+          value={
+            provider &&
+            provider !== 'route-budget' &&
+            provider !== 'route-search-controller'
+              ? provider
+              : undefined
+          }
+        />
         <MetaPill label="Results" value={total} />
         {tookMs > 0 ? <MetaPill label="Time" value={`${tookMs}ms`} /> : null}
       </div>
 
-      {budgetExhausted ? (
+      {budgetExhausted || searchStopped ? (
         <div className="rounded-lg border border-amber-200 bg-[rgba(255,248,235,0.88)] px-3 py-2 text-[12px] leading-relaxed text-amber-800">
-          <div>{budgetSummary || '本轮网页搜索预算已经用完。'}</div>
-          {budgetAction ? (
-            <div className="mt-1 text-[11px] text-amber-700/85">{budgetAction}</div>
+          <div>{stopSummary || '当前搜索阶段已经收束，建议转入阅读和整理。'}</div>
+          {stopAction ? (
+            <div className="mt-1 text-[11px] text-amber-700/85">{stopAction}</div>
+          ) : null}
+          {recommendedResults.length > 0 ? (
+            <div className="mt-2 flex flex-col gap-2">
+              {recommendedResults.map((entry, index) => {
+                const title = asText(entry.title) || `Recommended ${index + 1}`
+                const url = asText(entry.url)
+                const site = asText(entry.site)
+                const rankScore =
+                  typeof entry.rankScore === 'number' ? Math.round(entry.rankScore) : undefined
+
+                return (
+                  <div
+                    key={`${url || title}-${index}`}
+                    className="rounded-lg border border-amber-100 bg-white/75 px-2.5 py-2"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 text-[11px] font-600 text-[var(--text-primary)]">
+                        {title}
+                      </div>
+                      <MetaPill
+                        label="Score"
+                        value={rankScore !== undefined ? `${rankScore}` : undefined}
+                      />
+                    </div>
+                    <div className="mt-1 text-[10px] text-[var(--text-secondary)]">
+                      {site || summarizeUrl(url)}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           ) : null}
         </div>
       ) : results.length > 0 ? (
@@ -72,6 +122,15 @@ export function WebSearchEventCard({
             const url = asText(entry.url)
             const site = asText(entry.site)
             const snippet = asText(entry.snippet)
+            const rankScore =
+              typeof entry.rankScore === 'number' ? Math.round(entry.rankScore) : undefined
+            const sourceQualityScore =
+              typeof entry.sourceQualityScore === 'number'
+                ? Math.round(entry.sourceQualityScore)
+                : undefined
+            const noveltyScore =
+              typeof entry.noveltyScore === 'number' ? Math.round(entry.noveltyScore) : undefined
+            const domainCategory = asText(entry.domainCategory)
 
             return (
               <article
@@ -106,6 +165,20 @@ export function WebSearchEventCard({
                     {snippet}
                   </div>
                 ) : null}
+                {rankScore !== undefined || sourceQualityScore !== undefined || noveltyScore !== undefined ? (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <MetaPill label="Score" value={rankScore !== undefined ? `${rankScore}` : undefined} />
+                    <MetaPill
+                      label="Quality"
+                      value={sourceQualityScore !== undefined ? `${sourceQualityScore}` : undefined}
+                    />
+                    <MetaPill
+                      label="Novelty"
+                      value={noveltyScore !== undefined ? `${noveltyScore}` : undefined}
+                    />
+                    <MetaPill label="Type" value={domainCategory || undefined} />
+                  </div>
+                ) : null}
               </article>
             )
           })}
@@ -136,6 +209,15 @@ export function WebFetchEventCard({
   const contentFormat = asText(output.contentFormat)
   const author = asText(output.author)
   const publishedAt = asText(output.publishedAt)
+  const riskFlags = asTextArray(output.riskFlags)
+  const keyPoints = asTextArray(output.keyPoints)
+  const sourceAssessment = isRecord(output.sourceAssessment) ? output.sourceAssessment : null
+  const crossSourceInsights = isRecord(output.crossSourceInsights)
+    ? output.crossSourceInsights
+    : null
+  const evidenceBlocks = Array.isArray(output.evidenceBlocks)
+    ? output.evidenceBlocks.filter(isRecord).slice(0, 4)
+    : []
   const tookMs = typeof output.tookMs === 'number' ? output.tookMs : 0
   const preview = expanded ? content : content.slice(0, 900).trim()
   const canExpand = content.length > 900
@@ -168,9 +250,180 @@ export function WebFetchEventCard({
             {[author, publishedAt].filter(Boolean).join(' · ')}
           </div>
         ) : null}
+        {sourceAssessment ? (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <MetaPill label="Source" value={asText(sourceAssessment.category) || undefined} />
+            <MetaPill label="Freshness" value={asText(sourceAssessment.freshness) || undefined} />
+            <MetaPill label="Use" value={asText(sourceAssessment.recommendedUse) || undefined} />
+            <MetaPill
+              label="Quality"
+              value={
+                typeof sourceAssessment.qualityScore === 'number'
+                  ? `${Math.round(sourceAssessment.qualityScore)}`
+                  : undefined
+              }
+            />
+          </div>
+        ) : null}
         {excerpt ? (
           <div className="mt-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
             {excerpt}
+          </div>
+        ) : null}
+        {riskFlags.length > 0 ? (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {riskFlags.map(flag => (
+              <MetaPill key={flag} label="Risk" value={flag} />
+            ))}
+          </div>
+        ) : null}
+        {crossSourceInsights ? (
+          <div className="mt-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.03)] px-3 py-2">
+            <div className="mb-2 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+              Cross-Source Check
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <MetaPill
+                label="Signal"
+                value={asText(crossSourceInsights.overallSignal) || undefined}
+              />
+              <MetaPill
+                label="Sources"
+                value={
+                  typeof crossSourceInsights.comparedSources === 'number'
+                    ? `${Math.round(crossSourceInsights.comparedSources)}`
+                    : undefined
+                }
+              />
+              <MetaPill
+                label="Domains"
+                value={
+                  typeof crossSourceInsights.uniqueDomains === 'number'
+                    ? `${Math.round(crossSourceInsights.uniqueDomains)}`
+                    : undefined
+                }
+              />
+            </div>
+            {Array.isArray(crossSourceInsights.corroboratingClaims) &&
+            crossSourceInsights.corroboratingClaims.length > 0 ? (
+              <div className="mt-2 flex flex-col gap-2">
+                {crossSourceInsights.corroboratingClaims
+                  .filter(isRecord)
+                  .slice(0, 3)
+                  .map((entry, index) => (
+                    <div
+                      key={`corroboration-${index}`}
+                      className="rounded-lg border border-emerald-100 bg-emerald-50/60 px-2.5 py-2"
+                    >
+                      <div className="flex flex-wrap gap-1.5">
+                        <MetaPill label="Check" value="corroborated" />
+                        <MetaPill
+                          label="Score"
+                          value={
+                            typeof entry.confidenceScore === 'number'
+                              ? `${Math.round(entry.confidenceScore)}`
+                              : undefined
+                          }
+                        />
+                        <MetaPill
+                          label="Sources"
+                          value={asTextArray(entry.sources).join(' / ') || undefined}
+                        />
+                      </div>
+                      <div className="mt-2 text-[11px] leading-relaxed text-[var(--text-primary)]">
+                        {asText(entry.summary)}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            ) : null}
+            {Array.isArray(crossSourceInsights.conflictingSignals) &&
+            crossSourceInsights.conflictingSignals.length > 0 ? (
+              <div className="mt-2 flex flex-col gap-2">
+                {crossSourceInsights.conflictingSignals
+                  .filter(isRecord)
+                  .slice(0, 3)
+                  .map((entry, index) => (
+                    <div
+                      key={`conflict-${index}`}
+                      className="rounded-lg border border-amber-100 bg-amber-50/60 px-2.5 py-2"
+                    >
+                      <div className="flex flex-wrap gap-1.5">
+                        <MetaPill label="Check" value="conflict" />
+                        <MetaPill
+                          label="Sources"
+                          value={asTextArray(entry.sources).join(' / ') || undefined}
+                        />
+                      </div>
+                      <div className="mt-2 text-[11px] leading-relaxed text-[var(--text-primary)]">
+                        {asText(entry.summary)}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            ) : null}
+            {asTextArray(crossSourceInsights.weakerSources).length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {asTextArray(crossSourceInsights.weakerSources).map(source => (
+                  <MetaPill key={source} label="Weaker" value={source} />
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        {keyPoints.length > 0 ? (
+          <div className="mt-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.03)] px-3 py-2">
+            <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+              Key Points
+            </div>
+            <div className="flex flex-col gap-1.5 text-[11px] leading-relaxed text-[var(--text-primary)]">
+              {keyPoints.map((point, index) => (
+                <div key={`${point}-${index}`}>{point}</div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {evidenceBlocks.length > 0 ? (
+          <div className="mt-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.03)] px-3 py-2">
+            <div className="mb-2 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+              Evidence
+            </div>
+            <div className="flex flex-col gap-2">
+              {evidenceBlocks.map((entry, index) => {
+                const claim = asText(entry.claim) || asText(entry.supportingQuote)
+                const kind = asText(entry.kind)
+                const matchedKeywords = asTextArray(entry.matchedKeywords)
+                const evidenceScore =
+                  typeof entry.evidenceScore === 'number'
+                    ? Math.round(entry.evidenceScore)
+                    : undefined
+
+                if (!claim) {
+                  return null
+                }
+
+                return (
+                  <div
+                    key={`${claim}-${index}`}
+                    className="rounded-lg border border-white/80 bg-white/85 px-2.5 py-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <MetaPill label="Type" value={kind || undefined} />
+                      <MetaPill
+                        label="Score"
+                        value={evidenceScore !== undefined ? `${evidenceScore}` : undefined}
+                      />
+                      {matchedKeywords.length > 0 ? (
+                        <MetaPill label="Match" value={matchedKeywords.join(', ')} />
+                      ) : null}
+                    </div>
+                    <div className="mt-2 text-[11px] leading-relaxed text-[var(--text-primary)]">
+                      {claim}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         ) : null}
         {preview ? (

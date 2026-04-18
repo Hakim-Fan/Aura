@@ -79,6 +79,10 @@ function createProviderProfile(provider: ProviderMode = 'custom'): ProviderProfi
   }
 }
 
+function formatModelLabel(modelId: string) {
+  return modelId.split('/').filter(Boolean).at(-1) || modelId
+}
+
 type ProviderStatusState = {
   tone: 'success' | 'error'
   message: string
@@ -245,6 +249,26 @@ export function SettingsWindowApp({ initialTab }: Props) {
     draftSettings.providerProfiles.find(profile => profile.id === selectedProviderProfileId) ||
     draftSettings.providerProfiles[0] ||
     null
+
+  const analysisCandidateProfiles = useMemo(
+    () =>
+      draftSettings.providerProfiles.filter(
+        profile => profile.enabled && profile.models.some(model => model.enabled),
+      ),
+    [draftSettings.providerProfiles],
+  )
+
+  const selectedAnalysisProfile =
+    analysisCandidateProfiles.find(
+      profile => profile.id === draftSettings.analysisProviderProfileId,
+    ) || null
+
+  const analysisUsesDedicatedModel =
+    !!draftSettings.analysisProviderProfileId && !!draftSettings.analysisModel
+
+  const analysisModelOptions = selectedAnalysisProfile
+    ? selectedAnalysisProfile.models.filter(model => model.enabled)
+    : []
 
   const browserValidationError = useMemo(() => {
     if (
@@ -635,6 +659,52 @@ export function SettingsWindowApp({ initialTab }: Props) {
       baseUrl: profile.baseUrl,
       model: primaryModel,
     }
+  }
+
+  function setAnalysisMode(mode: 'inherit' | 'dedicated') {
+    if (mode === 'inherit') {
+      setDraftSettings(current => ({
+        ...current,
+        analysisProviderProfileId: '',
+        analysisModel: '',
+      }))
+      setSaveState('idle')
+      return
+    }
+
+    const fallbackProfile =
+      selectedAnalysisProfile ||
+      analysisCandidateProfiles[0] ||
+      draftSettings.providerProfiles.find(profile => profile.id === draftSettings.activeProviderProfileId) ||
+      null
+    const fallbackModel = fallbackProfile ? getPrimaryModelId(fallbackProfile) : ''
+
+    setDraftSettings(current => ({
+      ...current,
+      analysisProviderProfileId: fallbackProfile?.id || '',
+      analysisModel: fallbackModel,
+    }))
+    setSaveState('idle')
+  }
+
+  function updateAnalysisProfile(profileId: string) {
+    const profile =
+      analysisCandidateProfiles.find(entry => entry.id === profileId) || null
+    const nextModel = profile ? getPrimaryModelId(profile) : ''
+    setDraftSettings(current => ({
+      ...current,
+      analysisProviderProfileId: profile?.id || '',
+      analysisModel: nextModel,
+    }))
+    setSaveState('idle')
+  }
+
+  function updateAnalysisModel(modelId: string) {
+    setDraftSettings(current => ({
+      ...current,
+      analysisModel: modelId,
+    }))
+    setSaveState('idle')
   }
 
   function toggleSkill(skillId: string) {
@@ -1580,6 +1650,82 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
+            <div className="section-title">意图分析模型</div>
+            <p className="muted">
+              用于前置判断任务是否需要联网、浏览器交互，以及是否属于复杂任务。默认跟随当前聊天模型；只有你想用更便宜或更快的模型做前置分析时，才需要单独指定。
+            </p>
+            <div className="settings-mode-stack">
+              <label className="toggle-inline">
+                <input
+                  checked={!analysisUsesDedicatedModel}
+                  name="analysis-model-mode"
+                  type="radio"
+                  onChange={() => setAnalysisMode('inherit')}
+                />
+                <div className="flex flex-col">
+                  <strong>跟随当前聊天模型</strong>
+                  <span className="muted">
+                    不单独设置时，自动使用你当前会话正在使用的模型。
+                  </span>
+                </div>
+              </label>
+              <label className="toggle-inline mt-2">
+                <input
+                  checked={analysisUsesDedicatedModel}
+                  disabled={analysisCandidateProfiles.length === 0}
+                  name="analysis-model-mode"
+                  type="radio"
+                  onChange={() => setAnalysisMode('dedicated')}
+                />
+                <div className="flex flex-col">
+                  <strong>单独指定分析模型</strong>
+                  <span className="muted">
+                    适合把前置分类交给更快或更省成本的模型处理。
+                  </span>
+                </div>
+              </label>
+            </div>
+            {analysisUsesDedicatedModel ? (
+              analysisCandidateProfiles.length > 0 ? (
+                <div className="mt-3 flex flex-col gap-3">
+                  <label className="flex flex-col gap-1">
+                    <span className="muted">分析 Provider</span>
+                    <select
+                      className="settings-select"
+                      value={draftSettings.analysisProviderProfileId}
+                      onChange={event => updateAnalysisProfile(event.target.value)}
+                    >
+                      {analysisCandidateProfiles.map(profile => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name} · {profile.provider}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="muted">分析模型</span>
+                    <select
+                      className="settings-select"
+                      value={draftSettings.analysisModel}
+                      onChange={event => updateAnalysisModel(event.target.value)}
+                    >
+                      {analysisModelOptions.map(model => (
+                        <option key={model.id} value={model.id}>
+                          {formatModelLabel(model.id)} · {model.id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              ) : (
+                <p className="muted mt-3">
+                  还没有可选的已启用模型。先到“提供商”页启用至少一个模型，再回来单独指定分析模型。
+                </p>
+              )
+            ) : null}
+          </section>
+
+          <section className="dashboard-card">
             <div className="section-title">交互设置</div>
             <div className="toggle-stack">
               <label className="toggle-inline">
@@ -1621,7 +1767,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 <div className="flex flex-col">
                   <strong>标准模式</strong>
                   <span className="muted">
-                    当前默认执行方案 A：优先直接回答，并按需挂载最小工具集。
+                    适合绝大多数任务。会先判断你当前问题需要哪些能力，再按需挂载最小工具集，直接开始解决问题，速度更快也更稳。
                   </span>
                 </div>
               </label>
@@ -1635,7 +1781,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 <div className="flex flex-col">
                   <strong>编排模式</strong>
                   <span className="muted">
-                    为方案 B 预留入口。规划-执行-审查编排仍在开发中，当前暂未开放切换。
+                    面向更复杂的多阶段任务，例如先规划、再执行、再验收的长链路工作。该模式仍在开发中，当前版本暂未开放切换。
                   </span>
                 </div>
               </label>

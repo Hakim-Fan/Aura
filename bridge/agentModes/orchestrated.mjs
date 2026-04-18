@@ -1,5 +1,7 @@
 import { createStructuredError } from '../runtimeErrors.mjs'
 
+export const ORCHESTRATED_AGENT_AVAILABLE = false
+
 export async function runOrchestratedAgent(request = {}) {
   const error = createStructuredError('编排模式仍在开发中，当前版本暂未开放。', {
     source: 'system',

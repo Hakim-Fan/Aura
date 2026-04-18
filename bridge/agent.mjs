@@ -8,13 +8,16 @@ import {
 } from './agentPrompting.mjs'
 import {
   applyRouteToolBudgets,
+  deriveHardSignals,
   escalateRouteState,
   filterToolsForRouteState,
   getRouteEscalationTargets,
   inferRouteState,
+  selectAgentStrategy,
 } from './agentRouting.mjs'
 import { closeHeadlessBrowserSession } from './browserRuntime.mjs'
 import { buildSkillPrompt, loadPluginTools, loadSkillCatalog } from './extensions.mjs'
+import { classifyIntent } from './intentClassifier.mjs'
 import { connectMcpTools } from './mcp.mjs'
 import {
   finalizeGoogleAnswer,
@@ -35,7 +38,10 @@ import {
   deriveCompletionState,
   enforceEvidencePolicy,
 } from './agentEvidence.mjs'
-import { runOrchestratedAgent } from './agentModes/orchestrated.mjs'
+import {
+  ORCHESTRATED_AGENT_AVAILABLE,
+  runOrchestratedAgent,
+} from './agentModes/orchestrated.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ROUTE_ESCALATION_TOOL_NAME = 'route_request_escalation'
@@ -141,6 +147,52 @@ function buildRuntimeBlocks(routeStopReason) {
   }
 }
 
+function reasoningEffortRank(value) {
+  switch (value) {
+    case 'max':
+      return 4
+    case 'high':
+      return 3
+    case 'medium':
+      return 2
+    case 'low':
+      return 1
+    case 'off':
+    default:
+      return 0
+  }
+}
+
+function maxReasoningEffort(currentValue, minimumValue) {
+  return reasoningEffortRank(currentValue) >= reasoningEffortRank(minimumValue)
+    ? currentValue
+    : minimumValue
+}
+
+function buildEffectiveRunSettings(settings, routeState) {
+  if (!routeState || typeof routeState !== 'object') {
+    return settings
+  }
+
+  if (routeState.researchMode === 'deep') {
+    return {
+      ...settings,
+      reasoningEffort: maxReasoningEffort(settings.reasoningEffort, 'high'),
+      maxSteps: Math.max(Number(settings.maxSteps) || 8, 18),
+    }
+  }
+
+  if (routeState.responseStyle === 'research-structured') {
+    return {
+      ...settings,
+      reasoningEffort: maxReasoningEffort(settings.reasoningEffort, 'medium'),
+      maxSteps: Math.max(Number(settings.maxSteps) || 8, 12),
+    }
+  }
+
+  return settings
+}
+
 function buildCompletionContext(routeState, toolEvents, runtimeBlocks = {}) {
   const evidenceSummary = collectEvidenceFromToolEvents(toolEvents)
   const mergedEvidenceSummary = {
@@ -170,8 +222,30 @@ function buildRouteDecisionSnapshot({
   availableEscalations,
   tierHistory,
   stopReason,
+  classification,
+  strategy,
 }) {
   return {
+    strategyDecision: strategy
+      ? {
+          chain: strategy.chain,
+          reason: strategy.reason,
+          requestedChain: strategy.requestedChain,
+        }
+      : undefined,
+    intentClassification: classification
+      ? {
+          answerMode: classification.answerMode,
+          needsExternalFacts: classification.needsExternalFacts,
+          webInteractionRequired: classification.webInteractionRequired,
+          workspaceRelated: classification.workspaceRelated,
+          isCapabilityAdmin: classification.isCapabilityAdmin,
+          systemChromeRequested: classification.systemChromeRequested,
+          taskComplexity: classification.taskComplexity,
+          planDepth: classification.planDepth,
+          confidence: classification.confidence,
+        }
+      : undefined,
     answerMode: routeState.answerMode,
     capabilityTier: routeState.capabilityTier,
     budgets: {
@@ -516,6 +590,7 @@ async function runProviderTurn({
           draftMessage: result.message,
           completionState: completionContext.completionState,
           deliveryPolicy: completionContext.deliveryPolicy,
+          responseStyle: routeState?.responseStyle,
           stage: 'finalization',
         })
         if (finalized.message.trim()) {
@@ -561,6 +636,7 @@ async function runProviderTurn({
           draftMessage: result.message,
           completionState: completionContext.completionState,
           deliveryPolicy: completionContext.deliveryPolicy,
+          responseStyle: routeState?.responseStyle,
           stage: 'finalization',
         })
         if (finalized.message.trim()) {
@@ -764,10 +840,6 @@ export async function runRouteFirstAgent(request) {
   const currentTaskId = runtime.currentTaskId || taskTracker.rootId
   taskTracker.setStatus(currentTaskId, 'running')
 
-  const skillCatalog = await loadSkillCatalog(
-    appRoot,
-    capabilities?.skills || settings.enabledSkillIds || [],
-  )
   const builtinTools = createBuiltinTools(context)
   const advancedTools = createAdvancedTools({
     appRoot,
@@ -778,28 +850,47 @@ export async function runRouteFirstAgent(request) {
       runAgent({
         ...nestedRequest,
         hooks,
-      }),
+    }),
     taskTracker,
   })
-  const pluginTools = await loadPluginTools(
-    appRoot,
-    capabilities?.plugins || settings.enabledPluginIds || [],
-    context,
-  )
-  const mcp = await connectMcpTools(capabilities?.mcpServers || settings.mcpServers || [])
+  const [classification, skillCatalog, pluginTools, mcp] = await Promise.all([
+    classifyIntent(messages, settings).catch(() => null),
+    loadSkillCatalog(appRoot, capabilities?.skills || settings.enabledSkillIds || []),
+    loadPluginTools(
+      appRoot,
+      capabilities?.plugins || settings.enabledPluginIds || [],
+      context,
+    ),
+    connectMcpTools(capabilities?.mcpServers || settings.mcpServers || []),
+  ])
   const availableTools = [
     ...builtinTools,
     ...advancedTools,
     ...pluginTools,
     ...mcp.tools,
   ]
-  let routeState = inferRouteState(messages)
+  const hardSignals = deriveHardSignals(messages)
+  const strategy = selectAgentStrategy(classification, hardSignals, {
+    orchestratedAvailable: ORCHESTRATED_AGENT_AVAILABLE,
+  })
+
+  if (strategy.chain === 'orchestrated' && ORCHESTRATED_AGENT_AVAILABLE) {
+    await mcp.close().catch(() => {})
+    return runOrchestratedAgent(request)
+  }
+
+  let routeState = inferRouteState(messages, {
+    classification,
+    hardSignals,
+  })
   const visitedTiers = new Set([routeState.capabilityTier])
   const routeNotes = []
   const routeHistory = []
   let lastSelectedCapabilities = null
   let lastSystemPrompt = ''
   let lastRouteDecision = {
+    strategyDecision: strategy,
+    intentClassification: classification || undefined,
     answerMode: routeState.answerMode,
     capabilityTier: routeState.capabilityTier,
     budgets: {
@@ -824,6 +915,7 @@ export async function runRouteFirstAgent(request) {
         ...routeState,
         availableEscalations,
       }
+      const effectiveRunSettings = buildEffectiveRunSettings(settings, promptRouteState)
       const routedTools = applyRouteToolBudgets(
         filterToolsForRouteState(availableTools, routeState),
         routeState,
@@ -833,6 +925,7 @@ export async function runRouteFirstAgent(request) {
         runtimeCapabilities: capabilities,
         skillEntries: skillCatalog,
         tools: routedTools,
+        classification,
       })
       lastSelectedCapabilities = selectedCapabilities
       const skillPrompt = buildSkillPrompt(selectedCapabilities.selectedSkills)
@@ -842,7 +935,7 @@ export async function runRouteFirstAgent(request) {
       )
       lastSystemPrompt = appendRouteNotesToPrompt(
         buildRouteFirstSystemPrompt(
-          settings,
+          effectiveRunSettings,
           skillPrompt,
           exposureNote,
           promptRouteState,
@@ -863,13 +956,15 @@ export async function runRouteFirstAgent(request) {
         escalationCount: routeNotes.length,
         availableEscalations,
         tierHistory: [...routeHistory.map(entry => entry.capabilityTier), routeState.capabilityTier],
+        classification,
+        strategy,
       })
       const turnToolEventStart = toolEvents.length
 
       let turnResult
       try {
         turnResult = await runProviderTurn({
-          settings,
+          settings: effectiveRunSettings,
           systemPrompt: lastSystemPrompt,
           messages,
           tools: allTools,
@@ -953,6 +1048,8 @@ export async function runRouteFirstAgent(request) {
         escalationCount: routeNotes.length,
         availableEscalations,
         tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),
+        classification,
+        strategy,
         stopReason:
           routeStopReason ||
           (result.completionState === 'executed_verified' &&
@@ -1041,7 +1138,7 @@ export async function runRouteFirstAgent(request) {
         const recovered =
           settings.provider === 'google'
             ? await finalizeGoogleAnswer({
-                settings,
+                settings: buildEffectiveRunSettings(settings, routeState),
                 systemPrompt: lastSystemPrompt,
                 messages,
                 toolEvents,
@@ -1049,10 +1146,11 @@ export async function runRouteFirstAgent(request) {
                 draftMessage: partialMessage,
                 completionState: recoveryCompletionContext.completionState,
                 deliveryPolicy: recoveryCompletionContext.deliveryPolicy,
+                responseStyle: routeState?.responseStyle,
                 stage: 'recovery',
               })
             : await finalizeOpenAiCompatibleAnswer({
-                settings,
+                settings: buildEffectiveRunSettings(settings, routeState),
                 systemPrompt: lastSystemPrompt,
                 messages,
                 toolEvents,
@@ -1060,6 +1158,7 @@ export async function runRouteFirstAgent(request) {
                 draftMessage: partialMessage,
                 completionState: recoveryCompletionContext.completionState,
                 deliveryPolicy: recoveryCompletionContext.deliveryPolicy,
+                responseStyle: routeState?.responseStyle,
                 stage: 'recovery',
               })
 

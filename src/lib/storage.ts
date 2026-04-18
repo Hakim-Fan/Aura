@@ -18,6 +18,7 @@ import type {
   ResolvedAgentCapabilities,
   ProviderMode,
   ProviderProfile,
+  ResearchMode,
   ProviderRetryStage,
   ReasoningEffort,
   RouteDecisionSnapshot,
@@ -128,6 +129,8 @@ export const defaultSettings: AgentSettings = {
   apiKey: '',
   baseUrl: baseUrlForProvider('openai'),
   model: '',
+  analysisProviderProfileId: '',
+  analysisModel: '',
   activeProviderProfileId: 'profile-openai',
   providerProfiles: defaultProfiles(),
   agentArchitectureMode: 'route-first',
@@ -678,6 +681,10 @@ function normalizeMessageVariant(
   }
 
   const variant = value as Partial<ChatMessageVariant>
+  const researchMode: ResearchMode | undefined =
+    variant.researchMode === 'deep' || variant.researchMode === 'auto'
+      ? variant.researchMode
+      : undefined
   return {
     content: typeof variant.content === 'string' ? variant.content : '',
     parts: normalizeMessageParts(variant.parts),
@@ -689,6 +696,7 @@ function normalizeMessageVariant(
         : 'completed',
     createdAt:
       typeof variant.createdAt === 'number' ? variant.createdAt : fallbackCreatedAt,
+    researchMode,
     attachments: normalizeMessageAttachments(variant.attachments),
     reasoning: normalizeMessageReasoning(variant.reasoning),
     phaseOutputs: normalizeMessagePhaseOutputs(variant.phaseOutputs),
@@ -757,10 +765,16 @@ function normalizeMessageVariant(
               attachments?: unknown
               createdAt?: unknown
               status?: unknown
+              researchMode?: unknown
             }
             if (typeof entry.id !== 'string' || !entry.id.trim()) {
               return null
             }
+
+            const researchMode: ResearchMode | undefined =
+              entry.researchMode === 'deep' || entry.researchMode === 'auto'
+                ? entry.researchMode
+                : undefined
 
             return {
               id: entry.id,
@@ -772,6 +786,7 @@ function normalizeMessageVariant(
                   ? entry.createdAt
                   : fallbackCreatedAt,
               status: entry.status === 'consumed' ? ('consumed' as const) : ('queued' as const),
+              researchMode,
             }
           })
           .filter((input): input is NonNullable<typeof input> => Boolean(input))
@@ -872,6 +887,12 @@ function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
   return {
     ...settings,
     providerProfiles: normalizeProviderProfiles(settings.providerProfiles),
+    analysisProviderProfileId:
+      typeof settings.analysisProviderProfileId === 'string'
+        ? settings.analysisProviderProfileId
+        : '',
+    analysisModel:
+      typeof settings.analysisModel === 'string' ? settings.analysisModel : '',
     mcpServers: normalizeMcpServers(settings.mcpServers),
   }
 }
@@ -1386,10 +1407,27 @@ function syncLegacyFields(settings: AgentSettings): AgentSettings {
     normalizedSettings.providerProfiles,
     normalizedSettings.activeProviderProfileId,
   )
+  const analysisProfile = resolveActiveProfile(
+    normalizedSettings.providerProfiles,
+    normalizedSettings.analysisProviderProfileId,
+  )
 
   if (!activeProfile) {
     return normalizedSettings
   }
+
+  const resolvedAnalysisModel =
+    normalizedSettings.analysisProviderProfileId &&
+    normalizedSettings.analysisModel &&
+    analysisProfile &&
+    analysisProfile.id === normalizedSettings.analysisProviderProfileId
+      ? resolvePreferredModelId(analysisProfile, normalizedSettings.analysisModel)
+      : ''
+
+  const shouldKeepAnalysisSelection =
+    !!resolvedAnalysisModel &&
+    !!analysisProfile &&
+    analysisProfile.id === normalizedSettings.analysisProviderProfileId
 
   return {
     ...normalizedSettings,
@@ -1398,6 +1436,8 @@ function syncLegacyFields(settings: AgentSettings): AgentSettings {
     apiKey: activeProfile.apiKey,
     baseUrl: activeProfile.baseUrl,
     model: resolvePreferredModelId(activeProfile, normalizedSettings.model),
+    analysisProviderProfileId: shouldKeepAnalysisSelection ? analysisProfile.id : '',
+    analysisModel: shouldKeepAnalysisSelection ? resolvedAnalysisModel : '',
   }
 }
 
@@ -1429,6 +1469,10 @@ function parseSessions(raw: string | null): Session[] {
             parts: [],
             status: message.status || 'completed',
             createdAt,
+            researchMode:
+              message.researchMode === 'deep' || message.researchMode === 'auto'
+                ? message.researchMode
+                : undefined,
             attachments: [],
             reasoning: [],
             usage: undefined,
@@ -1489,6 +1533,7 @@ function parseSessions(raw: string | null): Session[] {
             parts: activeVariant.parts,
             status: activeVariant.status,
             createdAt: activeVariant.createdAt,
+            researchMode: activeVariant.researchMode,
             attachments: activeVariant.attachments,
             reasoning: activeVariant.reasoning,
             phaseOutputs: activeVariant.phaseOutputs,
@@ -1701,6 +1746,10 @@ function persistedMessageVersions(message: PersistedSessionRecord['messages'][nu
       parts: message.parts || [],
       status: message.status || 'completed',
       createdAt: message.createdAt || Date.now(),
+      researchMode:
+        message.researchMode === 'deep' || message.researchMode === 'auto'
+          ? message.researchMode
+          : undefined,
       attachments: message.attachments || [],
       reasoning: message.reasoning || [],
       phaseOutputs: message.phaseOutputs || [],
