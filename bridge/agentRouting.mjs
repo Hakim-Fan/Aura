@@ -802,10 +802,14 @@ function normalizeRecommendedSearchResult(result) {
     rankingSignals: Array.isArray(result.rankingSignals)
       ? result.rankingSignals.filter(entry => typeof entry === 'string' && entry.trim()).slice(0, 4)
       : [],
+    queryKey:
+      typeof result.queryKey === 'string' && result.queryKey.trim()
+        ? result.queryKey.trim()
+        : '',
   }
 }
 
-function buildRecommendedFetchResults(searchRuntime, limit = 3) {
+function buildRecommendedFetchResults(searchRuntime, limit = 3, queryKey = '') {
   const fetchedUrls = new Set(
     (Array.isArray(searchRuntime?.fetches) ? searchRuntime.fetches : [])
       .map(entry => (typeof entry?.url === 'string' ? entry.url.trim() : ''))
@@ -817,6 +821,9 @@ function buildRecommendedFetchResults(searchRuntime, limit = 3) {
   for (const entry of Array.isArray(searchRuntime?.lastResults) ? searchRuntime.lastResults : []) {
     const normalized = normalizeRecommendedSearchResult(entry)
     if (!normalized || fetchedUrls.has(normalized.url)) {
+      continue
+    }
+    if (queryKey && normalized.queryKey && normalized.queryKey !== queryKey) {
       continue
     }
 
@@ -846,8 +853,8 @@ function buildRecommendedFetchResults(searchRuntime, limit = 3) {
   return recommendations
 }
 
-function hasStrongReadCandidates(searchRuntime) {
-  const recommendations = buildRecommendedFetchResults(searchRuntime, 3)
+function hasStrongReadCandidates(searchRuntime, queryKey = '') {
+  const recommendations = buildRecommendedFetchResults(searchRuntime, 3, queryKey)
   if (recommendations.length === 0) {
     return false
   }
@@ -893,7 +900,11 @@ function shouldStopSearchAttempts(searchRuntime, attemptSignature, routeState) {
     new Set(successfulAttempts.flatMap(entry => entry.resultDomains || []).filter(Boolean)),
   )
 
-  if (fetches.length === 0 && successfulAttempts.length >= 1 && hasStrongReadCandidates(searchRuntime)) {
+  if (
+    fetches.length === 0 &&
+    successfulAttempts.length >= 1 &&
+    hasStrongReadCandidates(searchRuntime, attemptSignature.comparableKey)
+  ) {
     return {
       shouldStop: true,
       reason: 'read-recommended-results-first',
@@ -967,10 +978,14 @@ function shouldStopSearchAttempts(searchRuntime, attemptSignature, routeState) {
   return { shouldStop: false, reason: '' }
 }
 
-function buildSearchStopPayload(reason, args, searchRuntime) {
+function buildSearchStopPayload(reason, args, searchRuntime, attemptSignature = {}) {
   const query = typeof args?.query === 'string' ? args.query : ''
   const domains = normalizeSearchDomains(args?.domains)
-  const recommendedResults = buildRecommendedFetchResults(searchRuntime, 3)
+  const recommendedResults = buildRecommendedFetchResults(
+    searchRuntime,
+    3,
+    attemptSignature.comparableKey || '',
+  )
   const summary =
     reason === 'read-recommended-results-first'
       ? '已经找到一组质量较高的候选来源，下一步应该先阅读这些页面，而不是继续扩展搜索。'
@@ -1550,11 +1565,21 @@ export function applyRouteToolBudgets(tools, routeState) {
           routeState,
         )
         if (stopDecision.shouldStop) {
-          return buildSearchStopPayload(stopDecision.reason, args, searchRuntime)
+          return buildSearchStopPayload(
+            stopDecision.reason,
+            args,
+            searchRuntime,
+            attemptSignature,
+          )
         }
 
         if ((budgets.searchesRemaining || 0) <= 0) {
-          return buildSearchStopPayload('budget-exhausted', args, searchRuntime)
+          return buildSearchStopPayload(
+            'budget-exhausted',
+            args,
+            searchRuntime,
+            attemptSignature,
+          )
         }
 
         budgets.searchesRemaining -= 1
@@ -1562,7 +1587,16 @@ export function applyRouteToolBudgets(tools, routeState) {
         const normalizedOutput = output && typeof output === 'object' ? output : {}
         const recommendedResults = Array.isArray(normalizedOutput.results)
           ? normalizedOutput.results
-              .map(result => normalizeRecommendedSearchResult(result))
+              .map(result => {
+                const normalizedResult = normalizeRecommendedSearchResult(result)
+                if (!normalizedResult) {
+                  return null
+                }
+                return {
+                  ...normalizedResult,
+                  queryKey: attemptSignature.comparableKey,
+                }
+              })
               .filter(Boolean)
               .slice(0, 5)
           : []

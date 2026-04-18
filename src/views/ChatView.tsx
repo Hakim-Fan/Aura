@@ -2749,6 +2749,13 @@ export function ChatView({
       <div className="flex-1 flex overflow-hidden">
         {/* Messages Stage */}
         <div className="flex-1 flex flex-col min-w-0 relative">
+          {error ? (
+            <div className="mx-auto mt-4 w-full max-w-980px px-8">
+              <div className="rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-13px leading-relaxed text-red-600 shadow-sm">
+                {error}
+              </div>
+            </div>
+          ) : null}
           <div
             ref={scrollRef}
             className="flex-1 overflow-y-auto custom-scrollbar pt-8 pb-72 scroll-smooth"

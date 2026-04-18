@@ -1546,7 +1546,7 @@ export function MainWindowApp() {
   async function chooseExplicitWorkspaceForSession() {
     if (activeSession?.messages.length) {
       setError('当前会话已经有消息记录，工作区已锁定。请新建会话后再切换目录。')
-      return
+      return ''
     }
 
     const selected = await open({
@@ -1555,10 +1555,10 @@ export function MainWindowApp() {
       title: '选择当前会话工作目录',
     })
     if (typeof selected !== 'string') {
-      return
+      return ''
     }
     if (!activeSession) {
-      return
+      return ''
     }
 
     updateSession(activeSession.id, session => ({
@@ -1569,6 +1569,8 @@ export function MainWindowApp() {
       updatedAt: Date.now(),
     }))
     setSelectedFilePath(null)
+    setError('')
+    return selected
   }
 
   async function appendAttachmentsFromPaths(paths: string[]) {
@@ -1850,9 +1852,6 @@ export function MainWindowApp() {
       return session.workspacePath
     }
     const workspaceRoot = session.workspaceRoot.trim() || fallbackWorkspaceRoot.trim()
-    if (!workspaceRoot) {
-      throw new Error('请先在设置里配置默认工作目录，或者在新会话时手动选择目录。')
-    }
 
     const workspacePath = await createSessionWorkspace(workspaceRoot, prompt)
     updateSession(session.id, current => ({

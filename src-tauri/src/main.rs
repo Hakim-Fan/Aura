@@ -3994,6 +3994,7 @@ fn open_path_in_default_app(path: String) -> Result<(), String> {
 fn slugify(value: &str) -> String {
     let mut slug = String::new();
     let mut previous_dash = false;
+    const MAX_SESSION_SLUG_LEN: usize = 80;
 
     for character in value.chars() {
         if character.is_ascii_alphanumeric() {
@@ -4003,9 +4004,17 @@ fn slugify(value: &str) -> String {
             slug.push('-');
             previous_dash = true;
         }
+
+        if slug.len() >= MAX_SESSION_SLUG_LEN {
+            break;
+        }
     }
 
-    let trimmed = slug.trim_matches('-').to_string();
+    let trimmed = slug
+        .trim_matches('-')
+        .chars()
+        .take(MAX_SESSION_SLUG_LEN)
+        .collect::<String>();
     if trimmed.is_empty() {
         "session".into()
     } else {
