@@ -181,8 +181,14 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       sections.push('Workspace read and write tools are mounted for this turn. Keep changes focused and verify before claiming completion.')
     } else if (routeState.capabilityTier === 'web-lookup') {
       sections.push('Web lookup tools are mounted only for external facts and current information. Prefer local context first, then use the web only when necessary.')
+      sections.push(
+        'For research, latest info, docs, news, or source-finding tasks, prefer web_search first and then web_fetch for selected URLs. Do not jump to browser_search just to read public web content.',
+      )
     } else if (routeState.capabilityTier === 'browser-interactive') {
       sections.push('Interactive browser tools are mounted because the request explicitly requires web interaction. Stay focused on the requested workflow.')
+      sections.push(
+        'When both web_* and browser_* are mounted, use web_search/web_fetch for structured lookup or page reading, and use browser_* only when the user explicitly wants browser interaction or the page truly requires interaction.',
+      )
       if (routeState.explicitSystemChromeRequest) {
         sections.push('The user explicitly asked to operate system Chrome. Prefer the mounted chrome_* tools over the Aura browser runtime for this turn.')
       }

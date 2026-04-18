@@ -12,6 +12,7 @@ import {
   truncate,
 } from './utils.mjs'
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
+import { createWebTools } from './webTools.mjs'
 
 const execFileAsync = promisify(execFile)
 const ALWAYS_ON_SKILL_IDS = new Set([
@@ -19,6 +20,7 @@ const ALWAYS_ON_SKILL_IDS = new Set([
   'desktop-operator',
   'repair-planner',
   'repo-reviewer',
+  'web-research',
 ])
 
 async function walkDirectory(dirPath, maxDepth, currentDepth = 0) {
@@ -844,6 +846,7 @@ export function createBuiltinTools(context) {
   context.todoState ||= { items: [] }
 
   return [
+    ...createWebTools(context),
     {
       source: 'builtin',
       name: 'list_files',
@@ -1523,11 +1526,15 @@ function emitToolEvent(event, toolEvents, hooks) {
 export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   const eventId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const shouldEmitEvent = tool.internalOnly !== true
+  const eventSummary =
+    typeof tool.getSummary === 'function'
+      ? tool.getSummary(args) || tool.description
+      : tool.description
   const baseEvent = {
     id: eventId,
     source: tool.source,
     name: tool.name,
-    summary: tool.description,
+    summary: eventSummary,
     order:
       typeof hooks.timelineOrder === 'number'
         ? hooks.timelineOrder

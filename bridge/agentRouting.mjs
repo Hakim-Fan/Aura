@@ -19,16 +19,16 @@ function buildConversationText(messages) {
       .map(message => {
         const parts = Array.isArray(message.parts)
           ? message.parts
-              .map(part => {
-                if (part.type === 'text') {
-                  return part.text || ''
-                }
-                if (part.type === 'image' || part.type === 'file') {
-                  return [part.name, part.path].filter(Boolean).join(' ')
-                }
-                return ''
-              })
-              .join('\n')
+            .map(part => {
+              if (part.type === 'text') {
+                return part.text || ''
+              }
+              if (part.type === 'image' || part.type === 'file') {
+                return [part.name, part.path].filter(Boolean).join(' ')
+              }
+              return ''
+            })
+            .join('\n')
           : ''
 
         return [message.content, parts].filter(Boolean).join('\n')
@@ -136,6 +136,24 @@ const EXTERNAL_FACT_KEYWORDS = [
   'current',
   'today',
   'news',
+  'search',
+  'search the web',
+  'web search',
+  'documentation',
+  'docs',
+  'document',
+  'article',
+  'articles',
+  'source',
+  'sources',
+  'research',
+  'finance',
+  'earnings',
+  'market',
+  'investor relations',
+  'stock market',
+  'bullish',
+  'bearish',
   'price',
   'stock',
   'quote',
@@ -149,6 +167,23 @@ const EXTERNAL_FACT_KEYWORDS = [
   '当前',
   '今天',
   '新闻',
+  '搜索',
+  '搜一下',
+  '查一下',
+  '资料',
+  '文档',
+  '文章来源',
+  '来源',
+  '研究',
+  '股票',
+  '股市',
+  '财报',
+  '公告',
+  '研报',
+  '利好',
+  '利空',
+  '港股',
+  '美股',
   '价格',
   '股价',
   '行情',
@@ -268,8 +303,12 @@ const AURA_MUTATION_TOOLS = new Set([
   'aura_remove_mcp_server',
 ])
 
+const WEB_LOOKUP_TOOLS = new Set([
+  'web_search',
+  'web_fetch',
+])
+
 const BROWSER_LOOKUP_TOOLS = new Set([
-  'browser_search',
   'browser_open',
   'browser_get_page',
   'browser_snapshot',
@@ -305,8 +344,8 @@ const SEARCH_BUDGET_BY_TIER = {
   none: 0,
   'local-readonly': 0,
   'local-write': 0,
-  'web-lookup': 1,
-  'browser-interactive': 1,
+  'web-lookup': 5,
+  'browser-interactive': 3,
 }
 
 function uniqueTargets(values) {
@@ -413,6 +452,10 @@ function isBrowserLookupTool(tool) {
   return tool.source === 'builtin' && BROWSER_LOOKUP_TOOLS.has(tool.name)
 }
 
+function isWebLookupTool(tool) {
+  return tool.source === 'builtin' && WEB_LOOKUP_TOOLS.has(tool.name)
+}
+
 function isBrowserInteractiveOnlyTool(tool) {
   return tool.source === 'builtin' && BROWSER_INTERACTIVE_ONLY_TOOLS.has(tool.name)
 }
@@ -478,7 +521,7 @@ export function filterToolsForRouteState(tools, routeState) {
       }
       return (
         isBuiltinReadonlyTool(tool) ||
-        isBrowserLookupTool(tool) ||
+        isWebLookupTool(tool) ||
         allowReadonlyPluginLikeTool(tool, routeState)
       )
     }
@@ -587,11 +630,11 @@ export function applyRouteToolBudgets(tools, routeState) {
   const budgets = routeState?.budgets || {}
   const mountedTools =
     (budgets.searchesRemaining || 0) <= 0
-      ? tools.filter(tool => tool?.name !== 'browser_search')
+      ? tools.filter(tool => tool?.name !== 'browser_search' && tool?.name !== 'web_search')
       : tools
 
   return mountedTools.map(tool => {
-    if (tool?.name !== 'browser_search') {
+    if (tool?.name !== 'browser_search' && tool?.name !== 'web_search') {
       return tool
     }
 
@@ -599,13 +642,18 @@ export function applyRouteToolBudgets(tools, routeState) {
       ...tool,
       async run(args, runtime = {}) {
         if ((budgets.searchesRemaining || 0) <= 0) {
-          throw createStructuredError('本轮网页搜索预算已经用完。', {
-            source: 'tool',
-            category: 'execution_failed',
+          return {
+            query: typeof args?.query === 'string' ? args.query : '',
+            provider: 'route-budget',
+            tookMs: 0,
+            total: 0,
+            results: [],
+            budgetExhausted: true,
             code: 'ROUTE_SEARCH_BUDGET_EXHAUSTED',
-            detail: 'browser_search budget exhausted for current route-first turn.',
-            suggestedAction: '请基于当前已拿到的信息直接作答，或等待系统在后续阶段显式升级能力。',
-          })
+            summary: '本轮网页搜索预算已经用完。',
+            suggestedAction:
+              '请直接基于前面已经成功的搜索结果继续分析，或改用 web_fetch 打开已有链接。',
+          }
         }
 
         budgets.searchesRemaining -= 1

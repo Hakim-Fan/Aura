@@ -245,6 +245,9 @@ export type EvidenceRecord = {
     | 'test_fail'
     | 'page_state'
     | 'search_result'
+    | 'web_search_result'
+    | 'web_fetch_content'
+    | 'web_fetch_summary'
     | 'user_denied'
   >
   verificationLevel: 'none' | 'partial' | 'verified'

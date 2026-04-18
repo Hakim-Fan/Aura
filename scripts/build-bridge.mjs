@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,6 +7,7 @@ import { build } from 'esbuild'
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '..')
 const outdir = path.join(repoRoot, 'dist-bridge')
+const destNodeModules = path.join(outdir, 'node_modules')
 
 const entryPoints = {
   ipc: path.join(repoRoot, 'bridge', 'ipc.mjs'),
@@ -20,6 +21,63 @@ const entryPoints = {
 // 无法被 esbuild 正确打包为单文件 ESM，必须以原始 node_modules 目录结构随 App 分发。
 const externalPackages = ['playwright-core', 'chromium-bidi']
 
+const removableDirectorySuffixes = [
+  `${path.sep}playwright-core${path.sep}lib${path.sep}vite`,
+  `${path.sep}playwright-core${path.sep}src`,
+  `${path.sep}playwright-core${path.sep}types`,
+  `${path.sep}chromium-bidi${path.sep}lib${path.sep}iife`,
+  `${path.sep}chromium-bidi${path.sep}src`,
+  `${path.sep}zod${path.sep}src`,
+]
+
+const removableFileExtensions = ['.map', '.d.ts', '.d.cts']
+
+function shouldRemoveDirectory(targetPath) {
+  const normalized = targetPath.split(path.sep).join(path.sep)
+  return removableDirectorySuffixes.some(suffix => normalized.endsWith(suffix))
+}
+
+function shouldRemoveFile(targetPath) {
+  return removableFileExtensions.some(extension => targetPath.endsWith(extension))
+}
+
+function pruneNodeModules(rootDir) {
+  const stack = [rootDir]
+
+  while (stack.length > 0) {
+    const currentDir = stack.pop()
+    if (!currentDir || !existsSync(currentDir)) {
+      continue
+    }
+
+    for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
+      const targetPath = path.join(currentDir, entry.name)
+
+      if (entry.isDirectory()) {
+        if (shouldRemoveDirectory(targetPath)) {
+          rmSync(targetPath, { recursive: true, force: true })
+          continue
+        }
+        stack.push(targetPath)
+        continue
+      }
+
+      if (!entry.isFile() && !entry.isSymbolicLink()) {
+        continue
+      }
+
+      const stats = lstatSync(targetPath)
+      if (!stats.isFile() && !stats.isSymbolicLink()) {
+        continue
+      }
+
+      if (shouldRemoveFile(targetPath)) {
+        rmSync(targetPath, { force: true })
+      }
+    }
+  }
+}
+
 await rm(outdir, { recursive: true, force: true })
 
 await build({
@@ -32,7 +90,7 @@ await build({
   packages: 'bundle',
   splitting: false,
   sourcemap: false,
-  minify: false,
+  minify: true,
   logLevel: 'info',
   outExtension: { '.js': '.mjs' },
   external: externalPackages,
@@ -58,7 +116,6 @@ await build({
 //       将该目录下所有兄弟包一并复制（它们就是该包的完整依赖闭包）。
 
 const topNodeModules = path.join(repoRoot, 'node_modules')
-const destNodeModules = path.join(outdir, 'node_modules')
 mkdirSync(destNodeModules, { recursive: true })
 
 for (const pkg of externalPackages) {
@@ -83,3 +140,5 @@ for (const pkg of externalPackages) {
     console.log(`[build-bridge] 已复制外部包: ${entry}`)
   }
 }
+
+pruneNodeModules(destNodeModules)

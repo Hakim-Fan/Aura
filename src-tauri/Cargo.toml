@@ -21,3 +21,31 @@ tauri-plugin-dialog = "2.4.2"
 tauri-plugin-http = "2.2.0"
 tauri-plugin-shell = "2.3.0"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Optional release-size tuning for the Tauri/Rust host binary.
+# These are intentionally commented out for now so the current build behavior
+# stays unchanged. When we decide to optimize the Rust binary size further,
+# we can enable them one by one from the safer options at the top.
+#
+# [profile.release]
+# codegen-units = 1
+# Reduces parallel code generation to improve whole-program optimization.
+# Usually shrinks the final binary, but makes release builds slower.
+#
+# lto = true
+# Enables link-time optimization across crates. This often trims binary size
+# and may improve runtime performance, at the cost of longer build times.
+#
+# opt-level = "s"
+# Tells rustc to optimize for smaller code size instead of raw speed.
+# This is a common low-risk choice when install size matters.
+#
+# panic = "abort"
+# Removes panic unwinding support and aborts the process on panic instead.
+# Can save extra binary size, but makes crash behavior harsher and less
+# debuggable, so we keep it disabled unless we explicitly want that tradeoff.
+#
+# strip = true
+# Removes debug symbols from release binaries. This can reduce artifact size,
+# but it also makes post-crash investigation harder, so we leave it off by
+# default and prefer to enable it only when distribution size is the priority.

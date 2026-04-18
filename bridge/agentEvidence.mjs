@@ -5,6 +5,8 @@ const READ_EFFECT_TOOLS = new Set([
   'search_code',
   'aura_list_capabilities',
   'aura_read_skill',
+  'web_search',
+  'web_fetch',
   'browser_search',
   'browser_get_page',
   'browser_snapshot',
@@ -111,6 +113,18 @@ function isDeniedToolEvent(event) {
   return event?.errorInfo?.code === 'USER_DENIED'
 }
 
+function parseStructuredOutput(output) {
+  if (typeof output !== 'string' || !output.trim()) {
+    return null
+  }
+
+  try {
+    return JSON.parse(output)
+  } catch {
+    return null
+  }
+}
+
 function detectEffectTypes(event) {
   const name = normalizeToolName(event?.name)
 
@@ -175,6 +189,21 @@ function collectProducedEvidence(event, effectTypes) {
       producedEvidence.push('search_result')
     }
 
+    if (name === 'web_search') {
+      producedEvidence.push('web_search_result')
+    }
+
+    if (name === 'web_fetch') {
+      const output = parseStructuredOutput(event?.output)
+      const contentFormat =
+        output && typeof output === 'object' && typeof output.contentFormat === 'string'
+          ? output.contentFormat
+          : ''
+      producedEvidence.push(
+        contentFormat === 'text' ? 'web_fetch_summary' : 'web_fetch_content',
+      )
+    }
+
     if (PAGE_STATE_TOOLS.has(name)) {
       producedEvidence.push('page_state')
     }
@@ -190,6 +219,14 @@ function collectProducedEvidence(event, effectTypes) {
 function inferVerificationLevel(event, effectTypes, producedEvidence) {
   if (producedEvidence.includes('test_pass')) {
     return 'verified'
+  }
+
+  if (
+    producedEvidence.includes('web_search_result') ||
+    producedEvidence.includes('web_fetch_content') ||
+    producedEvidence.includes('web_fetch_summary')
+  ) {
+    return 'partial'
   }
 
   if (

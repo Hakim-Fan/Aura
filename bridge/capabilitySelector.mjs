@@ -195,6 +195,14 @@ function inferTaskSignals(text) {
       '行情',
       '资料',
       '文档',
+      '股票',
+      '财报',
+      '公告',
+      '利好',
+      '利空',
+      '研报',
+      '港股',
+      '美股',
     ]),
     isComplexTask: hasAny(text, [
       'complex',
@@ -237,6 +245,9 @@ function scoreSkill(skill, context) {
     score += 4
   }
   if (skill.id === 'desktop-operator' && context.signals.isDesktopTask) {
+    score += 5
+  }
+  if (skill.id === 'web-research' && context.signals.isResearchTask) {
     score += 5
   }
 

@@ -1,0 +1,201 @@
+import { useState } from 'react'
+import type { MessageEvent } from '../types'
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function asText(value: unknown) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function summarizeUrl(value: string) {
+  try {
+    const parsed = new URL(value)
+    return `${parsed.hostname.replace(/^www\./, '')}${parsed.pathname === '/' ? '' : parsed.pathname}`
+  } catch {
+    return value
+  }
+}
+
+function MetaPill({ label, value }: { label: string; value?: string | number }) {
+  if (value === undefined || value === null || value === '') {
+    return null
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-white/85 px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+      {label}
+      <span className="normal-case tracking-normal text-[var(--text-primary)]">{value}</span>
+    </span>
+  )
+}
+
+export function WebSearchEventCard({
+  event,
+  output,
+}: {
+  event: MessageEvent
+  output: Record<string, unknown>
+}) {
+  const query = asText(output.query)
+  const provider = asText(output.provider)
+  const total = typeof output.total === 'number' ? output.total : 0
+  const tookMs = typeof output.tookMs === 'number' ? output.tookMs : 0
+  const budgetExhausted = output.budgetExhausted === true
+  const budgetSummary = asText(output.summary)
+  const budgetAction = asText(output.suggestedAction)
+  const results = Array.isArray(output.results)
+    ? output.results.filter(isRecord).slice(0, 8)
+    : []
+
+  return (
+    <div className="mt-2 flex flex-col gap-2 rounded-xl border border-[rgba(79,123,116,0.12)] bg-[rgba(79,123,116,0.05)] p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <MetaPill label="Query" value={query || 'Searching'} />
+        <MetaPill label="Provider" value={provider && provider !== 'route-budget' ? provider : undefined} />
+        <MetaPill label="Results" value={total} />
+        {tookMs > 0 ? <MetaPill label="Time" value={`${tookMs}ms`} /> : null}
+      </div>
+
+      {budgetExhausted ? (
+        <div className="rounded-lg border border-amber-200 bg-[rgba(255,248,235,0.88)] px-3 py-2 text-[12px] leading-relaxed text-amber-800">
+          <div>{budgetSummary || '本轮网页搜索预算已经用完。'}</div>
+          {budgetAction ? (
+            <div className="mt-1 text-[11px] text-amber-700/85">{budgetAction}</div>
+          ) : null}
+        </div>
+      ) : results.length > 0 ? (
+        <div className="flex flex-col gap-2">
+          {results.map((entry, index) => {
+            const title = asText(entry.title) || `Result ${index + 1}`
+            const url = asText(entry.url)
+            const site = asText(entry.site)
+            const snippet = asText(entry.snippet)
+
+            return (
+              <article
+                key={`${url || title}-${index}`}
+                className="rounded-lg border border-white/80 bg-white/85 px-3 py-2.5"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-600 leading-relaxed text-[var(--text-primary)]">
+                      {title}
+                    </div>
+                    <div className="mt-1 text-[11px] text-[var(--text-secondary)]">
+                      {site || summarizeUrl(url)}
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-[rgba(79,123,116,0.08)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--accent-soft-strong)]">
+                    {index + 1}
+                  </span>
+                </div>
+                {url ? (
+                  <a
+                    className="mt-1 block truncate text-[11px] text-[var(--accent-soft-strong)] underline-offset-2 hover:underline"
+                    href={url}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    {url}
+                  </a>
+                ) : null}
+                {snippet ? (
+                  <div className="mt-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                    {snippet}
+                  </div>
+                ) : null}
+              </article>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="rounded-lg border border-dashed border-white/90 bg-white/55 px-3 py-2 text-[12px] text-[var(--text-secondary)]">
+          {event.status === 'running' ? '正在检索网页结果...' : '没有可展示的搜索结果。'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function WebFetchEventCard({
+  event,
+  output,
+}: {
+  event: MessageEvent
+  output: Record<string, unknown>
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const url = asText(output.finalUrl) || asText(output.url)
+  const provider = asText(output.provider)
+  const site = asText(output.site)
+  const title = asText(output.title)
+  const excerpt = asText(output.excerpt)
+  const content = asText(output.content)
+  const contentFormat = asText(output.contentFormat)
+  const author = asText(output.author)
+  const publishedAt = asText(output.publishedAt)
+  const tookMs = typeof output.tookMs === 'number' ? output.tookMs : 0
+  const preview = expanded ? content : content.slice(0, 900).trim()
+  const canExpand = content.length > 900
+
+  return (
+    <div className="mt-2 flex flex-col gap-2 rounded-xl border border-[rgba(79,123,116,0.12)] bg-[rgba(79,123,116,0.05)] p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <MetaPill label="Site" value={site || summarizeUrl(url)} />
+        <MetaPill label="Provider" value={provider || 'web'} />
+        <MetaPill label="Format" value={contentFormat || 'article'} />
+        {tookMs > 0 ? <MetaPill label="Time" value={`${tookMs}ms`} /> : null}
+      </div>
+
+      <div className="rounded-lg border border-white/80 bg-white/85 px-3 py-2.5">
+        <div className="text-[12px] font-600 leading-relaxed text-[var(--text-primary)]">
+          {title || summarizeUrl(url) || 'Fetched page'}
+        </div>
+        {url ? (
+          <a
+            className="mt-1 block truncate text-[11px] text-[var(--accent-soft-strong)] underline-offset-2 hover:underline"
+            href={url}
+            rel="noreferrer"
+            target="_blank"
+          >
+            {url}
+          </a>
+        ) : null}
+        {author || publishedAt ? (
+          <div className="mt-2 text-[11px] text-[var(--text-secondary)]">
+            {[author, publishedAt].filter(Boolean).join(' · ')}
+          </div>
+        ) : null}
+        {excerpt ? (
+          <div className="mt-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+            {excerpt}
+          </div>
+        ) : null}
+        {preview ? (
+          <div className="mt-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.03)] px-3 py-2">
+            <div className="mb-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+              Content
+            </div>
+            <div className="whitespace-pre-wrap text-[11px] leading-relaxed text-[var(--text-primary)]">
+              {preview}
+              {!expanded && canExpand ? '...' : ''}
+            </div>
+            {canExpand ? (
+              <button
+                className="mt-2 text-[11px] font-600 text-[var(--accent-soft-strong)]"
+                onClick={() => setExpanded(current => !current)}
+                type="button"
+              >
+                {expanded ? '收起正文' : '展开正文'}
+              </button>
+            ) : null}
+          </div>
+        ) : event.status === 'running' ? (
+          <div className="mt-2 text-[12px] text-[var(--text-secondary)]">正在抓取并提取页面正文...</div>
+        ) : null}
+      </div>
+    </div>
+  )
+}

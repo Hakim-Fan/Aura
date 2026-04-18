@@ -232,7 +232,7 @@ function inferRouteEscalationFromMessage(message, availableEscalations) {
 
   if (
     availableEscalations.includes('web-lookup') &&
-    /(latest|current|today|official docs|official documentation|web|online|最新|当前|今天|官网|官方文档|联网)/u.test(
+    /(latest|current|today|official docs|official documentation|docs|documentation|news|sources|web|online|最新|当前|今天|官网|官方文档|文档|资料|新闻|来源|联网)/u.test(
       normalized,
     )
   ) {

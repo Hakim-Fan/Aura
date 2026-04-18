@@ -68,79 +68,6 @@ fn build_node_command<R: Runtime>(...) -> Result<Command, String> {
 
 ---
 
-## 方案二：Bun 替换 Node Sidecar
-
-### 思路
-将 87MB 的 Node 二进制替换为 ~42MB 的 Bun 二进制。
-
-### 改动范围
-
-| 文件 | 改动 |
-|------|------|
-| `src-tauri/binaries/` | `node-x86_64-apple-darwin` → `bun-x86_64-apple-darwin` |
-| `src-tauri/tauri.conf.json` | `"externalBin": ["binaries/bun"]` |
-| `src-tauri/src/main.rs` | `.sidecar("node")` → `.sidecar("bun")` |
-| Bridge 脚本 | **无需修改** |
-
-### 下载 Bun 二进制
-```bash
-# macOS x86_64
-curl -Lo bun-x86_64-apple-darwin https://github.com/oven-sh/bun/releases/latest/download/bun-darwin-x64.zip
-# macOS arm64
-curl -Lo bun-aarch64-apple-darwin https://github.com/oven-sh/bun/releases/latest/download/bun-darwin-aarch64.zip
-```
-
-### 效果
-
-| 指标 | Node | Bun |
-|------|------|-----|
-| Sidecar 大小 | 87MB | ~42MB |
-| App 总体积 | ~146MB | **~101MB** |
-| API 兼容性 | 100% | ~98% |
-
-### 兼容性风险清单
-
-| 功能 | 兼容性 | 备注 |
-|------|--------|------|
-| fetch + SSE | ✅ | Bun 原生支持，性能更好 |
-| readline (IPC) | ✅ | |
-| child_process | ✅ | |
-| createRequire() | ✅ | |
-| ESM dynamic import() | ✅ | |
-| @modelcontextprotocol/sdk | ✅ | 标准 Node API |
-| **playwright-core** | ⚠️ | 非官方支持运行时，需实测 |
-| **chromium-bidi** | ⚠️ | 同上 |
-
-### 优缺点
-- ✅ 减少 ~45MB 体积
-- ✅ Bun 启动速度更快（冷启动比 Node 快 3-5x）
-- ✅ Bridge 脚本无需任何修改
-- ⚠️ **playwright-core 未被 Bun 官方支持**，可能在浏览器自动化场景出现问题
-- ⚠️ 需要为每个目标平台维护对应的 Bun 二进制
-- ⚠️ Bun 仍在快速迭代中，API 稳定性不如 Node
-
----
-
-## 方案三：方案一 + 方案二组合
-
-### 思路
-优先使用系统 Node → 系统没有则用打包的 Bun sidecar 兜底。
-
-### 效果
-
-| 场景 | App 体积 | 运行时 |
-|------|---------|--------|
-| 有系统 Node | 101MB（含 Bun 兜底） | 系统 Node |
-| 无系统 Node | 101MB | Bun sidecar |
-| 移除 sidecar 分发 | 59MB | 仅系统 Node |
-
-### 优缺点
-- ✅ 最佳体积平衡
-- ✅ 大多数用户用 Node（完全兼容），少数用 Bun（基本兼容）
-- ⚠️ 需要维护两套运行时的兼容测试
-
----
-
 ## 方案四：按需下载 Node 到 App 私有目录（⭐ 最优推荐）
 
 ### 思路
@@ -296,10 +223,6 @@ fn build_node_command<R: Runtime>(...) -> Result<Command, String> {
 │    改动量：~200 行 Rust + 1 前端组件                          │
 │    效果：App 59MB，首次无 Node 时自动下载 25MB                 │
 ├─────────────────────────────────────────────────────────────┤
-│  可选                                                        │
-│  → 方案二：Bun 替换（如 Node 下载方案不可行时的备选）          │
-│    风险：playwright 兼容性                                    │
-└─────────────────────────────────────────────────────────────┘
 ```
 
 ## 相关文件

@@ -3,7 +3,6 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { chromium } from 'playwright-core'
 import { createStructuredError } from './runtimeErrors.mjs'
 import { resolveWorkspacePath, stringifyOutput, truncate } from './utils.mjs'
 
@@ -18,6 +17,20 @@ const MAX_DEBUG_BUFFER_ENTRIES = 200
 const DEFAULT_TRACE_RELATIVE_PATH = `.aura/browser/trace-${Date.now()}.zip`
 const DEFAULT_VIDEO_RELATIVE_DIR = '.aura/browser/videos'
 const execFileAsync = promisify(execFile)
+let chromiumPromise = null
+
+async function getChromium() {
+  if (!chromiumPromise) {
+    chromiumPromise = import('playwright-core')
+      .then(module => module.chromium)
+      .catch(error => {
+        chromiumPromise = null
+        throw error
+      })
+  }
+
+  return chromiumPromise
+}
 
 function normalizeSessionId(value) {
   if (typeof value !== 'string') {
@@ -434,7 +447,7 @@ async function launchPersistentContextWithRetry(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      return await chromium.launchPersistentContext(
+      return await (await getChromium()).launchPersistentContext(
         userDataDir,
         browserContextOptions(settings, executablePath, headless, launchOptions),
       )
@@ -1263,7 +1276,7 @@ export async function clearAuraProfileSiteCookies(settings, domain) {
   const userDataDir = resolveAuraProfilePath(settings)
   await fs.mkdir(userDataDir, { recursive: true })
 
-  const context = await chromium.launchPersistentContext(
+  const context = await (await getChromium()).launchPersistentContext(
     userDataDir,
     browserContextOptions(settings, executablePath, true),
   )
@@ -1293,7 +1306,7 @@ export async function clearAuraProfileAllCookies(settings) {
   const userDataDir = resolveAuraProfilePath(settings)
   await fs.mkdir(userDataDir, { recursive: true })
 
-  const context = await chromium.launchPersistentContext(
+  const context = await (await getChromium()).launchPersistentContext(
     userDataDir,
     browserContextOptions(settings, executablePath, true),
   )

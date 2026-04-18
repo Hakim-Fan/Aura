@@ -41,6 +41,7 @@ import {
 } from 'lucide-react'
 import { WorkspaceExplorer } from '../components/WorkspaceExplorer'
 import { TaskTreeView } from '../components/TaskTreeView'
+import { WebFetchEventCard, WebSearchEventCard } from '../components/WebToolEventCards'
 import { formatConversationTimestamp } from '../lib/sessionMeta'
 import type {
   AgentExecutionPhase,
@@ -1117,10 +1118,11 @@ function MessageEventCard({
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
   const isApproval = event.kind === 'approval' && event.status === 'awaiting_approval'
   const parsedOutput = parseJsonOutput(event.output)
+  const toolName = typeof event.toolName === 'string' ? event.toolName : ''
   const isStructuredBrowserEvent =
-    typeof event.toolName === 'string' &&
-    event.toolName.startsWith('browser_') &&
-    Boolean(parsedOutput)
+    toolName.startsWith('browser_') && Boolean(parsedOutput)
+  const isStructuredWebSearchEvent = toolName === 'web_search' && Boolean(parsedOutput)
+  const isStructuredWebFetchEvent = toolName === 'web_fetch' && Boolean(parsedOutput)
   const failureSummary =
     event.status === 'error'
       ? event.errorInfo?.summary || summarizeFailureReason(event.error || event.output || event.summary)
@@ -1184,6 +1186,12 @@ function MessageEventCard({
       <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
       {!isApproval && isStructuredBrowserEvent && parsedOutput ? (
         <BrowserStructuredEventCard event={event} output={parsedOutput} onCopyText={onCopyText} />
+      ) : null}
+      {!isApproval && isStructuredWebSearchEvent && parsedOutput ? (
+        <WebSearchEventCard event={event} output={parsedOutput} />
+      ) : null}
+      {!isApproval && isStructuredWebFetchEvent && parsedOutput ? (
+        <WebFetchEventCard event={event} output={parsedOutput} />
       ) : null}
       {isApproval ? (
         <div className="mt-2 rounded-xl border border-amber-200 bg-white p-3">
