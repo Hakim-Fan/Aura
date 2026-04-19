@@ -561,6 +561,8 @@ async function runProviderTurn({
   const providerHooks = {
     ...hooks,
     settings,
+    routeState,
+    researchMode: routeState?.researchMode || 'auto',
     taskTracker,
     currentTaskId,
   }
@@ -883,6 +885,7 @@ export async function runRouteFirstAgent(request) {
   let routeState = inferRouteState(messages, {
     classification,
     hardSignals,
+    settings,
   })
   const visitedTiers = new Set([routeState.capabilityTier])
   const routeNotes = []
@@ -927,6 +930,7 @@ export async function runRouteFirstAgent(request) {
         skillEntries: skillCatalog,
         tools: routedTools,
         classification,
+        routeState,
       })
       lastSelectedCapabilities = selectedCapabilities
       const skillPrompt = buildSkillPrompt(selectedCapabilities.selectedSkills)

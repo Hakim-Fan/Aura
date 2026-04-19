@@ -6,6 +6,7 @@ import type {
   BrowserRuntimeStatusRecord,
   BrowserSearchPreferences,
   WebFetchSettings,
+  WebResearchSettings,
   WebSearchProviderSettings,
   WebSearchSettings,
   WebToolsSettings,
@@ -158,10 +159,26 @@ function defaultWebFetchSettings(): WebFetchSettings {
   }
 }
 
+function defaultWebResearchSettings(): WebResearchSettings {
+  return {
+    enabled: true,
+    defaultSearchLimit: 5,
+    defaultFetchLimit: 3,
+    defaultMaxChars: 3_200,
+    preferSearchContent: true,
+    searchContentMinChars: 1_200,
+    deepSearchLimit: 8,
+    deepFetchLimit: 5,
+    deepMaxChars: 5_200,
+    allowBrowserFallback: false,
+  }
+}
+
 function defaultWebToolsSettings(): WebToolsSettings {
   return {
     search: defaultWebSearchSettings(),
     fetch: defaultWebFetchSettings(),
+    research: defaultWebResearchSettings(),
   }
 }
 
@@ -1010,6 +1027,62 @@ function normalizeWebFetchSettings(value: unknown): WebFetchSettings {
   }
 }
 
+function normalizeWebResearchSettings(value: unknown): WebResearchSettings {
+  const defaults = defaultWebResearchSettings()
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<WebResearchSettings>
+  return {
+    enabled: entry.enabled !== false,
+    defaultSearchLimit: clampIntegerSetting(
+      entry.defaultSearchLimit,
+      defaults.defaultSearchLimit,
+      1,
+      10,
+    ),
+    defaultFetchLimit: clampIntegerSetting(
+      entry.defaultFetchLimit,
+      defaults.defaultFetchLimit,
+      1,
+      6,
+    ),
+    defaultMaxChars: clampIntegerSetting(
+      entry.defaultMaxChars,
+      defaults.defaultMaxChars,
+      500,
+      20_000,
+    ),
+    preferSearchContent: entry.preferSearchContent !== false,
+    searchContentMinChars: clampIntegerSetting(
+      entry.searchContentMinChars,
+      defaults.searchContentMinChars,
+      200,
+      8_000,
+    ),
+    deepSearchLimit: clampIntegerSetting(
+      entry.deepSearchLimit,
+      defaults.deepSearchLimit,
+      2,
+      10,
+    ),
+    deepFetchLimit: clampIntegerSetting(
+      entry.deepFetchLimit,
+      defaults.deepFetchLimit,
+      1,
+      6,
+    ),
+    deepMaxChars: clampIntegerSetting(
+      entry.deepMaxChars,
+      defaults.deepMaxChars,
+      800,
+      20_000,
+    ),
+    allowBrowserFallback: entry.allowBrowserFallback === true,
+  }
+}
+
 function normalizeWebToolsSettings(value: unknown): WebToolsSettings {
   const defaults = defaultWebToolsSettings()
   if (!value || typeof value !== 'object') {
@@ -1020,6 +1093,7 @@ function normalizeWebToolsSettings(value: unknown): WebToolsSettings {
   return {
     search: normalizeWebSearchSettings(entry.search),
     fetch: normalizeWebFetchSettings(entry.fetch),
+    research: normalizeWebResearchSettings(entry.research),
   }
 }
 

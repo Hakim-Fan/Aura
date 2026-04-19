@@ -515,6 +515,23 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setSaveState('idle')
   }
 
+  function updateWebResearchSettings<K extends keyof AgentSettings['web']['research']>(
+    key: K,
+    value: AgentSettings['web']['research'][K],
+  ) {
+    setDraftSettings(current => ({
+      ...current,
+      web: {
+        ...current.web,
+        research: {
+          ...current.web.research,
+          [key]: value,
+        },
+      },
+    }))
+    setSaveState('idle')
+  }
+
   function updateWebFetchSettings<K extends keyof AgentSettings['web']['fetch']>(
     key: K,
     value: AgentSettings['web']['fetch'][K],
@@ -2699,13 +2716,174 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   <div className="form-container">
                     <label className="toggle-inline">
                       <input
+                        checked={draftSettings.web.research.enabled}
+                        onChange={event =>
+                          updateWebResearchSettings('enabled', event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>启用 `web_research`</strong>
+                        <span className="muted">把搜索、候选筛选和正文证据收集整合成一次调用，适合最新信息、文档和多来源调研。</span>
+                      </div>
+                    </label>
+
+                    <label className="toggle-inline">
+                      <input
+                        checked={draftSettings.web.research.preferSearchContent}
+                        onChange={event =>
+                          updateWebResearchSettings('preferSearchContent', event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>优先复用搜索结果正文</strong>
+                        <span className="muted">当 Tavily / 其他 provider 已经返回足够长的原文时，优先直接用它，减少重复抓取和等待。</span>
+                      </div>
+                    </label>
+
+                    <label className="toggle-inline">
+                      <input
+                        checked={draftSettings.web.research.allowBrowserFallback}
+                        onChange={event =>
+                          updateWebResearchSettings('allowBrowserFallback', event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>允许最终降级到浏览器研究</strong>
+                        <span className="muted">仅在 `web_*` 结果不足、被风控拦截，或工具明确建议浏览器兜底时，才允许升级到 `browser_search` / `browser_open`。</span>
+                      </div>
+                    </label>
+
+                    <div className="form-row">
+                      <label>普通模式搜索结果数</label>
+                      <input
+                        min={1}
+                        max={10}
+                        onChange={event =>
+                          updateWebResearchSettings(
+                            'defaultSearchLimit',
+                            Number(event.target.value) ||
+                              draftSettings.web.research.defaultSearchLimit,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.research.defaultSearchLimit}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>普通模式抓取页数</label>
+                      <input
+                        min={1}
+                        max={6}
+                        onChange={event =>
+                          updateWebResearchSettings(
+                            'defaultFetchLimit',
+                            Number(event.target.value) ||
+                              draftSettings.web.research.defaultFetchLimit,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.research.defaultFetchLimit}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>普通模式单页正文上限</label>
+                      <input
+                        min={500}
+                        max={20000}
+                        onChange={event =>
+                          updateWebResearchSettings(
+                            'defaultMaxChars',
+                            Number(event.target.value) ||
+                              draftSettings.web.research.defaultMaxChars,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.research.defaultMaxChars}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>复用搜索正文的最小长度</label>
+                      <input
+                        min={200}
+                        max={8000}
+                        onChange={event =>
+                          updateWebResearchSettings(
+                            'searchContentMinChars',
+                            Number(event.target.value) ||
+                              draftSettings.web.research.searchContentMinChars,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.research.searchContentMinChars}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>深度研究搜索结果数</label>
+                      <input
+                        min={2}
+                        max={10}
+                        onChange={event =>
+                          updateWebResearchSettings(
+                            'deepSearchLimit',
+                            Number(event.target.value) ||
+                              draftSettings.web.research.deepSearchLimit,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.research.deepSearchLimit}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>深度研究抓取页数</label>
+                      <input
+                        min={1}
+                        max={6}
+                        onChange={event =>
+                          updateWebResearchSettings(
+                            'deepFetchLimit',
+                            Number(event.target.value) ||
+                              draftSettings.web.research.deepFetchLimit,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.research.deepFetchLimit}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>深度研究单页正文上限</label>
+                      <input
+                        min={800}
+                        max={20000}
+                        onChange={event =>
+                          updateWebResearchSettings(
+                            'deepMaxChars',
+                            Number(event.target.value) ||
+                              draftSettings.web.research.deepMaxChars,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.research.deepMaxChars}
+                      />
+                    </div>
+
+                    <label className="toggle-inline">
+                      <input
                         checked={draftSettings.web.search.enabled}
                         onChange={event => updateWebSearchSettings('enabled', event.target.checked)}
                         type="checkbox"
                       />
                       <div className="flex flex-col">
                         <strong>启用 `web_search`</strong>
-                        <span className="muted">优先用于研究、新闻、文档和事实查询，不影响 `browser_search`。</span>
+                        <span className="muted">用于候选来源发现和结构化排序；`web_research` 会复用这里的 provider 配置。</span>
                       </div>
                     </label>
 
@@ -2803,7 +2981,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     </div>
 
                     <div className="provider-note">
-                      <p>`web_search` 使用这里的 provider 配置；浏览器搜索页仍由下方的 `browser.search` 控制。</p>
+                      <p>`web_search` 和 `web_research` 共用这里的搜索 provider 配置；浏览器搜索页仍由上方的 `browser.search` 控制。</p>
                     </div>
                   </div>
                 </section>

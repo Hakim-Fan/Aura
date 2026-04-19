@@ -249,6 +249,7 @@ export type EvidenceRecord = {
     | 'page_state'
     | 'search_result'
     | 'web_search_result'
+    | 'web_research_result'
     | 'web_fetch_content'
     | 'web_fetch_summary'
     | 'user_denied'
@@ -512,9 +513,23 @@ export type WebFetchSettings = {
   readability: boolean
 }
 
+export type WebResearchSettings = {
+  enabled: boolean
+  defaultSearchLimit: number
+  defaultFetchLimit: number
+  defaultMaxChars: number
+  preferSearchContent: boolean
+  searchContentMinChars: number
+  deepSearchLimit: number
+  deepFetchLimit: number
+  deepMaxChars: number
+  allowBrowserFallback: boolean
+}
+
 export type WebToolsSettings = {
   search: WebSearchSettings
   fetch: WebFetchSettings
+  research: WebResearchSettings
 }
 
 export type ChromeImportSource = {

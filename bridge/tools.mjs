@@ -1607,6 +1607,8 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         tool.run(args, {
           signal: abortController?.signal,
           settings: hooks.settings,
+          routeState: hooks.routeState,
+          researchMode: hooks.researchMode,
           throwIfAborted() {
             throwIfAborted(abortController?.signal, tool)
           },

@@ -435,7 +435,20 @@ function scoreToolGroup(group, context) {
     if (group.id === 'advanced:browser-runtime' && context.signals.isBrowserTask) {
       score += 8
     }
+    if (
+      group.id === 'advanced:browser-runtime' &&
+      context.routeState?.capabilityTier === 'browser-interactive'
+    ) {
+      score += 8
+    }
     if (group.id === 'advanced:chrome-automation' && context.signals.isBrowserTask) {
+      score += 4
+    }
+    if (
+      group.id === 'advanced:chrome-automation' &&
+      context.routeState?.capabilityTier === 'browser-interactive' &&
+      context.routeState?.explicitSystemChromeRequest === true
+    ) {
       score += 4
     }
   }
@@ -521,11 +534,13 @@ export function selectTurnCapabilities({
   skillEntries,
   tools,
   classification,
+  routeState,
 }) {
   const text = buildConversationText(messages)
   const context = {
     text,
     signals: inferTaskSignalsFromClassification(classification, text),
+    routeState,
   }
 
   const selectedSkills = skillEntries

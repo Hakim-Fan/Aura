@@ -367,6 +367,7 @@ const AURA_MUTATION_TOOLS = new Set([
 ])
 
 const WEB_LOOKUP_TOOLS = new Set([
+  'web_research',
   'web_search',
   'web_fetch',
 ])
@@ -1090,6 +1091,7 @@ function buildRouteStateFromSignals({
   answerMode,
   needsExternalFacts,
   webInteractionRequired,
+  allowBrowserResearchFallback = false,
   workspaceRelated,
   isCapabilityAdminTask,
   explicitSystemChromeRequest,
@@ -1116,7 +1118,11 @@ function buildRouteStateFromSignals({
   if (!isWebCapableTier(capabilityTier) && needsExternalFacts) {
     allowEscalationTo.push('web-lookup')
   }
-  if (supportsBrowserEscalation(capabilityTier) && webInteractionRequired) {
+  if (
+    supportsBrowserEscalation(capabilityTier) &&
+    (webInteractionRequired ||
+      (allowBrowserResearchFallback && needsExternalFacts && capabilityTier !== 'browser-interactive'))
+  ) {
     allowEscalationTo.push('browser-interactive')
   }
 
@@ -1132,6 +1138,8 @@ function buildRouteStateFromSignals({
     answerMode,
     capabilityTier,
     researchMode,
+    webInteractionRequired,
+    allowBrowserResearchFallback,
     responseStyle,
     taskComplexity,
     planDepth,
@@ -1145,7 +1153,13 @@ function buildRouteStateFromSignals({
         planDepth,
       }),
       browserEscalationsRemaining:
-        webInteractionRequired && supportsBrowserEscalation(capabilityTier) ? 1 : 0,
+        (webInteractionRequired ||
+          (allowBrowserResearchFallback &&
+            needsExternalFacts &&
+            capabilityTier !== 'browser-interactive')) &&
+        supportsBrowserEscalation(capabilityTier)
+          ? 1
+          : 0,
       writeEscalationsRemaining:
         answerMode === 'execute' && workspaceRelated && supportsWriteEscalation(capabilityTier)
           ? 1
@@ -1173,7 +1187,7 @@ export function deriveHardSignals(messages) {
   }
 }
 
-export function inferRouteStateFromClassification(classification, hardSignals = {}) {
+export function inferRouteStateFromClassification(classification, hardSignals = {}, settings = {}) {
   if (!classification || typeof classification !== 'object') {
     throw createStructuredError('缺少有效的意图分类结果，无法基于分类推导路由状态。', {
       source: 'system',
@@ -1205,6 +1219,7 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
     answerMode,
     needsExternalFacts: classification.needsExternalFacts === true,
     webInteractionRequired,
+    allowBrowserResearchFallback: settings?.web?.research?.allowBrowserFallback === true,
     workspaceRelated,
     isCapabilityAdminTask: classification.isCapabilityAdmin === true,
     explicitSystemChromeRequest:
@@ -1216,7 +1231,7 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
   })
 }
 
-export function inferRouteStateFromKeywords(messages) {
+export function inferRouteStateFromKeywords(messages, settings = {}) {
   const text = buildConversationText(messages)
   const intent = latestUserIntent(messages)
   const asksInformational = hasAny(intent, INFORMATIONAL_KEYWORDS)
@@ -1243,6 +1258,7 @@ export function inferRouteStateFromKeywords(messages) {
     answerMode,
     needsExternalFacts,
     webInteractionRequired: explicitWebInteraction,
+    allowBrowserResearchFallback: settings?.web?.research?.allowBrowserFallback === true,
     workspaceRelated: workspaceRelated || answerMode === 'execute',
     isCapabilityAdminTask,
     explicitSystemChromeRequest,
@@ -1258,9 +1274,10 @@ export function inferRouteState(messages, options = {}) {
         ...(options.hardSignals || deriveHardSignals(messages)),
         researchMode: latestUserResearchMode(messages),
       },
+      options.settings,
     )
   }
-  return inferRouteStateFromKeywords(messages)
+  return inferRouteStateFromKeywords(messages, options.settings)
 }
 
 export function selectAgentStrategy(classification, hardSignals = {}, options = {}) {
@@ -1505,7 +1522,12 @@ export function applyRouteToolBudgets(tools, routeState) {
   const budgets = routeState?.budgets || {}
   const mountedTools =
     (budgets.searchesRemaining || 0) <= 0
-      ? tools.filter(tool => tool?.name !== 'browser_search' && tool?.name !== 'web_search')
+      ? tools.filter(
+          tool =>
+            tool?.name !== 'browser_search' &&
+            tool?.name !== 'web_search' &&
+            tool?.name !== 'web_research',
+        )
       : tools
 
   return mountedTools.map(tool => {
@@ -1541,6 +1563,139 @@ export function applyRouteToolBudgets(tools, routeState) {
           if (normalizedOutput && typeof normalizedOutput === 'object') {
             return {
               ...normalizedOutput,
+              crossSourceInsights,
+            }
+          }
+
+          return output
+        },
+      }
+    }
+
+    if (tool?.name === 'web_research') {
+      return {
+        ...tool,
+        async run(args, runtime = {}) {
+          const searchRuntime = getSearchRuntimeState(budgets)
+          const attemptSignature = buildSearchAttemptSignature(args)
+          const stopDecision = shouldStopSearchAttempts(
+            searchRuntime,
+            attemptSignature,
+            routeState,
+          )
+          if (stopDecision.shouldStop) {
+            return buildSearchStopPayload(
+              stopDecision.reason,
+              args,
+              searchRuntime,
+              attemptSignature,
+            )
+          }
+
+          if ((budgets.searchesRemaining || 0) <= 0) {
+            return buildSearchStopPayload(
+              'budget-exhausted',
+              args,
+              searchRuntime,
+              attemptSignature,
+            )
+          }
+
+          budgets.searchesRemaining -= 1
+          const output = await tool.run(args, runtime)
+          const normalizedOutput = output && typeof output === 'object' ? output : {}
+          const recommendedResults = Array.isArray(normalizedOutput.results)
+            ? normalizedOutput.results
+                .map(result => {
+                  const normalizedResult = normalizeRecommendedSearchResult(result)
+                  if (!normalizedResult) {
+                    return null
+                  }
+                  return {
+                    ...normalizedResult,
+                    queryKey: attemptSignature.comparableKey,
+                  }
+                })
+                .filter(Boolean)
+                .slice(0, 5)
+            : []
+
+          const nextAttempt = {
+            comparableKey: attemptSignature.comparableKey,
+            query: attemptSignature.query,
+            domains: attemptSignature.domains,
+            noResults:
+              normalizedOutput.noResults === true ||
+              (typeof normalizedOutput.total === 'number' && normalizedOutput.total <= 0),
+            total:
+              typeof normalizedOutput.total === 'number' ? normalizedOutput.total : 0,
+            resultDomains: Array.isArray(normalizedOutput.results)
+              ? Array.from(
+                  new Set(
+                    normalizedOutput.results
+                      .map(result => extractSearchRuntimeHostname(result?.url || ''))
+                      .filter(Boolean),
+                  ),
+                )
+              : [],
+          }
+          searchRuntime.attempts = [...(searchRuntime.attempts || []), nextAttempt].slice(-6)
+          searchRuntime.lastResults = recommendedResults
+
+          const researchFetches = Array.isArray(normalizedOutput.results)
+            ? normalizedOutput.results
+                .map(result => {
+                  const status =
+                    typeof result?.status === 'string' ? result.status.trim().toLowerCase() : ''
+                  if (status === 'error' || status === 'not_fetched') {
+                    return null
+                  }
+                  if (
+                    typeof result?.fullContent !== 'string' &&
+                    typeof result?.content !== 'string' &&
+                    !Array.isArray(result?.evidenceBlocks)
+                  ) {
+                    return null
+                  }
+                  return normalizeFetchRuntimeRecord(
+                    {
+                      ...result,
+                      url:
+                        typeof result?.finalUrl === 'string' && result.finalUrl.trim()
+                          ? result.finalUrl
+                          : result?.url,
+                      content:
+                        typeof result?.fullContent === 'string'
+                          ? result.fullContent
+                          : result?.content,
+                    },
+                    result?.url || '',
+                  )
+                })
+                .filter(Boolean)
+            : []
+
+          if (researchFetches.length > 0) {
+            const fetchesByUrl = new Map(
+              (Array.isArray(searchRuntime.fetches) ? searchRuntime.fetches : [])
+                .filter(entry => entry?.url)
+                .map(entry => [entry.url, entry]),
+            )
+            for (const fetchRecord of researchFetches) {
+              fetchesByUrl.set(fetchRecord.url, fetchRecord)
+            }
+            searchRuntime.fetches = Array.from(fetchesByUrl.values()).slice(-6)
+          }
+
+          const crossSourceInsights = buildCrossSourceInsights(searchRuntime)
+          if (normalizedOutput && typeof normalizedOutput === 'object') {
+            return {
+              ...normalizedOutput,
+              recommendedResults,
+              recommendedNextAction:
+                recommendedResults.length > 0
+                  ? 'synthesize_research_results'
+                  : undefined,
               crossSourceInsights,
             }
           }

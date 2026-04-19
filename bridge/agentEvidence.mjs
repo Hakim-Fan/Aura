@@ -5,6 +5,7 @@ const READ_EFFECT_TOOLS = new Set([
   'search_code',
   'aura_list_capabilities',
   'aura_read_skill',
+  'web_research',
   'web_search',
   'web_fetch',
   'browser_search',
@@ -201,6 +202,17 @@ function collectProducedEvidence(event, effectTypes) {
       }
     }
 
+    if (name === 'web_research') {
+      if (
+        structuredOutput?.noResults !== true &&
+        structuredOutput?.searchStopped !== true &&
+        structuredOutput?.budgetExhausted !== true &&
+        (!Array.isArray(structuredOutput?.results) || structuredOutput.results.length > 0)
+      ) {
+        producedEvidence.push('web_research_result')
+      }
+    }
+
     if (name === 'web_fetch') {
       const contentFormat =
         structuredOutput &&
@@ -232,6 +244,7 @@ function inferVerificationLevel(event, effectTypes, producedEvidence) {
 
   if (
     producedEvidence.includes('web_search_result') ||
+    producedEvidence.includes('web_research_result') ||
     producedEvidence.includes('web_fetch_content') ||
     producedEvidence.includes('web_fetch_summary')
   ) {

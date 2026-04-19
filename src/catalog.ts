@@ -22,7 +22,7 @@ export const builtinSkills = [
   {
     id: 'web-research',
     name: 'Web Research',
-    description: '研究、新闻、文档、行情和事实查询时，优先用 web_search 找来源，再用 web_fetch 读正文。',
+    description: '研究、新闻、文档、行情和事实查询时，优先用 web_research 聚合来源与正文证据，必要时再配合 web_search / web_fetch。',
   },
 ]
 

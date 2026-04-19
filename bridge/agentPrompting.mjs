@@ -182,7 +182,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
     } else if (routeState.capabilityTier === 'web-lookup') {
       sections.push('Web lookup tools are mounted only for external facts and current information. Prefer local context first, then use the web only when necessary.')
       sections.push(
-        'For research, latest info, docs, news, or source-finding tasks, prefer web_search first and then web_fetch for selected URLs. Do not jump to browser_search just to read public web content.',
+        'For research, latest info, docs, news, or source-finding tasks, prefer web_research when one call can likely gather both candidate sources and grounded page content. Use web_search when you mainly need broader discovery, and use web_fetch when you already know the exact URL that needs deeper reading.',
       )
       sections.push(
         'For source selection, prefer high-signal domains when relevant: official docs for technical references, reputable finance sites for market data, and established news outlets for current events.',
@@ -191,38 +191,60 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
         'When calling web_search, prefer plain natural-language keywords. If you want to bias toward certain sites, prefer the domains field. Legacy operators like site:, intitle:, or quoted phrases are accepted, but they are less portable across providers than structured fields.',
       )
       sections.push(
+        'web_research returns ranked results together with fetched or provider-supplied evidence when available. Prefer it when you want packaged evidence with citationIndex, status, content, and per-source risk signals in a single step.',
+      )
+      sections.push(
         'web_search returns ranking metadata such as rankScore, sourceQualityScore, noveltyScore, freshnessScore, domainCategory, and rankingSignals. Some providers may also return rich snippets, answer fields, or result content. Prefer higher rankScore links, but still diversify domains when the question benefits from comparison.',
       )
       sections.push(
         'web_fetch returns structured evidence such as sourceAssessment, riskFlags, keyPoints, and evidenceBlocks. Prefer grounding your answer in those evidenceBlocks instead of paraphrasing the whole page blindly.',
       )
       sections.push(
-        'When multiple web_fetch calls are available, prefer crossSourceInsights to separate corroborated claims from mixed or conflicting signals before writing the conclusion.',
+        'When multiple web_fetch calls or a web_research result expose crossSourceInsights, prefer those signals to separate corroborated claims from mixed or conflicting evidence before writing the conclusion.',
       )
       sections.push(
-        'Use a research loop that mirrors mature agents: start with one broad discovery search, inspect whether web_search already returned enough grounded content, then web_fetch only the best 1-3 links when you still need fuller evidence. Search again only if the evidence is stale, contradictory, or still missing a key angle.',
+        'Use a research loop that mirrors mature agents: start with one broad but well-formed discovery step, inspect whether web_research or web_search already returned enough grounded content, then deepen only the best sources. Search again only if the evidence is stale, contradictory, or still missing a key angle.',
       )
       if (routeState.researchMode === 'deep') {
         sections.push(
-          'Deep research mode is enabled. You may spend extra search and reasoning steps when they materially improve evidence quality, source diversity, or conflict resolution.',
+          'Deep research mode is enabled. Prefer broader source coverage, more domain diversity, and higher-confidence corroboration. A well-scoped web_research call with higher searchLimit and fetchLimit is often the fastest starting point.',
         )
       }
       sections.push(
         routeState.researchMode === 'deep'
-          ? 'Do not burn searches on minor query rewrites. In deep research mode you may spend a few extra discovery searches, but once strong candidates exist you should switch to web_fetch before searching again.'
-          : 'Do not burn searches on minor query rewrites. After two discovery searches without switching to reading, stop and move to web_fetch or a bounded answer.',
+          ? 'Do not burn searches on minor query rewrites. In deep research mode you may spend a few extra discovery searches, but once strong candidates exist you should switch to reading, web_research synthesis, or targeted web_fetch before searching again.'
+          : 'Do not burn searches on minor query rewrites. After two discovery searches without switching to reading or web_research synthesis, stop and move to source analysis or a bounded answer.',
       )
+      if (routeState.allowBrowserResearchFallback) {
+        sections.push(
+          'Browser fallback for web research is enabled in settings, but it is still a last resort. Stay on web_* first. Only request escalation to browser-interactive when web_research or web_fetch explicitly signals browserFallbackSuggested, repeated WEB_FETCH_PAGE_REQUIRES_BROWSER blockers occur, or public-web results remain unusable after reasonable web_* attempts.',
+        )
+      } else {
+        sections.push(
+          'Browser fallback for ordinary web research is disabled in settings. Do not request browser-interactive just because web results are thin; stay within web_* unless the user explicitly asked for browser operation.',
+        )
+      }
       sections.push(
         'When you stop searching, present it as a user-facing evidence boundary, not an internal budget boundary.',
       )
     } else if (routeState.capabilityTier === 'browser-interactive') {
-      sections.push('Interactive browser tools are mounted because the request explicitly requires web interaction. Stay focused on the requested workflow.')
       sections.push(
-        'When both web_* and browser_* are mounted, use web_search/web_fetch for information gathering, source lookup, and page reading. Use browser_* only for actual browser operation such as open, login, click, type, submit, or page-state verification.',
+        routeState.webInteractionRequired
+          ? 'Interactive browser tools are mounted because the request explicitly requires web interaction. Stay focused on the requested workflow.'
+          : 'Interactive browser tools are mounted as a last-resort fallback after web research limits were reached or browser-dependent pages blocked ordinary web access. Stay focused on unblocking the evidence path instead of browsing casually.',
       )
       sections.push(
-        'Do not use browser_search or browser page navigation as a substitute for ordinary research. Unless the task itself is to operate a browser workflow, gather information only through web_search and web_fetch.',
+        'When both web_* and browser_* are mounted, use web_research, web_search, and web_fetch for information gathering, source lookup, and page reading. Use browser_* only for actual browser operation such as open, login, click, type, submit, or page-state verification.',
       )
+      if (routeState.webInteractionRequired) {
+        sections.push(
+          'Do not use browser_search or browser page navigation as a substitute for ordinary research. Unless the task itself is to operate a browser workflow, gather information only through web_search, web_research, and web_fetch.',
+        )
+      } else {
+        sections.push(
+          'Because this browser tier came from research fallback, prefer browser_search only when web_search or web_research failed to surface usable public results, and prefer browser_open on specific blocked URLs when web_fetch or web_research already identified them.',
+        )
+      }
       if (routeState.explicitSystemChromeRequest) {
         sections.push('The user explicitly asked to operate system Chrome. Prefer the mounted chrome_* tools over the Aura browser runtime for this turn.')
       }
