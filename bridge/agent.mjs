@@ -834,6 +834,7 @@ export async function runRouteFirstAgent(request) {
     cwd: settings.cwd,
     appControl: hooks.appControl,
     todoState: runtime.todoState || { items: [] },
+    settings,
   }
   const taskTracker =
     runtime.taskTracker || createTaskTracker(hooks, summarizeMessages(messages))

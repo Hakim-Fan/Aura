@@ -487,6 +487,73 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setBrowserStatus(null)
   }
 
+  function updateWebSettings(patch: Partial<AgentSettings['web']>) {
+    setDraftSettings(current => ({
+      ...current,
+      web: {
+        ...current.web,
+        ...patch,
+      },
+    }))
+    setSaveState('idle')
+  }
+
+  function updateWebSearchSettings<K extends keyof AgentSettings['web']['search']>(
+    key: K,
+    value: AgentSettings['web']['search'][K],
+  ) {
+    setDraftSettings(current => ({
+      ...current,
+      web: {
+        ...current.web,
+        search: {
+          ...current.web.search,
+          [key]: value,
+        },
+      },
+    }))
+    setSaveState('idle')
+  }
+
+  function updateWebFetchSettings<K extends keyof AgentSettings['web']['fetch']>(
+    key: K,
+    value: AgentSettings['web']['fetch'][K],
+  ) {
+    setDraftSettings(current => ({
+      ...current,
+      web: {
+        ...current.web,
+        fetch: {
+          ...current.web.fetch,
+          [key]: value,
+        },
+      },
+    }))
+    setSaveState('idle')
+  }
+
+  function updateWebSearchProviderSettings<
+    K extends keyof AgentSettings['web']['search']['providers'],
+  >(
+    key: K,
+    value: AgentSettings['web']['search']['providers'][K],
+  ) {
+    setDraftSettings(current => ({
+      ...current,
+      web: {
+        ...current.web,
+        search: {
+          ...current.web.search,
+          providers: {
+            ...current.web.search.providers,
+            [key]: value,
+          },
+        },
+      },
+    }))
+    setSaveState('idle')
+  }
+
   function updateProviderProfile<K extends keyof ProviderProfile>(
     profileId: string,
     key: K,
@@ -1629,6 +1696,21 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
+            <div className="section-title">网络连接代理 (Network Proxy)</div>
+            <p className="muted">
+              配置全局 HTTP/HTTPS 代理。当你需要抓取海外网站或访问专业提供商时，建议填入你的本机梯子代理地址。例如：<code>http://127.0.0.1:7890</code>
+            </p>
+            <input
+              type="text"
+              placeholder="留空则直连网络或跟随环境变量"
+              value={draftSettings.networkProxy || ''}
+              className="settings-text-input mt-3"
+              onChange={event => handleSettingsChange('networkProxy', event.target.value)}
+              style={{ width: '100%', maxWidth: '400px' }}
+            />
+          </section>
+
+          <section className="dashboard-card">
             <div className="section-title">提供商概览</div>
             <div className="dashboard-list">
               <div className="dashboard-row">
@@ -2613,6 +2695,120 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 </section>
 
                 <section className="dashboard-card nested">
+                  <div className="section-title">Web Research</div>
+                  <div className="form-container">
+                    <label className="toggle-inline">
+                      <input
+                        checked={draftSettings.web.search.enabled}
+                        onChange={event => updateWebSearchSettings('enabled', event.target.checked)}
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>启用 `web_search`</strong>
+                        <span className="muted">优先用于研究、新闻、文档和事实查询，不影响 `browser_search`。</span>
+                      </div>
+                    </label>
+
+                    <div className="form-row">
+                      <label>搜索 Provider</label>
+                      <select
+                        className="settings-select"
+                        value={draftSettings.web.search.provider}
+                        onChange={event =>
+                          updateWebSearchSettings(
+                            'provider',
+                            event.target.value as AgentSettings['web']['search']['provider'],
+                          )
+                        }
+                      >
+                        <option value="auto">Auto（Tavily → Brave → DuckDuckGo）</option>
+                        <option value="tavily">Tavily</option>
+                        <option value="brave">Brave</option>
+                        <option value="duckduckgo">DuckDuckGo</option>
+                      </select>
+                    </div>
+
+                    <div className="form-row">
+                      <label>Tavily API Key</label>
+                      <input
+                        className="monospace"
+                        value={draftSettings.web.search.providers.tavilyApiKey}
+                        onChange={event =>
+                          updateWebSearchProviderSettings('tavilyApiKey', event.target.value)
+                        }
+                        placeholder="tvly-..."
+                        type="password"
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>Brave API Key</label>
+                      <input
+                        className="monospace"
+                        value={draftSettings.web.search.providers.braveApiKey}
+                        onChange={event =>
+                          updateWebSearchProviderSettings('braveApiKey', event.target.value)
+                        }
+                        placeholder="BSA..."
+                        type="password"
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>搜索超时（秒）</label>
+                      <input
+                        min={3}
+                        max={60}
+                        onChange={event =>
+                          updateWebSearchSettings(
+                            'timeoutSeconds',
+                            Number(event.target.value) || draftSettings.web.search.timeoutSeconds,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.search.timeoutSeconds}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>缓存 TTL（分钟）</label>
+                      <input
+                        min={0}
+                        max={1440}
+                        onChange={event =>
+                          updateWebSearchSettings(
+                            'cacheTtlMinutes',
+                            Number(event.target.value) || draftSettings.web.search.cacheTtlMinutes,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.search.cacheTtlMinutes}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>默认结果数</label>
+                      <input
+                        min={1}
+                        max={10}
+                        onChange={event =>
+                          updateWebSearchSettings(
+                            'maxResults',
+                            Number(event.target.value) || draftSettings.web.search.maxResults,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.search.maxResults}
+                      />
+                    </div>
+
+                    <div className="provider-note">
+                      <p>`web_search` 使用这里的 provider 配置；浏览器搜索页仍由下方的 `browser.search` 控制。</p>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="dashboard-card nested">
                   <div className="section-title">浏览器行为</div>
                   <div className="form-container">
                     <div className="form-row">
@@ -2664,6 +2860,99 @@ export function SettingsWindowApp({ initialTab }: Props) {
                         <option value="default">默认</option>
                         <option value="desktop">优先桌面站</option>
                       </select>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="dashboard-card nested">
+                  <div className="section-title">Web Fetch</div>
+                  <div className="form-container">
+                    <label className="toggle-inline">
+                      <input
+                        checked={draftSettings.web.fetch.enabled}
+                        onChange={event => updateWebFetchSettings('enabled', event.target.checked)}
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>启用 `web_fetch`</strong>
+                        <span className="muted">用于 HTTP 拉取和正文抽取，和浏览器自动化分开维护。</span>
+                      </div>
+                    </label>
+
+                    <label className="toggle-inline">
+                      <input
+                        checked={draftSettings.web.fetch.readability}
+                        onChange={event => updateWebFetchSettings('readability', event.target.checked)}
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>优先正文抽取</strong>
+                        <span className="muted">开启后，`web_fetch` 会优先走更适合文章正文的抽取策略。</span>
+                      </div>
+                    </label>
+
+                    <div className="form-row">
+                      <label>抓取超时（秒）</label>
+                      <input
+                        min={3}
+                        max={90}
+                        onChange={event =>
+                          updateWebFetchSettings(
+                            'timeoutSeconds',
+                            Number(event.target.value) || draftSettings.web.fetch.timeoutSeconds,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.fetch.timeoutSeconds}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>最大返回字符数</label>
+                      <input
+                        min={500}
+                        max={100000}
+                        onChange={event =>
+                          updateWebFetchSettings(
+                            'maxCharsCap',
+                            Number(event.target.value) || draftSettings.web.fetch.maxCharsCap,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.fetch.maxCharsCap}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>最大响应字节数</label>
+                      <input
+                        min={32000}
+                        max={10000000}
+                        onChange={event =>
+                          updateWebFetchSettings(
+                            'maxResponseBytes',
+                            Number(event.target.value) || draftSettings.web.fetch.maxResponseBytes,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.fetch.maxResponseBytes}
+                      />
+                    </div>
+
+                    <div className="form-row">
+                      <label>最大跳转次数</label>
+                      <input
+                        min={0}
+                        max={10}
+                        onChange={event =>
+                          updateWebFetchSettings(
+                            'maxRedirects',
+                            Number(event.target.value) || draftSettings.web.fetch.maxRedirects,
+                          )
+                        }
+                        type="number"
+                        value={draftSettings.web.fetch.maxRedirects}
+                      />
                     </div>
                   </div>
                 </section>

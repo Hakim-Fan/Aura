@@ -1,4 +1,8 @@
 import { createStructuredError } from './runtimeErrors.mjs'
+import {
+  runWebFetch as runStructuredWebFetch,
+  runWebSearch as runStructuredWebSearch,
+} from './web/index.mjs'
 
 const DEFAULT_SEARCH_PROVIDER = 'auto'
 const DEFAULT_FETCH_PROVIDER = 'http-readability'
@@ -1609,7 +1613,7 @@ async function runWebFetch(args, runtime = {}) {
   }
 }
 
-export function createWebTools() {
+export function createWebTools(context = {}) {
   return [
     {
       source: 'builtin',
@@ -1638,7 +1642,7 @@ export function createWebTools() {
           provider: {
             type: 'string',
             description:
-              'Optional search provider override. One of: auto, google-html, bing-html, duckduckgo-html, baidu-html. Defaults to auto.',
+              'Optional search provider override. One of: auto, tavily, brave, duckduckgo. Defaults to auto.',
           },
           freshness: {
             type: 'string',
@@ -1665,7 +1669,10 @@ export function createWebTools() {
           : 'Searching the web'
       },
       async run(args, runtime = {}) {
-        return runWebSearch(args, runtime)
+        return runStructuredWebSearch(args, {
+          ...runtime,
+          settings: runtime.settings || context.settings || {},
+        })
       },
     },
     {
@@ -1703,7 +1710,10 @@ export function createWebTools() {
         return url ? `Fetching page ${url}` : 'Fetching page'
       },
       async run(args, runtime = {}) {
-        return runWebFetch(args, runtime)
+        return runStructuredWebFetch(args, {
+          ...runtime,
+          settings: runtime.settings || context.settings || {},
+        })
       },
     },
   ]

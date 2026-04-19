@@ -21,3 +21,5 @@ src-tauri/binaries/
 .vscode/
 pnpm-lock.yaml
 claude-code-runnable/
+
+open-claw/

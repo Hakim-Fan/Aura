@@ -425,6 +425,7 @@ export type McpServerConfig = {
   args: string
   env: string
   cwd: string
+  networkProxy?: string
   enabled: boolean
   healthStatus?: 'unknown' | 'ok' | 'error'
   healthMessage?: string
@@ -481,6 +482,39 @@ export type BrowserRuntimeSettings = {
   auraProfilePath?: string
   search: BrowserSearchPreferences
   behavior: BrowserBehaviorPreferences
+}
+
+export type WebSearchProviderId = 'auto' | 'tavily' | 'brave' | 'duckduckgo'
+
+export type WebFetchProviderId = 'auto' | 'http-readability'
+
+export type WebSearchProviderSettings = {
+  tavilyApiKey: string
+  braveApiKey: string
+}
+
+export type WebSearchSettings = {
+  enabled: boolean
+  provider: WebSearchProviderId
+  timeoutSeconds: number
+  cacheTtlMinutes: number
+  maxResults: number
+  providers: WebSearchProviderSettings
+}
+
+export type WebFetchSettings = {
+  enabled: boolean
+  provider: WebFetchProviderId
+  timeoutSeconds: number
+  maxCharsCap: number
+  maxResponseBytes: number
+  maxRedirects: number
+  readability: boolean
+}
+
+export type WebToolsSettings = {
+  search: WebSearchSettings
+  fetch: WebFetchSettings
 }
 
 export type ChromeImportSource = {
@@ -540,6 +574,7 @@ export type AgentSettings = {
   providerProfiles: ProviderProfile[]
   agentArchitectureMode: AgentArchitectureMode
   cwd: string
+  networkProxy?: string
   maxSteps: number
   executionMode: ExecutionMode
   memoryMode: MemoryMode
@@ -556,6 +591,7 @@ export type AgentSettings = {
   enabledSkillIds: string[]
   enabledPluginIds: string[]
   browser: BrowserRuntimeSettings
+  web: WebToolsSettings
   chromeImportSources: ChromeImportSource[]
   importedChromeSites: ImportedChromeSite[]
   browserRuntimeStatus?: BrowserRuntimeStatusRecord

@@ -191,7 +191,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
         'When calling web_search, prefer plain natural-language keywords. If you want to bias toward certain sites, prefer the domains field. Legacy operators like site:, intitle:, or quoted phrases are accepted, but they are less portable across providers than structured fields.',
       )
       sections.push(
-        'web_search returns ranking metadata such as rankScore, sourceQualityScore, noveltyScore, freshnessScore, domainCategory, and rankingSignals. Prefer higher rankScore links, but still diversify domains when the question benefits from comparison.',
+        'web_search returns ranking metadata such as rankScore, sourceQualityScore, noveltyScore, freshnessScore, domainCategory, and rankingSignals. Some providers may also return rich snippets, answer fields, or result content. Prefer higher rankScore links, but still diversify domains when the question benefits from comparison.',
       )
       sections.push(
         'web_fetch returns structured evidence such as sourceAssessment, riskFlags, keyPoints, and evidenceBlocks. Prefer grounding your answer in those evidenceBlocks instead of paraphrasing the whole page blindly.',
@@ -200,7 +200,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
         'When multiple web_fetch calls are available, prefer crossSourceInsights to separate corroborated claims from mixed or conflicting signals before writing the conclusion.',
       )
       sections.push(
-        'Use a research loop that mirrors mature agents: one broad discovery search, then web_fetch on the best 1-3 links, then answer. Search again only if the fetched evidence is stale, contradictory, or still missing a key angle.',
+        'Use a research loop that mirrors mature agents: start with one broad discovery search, inspect whether web_search already returned enough grounded content, then web_fetch only the best 1-3 links when you still need fuller evidence. Search again only if the evidence is stale, contradictory, or still missing a key angle.',
       )
       if (routeState.researchMode === 'deep') {
         sections.push(

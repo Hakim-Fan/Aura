@@ -1606,6 +1606,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       Promise.resolve(
         tool.run(args, {
           signal: abortController?.signal,
+          settings: hooks.settings,
           throwIfAborted() {
             throwIfAborted(abortController?.signal, tool)
           },

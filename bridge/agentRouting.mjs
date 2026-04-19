@@ -407,7 +407,7 @@ const SEARCH_BUDGET_BY_TIER = {
   none: 0,
   'local-readonly': 0,
   'local-write': 0,
-  'web-lookup': 3,
+  'web-lookup': 5,
   'browser-interactive': 2,
 }
 
@@ -415,7 +415,7 @@ const DEEP_RESEARCH_SEARCH_BUDGET_BY_TIER = {
   none: 0,
   'local-readonly': 0,
   'local-write': 0,
-  'web-lookup': 6,
+  'web-lookup': 8,
   'browser-interactive': 4,
 }
 

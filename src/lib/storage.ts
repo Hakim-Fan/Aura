@@ -5,6 +5,10 @@ import type {
   BrowserRuntimeSettings,
   BrowserRuntimeStatusRecord,
   BrowserSearchPreferences,
+  WebFetchSettings,
+  WebSearchProviderSettings,
+  WebSearchSettings,
+  WebToolsSettings,
   CapabilityOverrideMode,
   CapabilityUsageSnapshot,
   ChatMessageVariant,
@@ -124,6 +128,43 @@ function defaultBrowserRuntimeSettings(): BrowserRuntimeSettings {
   }
 }
 
+function defaultWebSearchProviderSettings(): WebSearchProviderSettings {
+  return {
+    tavilyApiKey: '',
+    braveApiKey: '',
+  }
+}
+
+function defaultWebSearchSettings(): WebSearchSettings {
+  return {
+    enabled: true,
+    provider: 'auto',
+    timeoutSeconds: 12,
+    cacheTtlMinutes: 30,
+    maxResults: 5,
+    providers: defaultWebSearchProviderSettings(),
+  }
+}
+
+function defaultWebFetchSettings(): WebFetchSettings {
+  return {
+    enabled: true,
+    provider: 'auto',
+    timeoutSeconds: 15,
+    maxCharsCap: 20_000,
+    maxResponseBytes: 750_000,
+    maxRedirects: 3,
+    readability: true,
+  }
+}
+
+function defaultWebToolsSettings(): WebToolsSettings {
+  return {
+    search: defaultWebSearchSettings(),
+    fetch: defaultWebFetchSettings(),
+  }
+}
+
 export const defaultSettings: AgentSettings = {
   provider: 'openai',
   apiKey: '',
@@ -135,6 +176,7 @@ export const defaultSettings: AgentSettings = {
   providerProfiles: defaultProfiles(),
   agentArchitectureMode: 'route-first',
   cwd: '',
+  networkProxy: '',
   maxSteps: 8,
   executionMode: 'bounded',
   memoryMode: 'summary',
@@ -151,6 +193,7 @@ export const defaultSettings: AgentSettings = {
   enabledSkillIds: [],
   enabledPluginIds: [],
   browser: defaultBrowserRuntimeSettings(),
+  web: defaultWebToolsSettings(),
   chromeImportSources: [],
   importedChromeSites: [],
   mcpServers: [],
@@ -893,7 +936,90 @@ function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
         : '',
     analysisModel:
       typeof settings.analysisModel === 'string' ? settings.analysisModel : '',
+    web: normalizeWebToolsSettings(settings.web),
     mcpServers: normalizeMcpServers(settings.mcpServers),
+  }
+}
+
+function normalizeWebSearchProviderSettings(value: unknown): WebSearchProviderSettings {
+  const defaults = defaultWebSearchProviderSettings()
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<WebSearchProviderSettings>
+  return {
+    tavilyApiKey: typeof entry.tavilyApiKey === 'string' ? entry.tavilyApiKey : defaults.tavilyApiKey,
+    braveApiKey: typeof entry.braveApiKey === 'string' ? entry.braveApiKey : defaults.braveApiKey,
+  }
+}
+
+function clampIntegerSetting(value: unknown, fallback: number, min: number, max: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback
+  }
+  return Math.max(min, Math.min(max, Math.round(value)))
+}
+
+function normalizeWebSearchSettings(value: unknown): WebSearchSettings {
+  const defaults = defaultWebSearchSettings()
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<WebSearchSettings>
+  return {
+    enabled: entry.enabled !== false,
+    provider:
+      entry.provider === 'tavily' ||
+      entry.provider === 'brave' ||
+      entry.provider === 'duckduckgo' ||
+      entry.provider === 'auto'
+        ? entry.provider
+        : defaults.provider,
+    timeoutSeconds: clampIntegerSetting(entry.timeoutSeconds, defaults.timeoutSeconds, 3, 60),
+    cacheTtlMinutes: clampIntegerSetting(entry.cacheTtlMinutes, defaults.cacheTtlMinutes, 0, 24 * 60),
+    maxResults: clampIntegerSetting(entry.maxResults, defaults.maxResults, 1, 10),
+    providers: normalizeWebSearchProviderSettings(entry.providers),
+  }
+}
+
+function normalizeWebFetchSettings(value: unknown): WebFetchSettings {
+  const defaults = defaultWebFetchSettings()
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<WebFetchSettings>
+  return {
+    enabled: entry.enabled !== false,
+    provider:
+      entry.provider === 'http-readability' || entry.provider === 'auto'
+        ? entry.provider
+        : defaults.provider,
+    timeoutSeconds: clampIntegerSetting(entry.timeoutSeconds, defaults.timeoutSeconds, 3, 90),
+    maxCharsCap: clampIntegerSetting(entry.maxCharsCap, defaults.maxCharsCap, 500, 100_000),
+    maxResponseBytes: clampIntegerSetting(
+      entry.maxResponseBytes,
+      defaults.maxResponseBytes,
+      32_000,
+      10_000_000,
+    ),
+    maxRedirects: clampIntegerSetting(entry.maxRedirects, defaults.maxRedirects, 0, 10),
+    readability: entry.readability !== false,
+  }
+}
+
+function normalizeWebToolsSettings(value: unknown): WebToolsSettings {
+  const defaults = defaultWebToolsSettings()
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<WebToolsSettings>
+  return {
+    search: normalizeWebSearchSettings(entry.search),
+    fetch: normalizeWebFetchSettings(entry.fetch),
   }
 }
 
@@ -1147,6 +1273,7 @@ function parseSettings(raw: string | null): AgentSettings {
       ...parsed,
       providerProfiles,
       activeProviderProfileId,
+      networkProxy: typeof parsed.networkProxy === 'string' ? parsed.networkProxy : '',
       agentArchitectureMode: normalizeAgentArchitectureMode(parsed.agentArchitectureMode),
       maxSteps: normalizeMaxSteps(parsed.maxSteps),
       executionMode: normalizeExecutionMode(parsed.executionMode),
@@ -1157,6 +1284,7 @@ function parseSettings(raw: string | null): AgentSettings {
         parsed.providerFailureRecoveryMaxAttempts,
       ),
       browser: normalizeBrowserRuntimeSettings(parsed.browser),
+      web: normalizeWebToolsSettings(parsed.web),
       chromeImportSources: normalizeChromeImportSources(parsed.chromeImportSources),
       importedChromeSites: normalizeImportedChromeSites(parsed.importedChromeSites),
       browserRuntimeStatus: normalizeBrowserRuntimeStatusRecord(parsed.browserRuntimeStatus),
