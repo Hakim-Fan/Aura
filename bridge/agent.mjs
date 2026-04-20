@@ -140,6 +140,19 @@ function appendRouteNotesToPrompt(systemPrompt, routeNotes) {
   return [systemPrompt, ...routeNotes.slice(-2)].join('\n\n')
 }
 
+function appendCarryoverContextToPrompt(systemPrompt, carryoverContext) {
+  const normalized = typeof carryoverContext === 'string' ? carryoverContext.trim() : ''
+  if (!normalized) {
+    return systemPrompt
+  }
+
+  return [
+    systemPrompt,
+    'Carryover evidence from earlier turns is already available below. Reuse it before repeating the same web lookup unless fresh verification is clearly necessary.',
+    normalized,
+  ].join('\n\n')
+}
+
 function buildRuntimeBlocks(routeStopReason) {
   return {
     hasCapabilityBlock:
@@ -810,7 +823,14 @@ function createTaskTracker(hooks, rootTitle) {
 }
 
 export async function runRouteFirstAgent(request) {
-  const { settings, messages, runtime = {}, hooks = {}, capabilities } = request
+  const {
+    settings,
+    messages,
+    runtime = {},
+    hooks = {},
+    capabilities,
+    carryoverContext = '',
+  } = request
   hooks?.onPhaseChange?.('preparing')
   if (!settings?.apiKey?.trim()) {
     throw createStructuredError('模型调用失败，当前缺少 API Key。', {
@@ -938,14 +958,17 @@ export async function runRouteFirstAgent(request) {
         selectedCapabilities.capabilitySnapshot,
         promptRouteState,
       )
-      lastSystemPrompt = appendRouteNotesToPrompt(
-        buildRouteFirstSystemPrompt(
-          effectiveRunSettings,
-          skillPrompt,
-          exposureNote,
-          promptRouteState,
+      lastSystemPrompt = appendCarryoverContextToPrompt(
+        appendRouteNotesToPrompt(
+          buildRouteFirstSystemPrompt(
+            effectiveRunSettings,
+            skillPrompt,
+            exposureNote,
+            promptRouteState,
+          ),
+          routeNotes,
         ),
-        routeNotes,
+        carryoverContext,
       )
       const escalationTool = createRouteEscalationTool(
         promptRouteState,

@@ -549,6 +549,28 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setSaveState('idle')
   }
 
+  function updateWebFetchProviderSettings<
+    K extends keyof AgentSettings['web']['fetch']['providers'],
+  >(
+    key: K,
+    value: AgentSettings['web']['fetch']['providers'][K],
+  ) {
+    setDraftSettings(current => ({
+      ...current,
+      web: {
+        ...current.web,
+        fetch: {
+          ...current.web.fetch,
+          providers: {
+            ...current.web.fetch.providers,
+            [key]: value,
+          },
+        },
+      },
+    }))
+    setSaveState('idle')
+  }
+
   function updateWebSearchProviderSettings<
     K extends keyof AgentSettings['web']['search']['providers'],
   >(
@@ -3069,6 +3091,49 @@ export function SettingsWindowApp({ initialTab }: Props) {
                       </div>
                     </label>
 
+                    <label className="toggle-inline">
+                      <input
+                        checked={draftSettings.web.fetch.providers.jinaEnabled}
+                        onChange={event =>
+                          updateWebFetchProviderSettings('jinaEnabled', event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>启用 Jina Reader fallback</strong>
+                        <span className="muted">默认开启；仅在本地提取明显不足时，才把页面交给第三方云端抓取。</span>
+                      </div>
+                    </label>
+
+                    <label className="toggle-inline">
+                      <input
+                        checked={draftSettings.web.fetch.providers.jinaAllowAnonymous}
+                        disabled={!draftSettings.web.fetch.providers.jinaEnabled}
+                        onChange={event =>
+                          updateWebFetchProviderSettings('jinaAllowAnonymous', event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <div className="flex flex-col">
+                        <strong>允许匿名调用 Jina</strong>
+                        <span className="muted">默认开启；如果填写了 API Key，请求会自动优先带 Key 以提高限额和稳定性。</span>
+                      </div>
+                    </label>
+
+                    <div className="form-row">
+                      <label>Jina API Key</label>
+                      <input
+                        className="monospace"
+                        disabled={!draftSettings.web.fetch.providers.jinaEnabled}
+                        value={draftSettings.web.fetch.providers.jinaApiKey}
+                        onChange={event =>
+                          updateWebFetchProviderSettings('jinaApiKey', event.target.value)
+                        }
+                        placeholder="jina_..."
+                        type="password"
+                      />
+                    </div>
+
                     <div className="form-row">
                       <label>抓取超时（秒）</label>
                       <input
@@ -3131,6 +3196,10 @@ export function SettingsWindowApp({ initialTab }: Props) {
                         type="number"
                         value={draftSettings.web.fetch.maxRedirects}
                       />
+                    </div>
+
+                    <div className="provider-note">
+                      <p>Jina Reader 是第三方服务。默认作为 `web_fetch` 的 fallback 启用；若填写了 Jina API Key，运行时会自动优先使用你的 Key。</p>
                     </div>
                   </div>
                 </section>

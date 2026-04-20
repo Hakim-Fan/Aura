@@ -182,7 +182,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
     } else if (routeState.capabilityTier === 'web-lookup') {
       sections.push('Web lookup tools are mounted only for external facts and current information. Prefer local context first, then use the web only when necessary.')
       sections.push(
-        'For research, latest info, docs, news, or source-finding tasks, prefer web_research when one call can likely gather both candidate sources and grounded page content. Use web_search when you mainly need broader discovery, and use web_fetch when you already know the exact URL that needs deeper reading.',
+        'For research, latest info, docs, news, or source-finding tasks, your first external evidence step should normally be web_research. Use web_search only after an initial web_research pass when you truly need extra discovery breadth, and use web_fetch when you already know the exact URL that needs deeper reading.',
       )
       sections.push(
         'For source selection, prefer high-signal domains when relevant: official docs for technical references, reputable finance sites for market data, and established news outlets for current events.',

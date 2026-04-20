@@ -540,6 +540,34 @@ function detectDirectionalConflict(leftText, rightText) {
   })
 }
 
+function extractComparableNumbers(text) {
+  return Array.from(
+    String(text || '').matchAll(/\b\d+(?:\.\d+)?\b/g),
+    match => Number(match[0]),
+  ).filter(value => Number.isFinite(value))
+}
+
+function classifyConflictType(leftText, rightText) {
+  const leftNumbers = extractComparableNumbers(leftText)
+  const rightNumbers = extractComparableNumbers(rightText)
+  if (leftNumbers.length > 0 && rightNumbers.length > 0) {
+    const leftValue = leftNumbers[0]
+    const rightValue = rightNumbers[0]
+    const baseline = Math.max(1, Math.abs(leftValue), Math.abs(rightValue))
+    if (Math.abs(leftValue - rightValue) / baseline >= 0.05) {
+      return 'quantitative'
+    }
+  }
+  return detectDirectionalConflict(leftText, rightText) ? 'directional' : 'mixed'
+}
+
+function clampCrossSourceScore(value) {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.max(0, Math.min(1, value))
+}
+
 function normalizeFetchRuntimeRecord(output, fallbackUrl = '') {
   if (!output || typeof output !== 'object') {
     return null
@@ -646,6 +674,7 @@ function buildCrossSourceInsights(searchRuntime) {
     .filter(Boolean)
 
   const corroboratingClaims = []
+  const conflictDetails = []
   const conflictingSignals = []
   const seenCorroborations = new Set()
   const seenConflicts = new Set()
@@ -682,6 +711,7 @@ function buildCrossSourceInsights(searchRuntime) {
           const sources = [leftSource.site || leftSource.title, rightSource.site || rightSource.title]
             .filter(Boolean)
             .slice(0, 2)
+          const conflictType = classifyConflictType(leftText, rightText)
 
           if (
             (overlap.overlapCount >= 2 || overlap.jaccard >= 0.26) &&
@@ -706,11 +736,22 @@ function buildCrossSourceInsights(searchRuntime) {
             }
           } else if (
             (overlap.overlapCount >= 1 || overlap.jaccard >= 0.16) &&
-            detectDirectionalConflict(leftText, rightText)
+            conflictType !== 'mixed'
           ) {
             const key = `${normalizeEvidenceComparableText(leftText)}::${normalizeEvidenceComparableText(rightText)}`
             if (!seenConflicts.has(key)) {
               seenConflicts.add(key)
+              conflictDetails.push({
+                claim: leftText.length <= rightText.length ? leftText : rightText,
+                sources,
+                conflictType,
+                notes:
+                  conflictType === 'quantitative'
+                    ? '不同来源给出的数值存在明显偏差。'
+                    : '不同来源对同一主题的描述方向不一致。',
+                leftClaim: leftText,
+                rightClaim: rightText,
+              })
               conflictingSignals.push({
                 summary: `${sources[0] || '来源 A'} 与 ${sources[1] || '来源 B'} 对同一主题的描述方向不一致。`,
                 sources,
@@ -725,6 +766,21 @@ function buildCrossSourceInsights(searchRuntime) {
   }
 
   const uniqueWeakerSources = Array.from(new Set(weakerSources)).slice(0, 3)
+  const corroborationScore = clampCrossSourceScore(
+    0.28 +
+      Math.min(0.5, corroboratingClaims.length * 0.18) -
+      Math.min(0.45, conflictDetails.length * 0.22) -
+      (uniqueWeakerSources.length > 0 ? 0.08 : 0) +
+      Math.min(0.12, uniqueDomains.length * 0.03),
+  )
+  const evidenceLevel =
+    conflictDetails.length > 0
+      ? 'conflict'
+      : corroboratingClaims.length > 0 && corroborationScore >= 0.72
+        ? 'strong'
+        : corroboratingClaims.length > 0
+          ? 'mixed'
+          : 'limited'
 
   return {
     comparedSources: fetches.length,
@@ -732,12 +788,45 @@ function buildCrossSourceInsights(searchRuntime) {
     corroboratingClaims: corroboratingClaims.slice(0, 3),
     conflictingSignals: conflictingSignals.slice(0, 3),
     weakerSources: uniqueWeakerSources,
+    hasConflict: conflictDetails.length > 0,
+    conflictDetails: conflictDetails.slice(0, 3),
+    corroborationScore: Number(corroborationScore.toFixed(2)),
+    evidenceLevel,
     overallSignal:
-      conflictingSignals.length > 0
+      conflictDetails.length > 0
         ? 'mixed'
         : corroboratingClaims.length > 0
           ? 'corroborated'
           : 'limited',
+  }
+}
+
+function mergeCrossSourceInsights(primary, secondary) {
+  if (!primary && !secondary) {
+    return null
+  }
+  if (!primary) {
+    return secondary
+  }
+  if (!secondary) {
+    return primary
+  }
+
+  return {
+    ...secondary,
+    ...primary,
+    corroboratingClaims: Array.isArray(primary.corroboratingClaims)
+      ? primary.corroboratingClaims
+      : secondary.corroboratingClaims,
+    conflictingSignals: Array.isArray(primary.conflictingSignals)
+      ? primary.conflictingSignals
+      : secondary.conflictingSignals,
+    conflictDetails: Array.isArray(primary.conflictDetails)
+      ? primary.conflictDetails
+      : secondary.conflictDetails,
+    weakerSources: Array.isArray(primary.weakerSources)
+      ? primary.weakerSources
+      : secondary.weakerSources,
   }
 }
 
@@ -1520,6 +1609,7 @@ export function applyRouteToolBudgets(tools, routeState) {
   }
 
   const budgets = routeState?.budgets || {}
+  const searchRuntime = getSearchRuntimeState(budgets)
   const mountedTools =
     (budgets.searchesRemaining || 0) <= 0
       ? tools.filter(
@@ -1529,8 +1619,18 @@ export function applyRouteToolBudgets(tools, routeState) {
             tool?.name !== 'web_research',
         )
       : tools
+  const shouldPreferResearchFirst =
+    routeState?.capabilityTier === 'web-lookup' &&
+    mountedTools.some(tool => tool?.name === 'web_research') &&
+    Array.isArray(searchRuntime.attempts) &&
+    searchRuntime.attempts.length === 0 &&
+    Array.isArray(searchRuntime.fetches) &&
+    searchRuntime.fetches.length === 0
+  const routedMountedTools = shouldPreferResearchFirst
+    ? mountedTools.filter(tool => tool?.name !== 'web_search')
+    : mountedTools
 
-  return mountedTools.map(tool => {
+  return routedMountedTools.map(tool => {
     if (tool?.name === 'web_fetch') {
       return {
         ...tool,
@@ -1687,7 +1787,10 @@ export function applyRouteToolBudgets(tools, routeState) {
             searchRuntime.fetches = Array.from(fetchesByUrl.values()).slice(-6)
           }
 
-          const crossSourceInsights = buildCrossSourceInsights(searchRuntime)
+          const crossSourceInsights = mergeCrossSourceInsights(
+            normalizedOutput.crossSourceInsights,
+            buildCrossSourceInsights(searchRuntime),
+          )
           if (normalizedOutput && typeof normalizedOutput === 'object') {
             return {
               ...normalizedOutput,
@@ -1697,6 +1800,10 @@ export function applyRouteToolBudgets(tools, routeState) {
                   ? 'synthesize_research_results'
                   : undefined,
               crossSourceInsights,
+              evidenceLevel:
+                typeof normalizedOutput.evidenceLevel === 'string' && normalizedOutput.evidenceLevel
+                  ? normalizedOutput.evidenceLevel
+                  : crossSourceInsights?.evidenceLevel,
             }
           }
 

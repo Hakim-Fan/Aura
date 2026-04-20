@@ -190,6 +190,40 @@ export function looksLikeBrowserOnlyPage(html, finalUrl = '') {
   return /\/login\b|\/signin\b|\/auth\b/iu.test(finalUrl)
 }
 
+export function detectJsDependentPage(html, finalUrl = '') {
+  const normalizedHtml = String(html || '')
+  if (!normalizedHtml.trim()) {
+    return false
+  }
+
+  const text = collapseWhitespace(stripTags(normalizedHtml))
+  const thinText = text.length > 0 && text.length < 700
+  const rootOnly =
+    /<div[^>]+id=["'](?:__next|__nuxt|root|app)["'][^>]*>\s*<\/div>/iu.test(normalizedHtml) ||
+    /<main[^>]+id=["'](?:__next|__nuxt|root|app)["'][^>]*>\s*<\/main>/iu.test(normalizedHtml)
+  const hydrationSignals =
+    /__NEXT_DATA__|__NUXT__|window\.__INITIAL_STATE__|window\.__PRELOADED_STATE__|window\.__APOLLO_STATE__/u.test(
+      normalizedHtml,
+    )
+  const loadingSignals =
+    /class=["'][^"']*(?:skeleton|loading|spinner|placeholder|shimmer)[^"']*["']/iu.test(
+      normalizedHtml,
+    ) ||
+    /\b(?:loading|spinner|skeleton)\b/iu.test(text)
+  const scriptHeavy =
+    (normalizedHtml.match(/<script\b/giu) || []).length >= 8 &&
+    text.length < 1_200
+  const appShellUrl = /\/app(?:\/|$)|\/dashboard(?:\/|$)|\/portal(?:\/|$)/iu.test(finalUrl)
+
+  return (
+    hydrationSignals ||
+    loadingSignals ||
+    (rootOnly && thinText) ||
+    scriptHeavy ||
+    (appShellUrl && thinText)
+  )
+}
+
 export function extractBasicHtmlContent(html) {
   const candidate = pickHtmlContentCandidate(html)
   return htmlToMarkdownish(candidate)

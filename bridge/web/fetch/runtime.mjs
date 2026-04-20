@@ -1,8 +1,14 @@
 import { createStructuredError } from '../../runtimeErrors.mjs'
 import { guardedFetch, readResponseText } from '../net/guardedFetch.mjs'
+import { normalizeCacheKey, readCache, writeCache } from '../shared/cache.mjs'
+import {
+  readPersistentCacheEntry,
+  writePersistentCache,
+} from '../shared/persistentCache.mjs'
 import {
   clipText,
   collapseWhitespace,
+  detectJsDependentPage,
   extractAuthor,
   extractBasicHtmlContent,
   extractMetaContent,
@@ -11,12 +17,23 @@ import {
   looksLikeBrowserOnlyPage,
   stripTags,
 } from './extraction/basicHtml.mjs'
+import { buildCloudFetchCacheHint } from './providers/cloudAccess.mjs'
+import {
+  createJinaFetchProvider,
+  getJinaProviderAvailability,
+  rememberJinaFailure,
+  resolveJinaProviderAccess,
+} from './providers/jina.mjs'
 import { extractReadableContent } from './extraction/readability.mjs'
 
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000
 const DEFAULT_FETCH_MAX_CHARS = 20_000
 const DEFAULT_FETCH_MAX_RESPONSE_BYTES = 750_000
 const DEFAULT_FETCH_MAX_REDIRECTS = 3
+const FETCH_CACHE = new Map()
+const FETCH_CACHE_NAMESPACE = 'fetch'
+const FETCH_CACHE_MAX_ENTRIES = 384
+const JINA_FETCH_PROVIDER = createJinaFetchProvider()
 
 function unique(values) {
   return Array.from(new Set((values || []).filter(Boolean)))
@@ -272,14 +289,18 @@ function countWords(value) {
   return latinWords.length + cjkChars.length
 }
 
-function ensureSupportedFetchContentType(contentType) {
+function isSupportedFetchContentType(contentType) {
   const normalized = String(contentType || '').toLowerCase()
-  if (
+  return (
     normalized.includes('text/html') ||
     normalized.includes('application/xhtml+xml') ||
     normalized.includes('text/plain') ||
     normalized.includes('text/markdown')
-  ) {
+  )
+}
+
+function ensureSupportedFetchContentType(contentType) {
+  if (isSupportedFetchContentType(contentType)) {
     return
   }
   throw createStructuredError('网页抓取失败，当前内容类型不适合直接读取正文。', {
@@ -376,6 +397,89 @@ function buildFetchPayload({ url, finalUrl, provider, html, textContent, mode, m
   }
 }
 
+function buildJinaFetchPayload({ url, finalUrl, mode, maxChars, markdown, plain, title }) {
+  const site = extractHostname(finalUrl || url) || undefined
+  const effectiveTitle = title || site || url
+  const excerptSource = collapseWhitespace(plain || markdown)
+  const excerpt = clipText(excerptSource, 320) || undefined
+
+  if (mode === 'metadata') {
+    const sourceAssessment = buildSourceAssessment({
+      site,
+      url: finalUrl || url,
+      author: undefined,
+      publishedAt: undefined,
+      wordCount: 0,
+    })
+    return {
+      url,
+      finalUrl,
+      provider: JINA_FETCH_PROVIDER.id,
+      title: effectiveTitle,
+      site,
+      excerpt,
+      contentFormat: 'metadata',
+      publishedAt: undefined,
+      author: undefined,
+      sourceAssessment,
+      riskFlags: buildRiskFlags({
+        sourceAssessment,
+        publishedAt: undefined,
+        evidenceBlocks: [],
+        content: '',
+        excerpt,
+      }),
+      evidenceBlocks: [],
+      tookMs: 0,
+    }
+  }
+
+  const contentLimit = Math.max(400, Math.min(20_000, Number(maxChars) || DEFAULT_FETCH_MAX_CHARS))
+  const content =
+    mode === 'summary'
+      ? clipText(excerptSource, Math.min(contentLimit, 1_200))
+      : clipText(markdown || plain, contentLimit)
+  const wordCount = countWords(content)
+  const evidenceBlocks = buildEvidenceBlocks({
+    title: effectiveTitle,
+    excerpt,
+    content: plain || content,
+  })
+  const sourceAssessment = buildSourceAssessment({
+    site,
+    url: finalUrl || url,
+    author: undefined,
+    publishedAt: undefined,
+    wordCount,
+  })
+  const riskFlags = buildRiskFlags({
+    sourceAssessment,
+    publishedAt: undefined,
+    evidenceBlocks,
+    content: plain || content,
+    excerpt,
+  })
+
+  return {
+    url,
+    finalUrl,
+    provider: JINA_FETCH_PROVIDER.id,
+    title: effectiveTitle,
+    site,
+    excerpt,
+    content,
+    contentFormat: mode === 'summary' ? 'text' : 'markdown',
+    publishedAt: undefined,
+    author: undefined,
+    wordCount,
+    sourceAssessment,
+    riskFlags,
+    keyPoints: evidenceBlocks.map(entry => entry.claim).slice(0, 3),
+    evidenceBlocks,
+    tookMs: 0,
+  }
+}
+
 function resolveFetchSettings(settings) {
   const fetchSettings = settings?.web?.fetch || {}
   return {
@@ -389,10 +493,104 @@ function resolveFetchSettings(settings) {
   }
 }
 
+function resolveFetchCacheTtlMs(settings) {
+  const minutes = Number(settings?.web?.search?.cacheTtlMinutes)
+  return Math.max(0, Number.isFinite(minutes) ? Math.round(minutes * 60_000) : 30 * 60_000)
+}
+
+function readFetchCacheEntry(cacheKey) {
+  const inMemory = readCache(FETCH_CACHE, cacheKey)
+  if (inMemory) {
+    return {
+      value: inMemory,
+      layer: 'memory',
+    }
+  }
+
+  const persisted = readPersistentCacheEntry(FETCH_CACHE_NAMESPACE, cacheKey, {
+    maxEntries: FETCH_CACHE_MAX_ENTRIES,
+  })
+  if (!persisted) {
+    return null
+  }
+
+  writeCache(
+    FETCH_CACHE,
+    cacheKey,
+    persisted.value,
+    Math.max(1, persisted.expiresAt - Date.now()),
+  )
+  return {
+    value: persisted.value,
+    layer: 'persistent',
+  }
+}
+
+function writeFetchCacheEntry(cacheKey, value, ttlMs) {
+  writeCache(FETCH_CACHE, cacheKey, value, ttlMs)
+  writePersistentCache(FETCH_CACHE_NAMESPACE, cacheKey, value, ttlMs, {
+    maxEntries: FETCH_CACHE_MAX_ENTRIES,
+  })
+}
+
+async function tryJinaFallback({
+  normalizedUrl,
+  finalUrl,
+  mode,
+  maxChars,
+  title,
+  startedAt,
+  cacheKey,
+  cacheTtlMs,
+  runtime,
+  fetchSettings,
+}) {
+  const availability = getJinaProviderAvailability(runtime, runtime.settings || {})
+  if (!availability.usable && !availability.blocked) {
+    return null
+  }
+
+  try {
+    const jinaResult = await JINA_FETCH_PROVIDER.fetch(finalUrl, runtime, {
+      timeoutMs: Math.min(fetchSettings.timeoutMs, 8_000),
+    })
+    const result = {
+      ...buildJinaFetchPayload({
+        url: normalizedUrl,
+        finalUrl,
+        mode,
+        maxChars,
+        markdown: jinaResult.markdown,
+        plain: jinaResult.plain,
+        title: jinaResult.title || title,
+      }),
+      tookMs: Date.now() - startedAt,
+    }
+    writeFetchCacheEntry(cacheKey, result, cacheTtlMs)
+    return {
+      result: {
+        ...result,
+        cache: {
+          hit: false,
+          layer: 'miss',
+        },
+      },
+      error: null,
+    }
+  } catch (error) {
+    rememberJinaFailure(runtime, error, runtime.settings || {})
+    return {
+      result: null,
+      error,
+    }
+  }
+}
+
 export async function runWebFetch(args, runtime = {}) {
   runtime.throwIfAborted?.()
   const settings = runtime.settings || {}
   const fetchSettings = resolveFetchSettings(settings)
+  const jinaAccess = resolveJinaProviderAccess(settings)
 
   if (fetchSettings.enabled === false) {
     throw createStructuredError('网页抓取当前已在设置中关闭。', {
@@ -445,7 +643,18 @@ export async function runWebFetch(args, runtime = {}) {
       ? args.mode
       : 'article'
   const maxChars = Math.max(400, Math.min(fetchSettings.maxCharsCap, Number(args.maxChars) || fetchSettings.maxCharsCap))
+  const cacheTtlMs = resolveFetchCacheTtlMs(settings)
   const startedAt = Date.now()
+  const cacheKey = normalizeCacheKey(
+    JSON.stringify({
+      url: normalizedUrl,
+      provider,
+      mode,
+      maxChars,
+      readability: fetchSettings.readability,
+      jina: buildCloudFetchCacheHint(runtime, jinaAccess),
+    }),
+  )
 
   runtime.onUpdate?.({
     url: normalizedUrl,
@@ -455,6 +664,18 @@ export async function runWebFetch(args, runtime = {}) {
     excerpt: '',
     content: '',
   })
+
+  const cached = readFetchCacheEntry(cacheKey)
+  if (cached) {
+    return {
+      ...cached.value,
+      tookMs: Date.now() - startedAt,
+      cache: {
+        hit: true,
+        layer: cached.layer,
+      },
+    }
+  }
 
   const response = await guardedFetch(
     normalizedUrl,
@@ -492,14 +713,41 @@ export async function runWebFetch(args, runtime = {}) {
   }
 
   const contentType = response.headers.get('content-type') || ''
-  ensureSupportedFetchContentType(contentType)
   const finalUrl = response.url || normalizedUrl
+  const unsupportedContentType = !isSupportedFetchContentType(contentType)
+
+  if (
+    unsupportedContentType &&
+    JINA_FETCH_PROVIDER.shouldUse({ unsupportedContentType: true })
+  ) {
+    const jinaFallback = await tryJinaFallback({
+      normalizedUrl,
+      finalUrl,
+      mode,
+      maxChars,
+      title: '',
+      startedAt,
+      cacheKey,
+      cacheTtlMs,
+      runtime,
+      fetchSettings,
+    })
+    if (jinaFallback?.result) {
+      return jinaFallback.result
+    }
+    if (jinaFallback?.error) {
+      throw jinaFallback.error
+    }
+  }
+  ensureSupportedFetchContentType(contentType)
+
   const text = await readResponseText(response, fetchSettings.maxResponseBytes)
   const isHtml =
     contentType.toLowerCase().includes('text/html') ||
     contentType.toLowerCase().includes('application/xhtml+xml')
 
-  if (isHtml && looksLikeBrowserOnlyPage(text, finalUrl)) {
+  const browserOnly = isHtml && looksLikeBrowserOnlyPage(text, finalUrl)
+  if (browserOnly) {
     throw createStructuredError('网页抓取检测到该页面需要浏览器交互后才能继续。', {
       source: 'tool',
       category: 'unsupported',
@@ -518,6 +766,32 @@ export async function runWebFetch(args, runtime = {}) {
   const textContent = isHtml
     ? readabilityResult?.content || extractBasicHtmlContent(text)
     : collapseWhitespace(stripTags(text))
+  const jsDependent = isHtml && detectJsDependentPage(text, finalUrl)
+  const localContentThin = collapseWhitespace(textContent).length < 320
+
+  if (
+    JINA_FETCH_PROVIDER.shouldUse({
+      readabilityFailed: !readabilityResult?.content,
+      jsDependent,
+      localContentThin,
+    })
+  ) {
+    const jinaFallback = await tryJinaFallback({
+      normalizedUrl,
+      finalUrl,
+      mode,
+      maxChars,
+      title: readabilityResult?.title || extractTitle(html),
+      startedAt,
+      cacheKey,
+      cacheTtlMs,
+      runtime,
+      fetchSettings,
+    })
+    if (jinaFallback?.result) {
+      return jinaFallback.result
+    }
+  }
 
   const payload = buildFetchPayload({
     url: normalizedUrl,
@@ -530,8 +804,16 @@ export async function runWebFetch(args, runtime = {}) {
     readabilityResult,
   })
 
-  return {
+  const result = {
     ...payload,
     tookMs: Date.now() - startedAt,
+  }
+  writeFetchCacheEntry(cacheKey, result, cacheTtlMs)
+  return {
+    ...result,
+    cache: {
+      hit: false,
+      layer: 'miss',
+    },
   }
 }

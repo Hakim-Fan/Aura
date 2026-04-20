@@ -17,6 +17,7 @@ import {
   ArrowDown,
   Bot,
   Brain,
+  Telescope,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -2937,7 +2938,7 @@ export function ChatView({
                           : '启用深度研究'
                       }
                     >
-                      <Brain size={15} />
+                      <Telescope size={15} />
                       <span className="text-12px font-600">深度研究</span>
                     </button>
                     <div className="relative" ref={capabilityMenuRef}>

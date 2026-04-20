@@ -5,6 +5,7 @@ import type {
   BrowserRuntimeSettings,
   BrowserRuntimeStatusRecord,
   BrowserSearchPreferences,
+  WebFetchProviderSettings,
   WebFetchSettings,
   WebResearchSettings,
   WebSearchProviderSettings,
@@ -156,6 +157,15 @@ function defaultWebFetchSettings(): WebFetchSettings {
     maxResponseBytes: 750_000,
     maxRedirects: 3,
     readability: true,
+    providers: defaultWebFetchProviderSettings(),
+  }
+}
+
+function defaultWebFetchProviderSettings(): WebFetchProviderSettings {
+  return {
+    jinaEnabled: true,
+    jinaApiKey: '',
+    jinaAllowAnonymous: true,
   }
 }
 
@@ -1024,6 +1034,21 @@ function normalizeWebFetchSettings(value: unknown): WebFetchSettings {
     ),
     maxRedirects: clampIntegerSetting(entry.maxRedirects, defaults.maxRedirects, 0, 10),
     readability: entry.readability !== false,
+    providers: normalizeWebFetchProviderSettings((entry as Partial<WebFetchSettings>).providers),
+  }
+}
+
+function normalizeWebFetchProviderSettings(value: unknown): WebFetchProviderSettings {
+  const defaults = defaultWebFetchProviderSettings()
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<WebFetchProviderSettings>
+  return {
+    jinaEnabled: entry.jinaEnabled === true,
+    jinaApiKey: typeof entry.jinaApiKey === 'string' ? entry.jinaApiKey : defaults.jinaApiKey,
+    jinaAllowAnonymous: entry.jinaAllowAnonymous === true,
   }
 }
 

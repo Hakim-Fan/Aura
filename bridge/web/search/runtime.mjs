@@ -1,8 +1,17 @@
 import { createStructuredError } from '../../runtimeErrors.mjs'
+import { runWebFetch } from '../fetch/runtime.mjs'
 import { normalizeCacheKey, readCache, writeCache } from '../shared/cache.mjs'
+import {
+  readPersistentCacheEntry,
+  writePersistentCache,
+} from '../shared/persistentCache.mjs'
 import { resolveWebSearchProviderOrder } from './providerRegistry.mjs'
 
 const SEARCH_CACHE = new Map()
+const SEARCH_CACHE_NAMESPACE = 'search'
+const SEARCH_CACHE_MAX_ENTRIES = 256
+const SEARCH_PREFETCH_LIMIT = 3
+const SEARCH_PREFETCH_IN_FLIGHT = new Map()
 const DEFAULT_SEARCH_LIMIT = 5
 const DEFAULT_SEARCH_TIMEOUT_MS = 12_000
 
@@ -294,9 +303,24 @@ function scoreSearchNovelty(result, index, allResults) {
   }
 }
 
+function getDynamicRankingWeights(query, context = {}) {
+  const normalizedQuery = collapseWhitespace(String(query || '').toLowerCase())
+  const freshnessRequested =
+    Boolean(context?.requireFresh) ||
+    Boolean(context?.freshness) ||
+    /\b(?:latest|current|today|news|breaking|price|quote|earnings|stock)\b|最新|今天|当前|新闻|股价|行情|财报/u.test(
+      normalizedQuery,
+    )
+
+  return freshnessRequested
+    ? { quality: 0.3, coverage: 0.2, novelty: 0.15, freshness: 0.35 }
+    : { quality: 0.42, coverage: 0.28, novelty: 0.2, freshness: 0.1 }
+}
+
 function rankSearchResults(results, context = {}) {
   const queryTerms = tokenizeSearchTerms(context.query)
   const preferredDomains = Array.isArray(context.domains) ? context.domains : []
+  const weights = getDynamicRankingWeights(context.query, context)
 
   return (Array.isArray(results) ? results : [])
     .map((result, index, allResults) => {
@@ -309,10 +333,10 @@ function rankSearchResults(results, context = {}) {
         preferredDomains.length > 0 && matchesDomain(hostname, preferredDomains)
       const sourceQualityScore = clampScore(domainMeta.quality + (preferredDomainMatch ? 0.05 : 0))
       const rankScore = clampScore(
-        sourceQualityScore * 0.42 +
-          coverage.score * 0.28 +
-          novelty.score * 0.2 +
-          freshness.score * 0.1,
+        sourceQualityScore * weights.quality +
+          coverage.score * weights.coverage +
+          novelty.score * weights.novelty +
+          freshness.score * weights.freshness,
       )
       const rankingSignals = unique([
         ...domainMeta.signals,
@@ -354,6 +378,84 @@ function resolveSearchTimeoutMs(settings, args) {
 function resolveCacheTtlMs(settings) {
   const minutes = Number(settings?.web?.search?.cacheTtlMinutes)
   return Math.max(0, Number.isFinite(minutes) ? Math.round(minutes * 60_000) : 30 * 60_000)
+}
+
+function resolveSearchPrefetchMaxChars(settings) {
+  const configured = Number(settings?.web?.research?.defaultMaxChars)
+  const fetchCap = Number(settings?.web?.fetch?.maxCharsCap)
+  const fallback = Number.isFinite(configured) && configured > 0 ? configured : 3_200
+  const cap = Number.isFinite(fetchCap) && fetchCap > 0 ? fetchCap : 20_000
+  return Math.max(800, Math.min(cap, fallback))
+}
+
+function prefetchTopSearchResults(results, runtime = {}) {
+  const targets = (Array.isArray(results) ? results : [])
+    .filter(result => typeof result?.url === 'string' && result.url.trim())
+    .slice(0, SEARCH_PREFETCH_LIMIT)
+  if (targets.length === 0) {
+    return
+  }
+
+  const maxChars = resolveSearchPrefetchMaxChars(runtime.settings || {})
+  for (const entry of targets) {
+    const url = entry.url.trim()
+    if (!url || SEARCH_PREFETCH_IN_FLIGHT.has(url)) {
+      continue
+    }
+
+    const prefetchPromise = runWebFetch(
+      {
+        url,
+        mode: 'article',
+        maxChars,
+      },
+      {
+        ...runtime,
+        onUpdate: undefined,
+      },
+    )
+      .catch(() => null)
+      .finally(() => {
+        SEARCH_PREFETCH_IN_FLIGHT.delete(url)
+      })
+
+    SEARCH_PREFETCH_IN_FLIGHT.set(url, prefetchPromise)
+  }
+}
+
+function readSearchCacheEntry(cacheKey) {
+  const inMemory = readCache(SEARCH_CACHE, cacheKey)
+  if (inMemory) {
+    return {
+      value: inMemory,
+      layer: 'memory',
+    }
+  }
+
+  const persisted = readPersistentCacheEntry(SEARCH_CACHE_NAMESPACE, cacheKey, {
+    maxEntries: SEARCH_CACHE_MAX_ENTRIES,
+  })
+  if (!persisted) {
+    return null
+  }
+
+  writeCache(
+    SEARCH_CACHE,
+    cacheKey,
+    persisted.value,
+    Math.max(1, persisted.expiresAt - Date.now()),
+  )
+  return {
+    value: persisted.value,
+    layer: 'persistent',
+  }
+}
+
+function writeSearchCacheEntry(cacheKey, value, ttlMs) {
+  writeCache(SEARCH_CACHE, cacheKey, value, ttlMs)
+  writePersistentCache(SEARCH_CACHE_NAMESPACE, cacheKey, value, ttlMs, {
+    maxEntries: SEARCH_CACHE_MAX_ENTRIES,
+  })
 }
 
 export async function runWebSearch(args, runtime = {}) {
@@ -438,6 +540,7 @@ export async function runWebSearch(args, runtime = {}) {
   let parsedResults = []
   let activeProvider = providerOrder[0].id
   let activeQuery = providerQuery
+  let activeCacheLayer = 'none'
   let answer = ''
   let anyGeneralResults = false
   let generalResultDomains = []
@@ -454,10 +557,12 @@ export async function runWebSearch(args, runtime = {}) {
           limit,
         }),
       )
-      const cached = readCache(SEARCH_CACHE, cacheKey)
+      const cached = readSearchCacheEntry(cacheKey)
       let attempt
+      let cacheLayer = 'none'
       if (cached) {
-        attempt = cached
+        attempt = cached.value
+        cacheLayer = cached.layer
       } else {
         try {
           attempt = await provider.search(
@@ -471,7 +576,7 @@ export async function runWebSearch(args, runtime = {}) {
             },
             runtime,
           )
-          writeCache(SEARCH_CACHE, cacheKey, attempt, cacheTtlMs)
+          writeSearchCacheEntry(cacheKey, attempt, cacheTtlMs)
         } catch (error) {
           providerAttempts.push({
             provider: provider.id,
@@ -510,12 +615,14 @@ export async function runWebSearch(args, runtime = {}) {
         parsedResults = filteredResults
         activeProvider = provider.id
         activeQuery = candidateQuery
+        activeCacheLayer = cacheLayer
         break outer
       }
 
       if (rawResults.length > 0 && parsedResults.length === 0) {
         activeProvider = provider.id
         activeQuery = candidateQuery
+        activeCacheLayer = cacheLayer
       }
     }
   }
@@ -550,8 +657,14 @@ export async function runWebSearch(args, runtime = {}) {
           : '可以换一个更自然、更宽松的查询再试一次。',
       generalResultsAvailable: domains.length > 0 && anyGeneralResults,
       generalResultDomains: domains.length > 0 ? generalResultDomains : [],
+      cache: {
+        hit: activeCacheLayer !== 'none',
+        layer: activeCacheLayer,
+      },
     }
   }
+
+  prefetchTopSearchResults(results, runtime)
 
   return {
     query,
@@ -564,5 +677,9 @@ export async function runWebSearch(args, runtime = {}) {
     tookMs: Date.now() - startedAt,
     total: results.length,
     results,
+    cache: {
+      hit: activeCacheLayer !== 'none',
+      layer: activeCacheLayer,
+    },
   }
 }

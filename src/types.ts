@@ -494,6 +494,12 @@ export type WebSearchProviderSettings = {
   braveApiKey: string
 }
 
+export type WebFetchProviderSettings = {
+  jinaEnabled: boolean
+  jinaApiKey: string
+  jinaAllowAnonymous: boolean
+}
+
 export type WebSearchSettings = {
   enabled: boolean
   provider: WebSearchProviderId
@@ -511,6 +517,7 @@ export type WebFetchSettings = {
   maxResponseBytes: number
   maxRedirects: number
   readability: boolean
+  providers: WebFetchProviderSettings
 }
 
 export type WebResearchSettings = {
