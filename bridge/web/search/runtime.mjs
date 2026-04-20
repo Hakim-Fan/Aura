@@ -366,6 +366,110 @@ function rankSearchResults(results, context = {}) {
     })
 }
 
+function isResearchHeavySearchQuery(query) {
+  const normalized = collapseWhitespace(String(query || '').toLowerCase())
+  if (!normalized) {
+    return false
+  }
+
+  return /compare|comparison|versus|vs\.?|analy(?:sis|ze)|research|review|roundup|trend|outlook|impact|why|how|pros and cons|deep dive|总结|对比|分析|调研|综述|梳理|趋势|影响|原因|评测|优缺点|区别/u.test(
+    normalized,
+  )
+}
+
+function hasRichSearchProviderContent(result, minimumChars = 600) {
+  return collapseWhitespace(result?.content).length >= Math.max(120, minimumChars)
+}
+
+function hasUsefulSearchSnippet(result, minimumChars = 140) {
+  return collapseWhitespace(result?.snippet).length >= Math.max(60, minimumChars)
+}
+
+function buildSearchAssessment({ query, answer, results }) {
+  const normalizedResults = Array.isArray(results) ? results : []
+  const directAnswerAvailable = typeof answer === 'string' && answer.trim().length > 0
+  const researchHeavyQuery = isResearchHeavySearchQuery(query)
+  const domainDiversity = unique(
+    normalizedResults.map(result => extractHostname(result?.url || '')).filter(Boolean),
+  ).length
+  const topRankScore =
+    typeof normalizedResults[0]?.rankScore === 'number' ? normalizedResults[0].rankScore : 0
+  const topSourceQualityScore =
+    typeof normalizedResults[0]?.sourceQualityScore === 'number'
+      ? normalizedResults[0].sourceQualityScore
+      : 0
+  const strongResults = normalizedResults.filter(
+    result =>
+      (typeof result?.rankScore === 'number' ? result.rankScore : 0) >= 70 &&
+      (typeof result?.sourceQualityScore === 'number' ? result.sourceQualityScore : 0) >= 60,
+  ).length
+  const richContentResults = normalizedResults.filter(result =>
+    hasRichSearchProviderContent(result, 600),
+  ).length
+  const usefulSnippetResults = normalizedResults.filter(result =>
+    hasUsefulSearchSnippet(result, 140),
+  ).length
+  const reasons = []
+
+  if (directAnswerAvailable) {
+    reasons.push('provider-answer')
+  }
+  if (richContentResults > 0) {
+    reasons.push('provider-content')
+  }
+  if (domainDiversity >= 2) {
+    reasons.push('multi-domain-coverage')
+  } else if (normalizedResults.length > 0) {
+    reasons.push('low-domain-diversity')
+  }
+  if (usefulSnippetResults < Math.min(2, normalizedResults.length)) {
+    reasons.push('thin-snippets')
+  }
+  if (researchHeavyQuery) {
+    reasons.push('research-heavy-query')
+  }
+
+  let readiness = 'needs-research'
+  let recommendedNextAction = 'upgrade_to_web_research'
+  let summary = '搜索阶段已经拿到候选来源，但结果本身还不足以稳定回答，建议升级到 web_research。'
+
+  if (
+    directAnswerAvailable &&
+    (richContentResults > 0 || strongResults >= 1 || (domainDiversity >= 2 && usefulSnippetResults >= 2))
+  ) {
+    readiness = 'answer-ready'
+    recommendedNextAction = 'answer_from_search'
+    summary = '搜索结果已经足够支撑一个简洁回答，可以先直接基于搜索结果作答。'
+  } else if (
+    richContentResults > 0 ||
+    (!researchHeavyQuery &&
+      domainDiversity >= 2 &&
+      strongResults >= 2 &&
+      usefulSnippetResults >= 2 &&
+      topRankScore >= 74 &&
+      topSourceQualityScore >= 60)
+  ) {
+    readiness = 'read-ready'
+    recommendedNextAction = 'fetch_top_ranked_results'
+    summary = '搜索已经找到高质量候选来源，但还需要打开 1-2 个页面核实细节。'
+  }
+
+  return {
+    readiness,
+    recommendedNextAction,
+    directAnswerAvailable,
+    researchHeavyQuery,
+    domainDiversity,
+    strongResults,
+    richContentResults,
+    usefulSnippetResults,
+    topRankScore,
+    topSourceQualityScore,
+    summary,
+    reasons: reasons.slice(0, 6),
+  }
+}
+
 function resolveSearchTimeoutMs(settings, args) {
   const configuredSeconds = Number(settings?.web?.search?.timeoutSeconds)
   const configuredMs =
@@ -635,6 +739,20 @@ export async function runWebSearch(args, runtime = {}) {
   }).slice(0, limit)
 
   if (results.length === 0) {
+    const searchAssessment = {
+      readiness: 'needs-research',
+      recommendedNextAction: 'upgrade_to_web_research',
+      directAnswerAvailable: false,
+      researchHeavyQuery: isResearchHeavySearchQuery(query),
+      domainDiversity: 0,
+      strongResults: 0,
+      richContentResults: 0,
+      usefulSnippetResults: 0,
+      topRankScore: 0,
+      topSourceQualityScore: 0,
+      summary: '快速搜索没有拿到可用结果，若仍需继续，建议改用 web_research 扩大覆盖并自动抓取正文。',
+      reasons: ['no-results'],
+    }
     return {
       query,
       originalQuery: rawQuery !== query ? rawQuery : undefined,
@@ -655,6 +773,8 @@ export async function runWebSearch(args, runtime = {}) {
         domains.length > 0
           ? '可以放宽站点范围，或保留主题词后改用更自然的查询再试一次。'
           : '可以换一个更自然、更宽松的查询再试一次。',
+      searchAssessment,
+      recommendedNextAction: searchAssessment.recommendedNextAction,
       generalResultsAvailable: domains.length > 0 && anyGeneralResults,
       generalResultDomains: domains.length > 0 ? generalResultDomains : [],
       cache: {
@@ -665,6 +785,11 @@ export async function runWebSearch(args, runtime = {}) {
   }
 
   prefetchTopSearchResults(results, runtime)
+  const searchAssessment = buildSearchAssessment({
+    query,
+    answer,
+    results,
+  })
 
   return {
     query,
@@ -677,6 +802,8 @@ export async function runWebSearch(args, runtime = {}) {
     tookMs: Date.now() - startedAt,
     total: results.length,
     results,
+    searchAssessment,
+    recommendedNextAction: searchAssessment.recommendedNextAction,
     cache: {
       hit: activeCacheLayer !== 'none',
       layer: activeCacheLayer,

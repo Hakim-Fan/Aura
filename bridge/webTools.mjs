@@ -22,7 +22,7 @@ export function createWebTools(context = {}) {
     tools.push({
       source: 'builtin',
       name: 'web_research',
-      description: 'Comprehensive web research that searches for information and automatically fetches/extracts content from top results in a single step.',
+      description: 'Deeper multi-source web research that searches and automatically fetches/extracts top results in one step when quick search evidence is not enough.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -83,7 +83,7 @@ export function createWebTools(context = {}) {
     tools.push({
       source: 'builtin',
       name: 'web_search',
-      description: 'Search the web for recent information, docs, and articles without opening a browser.',
+      description: 'Fast first-pass web lookup for recent information, docs, and articles. It is best for lightweight discovery and can trigger deeper research when search evidence is too thin.',
       inputSchema: {
         type: 'object',
         properties: {

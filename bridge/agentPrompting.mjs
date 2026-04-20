@@ -182,7 +182,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
     } else if (routeState.capabilityTier === 'web-lookup') {
       sections.push('Web lookup tools are mounted only for external facts and current information. Prefer local context first, then use the web only when necessary.')
       sections.push(
-        'For research, latest info, docs, news, or source-finding tasks, your first external evidence step should normally be web_research. Use web_search only after an initial web_research pass when you truly need extra discovery breadth, and use web_fetch when you already know the exact URL that needs deeper reading.',
+        'Use staged retrieval like mature commercial assistants: start with web_search for straightforward fact lookup or quick source discovery, then escalate to web_research only when the search result says the evidence is still thin, conflicting, or clearly needs deeper reading. Use web_fetch when you already know the exact URL that needs closer inspection.',
       )
       sections.push(
         'For source selection, prefer high-signal domains when relevant: official docs for technical references, reputable finance sites for market data, and established news outlets for current events.',
@@ -194,7 +194,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
         'web_research returns ranked results together with fetched or provider-supplied evidence when available. Prefer it when you want packaged evidence with citationIndex, status, content, and per-source risk signals in a single step.',
       )
       sections.push(
-        'web_search returns ranking metadata such as rankScore, sourceQualityScore, noveltyScore, freshnessScore, domainCategory, and rankingSignals. Some providers may also return rich snippets, answer fields, or result content. Prefer higher rankScore links, but still diversify domains when the question benefits from comparison.',
+        'web_search returns ranking metadata such as rankScore, sourceQualityScore, noveltyScore, freshnessScore, domainCategory, rankingSignals, and a searchAssessment block. If searchAssessment recommends answer_from_search, you can usually answer quickly. If it recommends fetch_top_ranked_results, deepen selectively. If it recommends upgrade_to_web_research, stop stretching snippets and escalate.',
       )
       sections.push(
         'web_fetch returns structured evidence such as sourceAssessment, riskFlags, keyPoints, and evidenceBlocks. Prefer grounding your answer in those evidenceBlocks instead of paraphrasing the whole page blindly.',

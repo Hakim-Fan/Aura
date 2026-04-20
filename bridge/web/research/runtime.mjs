@@ -765,13 +765,19 @@ export async function runWebResearch(args, runtime = {}) {
   }
 
   const startedAt = Date.now()
-  const searchResult = await runWebSearch(
-    {
-      ...args,
-      limit: resolved.searchLimit,
-    },
-    runtime,
-  )
+  const seededSearchResult =
+    args?.__seedSearchResult && typeof args.__seedSearchResult === 'object'
+      ? args.__seedSearchResult
+      : null
+  const searchResult =
+    seededSearchResult ||
+    (await runWebSearch(
+      {
+        ...args,
+        limit: resolved.searchLimit,
+      },
+      runtime,
+    ))
 
   if (!Array.isArray(searchResult.results) || searchResult.results.length === 0) {
     return {

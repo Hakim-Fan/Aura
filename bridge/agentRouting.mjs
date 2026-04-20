@@ -943,6 +943,184 @@ function buildRecommendedFetchResults(searchRuntime, limit = 3, queryKey = '') {
   return recommendations
 }
 
+function finalizeSearchRouteOutput(normalizedOutput, attemptSignature, searchRuntime) {
+  const recommendedResults = Array.isArray(normalizedOutput?.results)
+    ? normalizedOutput.results
+        .map(result => {
+          const normalizedResult = normalizeRecommendedSearchResult(result)
+          if (!normalizedResult) {
+            return null
+          }
+          return {
+            ...normalizedResult,
+            queryKey: attemptSignature.comparableKey,
+          }
+        })
+        .filter(Boolean)
+        .slice(0, 5)
+    : []
+
+  const nextAttempt = {
+    comparableKey: attemptSignature.comparableKey,
+    query: attemptSignature.query,
+    domains: attemptSignature.domains,
+    noResults:
+      normalizedOutput?.noResults === true ||
+      (typeof normalizedOutput?.total === 'number' && normalizedOutput.total <= 0),
+    total:
+      typeof normalizedOutput?.total === 'number' ? normalizedOutput.total : 0,
+    resultDomains: Array.isArray(normalizedOutput?.results)
+      ? Array.from(
+          new Set(
+            normalizedOutput.results
+              .map(result => extractSearchRuntimeHostname(result?.url || ''))
+              .filter(Boolean),
+          ),
+        )
+      : [],
+  }
+  searchRuntime.attempts = [...(searchRuntime.attempts || []), nextAttempt].slice(-6)
+  searchRuntime.lastResults = recommendedResults
+
+  if (!normalizedOutput || typeof normalizedOutput !== 'object') {
+    return normalizedOutput
+  }
+
+  return {
+    ...normalizedOutput,
+    recommendedResults,
+    recommendedNextAction:
+      typeof normalizedOutput.recommendedNextAction === 'string' && normalizedOutput.recommendedNextAction
+        ? normalizedOutput.recommendedNextAction
+        : recommendedResults.length > 0
+          ? 'fetch_top_ranked_results'
+          : undefined,
+  }
+}
+
+function finalizeResearchRouteOutput(normalizedOutput, attemptSignature, searchRuntime) {
+  const recommendedResults = Array.isArray(normalizedOutput?.results)
+    ? normalizedOutput.results
+        .map(result => {
+          const normalizedResult = normalizeRecommendedSearchResult(result)
+          if (!normalizedResult) {
+            return null
+          }
+          return {
+            ...normalizedResult,
+            queryKey: attemptSignature.comparableKey,
+          }
+        })
+        .filter(Boolean)
+        .slice(0, 5)
+    : []
+
+  const nextAttempt = {
+    comparableKey: attemptSignature.comparableKey,
+    query: attemptSignature.query,
+    domains: attemptSignature.domains,
+    noResults:
+      normalizedOutput?.noResults === true ||
+      (typeof normalizedOutput?.total === 'number' && normalizedOutput.total <= 0),
+    total:
+      typeof normalizedOutput?.total === 'number' ? normalizedOutput.total : 0,
+    resultDomains: Array.isArray(normalizedOutput?.results)
+      ? Array.from(
+          new Set(
+            normalizedOutput.results
+              .map(result => extractSearchRuntimeHostname(result?.url || ''))
+              .filter(Boolean),
+          ),
+        )
+      : [],
+  }
+  searchRuntime.attempts = [...(searchRuntime.attempts || []), nextAttempt].slice(-6)
+  searchRuntime.lastResults = recommendedResults
+
+  const researchFetches = Array.isArray(normalizedOutput?.results)
+    ? normalizedOutput.results
+        .map(result => {
+          const status =
+            typeof result?.status === 'string' ? result.status.trim().toLowerCase() : ''
+          if (status === 'error' || status === 'not_fetched') {
+            return null
+          }
+          if (
+            typeof result?.fullContent !== 'string' &&
+            typeof result?.content !== 'string' &&
+            !Array.isArray(result?.evidenceBlocks)
+          ) {
+            return null
+          }
+          return normalizeFetchRuntimeRecord(
+            {
+              ...result,
+              url:
+                typeof result?.finalUrl === 'string' && result.finalUrl.trim()
+                  ? result.finalUrl
+                  : result?.url,
+              content:
+                typeof result?.fullContent === 'string'
+                  ? result.fullContent
+                  : result?.content,
+            },
+            result?.url || '',
+          )
+        })
+        .filter(Boolean)
+    : []
+
+  if (researchFetches.length > 0) {
+    const fetchesByUrl = new Map(
+      (Array.isArray(searchRuntime.fetches) ? searchRuntime.fetches : [])
+        .filter(entry => entry?.url)
+        .map(entry => [entry.url, entry]),
+    )
+    for (const fetchRecord of researchFetches) {
+      fetchesByUrl.set(fetchRecord.url, fetchRecord)
+    }
+    searchRuntime.fetches = Array.from(fetchesByUrl.values()).slice(-6)
+  }
+
+  const crossSourceInsights = mergeCrossSourceInsights(
+    normalizedOutput?.crossSourceInsights,
+    buildCrossSourceInsights(searchRuntime),
+  )
+
+  if (!normalizedOutput || typeof normalizedOutput !== 'object') {
+    return normalizedOutput
+  }
+
+  return {
+    ...normalizedOutput,
+    recommendedResults,
+    recommendedNextAction:
+      recommendedResults.length > 0 ? 'synthesize_research_results' : undefined,
+    crossSourceInsights,
+    evidenceLevel:
+      typeof normalizedOutput.evidenceLevel === 'string' && normalizedOutput.evidenceLevel
+        ? normalizedOutput.evidenceLevel
+        : crossSourceInsights?.evidenceLevel,
+  }
+}
+
+function shouldAutoUpgradeSearchToResearch(normalizedOutput, routeState, searchRuntime) {
+  if (!normalizedOutput || typeof normalizedOutput !== 'object') {
+    return false
+  }
+  if (normalizedOutput.searchStopped === true || normalizedOutput.noResults === true) {
+    return false
+  }
+  if (routeState?.capabilityTier !== 'web-lookup') {
+    return false
+  }
+  if (Array.isArray(searchRuntime?.fetches) && searchRuntime.fetches.length > 0) {
+    return false
+  }
+
+  return normalizedOutput?.searchAssessment?.recommendedNextAction === 'upgrade_to_web_research'
+}
+
 function hasStrongReadCandidates(searchRuntime, queryKey = '') {
   const recommendations = buildRecommendedFetchResults(searchRuntime, 3, queryKey)
   if (recommendations.length === 0) {
@@ -1621,6 +1799,7 @@ export function applyRouteToolBudgets(tools, routeState) {
       : tools
   const shouldPreferResearchFirst =
     routeState?.capabilityTier === 'web-lookup' &&
+    routeState?.responseStyle === 'research-structured' &&
     mountedTools.some(tool => tool?.name === 'web_research') &&
     Array.isArray(searchRuntime.attempts) &&
     searchRuntime.attempts.length === 0 &&
@@ -1629,6 +1808,11 @@ export function applyRouteToolBudgets(tools, routeState) {
   const routedMountedTools = shouldPreferResearchFirst
     ? mountedTools.filter(tool => tool?.name !== 'web_search')
     : mountedTools
+  const rawToolByName = new Map(
+    routedMountedTools
+      .filter(tool => tool?.name)
+      .map(tool => [tool.name, tool]),
+  )
 
   return routedMountedTools.map(tool => {
     if (tool?.name === 'web_fetch') {
@@ -1703,111 +1887,12 @@ export function applyRouteToolBudgets(tools, routeState) {
 
           budgets.searchesRemaining -= 1
           const output = await tool.run(args, runtime)
-          const normalizedOutput = output && typeof output === 'object' ? output : {}
-          const recommendedResults = Array.isArray(normalizedOutput.results)
-            ? normalizedOutput.results
-                .map(result => {
-                  const normalizedResult = normalizeRecommendedSearchResult(result)
-                  if (!normalizedResult) {
-                    return null
-                  }
-                  return {
-                    ...normalizedResult,
-                    queryKey: attemptSignature.comparableKey,
-                  }
-                })
-                .filter(Boolean)
-                .slice(0, 5)
-            : []
-
-          const nextAttempt = {
-            comparableKey: attemptSignature.comparableKey,
-            query: attemptSignature.query,
-            domains: attemptSignature.domains,
-            noResults:
-              normalizedOutput.noResults === true ||
-              (typeof normalizedOutput.total === 'number' && normalizedOutput.total <= 0),
-            total:
-              typeof normalizedOutput.total === 'number' ? normalizedOutput.total : 0,
-            resultDomains: Array.isArray(normalizedOutput.results)
-              ? Array.from(
-                  new Set(
-                    normalizedOutput.results
-                      .map(result => extractSearchRuntimeHostname(result?.url || ''))
-                      .filter(Boolean),
-                  ),
-                )
-              : [],
-          }
-          searchRuntime.attempts = [...(searchRuntime.attempts || []), nextAttempt].slice(-6)
-          searchRuntime.lastResults = recommendedResults
-
-          const researchFetches = Array.isArray(normalizedOutput.results)
-            ? normalizedOutput.results
-                .map(result => {
-                  const status =
-                    typeof result?.status === 'string' ? result.status.trim().toLowerCase() : ''
-                  if (status === 'error' || status === 'not_fetched') {
-                    return null
-                  }
-                  if (
-                    typeof result?.fullContent !== 'string' &&
-                    typeof result?.content !== 'string' &&
-                    !Array.isArray(result?.evidenceBlocks)
-                  ) {
-                    return null
-                  }
-                  return normalizeFetchRuntimeRecord(
-                    {
-                      ...result,
-                      url:
-                        typeof result?.finalUrl === 'string' && result.finalUrl.trim()
-                          ? result.finalUrl
-                          : result?.url,
-                      content:
-                        typeof result?.fullContent === 'string'
-                          ? result.fullContent
-                          : result?.content,
-                    },
-                    result?.url || '',
-                  )
-                })
-                .filter(Boolean)
-            : []
-
-          if (researchFetches.length > 0) {
-            const fetchesByUrl = new Map(
-              (Array.isArray(searchRuntime.fetches) ? searchRuntime.fetches : [])
-                .filter(entry => entry?.url)
-                .map(entry => [entry.url, entry]),
-            )
-            for (const fetchRecord of researchFetches) {
-              fetchesByUrl.set(fetchRecord.url, fetchRecord)
-            }
-            searchRuntime.fetches = Array.from(fetchesByUrl.values()).slice(-6)
-          }
-
-          const crossSourceInsights = mergeCrossSourceInsights(
-            normalizedOutput.crossSourceInsights,
-            buildCrossSourceInsights(searchRuntime),
+          const normalizedOutput = output && typeof output === 'object' ? output : output
+          return finalizeResearchRouteOutput(
+            normalizedOutput,
+            attemptSignature,
+            searchRuntime,
           )
-          if (normalizedOutput && typeof normalizedOutput === 'object') {
-            return {
-              ...normalizedOutput,
-              recommendedResults,
-              recommendedNextAction:
-                recommendedResults.length > 0
-                  ? 'synthesize_research_results'
-                  : undefined,
-              crossSourceInsights,
-              evidenceLevel:
-                typeof normalizedOutput.evidenceLevel === 'string' && normalizedOutput.evidenceLevel
-                  ? normalizedOutput.evidenceLevel
-                  : crossSourceInsights?.evidenceLevel,
-            }
-          }
-
-          return output
         },
       }
     }
@@ -1846,58 +1931,46 @@ export function applyRouteToolBudgets(tools, routeState) {
 
         budgets.searchesRemaining -= 1
         const output = await tool.run(args, runtime)
-        const normalizedOutput = output && typeof output === 'object' ? output : {}
-        const recommendedResults = Array.isArray(normalizedOutput.results)
-          ? normalizedOutput.results
-              .map(result => {
-                const normalizedResult = normalizeRecommendedSearchResult(result)
-                if (!normalizedResult) {
-                  return null
-                }
-                return {
-                  ...normalizedResult,
-                  queryKey: attemptSignature.comparableKey,
-                }
-              })
-              .filter(Boolean)
-              .slice(0, 5)
-          : []
-        const nextAttempt = {
-          comparableKey: attemptSignature.comparableKey,
-          query: attemptSignature.query,
-          domains: attemptSignature.domains,
-          noResults:
-            normalizedOutput.noResults === true ||
-            (typeof normalizedOutput.total === 'number' && normalizedOutput.total <= 0),
-          total:
-            typeof normalizedOutput.total === 'number' ? normalizedOutput.total : 0,
-          resultDomains: Array.isArray(normalizedOutput.results)
-            ? Array.from(
-                new Set(
-                  normalizedOutput.results
-                    .map(result => {
-                      return extractSearchRuntimeHostname(result?.url || '')
-                    })
-                    .filter(Boolean),
-                ),
-              )
-            : [],
-        }
-        searchRuntime.attempts = [...(searchRuntime.attempts || []), nextAttempt].slice(-6)
-        searchRuntime.lastResults = recommendedResults
+        const normalizedOutput = output && typeof output === 'object' ? output : output
+        const finalizedOutput = finalizeSearchRouteOutput(
+          normalizedOutput,
+          attemptSignature,
+          searchRuntime,
+        )
 
-        if (normalizedOutput && typeof normalizedOutput === 'object') {
-          return {
-            ...normalizedOutput,
-            recommendedResults,
-            recommendedNextAction:
-              recommendedResults.length > 0
-                ? 'fetch_top_ranked_results'
-                : undefined,
+        const rawResearchTool = rawToolByName.get('web_research')
+        if (
+          rawResearchTool &&
+          typeof rawResearchTool.run === 'function' &&
+          shouldAutoUpgradeSearchToResearch(finalizedOutput, routeState, searchRuntime)
+        ) {
+          const researchOutput = await rawResearchTool.run(
+            {
+              query:
+                typeof args?.query === 'string' ? args.query : finalizedOutput?.query || '',
+              domains: Array.isArray(args?.domains) ? args.domains : finalizedOutput?.domains,
+              depth: routeState?.responseStyle === 'research-structured' ? 'deep' : 'auto',
+              allowBrowserFallback: routeState?.allowBrowserResearchFallback === true,
+              __seedSearchResult: finalizedOutput,
+            },
+            runtime,
+          )
+          const finalizedResearchOutput = finalizeResearchRouteOutput(
+            researchOutput && typeof researchOutput === 'object' ? researchOutput : researchOutput,
+            attemptSignature,
+            searchRuntime,
+          )
+          if (finalizedResearchOutput && typeof finalizedResearchOutput === 'object') {
+            return {
+              ...finalizedResearchOutput,
+              autoUpgradedFrom: 'web_search',
+              initialSearchAssessment: finalizedOutput?.searchAssessment,
+            }
           }
+          return finalizedResearchOutput
         }
 
-        return output
+        return finalizedOutput
       },
     }
   })
