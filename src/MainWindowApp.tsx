@@ -1224,11 +1224,7 @@ export function MainWindowApp() {
             message.id === binding.messageId
               ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
                 ...currentVariant,
-                content:
-                  snapshot.message ||
-                  (snapshot.status === 'awaiting_approval'
-                    ? '等待你的审批后继续执行。'
-                    : currentVariant.content),
+                content: currentVariant.content,
                 reasoning: snapshot.reasoning || currentVariant.reasoning,
                 phaseOutputs: snapshot.phaseOutputs || currentVariant.phaseOutputs,
                 usage: snapshot.usage || currentVariant.usage,

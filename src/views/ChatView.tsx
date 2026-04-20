@@ -2026,6 +2026,7 @@ function AssistantMessageCard({
     visiblePhaseOutputs.length > 0
   const appendedInputs = message.appendedInputs || []
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
+  const activeVariantKey = `${message.id}:${message.activeVersionIndex || 0}`
   const messageFailureSummary =
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.summary || summarizeFailureReason(message.error)
@@ -2109,6 +2110,49 @@ function AssistantMessageCard({
     { label: 'Plugins', items: usedPlugins, type: 'Plug' },
     { label: 'MCP Servers', items: usedMcp, type: 'MCP' },
   ].filter(group => group.items.length > 0)
+  const [answerPresentation, setAnswerPresentation] = useState(() => ({
+    variantKey: activeVariantKey,
+    visible: !isStreaming,
+    animate: false,
+  }))
+  const previousVariantKeyRef = useRef(activeVariantKey)
+  const previousStatusRef = useRef(message.status)
+
+  useEffect(() => {
+    const previousVariantKey = previousVariantKeyRef.current
+    const previousStatus = previousStatusRef.current
+    const variantChanged = previousVariantKey !== activeVariantKey
+    const wasStreaming = previousStatus === 'pending' || previousStatus === 'streaming'
+
+    setAnswerPresentation(current => {
+      const next = {
+        variantKey: activeVariantKey,
+        visible: !isStreaming,
+        animate:
+          !variantChanged &&
+          wasStreaming &&
+          message.status === 'completed' &&
+          Boolean(message.content),
+      }
+
+      return current.variantKey === next.variantKey &&
+        current.visible === next.visible &&
+        current.animate === next.animate
+        ? current
+        : next
+    })
+
+    previousVariantKeyRef.current = activeVariantKey
+    previousStatusRef.current = message.status
+  }, [activeVariantKey, isStreaming, message.content, message.status])
+
+  const isAnswerPresentationCurrent = answerPresentation.variantKey === activeVariantKey
+  const isAnswerVisible = isAnswerPresentationCurrent
+    ? answerPresentation.visible
+    : !isStreaming
+  const shouldAnimateAnswer = isAnswerPresentationCurrent && answerPresentation.animate
+  const shouldShowAnswer = isAnswerVisible && Boolean(message.content)
+  const canCopyAnswer = isAnswerVisible && Boolean(message.content)
 
   return (
     <article className="group relative flex flex-col gap-3">
@@ -2271,9 +2315,11 @@ function AssistantMessageCard({
             />
           ) : null}
 
-          {message.content ? (
-            <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
-          ) : !isStreaming ? (
+          {shouldShowAnswer ? (
+            <div className={shouldAnimateAnswer ? 'assistant-answer-reveal' : undefined}>
+              <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
+            </div>
+          ) : isAnswerVisible ? (
             <div className="rounded-xl border border-dashed border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-4 py-3 text-13px text-[var(--text-secondary)]">
               <div>
                 {(message.events?.length || 0) > 0
@@ -2306,8 +2352,9 @@ function AssistantMessageCard({
                   </span>
                 ) : null}
                 <button
-                  className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+                  className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
                   title="复制"
+                  disabled={!canCopyAnswer}
                   onClick={() => onCopyText(message.content)}
                 >
                   <Copy size={14} />
