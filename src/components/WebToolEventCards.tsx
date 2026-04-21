@@ -50,6 +50,7 @@ export function WebSearchEventCard({
   const tookMs = typeof output.tookMs === 'number' ? output.tookMs : 0
   const searchStopped = output.searchStopped === true
   const budgetExhausted = output.budgetExhausted === true
+  const basedOnPreviousEvidence = output.basedOnPreviousEvidence === true
   const stopSummary = asText(output.summary)
   const stopAction = asText(output.suggestedAction)
   const recommendedResults = Array.isArray(output.recommendedResults)
@@ -58,6 +59,13 @@ export function WebSearchEventCard({
   const results = Array.isArray(output.results)
     ? output.results.filter(isRecord).slice(0, 8)
     : []
+  const advisorySummary =
+    (searchStopped || budgetExhausted) &&
+      total === 0 &&
+      recommendedResults.length > 0 &&
+      basedOnPreviousEvidence
+      ? '这个 query 没有继续展开；更合适的下一步是先阅读前面已经找到的高质量来源。'
+      : stopSummary
 
   return (
     <div className="mt-2 flex flex-col gap-2 rounded-xl border border-[rgba(79,123,116,0.12)] bg-[rgba(79,123,116,0.05)] p-3">
@@ -73,13 +81,16 @@ export function WebSearchEventCard({
               : undefined
           }
         />
-        <MetaPill label="Results" value={total} />
+        <MetaPill
+          label={searchStopped && total === 0 && recommendedResults.length > 0 ? 'Suggested' : 'Results'}
+          value={searchStopped && total === 0 && recommendedResults.length > 0 ? recommendedResults.length : total}
+        />
         {tookMs > 0 ? <MetaPill label="Time" value={`${tookMs}ms`} /> : null}
       </div>
 
       {budgetExhausted || searchStopped ? (
         <div className="rounded-lg border border-amber-200 bg-[rgba(255,248,235,0.88)] px-3 py-2 text-[12px] leading-relaxed text-amber-800">
-          <div>{stopSummary || '当前搜索阶段已经收束，建议转入阅读和整理。'}</div>
+          <div>{advisorySummary || '当前搜索阶段已经收束，建议转入阅读和整理。'}</div>
           {stopAction ? (
             <div className="mt-1 text-[11px] text-amber-700/85">{stopAction}</div>
           ) : null}

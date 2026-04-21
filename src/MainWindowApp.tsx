@@ -1224,7 +1224,7 @@ export function MainWindowApp() {
             message.id === binding.messageId
               ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
                 ...currentVariant,
-                content: currentVariant.content,
+                content: snapshot.message || currentVariant.content,
                 reasoning: snapshot.reasoning || currentVariant.reasoning,
                 phaseOutputs: snapshot.phaseOutputs || currentVariant.phaseOutputs,
                 usage: snapshot.usage || currentVariant.usage,
@@ -1319,7 +1319,8 @@ export function MainWindowApp() {
                             snapshot.toolEvents,
                             snapshot.taskTree,
                             snapshot,
-                            snapshot.status !== 'completed',
+                            currentVariant.activity?.expanded ??
+                              (snapshot.status !== 'completed'),
                           ),
                           appendedInputs:
                             snapshot.appendedInputs || currentVariant.appendedInputs,

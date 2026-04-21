@@ -578,6 +578,15 @@ function appendedInputStatusLabel(status: AppendedInput['status']) {
   return status === 'consumed' ? '已并入当前任务' : '将在当前步骤后处理'
 }
 
+function isSearchControllerDecisionEvent(event: MessageEvent) {
+  if (event.toolName !== 'web_search' || !event.output) {
+    return false
+  }
+
+  const parsedOutput = parseJsonOutput(event.output)
+  return Boolean(parsedOutput && isSearchControllerDecisionOutput(parsedOutput))
+}
+
 function prettifyIdentifier(identifier: string) {
   return identifier
     .split(/[_-]+/)
@@ -616,6 +625,182 @@ function isGenericTaskSummary(summary?: string) {
 
 function normalizeComparableText(value?: string) {
   return (value || '').replace(/\s+/g, ' ').trim()
+}
+
+type RevealSegment = {
+  id: string
+  text: string
+  animate: boolean
+}
+
+// TODO: Tune these thresholds if you want reasoning cards to appear earlier or later.
+const MIN_PROVIDER_REASONING_CHARS = 8
+const MIN_PROVIDER_REASONING_WITH_OUTPUT_CHARS = 4
+const MAX_STREAM_REVEAL_SEGMENTS = 72
+
+function splitRevealDelta(delta: string) {
+  const segments: string[] = []
+  let buffer = ''
+
+  const pushBuffer = () => {
+    if (!buffer) {
+      return
+    }
+    segments.push(buffer)
+    buffer = ''
+  }
+
+  for (let index = 0; index < delta.length; index += 1) {
+    const char = delta[index]
+    const next = delta[index + 1] || ''
+    buffer += char
+
+    const reachedLineBreak = char === '\n'
+    const reachedSentenceEnd =
+      /[。！？!?；;：:]/u.test(char) && (!next || /\s|\n/u.test(next))
+    const reachedSoftChunkBoundary = buffer.length >= 32 && /\s/u.test(char)
+
+    if (reachedLineBreak || reachedSentenceEnd || reachedSoftChunkBoundary) {
+      pushBuffer()
+    }
+  }
+
+  pushBuffer()
+  return segments.length > 0 ? segments : [delta]
+}
+
+function compactRevealSegments(segments: RevealSegment[], maxSegments = MAX_STREAM_REVEAL_SEGMENTS) {
+  if (segments.length <= maxSegments) {
+    return segments
+  }
+
+  const overflow = segments.length - maxSegments + 1
+  const mergedText = segments
+    .slice(0, overflow)
+    .map(segment => segment.text)
+    .join('')
+
+  return [
+    {
+      id: segments[overflow - 1]?.id || segments[0]?.id || 'reveal-merged',
+      text: mergedText,
+      animate: false,
+    },
+    ...segments.slice(overflow),
+  ]
+}
+
+function useIncrementalRevealSegments(text: string, resetKey = '') {
+  const previousRef = useRef({ text, resetKey })
+  const sequenceRef = useRef(text ? 1 : 0)
+  const [segments, setSegments] = useState<RevealSegment[]>(() =>
+    text
+      ? [
+        {
+          id: 'reveal-1',
+          text,
+          animate: false,
+        },
+      ]
+      : [],
+  )
+
+  useEffect(() => {
+    const previous = previousRef.current
+    if (text === previous.text && resetKey === previous.resetKey) {
+      return
+    }
+
+    const nextId = () => {
+      sequenceRef.current += 1
+      return `reveal-${sequenceRef.current}`
+    }
+
+    if (!text) {
+      setSegments([])
+    } else if (resetKey !== previous.resetKey || !text.startsWith(previous.text)) {
+      setSegments([
+        {
+          id: nextId(),
+          text,
+          animate: false,
+        },
+      ])
+    } else {
+      const delta = text.slice(previous.text.length)
+      if (delta) {
+        const deltaSegments = splitRevealDelta(delta).map(segment => ({
+          id: nextId(),
+          text: segment,
+          animate: true,
+        }))
+        setSegments(current => compactRevealSegments([...current, ...deltaSegments]))
+      }
+    }
+
+    previousRef.current = { text, resetKey }
+  }, [resetKey, text])
+
+  return segments
+}
+
+function RevealTextSegments({
+  text,
+  resetKey = '',
+  className,
+  inline = false,
+}: {
+  text: string
+  resetKey?: string
+  className?: string
+  inline?: boolean
+}) {
+  const segments = useIncrementalRevealSegments(text, resetKey)
+  if (segments.length === 0) {
+    return null
+  }
+
+  const content = segments.map(segment => (
+    <span
+      key={segment.id}
+      className={segment.animate ? 'stream-reveal-segment' : undefined}
+    >
+      {segment.text}
+    </span>
+  ))
+
+  if (inline) {
+    return <span className={className}>{content}</span>
+  }
+
+  return <div className={className}>{content}</div>
+}
+
+function shouldDisplayReasoningEntry(
+  entry: MessageReasoning,
+  options: {
+    isStreaming: boolean
+    hasLinkedOutput: boolean
+  },
+) {
+  const normalized = normalizeComparableText(entry.content)
+  if (!normalized) {
+    return false
+  }
+
+  if (entry.kind === 'summary') {
+    return normalized.length >= 4
+  }
+
+  if (options.hasLinkedOutput && normalized.length >= MIN_PROVIDER_REASONING_WITH_OUTPUT_CHARS) {
+    return true
+  }
+
+  if (normalized.length >= MIN_PROVIDER_REASONING_CHARS) {
+    return true
+  }
+
+  return !options.isStreaming && normalized.length >= MIN_PROVIDER_REASONING_WITH_OUTPUT_CHARS
 }
 
 function sanitizeTaskNodes(nodes: TaskNode[], finalAnswer = ''): TaskNode[] {
@@ -689,6 +874,34 @@ function MarkdownAnswer({
       >
         {content}
       </ReactMarkdown>
+    </div>
+  )
+}
+
+function StreamingMarkdownAnswer({
+  content,
+  onCopyText,
+}: {
+  content: string
+  onCopyText: (value: string) => void
+}) {
+  const previousContentRef = useRef(content)
+  const [tailPulseKey, setTailPulseKey] = useState(0)
+
+  useEffect(() => {
+    const previousContent = previousContentRef.current
+    if (content && content.length > previousContent.length) {
+      setTailPulseKey(current => current + 1)
+    }
+    previousContentRef.current = content
+  }, [content])
+
+  return (
+    <div className="assistant-streaming-markdown">
+      <MarkdownAnswer content={content} onCopyText={onCopyText} />
+      {tailPulseKey > 0 ? (
+        <div key={tailPulseKey} className="assistant-streaming-markdown__veil" />
+      ) : null}
     </div>
   )
 }
@@ -786,7 +999,7 @@ function ReasoningPhaseCard({
   }, [isActive])
 
   return (
-    <article className="rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.05)] px-3 py-2.5">
+    <article className="stream-reveal-item rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.05)] px-3 py-2.5">
       <button
         className="flex w-full items-start justify-between gap-3 text-left"
         onClick={() => setExpanded(current => !current)}
@@ -797,7 +1010,9 @@ function ReasoningPhaseCard({
             <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 min-w-12 text-center rounded bg-white/80 text-[var(--accent-soft-strong)]">
               {isActive ? '思考中' : '思考'}
             </span>
-            <strong className="text-12px text-[var(--text-primary)] opacity-85">{firstLine}</strong>
+            <strong className="text-12px text-[var(--text-primary)] opacity-85">
+              <RevealTextSegments text={firstLine} inline />
+            </strong>
             {/* <span className="text-10px text-[var(--text-secondary)] opacity-55">
               {isActive ? '思考中' : ''}
             </span> */}
@@ -810,18 +1025,20 @@ function ReasoningPhaseCard({
         )}
       </button>
       {expanded && remainingContent ? (
-        <div className="mt-2 text-12px leading-relaxed whitespace-pre-wrap text-[var(--text-secondary)] opacity-80">
-          {remainingContent}
-        </div>
+        <RevealTextSegments
+          text={remainingContent}
+          className="mt-2 whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-secondary)] opacity-80"
+        />
       ) : null}
       {outputContent?.trim() ? (
         <div className="mt-2 rounded-lg border border-[rgba(79,123,116,0.10)] bg-white/70 px-3 py-2">
           <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--accent-soft-strong)] opacity-75">
             阶段输出
           </div>
-          <div className="text-12px leading-relaxed whitespace-pre-wrap text-[var(--text-primary)] opacity-80">
-            {outputContent.trim()}
-          </div>
+          <RevealTextSegments
+            text={outputContent.trim()}
+            className="whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-primary)] opacity-80"
+          />
         </div>
       ) : null}
     </article>
@@ -830,13 +1047,14 @@ function ReasoningPhaseCard({
 
 function PhaseOutputCard({ content }: { content: string }) {
   return (
-    <article className="rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.04)] px-3 py-2.5">
+    <article className="stream-reveal-item rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.04)] px-3 py-2.5">
       <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--accent-soft-strong)] opacity-80">
         阶段输出
       </div>
-      <div className="text-12px leading-relaxed whitespace-pre-wrap text-[var(--text-primary)] opacity-80">
-        {content.trim()}
-      </div>
+      <RevealTextSegments
+        text={content.trim()}
+        className="whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-primary)] opacity-80"
+      />
     </article>
   )
 }
@@ -869,6 +1087,62 @@ function browserArtifactSummary(artifact: unknown) {
     savedTo: typeof artifact.savedTo === 'string' ? artifact.savedTo : '',
     sessionId: typeof artifact.sessionId === 'string' ? artifact.sessionId : '',
   }
+}
+
+function isSearchControllerDecisionOutput(output: Record<string, unknown>) {
+  const provider = typeof output.provider === 'string' ? output.provider : ''
+  const code = typeof output.code === 'string' ? output.code : ''
+  return provider === 'route-search-controller' || code === 'ROUTE_SEARCH_DIMINISHING_RETURNS'
+}
+
+function SearchControllerDecisionCard({
+  output,
+}: {
+  output: Record<string, unknown>
+}) {
+  const query = typeof output.query === 'string' ? output.query.trim() : ''
+  const summary =
+    typeof output.summary === 'string' && output.summary.trim()
+      ? output.summary.trim()
+      : '这一步没有继续发起新的网页搜索，而是基于前面已经拿到的线索决定先收束当前搜索方向。'
+  const suggestedAction =
+    typeof output.suggestedAction === 'string' && output.suggestedAction.trim()
+      ? output.suggestedAction.trim()
+      : ''
+  const recommendedResults = Array.isArray(output.recommendedResults)
+    ? output.recommendedResults.filter(isRecord).slice(0, 3)
+    : []
+
+  return (
+    <article className="stream-reveal-item rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.05)] px-3 py-2.5">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 min-w-12 text-center rounded bg-white/80 text-[var(--accent-soft-strong)]">
+          思考
+        </span>
+        <strong className="text-12px text-[var(--text-primary)] opacity-85">搜索策略调整</strong>
+      </div>
+      {query ? (
+        <div className="mb-2 text-[11px] text-[var(--text-secondary)] opacity-70">
+          当前 query：{query}
+        </div>
+      ) : null}
+      <RevealTextSegments
+        text={summary}
+        className="whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-primary)] opacity-85"
+      />
+      {suggestedAction ? (
+        <RevealTextSegments
+          text={suggestedAction}
+          className="mt-2 whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-secondary)] opacity-80"
+        />
+      ) : null}
+      {recommendedResults.length > 0 ? (
+        <div className="mt-2 text-[10px] font-600 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)] opacity-75">
+          已推荐 {recommendedResults.length} 个后续优先阅读的来源
+        </div>
+      ) : null}
+    </article>
+  )
 }
 
 function BrowserStructuredEventCard({
@@ -1132,6 +1406,10 @@ function MessageEventCard({
   const isStructuredWebResearchEvent = toolName === 'web_research' && Boolean(parsedOutput)
   const isStructuredWebSearchEvent = toolName === 'web_search' && Boolean(parsedOutput)
   const isStructuredWebFetchEvent = toolName === 'web_fetch' && Boolean(parsedOutput)
+  const isSearchControllerDecisionEvent =
+    isStructuredWebSearchEvent &&
+    parsedOutput &&
+    isSearchControllerDecisionOutput(parsedOutput)
   const failureSummary =
     event.status === 'error'
       ? event.errorInfo?.summary || summarizeFailureReason(event.error || event.output || event.summary)
@@ -1140,6 +1418,10 @@ function MessageEventCard({
     event.status === 'error'
       ? event.errorInfo?.suggestedAction
       : ''
+
+  if (!isApproval && isSearchControllerDecisionEvent && parsedOutput) {
+    return <SearchControllerDecisionCard output={parsedOutput} />
+  }
 
   return (
     <article className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2">
@@ -2004,29 +2286,13 @@ function AssistantMessageCard({
   const visiblePhaseOutputs = (message.phaseOutputs || []).filter(output =>
     normalizeComparableText(output.content),
   )
-  const providerReasoning = visibleReasoning.filter(entry => entry.kind === 'provider')
-  const displayReasoning =
-    providerReasoning.length > 0
-      ? providerReasoning
-      : visibleReasoning.filter(entry => entry.kind === 'summary')
-  const phaseOutputByBlockId = new Map(
-    visiblePhaseOutputs.map(output => [output.blockId, output.content]),
+  const phaseOutputBlockIds = new Set(
+    visiblePhaseOutputs
+      .map(output => output.blockId)
+      .filter((blockId): blockId is string => typeof blockId === 'string' && blockId.length > 0),
   )
-  const executionTimeline = buildExecutionTimeline(
-    displayReasoning,
-    visiblePhaseOutputs,
-    message.events || [],
-  )
-  const latestReasoningId = displayReasoning.at(-1)?.id || ''
-  const hasExecution =
-    Boolean(activity) ||
-    (message.events?.length || 0) > 0 ||
-    visibleSteps.length > 0 ||
-    visibleReasoning.length > 0 ||
-    visiblePhaseOutputs.length > 0
   const appendedInputs = message.appendedInputs || []
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
-  const activeVariantKey = `${message.id}:${message.activeVersionIndex || 0}`
   const messageFailureSummary =
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.summary || summarizeFailureReason(message.error)
@@ -2078,10 +2344,39 @@ function AssistantMessageCard({
   const messageModelId = message.modelInfo?.modelId || activeModelId
   const hasUsage =
     (message.usage?.inputTokens || 0) > 0 || (message.usage?.outputTokens || 0) > 0
+  const filteredReasoning = visibleReasoning.filter(entry =>
+    shouldDisplayReasoningEntry(entry, {
+      isStreaming,
+      hasLinkedOutput: phaseOutputBlockIds.has(entry.id),
+    }),
+  )
+  const hasExecution =
+    (message.events?.length || 0) > 0 ||
+    visibleSteps.length > 0 ||
+    filteredReasoning.length > 0 ||
+    visiblePhaseOutputs.length > 0
+  const providerReasoning = filteredReasoning.filter(entry => entry.kind === 'provider')
+  const summaryReasoning = filteredReasoning.filter(entry => entry.kind === 'summary')
+  const displayReasoning =
+    providerReasoning.length > 0
+      ? [...providerReasoning, ...summaryReasoning]
+      : summaryReasoning.length > 0
+        ? summaryReasoning
+        : []
+  const phaseOutputByBlockId = new Map(
+    visiblePhaseOutputs.map(output => [output.blockId, output.content]),
+  )
+  const executionTimeline = buildExecutionTimeline(
+    displayReasoning,
+    visiblePhaseOutputs,
+    message.events || [],
+  )
+  const latestReasoningId = displayReasoning.at(-1)?.id || ''
 
   const usedTools = Array.from(
     new Set(
       (message.events || [])
+        .filter(event => !isSearchControllerDecisionEvent(event))
         .filter(event => event.kind !== 'approval')
         .filter(event => event.source === 'builtin' || event.source === 'subagent')
         .map(event => event.title),
@@ -2110,49 +2405,8 @@ function AssistantMessageCard({
     { label: 'Plugins', items: usedPlugins, type: 'Plug' },
     { label: 'MCP Servers', items: usedMcp, type: 'MCP' },
   ].filter(group => group.items.length > 0)
-  const [answerPresentation, setAnswerPresentation] = useState(() => ({
-    variantKey: activeVariantKey,
-    visible: !isStreaming,
-    animate: false,
-  }))
-  const previousVariantKeyRef = useRef(activeVariantKey)
-  const previousStatusRef = useRef(message.status)
-
-  useEffect(() => {
-    const previousVariantKey = previousVariantKeyRef.current
-    const previousStatus = previousStatusRef.current
-    const variantChanged = previousVariantKey !== activeVariantKey
-    const wasStreaming = previousStatus === 'pending' || previousStatus === 'streaming'
-
-    setAnswerPresentation(current => {
-      const next = {
-        variantKey: activeVariantKey,
-        visible: !isStreaming,
-        animate:
-          !variantChanged &&
-          wasStreaming &&
-          message.status === 'completed' &&
-          Boolean(message.content),
-      }
-
-      return current.variantKey === next.variantKey &&
-        current.visible === next.visible &&
-        current.animate === next.animate
-        ? current
-        : next
-    })
-
-    previousVariantKeyRef.current = activeVariantKey
-    previousStatusRef.current = message.status
-  }, [activeVariantKey, isStreaming, message.content, message.status])
-
-  const isAnswerPresentationCurrent = answerPresentation.variantKey === activeVariantKey
-  const isAnswerVisible = isAnswerPresentationCurrent
-    ? answerPresentation.visible
-    : !isStreaming
-  const shouldAnimateAnswer = isAnswerPresentationCurrent && answerPresentation.animate
-  const shouldShowAnswer = isAnswerVisible && Boolean(message.content)
-  const canCopyAnswer = isAnswerVisible && Boolean(message.content)
+  const shouldShowAnswer = Boolean(message.content)
+  const canCopyAnswer = Boolean(message.content)
 
   return (
     <article className="group relative flex flex-col gap-3">
@@ -2316,10 +2570,12 @@ function AssistantMessageCard({
           ) : null}
 
           {shouldShowAnswer ? (
-            <div className={shouldAnimateAnswer ? 'assistant-answer-reveal' : undefined}>
+            isStreaming ? (
+              <StreamingMarkdownAnswer content={message.content} onCopyText={onCopyText} />
+            ) : (
               <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
-            </div>
-          ) : isAnswerVisible ? (
+            )
+          ) : !isStreaming ? (
             <div className="rounded-xl border border-dashed border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-4 py-3 text-13px text-[var(--text-secondary)]">
               <div>
                 {(message.events?.length || 0) > 0

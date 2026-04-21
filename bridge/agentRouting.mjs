@@ -1254,19 +1254,28 @@ function buildSearchStopPayload(reason, args, searchRuntime, attemptSignature = 
     3,
     attemptSignature.comparableKey || '',
   )
+  const hasPriorReadCandidates = recommendedResults.length > 0
   const summary =
     reason === 'read-recommended-results-first'
-      ? '已经找到一组质量较高的候选来源，下一步应该先阅读这些页面，而不是继续扩展搜索。'
+      ? hasPriorReadCandidates
+        ? '这个 query 先不再继续扩展；前面已经找到一组质量较高的候选来源，下一步应该先阅读这些页面。'
+        : '这个 query 先不再继续扩展；下一步应该优先阅读已找到的页面。'
       : reason === 'fetch-before-more-search'
-      ? '已经完成候选来源发现，下一步应该优先阅读已找到的页面，而不是继续机械改写搜索词。'
+      ? hasPriorReadCandidates
+        ? '这个 query 没有必要继续改写；前面已经完成候选来源发现，下一步应该优先阅读已找到的页面。'
+        : '这个 query 先收束；下一步应该优先阅读已找到的页面，而不是继续机械改写搜索词。'
       : reason === 'enough-evidence'
-        ? '已经读过一批相关来源，继续扩展搜索的增量很低，先基于现有证据收束回答更稳妥。'
+        ? hasPriorReadCandidates
+          ? '这个 query 不再继续扩展；前面已经读过一批相关来源，继续搜索的增量很低，先基于现有证据收束回答更稳妥。'
+          : '当前搜索阶段已经有足够证据，继续扩展搜索的增量很低。'
         : reason === 'enough-discovery'
-          ? '已经做过多轮来源发现，继续搜索的边际收益很低。'
+          ? '这个 query 先收束；此前已经做过多轮来源发现，继续搜索的边际收益很低。'
       : reason === 'duplicate-no-results' || reason === 'repeated-no-results'
       ? '连续搜索都没有带来新结果，继续改写相似 query 的收益已经很低。'
       : reason === 'sufficient-discovery'
-        ? '已经拿到足够的候选来源，继续广撒网搜索的增量很低。'
+        ? hasPriorReadCandidates
+          ? '这个 query 先不再继续；前面已经拿到足够的候选来源，继续广撒网搜索的增量很低。'
+          : '已经拿到足够的候选来源，继续广撒网搜索的增量很低。'
       : reason === 'budget-exhausted'
         ? '当前搜索阶段先收束到这里，优先基于已经找到的线索继续整理和回答。'
         : '相同方向的网页搜索已经拿到候选来源，继续重复搜索的增量很低。'
@@ -1282,6 +1291,7 @@ function buildSearchStopPayload(reason, args, searchRuntime, attemptSignature = 
     code: 'ROUTE_SEARCH_DIMINISHING_RETURNS',
     summary,
     recommendedResults,
+    basedOnPreviousEvidence: hasPriorReadCandidates,
     suggestedAction:
       reason === 'read-recommended-results-first' ||
       reason === 'fetch-before-more-search' ||
