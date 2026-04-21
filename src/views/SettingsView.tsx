@@ -5,7 +5,7 @@ export type SettingsTab = 'general' | 'providers' | 'browser' | 'mcp' | 'skills'
 const tabs: Array<{ id: SettingsTab; label: string }> = [
   { id: 'general', label: '通用' },
   { id: 'providers', label: '提供商' },
-  { id: 'browser', label: '浏览器' },
+  { id: 'browser', label: '网页与浏览器' },
   { id: 'mcp', label: 'MCP' },
   { id: 'skills', label: '技能' },
   { id: 'plugins', label: '插件' },

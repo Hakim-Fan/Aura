@@ -13,13 +13,10 @@ const entryPoints = {
   ipc: path.join(repoRoot, 'bridge', 'ipc.mjs'),
   providerActions: path.join(repoRoot, 'bridge', 'providerActions.mjs'),
   mcpActions: path.join(repoRoot, 'bridge', 'mcpActions.mjs'),
-  browserProfileActions: path.join(repoRoot, 'bridge', 'browserProfileActions.mjs'),
   cli: path.join(repoRoot, 'bridge', 'cli.mjs'),
 }
 
-// 这些包含大量运行时路径解析（require.resolve / __dirname / 子进程启动），
-// 无法被 esbuild 正确打包为单文件 ESM，必须以原始 node_modules 目录结构随 App 分发。
-const externalPackages = ['playwright-core', 'chromium-bidi']
+const externalPackages = []
 
 const removableDirectorySuffixes = [
   `${path.sep}playwright-core${path.sep}lib${path.sep}vite`,

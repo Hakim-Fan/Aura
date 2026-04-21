@@ -1506,8 +1506,6 @@ function isAutoApproved(tool, settings) {
       return settings.autoApproveFileWrite
     case 'computer_use':
       return settings.autoApproveComputerUse
-    case 'chrome_automation':
-      return settings.autoApproveChromeAutomation
     default:
       return true
   }

@@ -55,10 +55,6 @@ export function createWebTools(context = {}) {
             type: 'boolean',
             description: 'Prefer provider-supplied page content when it is already strong enough, before issuing additional fetches.',
           },
-          allowBrowserFallback: {
-            type: 'boolean',
-            description: 'Allow browser fallback suggestions when public-web research is blocked and settings also permit it.',
-          },
         },
         required: ['query'],
       },

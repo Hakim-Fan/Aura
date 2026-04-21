@@ -372,36 +372,10 @@ const WEB_LOOKUP_TOOLS = new Set([
   'web_fetch',
 ])
 
-const BROWSER_LOOKUP_TOOLS = new Set([
-  'browser_open',
-  'browser_get_page',
-  'browser_snapshot',
-  'browser_inspect_element',
-  'browser_screenshot',
-  'browser_wait_for',
-  'browser_run_javascript',
-  'browser_list_sessions',
-  'browser_storage_list',
-  'browser_storage_get',
-  'browser_console_get',
-  'browser_network_get',
-  'browser_trace_start',
-])
+const BROWSER_LOOKUP_TOOLS = new Set([])
 
 const BROWSER_INTERACTIVE_ONLY_TOOLS = new Set([
-  'browser_click',
-  'browser_type',
-  'browser_set_active_session',
-  'browser_close_session',
-  'browser_storage_set',
-  'browser_storage_clear',
-  'browser_storage_export_state',
-  'browser_storage_import_state',
-  'browser_trace_stop',
-  'browser_video_start',
-  'browser_video_stop',
-  'browser_takeover_visible',
-  'browser_resume_after_takeover',
+  'system_browser_open',
 ])
 
 const SEARCH_BUDGET_BY_TIER = {
@@ -1368,7 +1342,6 @@ function buildRouteStateFromSignals({
   answerMode,
   needsExternalFacts,
   webInteractionRequired,
-  allowBrowserResearchFallback = false,
   workspaceRelated,
   isCapabilityAdminTask,
   explicitSystemChromeRequest,
@@ -1395,11 +1368,7 @@ function buildRouteStateFromSignals({
   if (!isWebCapableTier(capabilityTier) && needsExternalFacts) {
     allowEscalationTo.push('web-lookup')
   }
-  if (
-    supportsBrowserEscalation(capabilityTier) &&
-    (webInteractionRequired ||
-      (allowBrowserResearchFallback && needsExternalFacts && capabilityTier !== 'browser-interactive'))
-  ) {
+  if (supportsBrowserEscalation(capabilityTier) && webInteractionRequired) {
     allowEscalationTo.push('browser-interactive')
   }
 
@@ -1416,7 +1385,6 @@ function buildRouteStateFromSignals({
     capabilityTier,
     researchMode,
     webInteractionRequired,
-    allowBrowserResearchFallback,
     responseStyle,
     taskComplexity,
     planDepth,
@@ -1430,11 +1398,7 @@ function buildRouteStateFromSignals({
         planDepth,
       }),
       browserEscalationsRemaining:
-        (webInteractionRequired ||
-          (allowBrowserResearchFallback &&
-            needsExternalFacts &&
-            capabilityTier !== 'browser-interactive')) &&
-        supportsBrowserEscalation(capabilityTier)
+        webInteractionRequired && supportsBrowserEscalation(capabilityTier)
           ? 1
           : 0,
       writeEscalationsRemaining:
@@ -1496,7 +1460,6 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
     answerMode,
     needsExternalFacts: classification.needsExternalFacts === true,
     webInteractionRequired,
-    allowBrowserResearchFallback: settings?.web?.research?.allowBrowserFallback === true,
     workspaceRelated,
     isCapabilityAdminTask: classification.isCapabilityAdmin === true,
     explicitSystemChromeRequest:
@@ -1535,7 +1498,6 @@ export function inferRouteStateFromKeywords(messages, settings = {}) {
     answerMode,
     needsExternalFacts,
     webInteractionRequired: explicitWebInteraction,
-    allowBrowserResearchFallback: settings?.web?.research?.allowBrowserFallback === true,
     workspaceRelated: workspaceRelated || answerMode === 'execute',
     isCapabilityAdminTask,
     explicitSystemChromeRequest,
@@ -1627,8 +1589,8 @@ function isComputerTool(tool) {
   return tool.source === 'builtin' && tool.name.startsWith('computer_')
 }
 
-function isChromeTool(tool) {
-  return tool.source === 'builtin' && tool.name.startsWith('chrome_')
+function isSystemBrowserTool(tool) {
+  return tool.source === 'builtin' && tool.name === 'system_browser_open'
 }
 
 export function filterToolsForRouteState(tools, routeState) {
@@ -1693,13 +1655,14 @@ export function filterToolsForRouteState(tools, routeState) {
       if (isAuraMutationTool(tool) && !routeState.isCapabilityAdminTask) {
         return false
       }
-      if (isChromeTool(tool)) {
-        return routeState.explicitSystemChromeRequest
-      }
-      if (routeState.explicitSystemChromeRequest && tool.source === 'builtin' && tool.name.startsWith('browser_')) {
-        return false
-      }
-      return true
+      return (
+        isBuiltinReadonlyTool(tool) ||
+        isWebLookupTool(tool) ||
+        isBrowserInteractiveOnlyTool(tool) ||
+        isComputerTool(tool) ||
+        isSystemBrowserTool(tool) ||
+        allowReadonlyPluginLikeTool(tool, routeState)
+      )
     }
 
     return false
@@ -1802,7 +1765,6 @@ export function applyRouteToolBudgets(tools, routeState) {
     (budgets.searchesRemaining || 0) <= 0
       ? tools.filter(
           tool =>
-            tool?.name !== 'browser_search' &&
             tool?.name !== 'web_search' &&
             tool?.name !== 'web_research',
         )
@@ -1907,7 +1869,7 @@ export function applyRouteToolBudgets(tools, routeState) {
       }
     }
 
-    if (tool?.name !== 'browser_search' && tool?.name !== 'web_search') {
+    if (tool?.name !== 'web_search') {
       return tool
     }
 
@@ -1960,7 +1922,6 @@ export function applyRouteToolBudgets(tools, routeState) {
                 typeof args?.query === 'string' ? args.query : finalizedOutput?.query || '',
               domains: Array.isArray(args?.domains) ? args.domains : finalizedOutput?.domains,
               depth: routeState?.responseStyle === 'research-structured' ? 'deep' : 'auto',
-              allowBrowserFallback: routeState?.allowBrowserResearchFallback === true,
               __seedSearchResult: finalizedOutput,
             },
             runtime,

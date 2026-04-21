@@ -1,31 +1,8 @@
-function getBrowserSourceLabel(source) {
-  switch (source) {
-    case 'managed-chrome':
-      return 'Aura managed browser'
-    case 'custom-executable':
-      return 'custom browser executable'
-    case 'system-chrome':
-    default:
-      return 'system Chrome'
+function describeLightpandaAvailability(settings) {
+  if (settings?.browser?.lightpanda?.enabled === true) {
+    return 'enabled'
   }
-}
-
-function isBrowserSourceAvailable(settings) {
-  const source = settings.browser?.source
-  const status = settings.browserRuntimeStatus
-  if (!status || !source) {
-    return null
-  }
-
-  switch (source) {
-    case 'managed-chrome':
-      return status.managedChromeInstalled === true
-    case 'custom-executable':
-      return status.customExecutableValid === true
-    case 'system-chrome':
-    default:
-      return status.systemChromeDetected === true
-  }
+  return 'disabled'
 }
 
 function buildCurrentDateContext() {
@@ -53,19 +30,11 @@ function buildCurrentDateContext() {
 }
 
 function buildApprovalPolicy(settings) {
-  const lines = [
+  return [
     `Approval policy: shell is ${settings.autoApproveShell ? 'auto-approved' : 'approval-required'}.`,
     `Approval policy: file writes are ${settings.autoApproveFileWrite ? 'auto-approved' : 'approval-required'}.`,
     `Approval policy: computer use is ${settings.autoApproveComputerUse ? 'auto-approved' : 'approval-required'}.`,
-  ]
-
-  if (settings.enableChromeAutomation) {
-    lines.push(
-      `Approval policy: chrome automation is ${settings.autoApproveChromeAutomation ? 'auto-approved' : 'approval-required'}.`,
-    )
-  }
-
-  return lines.join('\n')
+  ].join('\n')
 }
 
 function buildReasoningInstruction(settings) {
@@ -215,15 +184,9 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
           ? 'Do not burn searches on minor query rewrites. In deep research mode you may spend a few extra discovery searches, but once strong candidates exist you should switch to reading, web_research synthesis, or targeted web_fetch before searching again.'
           : 'Do not burn searches on minor query rewrites. After two discovery searches without switching to reading or web_research synthesis, stop and move to source analysis or a bounded answer.',
       )
-      if (routeState.allowBrowserResearchFallback) {
-        sections.push(
-          'Browser fallback for web research is enabled in settings, but it is still a last resort. Stay on web_* first. Only request escalation to browser-interactive when web_research or web_fetch explicitly signals browserFallbackSuggested, repeated WEB_FETCH_PAGE_REQUIRES_BROWSER blockers occur, or public-web results remain unusable after reasonable web_* attempts.',
-        )
-      } else {
-        sections.push(
-          'Browser fallback for ordinary web research is disabled in settings. Do not request browser-interactive just because web results are thin; stay within web_* unless the user explicitly asked for browser operation.',
-        )
-      }
+      sections.push(
+        'Ordinary research does not escalate into browser interaction automatically. Stay within web_search, web_research, web_fetch, and when available the Lightpanda-backed fetch path unless the user explicitly asked to operate a browser.',
+      )
       sections.push(
         'When you stop searching, present it as a user-facing evidence boundary, not an internal budget boundary.',
       )
@@ -231,22 +194,13 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       sections.push(
         routeState.webInteractionRequired
           ? 'Interactive browser tools are mounted because the request explicitly requires web interaction. Stay focused on the requested workflow.'
-          : 'Interactive browser tools are mounted as a last-resort fallback after web research limits were reached or browser-dependent pages blocked ordinary web access. Stay focused on unblocking the evidence path instead of browsing casually.',
+          : 'Interactive browser tools are mounted only for explicit browser-operation tasks. Do not treat them as a research fallback.',
       )
       sections.push(
-        'When both web_* and browser_* are mounted, use web_research, web_search, and web_fetch for information gathering, source lookup, and page reading. Use browser_* only for actual browser operation such as open, login, click, type, submit, or page-state verification.',
+        'Use web_research, web_search, and web_fetch for information gathering. Use system_browser_open only to hand off an explicit browser workflow to the user-facing system browser.',
       )
-      if (routeState.webInteractionRequired) {
-        sections.push(
-          'Do not use browser_search or browser page navigation as a substitute for ordinary research. Unless the task itself is to operate a browser workflow, gather information only through web_search, web_research, and web_fetch.',
-        )
-      } else {
-        sections.push(
-          'Because this browser tier came from research fallback, prefer browser_search only when web_search or web_research failed to surface usable public results, and prefer browser_open on specific blocked URLs when web_fetch or web_research already identified them.',
-        )
-      }
       if (routeState.explicitSystemChromeRequest) {
-        sections.push('The user explicitly asked to operate system Chrome. Prefer the mounted chrome_* tools over the Aura browser runtime for this turn.')
+        sections.push('The user explicitly asked to use the system browser. Prefer system_browser_open and then computer_* tools when needed.')
       }
     }
   }
@@ -255,22 +209,15 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
     routeState?.capabilityTier === 'web-lookup' ||
     routeState?.capabilityTier === 'browser-interactive'
   ) {
-    const browserSource = settings.browser?.source || 'system-chrome'
-    const availability = isBrowserSourceAvailable(settings)
-    const statusLabel =
-      availability === null ? 'unknown' : availability ? 'available' : 'unavailable'
     sections.push(
-      `Aura browser source: ${getBrowserSourceLabel(browserSource)} (${statusLabel}).`,
+      `Lightpanda lookup path: ${describeLightpandaAvailability(settings)}.`,
     )
     if (routeState.capabilityTier === 'browser-interactive') {
       sections.push(
-        'If a browser_* tool reports a real blocker such as login, MFA, CAPTCHA, or consent, use browser_takeover_visible when mounted instead of switching to unrelated tools.',
+        'Open the site with system_browser_open when the user needs to log in, solve CAPTCHA, grant consent, submit forms, or otherwise interact manually.',
       )
       sections.push(
-        'Prefer the snapshot-first browser flow: inspect with browser_snapshot or browser_get_page(format=snapshot), act with ref-based browser_click/browser_type when possible, then verify with browser_wait_for, browser_inspect_element, browser_get_page, or browser_screenshot.',
-      )
-      sections.push(
-        'If the browser flow stalls, gather structured evidence before guessing again: browser_console_get, browser_network_get, browser_storage_list/get, and when needed browser_trace_start/browser_trace_stop or browser_video_start/browser_video_stop.',
+        'If computer_* tools are mounted, use them only after opening the system browser and only when they materially help the requested interaction.',
       )
     }
   }

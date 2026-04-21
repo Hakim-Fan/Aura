@@ -306,24 +306,13 @@ function describeBuiltinGroup(tool) {
     }
   }
 
-  if (tool.name.startsWith('browser_')) {
+  if (tool.name === 'system_browser_open') {
     return {
-      id: 'advanced:browser-runtime',
+      id: 'advanced:browser-interaction',
       kind: 'advanced',
-      name: 'Aura Browser Runtime',
+      name: 'Browser Interaction',
       description: tool.description,
-      keywords: ['browser', 'page', 'website', 'url', 'dom', 'screenshot', 'search', '网页', '浏览器'],
-      defaultSelected: false,
-    }
-  }
-
-  if (tool.name.startsWith('chrome_')) {
-    return {
-      id: 'advanced:chrome-automation',
-      kind: 'advanced',
-      name: 'Chrome Automation',
-      description: tool.description,
-      keywords: ['chrome', 'browser', 'tab', 'page', 'url', 'website'],
+      keywords: ['browser', 'website', 'url', 'open', 'login', 'tab', '网页', '浏览器'],
       defaultSelected: false,
     }
   }

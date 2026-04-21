@@ -392,7 +392,6 @@ export type ApprovalCategory =
   | 'shell'
   | 'file_write'
   | 'computer_use'
-  | 'chrome_automation'
 
 export type ApprovalRequest = {
   id: string
@@ -441,48 +440,21 @@ export type MemoryMode = 'summary' | 'claude-like'
 
 export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max'
 
-export type BrowserRuntimeSource =
-  | 'system-chrome'
-  | 'managed-chrome'
-  | 'custom-executable'
-
-export type BrowserSearchEngine =
-  | 'google'
-  | 'bing'
-  | 'duckduckgo'
-  | 'baidu'
-  | 'custom'
-
-export type BrowserTakeoverMode = 'ask' | 'auto-visible-on-blocker'
-
-export type BrowserSearchPreferences = {
-  engine: BrowserSearchEngine
-  customTemplate?: string
-  region?: string
-  language?: string
-  safeSearch?: 'off' | 'moderate' | 'strict'
-}
-
-export type BrowserBehaviorPreferences = {
-  acceptLanguage?: string
-  timezone?: string
-  locale?: string
-  colorScheme?: 'light' | 'dark' | 'system'
-  userAgentMode?: 'default' | 'desktop'
-}
-
-export type BrowserRuntimeSettings = {
+export type LightpandaSettings = {
   enabled: boolean
-  source: BrowserRuntimeSource
   executablePath?: string
-  managedExecutablePath?: string
-  allowChromeAutomationFallback: boolean
-  headlessByDefault: boolean
-  takeoverMode: BrowserTakeoverMode
-  persistAuraProfile: boolean
-  auraProfilePath?: string
-  search: BrowserSearchPreferences
-  behavior: BrowserBehaviorPreferences
+  maxConcurrency: number
+  timeoutSeconds: number
+}
+
+export type InteractiveBrowserSettings = {
+  enabled: boolean
+  allowComputerUse: boolean
+}
+
+export type BrowserSettings = {
+  lightpanda: LightpandaSettings
+  interactive: InteractiveBrowserSettings
 }
 
 export type WebSearchProviderId = 'auto' | 'tavily' | 'brave' | 'duckduckgo'
@@ -530,7 +502,6 @@ export type WebResearchSettings = {
   deepSearchLimit: number
   deepFetchLimit: number
   deepMaxChars: number
-  allowBrowserFallback: boolean
 }
 
 export type WebToolsSettings = {
@@ -539,50 +510,13 @@ export type WebToolsSettings = {
   research: WebResearchSettings
 }
 
-export type ChromeImportSource = {
-  id: string
-  profileName: string
-  profilePath: string
-  isDefault: boolean
-}
-
-export type ImportedChromeSite = {
-  id: string
-  domain: string
-  sourceProfileId: string
-  importedAt: number
-  lastRefreshedAt?: number
-  cookieCount: number
-  notes?: string
-}
-
-export type BrowserRuntimeStatusRecord = {
-  systemChromeDetected: boolean
-  systemChromePath?: string
-  managedChromeInstalled: boolean
-  managedChromePath?: string
-  managedChromeSizeBytes?: number
-  customExecutablePath?: string
-  customExecutableValid?: boolean
+export type LightpandaRuntimeStatusRecord = {
+  detected: boolean
+  executablePath?: string
+  version?: string
+  valid: boolean
   lastCheckedAt: number
-}
-
-export type ManagedBrowserInstallStage =
-  | 'preparing'
-  | 'resolving-download'
-  | 'downloading'
-  | 'extracting'
-  | 'verifying'
-  | 'cancelled'
-  | 'completed'
-  | 'failed'
-
-export type ManagedBrowserInstallProgress = {
-  stage: ManagedBrowserInstallStage
-  message: string
-  progress?: number
-  downloadedBytes?: number
-  totalBytes?: number
+  error?: string
 }
 
 export type AgentSettings = {
@@ -606,18 +540,13 @@ export type AgentSettings = {
   providerFailureRecoveryMaxAttempts: number
   enableMultiAgent: boolean
   enableComputerUse: boolean
-  enableChromeAutomation: boolean
   autoApproveShell: boolean
   autoApproveFileWrite: boolean
   autoApproveComputerUse: boolean
-  autoApproveChromeAutomation: boolean
   enabledSkillIds: string[]
   enabledPluginIds: string[]
-  browser: BrowserRuntimeSettings
+  browser: BrowserSettings
   web: WebToolsSettings
-  chromeImportSources: ChromeImportSource[]
-  importedChromeSites: ImportedChromeSite[]
-  browserRuntimeStatus?: BrowserRuntimeStatusRecord
   mcpServers: McpServerConfig[]
   sendShortcut: 'enter' | 'meta-enter'
 }

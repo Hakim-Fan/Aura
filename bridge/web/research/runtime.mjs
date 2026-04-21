@@ -393,11 +393,6 @@ function resolveResearchSettings(settings = {}, runtime = {}, args = {}) {
       200,
       8_000,
     ),
-    allowBrowserFallback:
-      (typeof args.allowBrowserFallback === 'boolean'
-        ? args.allowBrowserFallback
-        : researchSettings.allowBrowserFallback === true) &&
-      settings?.browser?.enabled !== false,
   }
 }
 
@@ -708,46 +703,7 @@ function buildFetchErrorResult(item, citationIndex, error) {
     status: 'error',
     error: normalized.message,
     errorInfo: normalized.errorInfo,
-    browserFallbackSuggested:
-      normalized.errorInfo?.code === 'WEB_FETCH_PAGE_REQUIRES_BROWSER',
   }
-}
-
-function buildBrowserFallbackPayload({
-  allowBrowserFallback,
-  query,
-  successfulResults,
-  blockedResults,
-  noResults,
-}) {
-  if (!allowBrowserFallback) {
-    return {}
-  }
-
-  if (noResults) {
-    return {
-      browserFallbackSuggested: true,
-      requireBrowserInteraction: true,
-      browserFallbackStrategy: 'browser_search',
-      browserFallbackReason: 'web-search-no-results',
-      browserFallbackQuery: query,
-    }
-  }
-
-  if (blockedResults.length > 0 && successfulResults.length === 0) {
-    return {
-      browserFallbackSuggested: true,
-      requireBrowserInteraction: true,
-      browserFallbackStrategy: 'browser_open',
-      browserFallbackReason: 'page-requires-browser',
-      browserFallbackTargets: blockedResults
-        .map(result => result?.url)
-        .filter(Boolean)
-        .slice(0, 3),
-    }
-  }
-
-  return {}
 }
 
 export async function runWebResearch(args, runtime = {}) {
@@ -792,13 +748,6 @@ export async function runWebResearch(args, runtime = {}) {
       errorTotal: 0,
       sourceDiversity: 0,
       tookMs: Date.now() - startedAt,
-      ...buildBrowserFallbackPayload({
-        allowBrowserFallback: resolved.allowBrowserFallback,
-        query: searchResult.query,
-        successfulResults: [],
-        blockedResults: [],
-        noResults: true,
-      }),
     }
   }
 
@@ -864,9 +813,6 @@ export async function runWebResearch(args, runtime = {}) {
     const status = typeof result?.status === 'string' ? result.status : ''
     return status === 'success' || status.startsWith('provider_content')
   })
-  const blockedResults = researchedResults.filter(
-    result => result?.errorInfo?.code === 'WEB_FETCH_PAGE_REQUIRES_BROWSER',
-  )
   const usedSearchContentTotal = researchedResults.filter(result => result?.providerContentUsed === true).length
   const sourceDiversity = unique(results.map(result => extractHostname(result?.url || ''))).length
   const crossSourceInsights = buildCrossSourceInsights(successfulResults)
@@ -897,12 +843,5 @@ export async function runWebResearch(args, runtime = {}) {
     results,
     total: results.length,
     tookMs: Date.now() - startedAt,
-    ...buildBrowserFallbackPayload({
-      allowBrowserFallback: resolved.allowBrowserFallback,
-      query: searchResult.query,
-      successfulResults,
-      blockedResults,
-      noResults: false,
-    }),
   }
 }

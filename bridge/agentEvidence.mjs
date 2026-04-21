@@ -8,23 +8,6 @@ const READ_EFFECT_TOOLS = new Set([
   'web_research',
   'web_search',
   'web_fetch',
-  'browser_search',
-  'browser_get_page',
-  'browser_snapshot',
-  'browser_inspect_element',
-  'browser_screenshot',
-  'browser_wait_for',
-  'browser_list_sessions',
-  'browser_storage_list',
-  'browser_storage_get',
-  'browser_storage_set',
-  'browser_storage_clear',
-  'browser_console_get',
-  'browser_network_get',
-  'browser_trace_start',
-  'browser_trace_stop',
-  'browser_video_start',
-  'browser_video_stop',
   'computer_capture_screen',
   'computer_list_apps',
   'computer_get_frontmost_app',
@@ -41,10 +24,6 @@ const WRITE_EFFECT_TOOLS = new Set([
   'aura_import_plugin',
   'aura_upsert_mcp_server',
   'aura_remove_mcp_server',
-  'browser_storage_export_state',
-  'browser_storage_import_state',
-  'browser_trace_stop',
-  'browser_video_stop',
 ])
 
 const EXECUTE_EFFECT_TOOLS = new Set([
@@ -55,52 +34,11 @@ const EXECUTE_EFFECT_TOOLS = new Set([
 ])
 
 const BROWSER_EFFECT_TOOLS = new Set([
-  'browser_open',
-  'browser_click',
-  'browser_type',
-  'browser_takeover_visible',
-  'browser_resume_after_takeover',
-  'browser_get_page',
-  'browser_snapshot',
-  'browser_inspect_element',
-  'browser_run_javascript',
-  'browser_screenshot',
-  'browser_wait_for',
-  'browser_search',
-  'browser_list_sessions',
-  'browser_set_active_session',
-  'browser_close_session',
-  'browser_storage_list',
-  'browser_storage_get',
-  'browser_storage_set',
-  'browser_storage_clear',
-  'browser_storage_export_state',
-  'browser_storage_import_state',
-  'browser_console_get',
-  'browser_network_get',
-  'browser_trace_start',
-  'browser_trace_stop',
-  'browser_video_start',
-  'browser_video_stop',
+  'system_browser_open',
 ])
 
 const PAGE_STATE_TOOLS = new Set([
-  'browser_get_page',
-  'browser_snapshot',
-  'browser_inspect_element',
-  'browser_run_javascript',
-  'browser_wait_for',
-  'browser_screenshot',
-  'browser_storage_list',
-  'browser_storage_get',
-  'browser_storage_set',
-  'browser_storage_clear',
-  'browser_console_get',
-  'browser_network_get',
-  'browser_trace_start',
-  'browser_trace_stop',
-  'browser_video_start',
-  'browser_video_stop',
+  'computer_capture_screen',
 ])
 
 const TEST_COMMAND_PATTERN =
@@ -185,10 +123,6 @@ function collectProducedEvidence(event, effectTypes) {
       if (TEST_COMMAND_PATTERN.test(String(event?.input || ''))) {
         producedEvidence.push('test_pass')
       }
-    }
-
-    if (name === 'browser_search') {
-      producedEvidence.push('search_result')
     }
 
     if (name === 'web_search') {

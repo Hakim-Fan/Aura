@@ -1,4 +1,9 @@
 import { createStructuredError } from '../../runtimeErrors.mjs'
+import {
+  getLightpandaProviderId,
+  isLightpandaEnabled,
+  runLightpandaFetch,
+} from '../../lightpandaRuntime.mjs'
 import { guardedFetch, readResponseText } from '../net/guardedFetch.mjs'
 import { normalizeCacheKey, readCache, writeCache } from '../shared/cache.mjs'
 import {
@@ -308,7 +313,7 @@ function ensureSupportedFetchContentType(contentType) {
     category: 'unsupported',
     code: 'WEB_FETCH_UNSUPPORTED_CONTENT',
     detail: `Unsupported content-type: ${contentType || 'unknown'}`,
-    suggestedAction: '请改抓取 HTML / 文本页面，或改用浏览器工具处理需要交互的资源。',
+    suggestedAction: '请改抓取 HTML / 文本页面；如果目标资源必须人工处理，请显式要求打开系统浏览器。',
   })
 }
 
@@ -480,6 +485,90 @@ function buildJinaFetchPayload({ url, finalUrl, mode, maxChars, markdown, plain,
   }
 }
 
+function buildLightpandaFetchPayload({ url, finalUrl, mode, maxChars, markdown, plain, title }) {
+  const site = extractHostname(finalUrl || url) || undefined
+  const effectiveTitle = title || site || url
+  const excerptSource = collapseWhitespace(plain || markdown)
+  const excerpt = clipText(excerptSource, 320) || undefined
+  const providerId = getLightpandaProviderId()
+
+  if (mode === 'metadata') {
+    const sourceAssessment = buildSourceAssessment({
+      site,
+      url: finalUrl || url,
+      author: undefined,
+      publishedAt: undefined,
+      wordCount: 0,
+    })
+    return {
+      url,
+      finalUrl,
+      provider: providerId,
+      title: effectiveTitle,
+      site,
+      excerpt,
+      contentFormat: 'metadata',
+      publishedAt: undefined,
+      author: undefined,
+      sourceAssessment,
+      riskFlags: buildRiskFlags({
+        sourceAssessment,
+        publishedAt: undefined,
+        evidenceBlocks: [],
+        content: '',
+        excerpt,
+      }),
+      evidenceBlocks: [],
+      tookMs: 0,
+    }
+  }
+
+  const contentLimit = Math.max(400, Math.min(20_000, Number(maxChars) || DEFAULT_FETCH_MAX_CHARS))
+  const content =
+    mode === 'summary'
+      ? clipText(excerptSource, Math.min(contentLimit, 1_200))
+      : clipText(markdown || plain, contentLimit)
+  const wordCount = countWords(content)
+  const evidenceBlocks = buildEvidenceBlocks({
+    title: effectiveTitle,
+    excerpt,
+    content: plain || content,
+  })
+  const sourceAssessment = buildSourceAssessment({
+    site,
+    url: finalUrl || url,
+    author: undefined,
+    publishedAt: undefined,
+    wordCount,
+  })
+  const riskFlags = buildRiskFlags({
+    sourceAssessment,
+    publishedAt: undefined,
+    evidenceBlocks,
+    content: plain || content,
+    excerpt,
+  })
+
+  return {
+    url,
+    finalUrl,
+    provider: providerId,
+    title: effectiveTitle,
+    site,
+    excerpt,
+    content,
+    contentFormat: mode === 'summary' ? 'text' : 'markdown',
+    publishedAt: undefined,
+    author: undefined,
+    wordCount,
+    sourceAssessment,
+    riskFlags,
+    keyPoints: evidenceBlocks.map(entry => entry.claim).slice(0, 3),
+    evidenceBlocks,
+    tookMs: 0,
+  }
+}
+
 function resolveFetchSettings(settings) {
   const fetchSettings = settings?.web?.fetch || {}
   return {
@@ -531,6 +620,59 @@ function writeFetchCacheEntry(cacheKey, value, ttlMs) {
   writePersistentCache(FETCH_CACHE_NAMESPACE, cacheKey, value, ttlMs, {
     maxEntries: FETCH_CACHE_MAX_ENTRIES,
   })
+}
+
+async function tryLightpandaFallback({
+  normalizedUrl,
+  finalUrl,
+  mode,
+  maxChars,
+  startedAt,
+  cacheKey,
+  cacheTtlMs,
+  runtime,
+}) {
+  if (!isLightpandaEnabled(runtime.settings || {})) {
+    return null
+  }
+
+  try {
+    const lightpandaResult = await runLightpandaFetch(
+      {
+        url: finalUrl,
+        mode,
+      },
+      runtime,
+    )
+    const result = {
+      ...buildLightpandaFetchPayload({
+        url: normalizedUrl,
+        finalUrl,
+        mode,
+        maxChars,
+        markdown: lightpandaResult.markdown,
+        plain: lightpandaResult.plain,
+        title: lightpandaResult.title,
+      }),
+      tookMs: Date.now() - startedAt,
+    }
+    writeFetchCacheEntry(cacheKey, result, cacheTtlMs)
+    return {
+      result: {
+        ...result,
+        cache: {
+          hit: false,
+          layer: 'miss',
+        },
+      },
+      error: null,
+    }
+  } catch (error) {
+    return {
+      result: null,
+      error,
+    }
+  }
 }
 
 async function tryJinaFallback({
@@ -597,7 +739,7 @@ export async function runWebFetch(args, runtime = {}) {
       source: 'tool',
       category: 'unsupported',
       code: 'WEB_FETCH_DISABLED',
-      suggestedAction: '请在设置中重新启用 Web Fetch，或改用浏览器工具。',
+      suggestedAction: '请在设置中重新启用 Web Fetch，或改为显式网页操作任务。',
     })
   }
 
@@ -653,6 +795,7 @@ export async function runWebFetch(args, runtime = {}) {
       maxChars,
       readability: fetchSettings.readability,
       jina: buildCloudFetchCacheHint(runtime, jinaAccess),
+      lightpanda: isLightpandaEnabled(settings),
     }),
   )
 
@@ -691,13 +834,43 @@ export async function runWebFetch(args, runtime = {}) {
   )
 
   if ([401, 403, 429].includes(response.status)) {
+    const lightpandaFallback = await tryLightpandaFallback({
+      normalizedUrl,
+      finalUrl: response.url || normalizedUrl,
+      mode,
+      maxChars,
+      startedAt,
+      cacheKey,
+      cacheTtlMs,
+      runtime,
+    })
+    if (lightpandaFallback?.result) {
+      return lightpandaFallback.result
+    }
+
+    const jinaFallback = await tryJinaFallback({
+      normalizedUrl,
+      finalUrl: response.url || normalizedUrl,
+      mode,
+      maxChars,
+      title: '',
+      startedAt,
+      cacheKey,
+      cacheTtlMs,
+      runtime,
+      fetchSettings,
+    })
+    if (jinaFallback?.result) {
+      return jinaFallback.result
+    }
+
     throw createStructuredError('网页抓取被目标站点拦截，可能需要登录、验证或浏览器环境。', {
       source: 'tool',
       category: 'unsupported',
       code: 'WEB_FETCH_PAGE_REQUIRES_BROWSER',
       status: response.status,
       detail: `HTTP ${response.status} while fetching ${normalizedUrl}`,
-      suggestedAction: '请切换到 browser_* 工具或显式要求用浏览器打开该页面。',
+      suggestedAction: '如果这是需要登录、验证码或人工处理的页面，请显式要求打开系统浏览器。',
     })
   }
   if (!response.ok) {
@@ -748,12 +921,42 @@ export async function runWebFetch(args, runtime = {}) {
 
   const browserOnly = isHtml && looksLikeBrowserOnlyPage(text, finalUrl)
   if (browserOnly) {
+    const lightpandaFallback = await tryLightpandaFallback({
+      normalizedUrl,
+      finalUrl,
+      mode,
+      maxChars,
+      startedAt,
+      cacheKey,
+      cacheTtlMs,
+      runtime,
+    })
+    if (lightpandaFallback?.result) {
+      return lightpandaFallback.result
+    }
+
+    const jinaFallback = await tryJinaFallback({
+      normalizedUrl,
+      finalUrl,
+      mode,
+      maxChars,
+      title: extractTitle(html),
+      startedAt,
+      cacheKey,
+      cacheTtlMs,
+      runtime,
+      fetchSettings,
+    })
+    if (jinaFallback?.result) {
+      return jinaFallback.result
+    }
+
     throw createStructuredError('网页抓取检测到该页面需要浏览器交互后才能继续。', {
       source: 'tool',
       category: 'unsupported',
       code: 'WEB_FETCH_PAGE_REQUIRES_BROWSER',
       detail: `Page appears to require interactive browser access: ${finalUrl}`,
-      suggestedAction: '请改用 browser_open / browser_* 工具继续，或明确要求用浏览器打开。',
+      suggestedAction: '如果这是需要人工处理的页面，请明确要求打开系统浏览器继续。',
     })
   }
 
@@ -776,6 +979,20 @@ export async function runWebFetch(args, runtime = {}) {
       localContentThin,
     })
   ) {
+    const lightpandaFallback = await tryLightpandaFallback({
+      normalizedUrl,
+      finalUrl,
+      mode,
+      maxChars,
+      startedAt,
+      cacheKey,
+      cacheTtlMs,
+      runtime,
+    })
+    if (lightpandaFallback?.result) {
+      return lightpandaFallback.result
+    }
+
     const jinaFallback = await tryJinaFallback({
       normalizedUrl,
       finalUrl,

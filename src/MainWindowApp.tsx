@@ -589,8 +589,6 @@ function approvalCategoryLabel(category?: string) {
       return '文件写入'
     case 'computer_use':
       return 'Computer Use'
-    case 'chrome_automation':
-      return 'Chrome 自动化'
     default:
       return '工具执行'
   }

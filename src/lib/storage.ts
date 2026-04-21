@@ -1,10 +1,7 @@
 import type {
   AgentArchitectureMode,
   AgentSettings,
-  BrowserBehaviorPreferences,
-  BrowserRuntimeSettings,
-  BrowserRuntimeStatusRecord,
-  BrowserSearchPreferences,
+  BrowserSettings,
   WebFetchProviderSettings,
   WebFetchSettings,
   WebResearchSettings,
@@ -14,11 +11,11 @@ import type {
   CapabilityOverrideMode,
   CapabilityUsageSnapshot,
   ChatMessageVariant,
-  ChromeImportSource,
   CompletionState,
   ExecutionMode,
   ExecutionEvidenceSummary,
-  ImportedChromeSite,
+  InteractiveBrowserSettings,
+  LightpandaSettings,
   MemoryMode,
   ProjectCapabilityOverrides,
   ResolvedAgentCapabilities,
@@ -98,35 +95,26 @@ function defaultProfiles(): ProviderProfile[] {
   ]
 }
 
-function defaultBrowserSearchPreferences(): BrowserSearchPreferences {
+function defaultLightpandaSettings(): LightpandaSettings {
   return {
-    engine: 'google',
-    region: 'auto',
-    language: 'auto',
-    safeSearch: 'moderate',
+    enabled: false,
+    executablePath: '',
+    maxConcurrency: 4,
+    timeoutSeconds: 12,
   }
 }
 
-function defaultBrowserBehaviorPreferences(): BrowserBehaviorPreferences {
-  return {
-    acceptLanguage: 'auto',
-    timezone: 'system',
-    locale: 'system',
-    colorScheme: 'system',
-    userAgentMode: 'default',
-  }
-}
-
-function defaultBrowserRuntimeSettings(): BrowserRuntimeSettings {
+function defaultInteractiveBrowserSettings(): InteractiveBrowserSettings {
   return {
     enabled: true,
-    source: 'system-chrome',
-    allowChromeAutomationFallback: false,
-    headlessByDefault: true,
-    takeoverMode: 'ask',
-    persistAuraProfile: true,
-    search: defaultBrowserSearchPreferences(),
-    behavior: defaultBrowserBehaviorPreferences(),
+    allowComputerUse: true,
+  }
+}
+
+function defaultBrowserSettings(): BrowserSettings {
+  return {
+    lightpanda: defaultLightpandaSettings(),
+    interactive: defaultInteractiveBrowserSettings(),
   }
 }
 
@@ -180,7 +168,6 @@ function defaultWebResearchSettings(): WebResearchSettings {
     deepSearchLimit: 8,
     deepFetchLimit: 5,
     deepMaxChars: 5_200,
-    allowBrowserFallback: false,
   }
 }
 
@@ -213,17 +200,13 @@ export const defaultSettings: AgentSettings = {
   providerFailureRecoveryMaxAttempts: 3,
   enableMultiAgent: true,
   enableComputerUse: true,
-  enableChromeAutomation: true,
   autoApproveShell: false,
   autoApproveFileWrite: false,
   autoApproveComputerUse: false,
-  autoApproveChromeAutomation: false,
   enabledSkillIds: [],
   enabledPluginIds: [],
-  browser: defaultBrowserRuntimeSettings(),
+  browser: defaultBrowserSettings(),
   web: defaultWebToolsSettings(),
-  chromeImportSources: [],
-  importedChromeSites: [],
   mcpServers: [],
   sendShortcut: 'meta-enter',
 }
@@ -964,6 +947,7 @@ function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
         : '',
     analysisModel:
       typeof settings.analysisModel === 'string' ? settings.analysisModel : '',
+    browser: normalizeBrowserSettings(settings.browser),
     web: normalizeWebToolsSettings(settings.web),
     mcpServers: normalizeMcpServers(settings.mcpServers),
   }
@@ -1105,7 +1089,6 @@ function normalizeWebResearchSettings(value: unknown): WebResearchSettings {
       800,
       20_000,
     ),
-    allowBrowserFallback: entry.allowBrowserFallback === true,
   }
 }
 
@@ -1123,232 +1106,56 @@ function normalizeWebToolsSettings(value: unknown): WebToolsSettings {
   }
 }
 
-function normalizeBrowserSearchPreferences(value: unknown): BrowserSearchPreferences {
-  const defaults = defaultBrowserSearchPreferences()
+function normalizeLightpandaSettings(value: unknown): LightpandaSettings {
+  const defaults = defaultLightpandaSettings()
   if (!value || typeof value !== 'object') {
     return defaults
   }
 
-  const entry = value as Partial<BrowserSearchPreferences>
+  const entry = value as Partial<LightpandaSettings>
   return {
-    engine:
-      entry.engine === 'google' ||
-      entry.engine === 'bing' ||
-      entry.engine === 'duckduckgo' ||
-      entry.engine === 'baidu' ||
-      entry.engine === 'custom'
-        ? entry.engine
-        : defaults.engine,
-    customTemplate:
-      typeof entry.customTemplate === 'string' && entry.customTemplate.trim()
-        ? entry.customTemplate.trim()
-        : undefined,
-    region:
-      typeof entry.region === 'string' && entry.region.trim()
-        ? entry.region.trim()
-        : defaults.region,
-    language:
-      typeof entry.language === 'string' && entry.language.trim()
-        ? entry.language.trim()
-        : defaults.language,
-    safeSearch:
-      entry.safeSearch === 'off' ||
-      entry.safeSearch === 'strict' ||
-      entry.safeSearch === 'moderate'
-        ? entry.safeSearch
-        : defaults.safeSearch,
+    enabled: entry.enabled === true,
+    executablePath:
+      typeof entry.executablePath === 'string' ? entry.executablePath.trim() : defaults.executablePath,
+    maxConcurrency: clampIntegerSetting(entry.maxConcurrency, defaults.maxConcurrency, 1, 12),
+    timeoutSeconds: clampIntegerSetting(entry.timeoutSeconds, defaults.timeoutSeconds, 3, 90),
   }
 }
 
-function normalizeBrowserBehaviorPreferences(value: unknown): BrowserBehaviorPreferences {
-  const defaults = defaultBrowserBehaviorPreferences()
+function normalizeInteractiveBrowserSettings(value: unknown): InteractiveBrowserSettings {
+  const defaults = defaultInteractiveBrowserSettings()
   if (!value || typeof value !== 'object') {
     return defaults
   }
 
-  const entry = value as Partial<BrowserBehaviorPreferences>
-  return {
-    acceptLanguage:
-      typeof entry.acceptLanguage === 'string' && entry.acceptLanguage.trim()
-        ? entry.acceptLanguage.trim()
-        : defaults.acceptLanguage,
-    timezone:
-      typeof entry.timezone === 'string' && entry.timezone.trim()
-        ? entry.timezone.trim()
-        : defaults.timezone,
-    locale:
-      typeof entry.locale === 'string' && entry.locale.trim()
-        ? entry.locale.trim()
-        : defaults.locale,
-    colorScheme:
-      entry.colorScheme === 'light' ||
-      entry.colorScheme === 'dark' ||
-      entry.colorScheme === 'system'
-        ? entry.colorScheme
-        : defaults.colorScheme,
-    userAgentMode:
-      entry.userAgentMode === 'desktop' || entry.userAgentMode === 'default'
-        ? entry.userAgentMode
-        : defaults.userAgentMode,
-  }
-}
-
-function normalizeBrowserRuntimeSettings(value: unknown): BrowserRuntimeSettings {
-  const defaults = defaultBrowserRuntimeSettings()
-  if (!value || typeof value !== 'object') {
-    return defaults
-  }
-
-  const entry = value as Partial<BrowserRuntimeSettings>
+  const entry = value as Partial<InteractiveBrowserSettings>
   return {
     enabled: entry.enabled !== false,
-    source:
-      entry.source === 'managed-chrome' ||
-      entry.source === 'custom-executable' ||
-      entry.source === 'system-chrome'
-        ? entry.source
-        : defaults.source,
-    executablePath:
-      typeof entry.executablePath === 'string' && entry.executablePath.trim()
-        ? entry.executablePath.trim()
-        : undefined,
-    managedExecutablePath:
-      typeof entry.managedExecutablePath === 'string' && entry.managedExecutablePath.trim()
-        ? entry.managedExecutablePath.trim()
-        : undefined,
-    allowChromeAutomationFallback: entry.allowChromeAutomationFallback === true,
-    headlessByDefault: entry.headlessByDefault !== false,
-    takeoverMode:
-      entry.takeoverMode === 'auto-visible-on-blocker' ? entry.takeoverMode : defaults.takeoverMode,
-    persistAuraProfile: entry.persistAuraProfile !== false,
-    auraProfilePath:
-      typeof entry.auraProfilePath === 'string' && entry.auraProfilePath.trim()
-        ? entry.auraProfilePath.trim()
-        : undefined,
-    search: normalizeBrowserSearchPreferences(entry.search),
-    behavior: normalizeBrowserBehaviorPreferences(entry.behavior),
+    allowComputerUse: entry.allowComputerUse !== false,
   }
 }
 
-function normalizeChromeImportSources(value: unknown): ChromeImportSource[] {
-  if (!Array.isArray(value)) {
-    return []
-  }
-
-  return value
-    .map((entry, index) => {
-      if (!entry || typeof entry !== 'object') {
-        return null
-      }
-
-      const source = entry as Partial<ChromeImportSource>
-      if (
-        typeof source.profileName !== 'string' ||
-        !source.profileName.trim() ||
-        typeof source.profilePath !== 'string' ||
-        !source.profilePath.trim()
-      ) {
-        return null
-      }
-
-      return {
-        id:
-          typeof source.id === 'string' && source.id.trim()
-            ? source.id
-            : `chrome-import-${index}-${Math.random().toString(36).slice(2, 8)}`,
-        profileName: source.profileName.trim(),
-        profilePath: source.profilePath.trim(),
-        isDefault: source.isDefault === true,
-      } satisfies ChromeImportSource
-    })
-    .filter((entry): entry is ChromeImportSource => Boolean(entry))
-}
-
-function normalizeImportedChromeSites(value: unknown): ImportedChromeSite[] {
-  if (!Array.isArray(value)) {
-    return []
-  }
-
-  return value
-    .map((entry, index) => {
-      if (!entry || typeof entry !== 'object') {
-        return null
-      }
-
-      const site = entry as Partial<ImportedChromeSite>
-      if (
-        typeof site.domain !== 'string' ||
-        !site.domain.trim() ||
-        typeof site.sourceProfileId !== 'string' ||
-        !site.sourceProfileId.trim()
-      ) {
-        return null
-      }
-
-      const normalized: ImportedChromeSite = {
-        id:
-          typeof site.id === 'string' && site.id.trim()
-            ? site.id
-            : `imported-site-${index}-${Math.random().toString(36).slice(2, 8)}`,
-        domain: site.domain.trim(),
-        sourceProfileId: site.sourceProfileId.trim(),
-        importedAt:
-          typeof site.importedAt === 'number' && Number.isFinite(site.importedAt)
-            ? site.importedAt
-            : Date.now(),
-        cookieCount:
-          typeof site.cookieCount === 'number' && Number.isFinite(site.cookieCount)
-            ? Math.max(0, Math.round(site.cookieCount))
-            : 0,
-      }
-
-      if (typeof site.lastRefreshedAt === 'number' && Number.isFinite(site.lastRefreshedAt)) {
-        normalized.lastRefreshedAt = site.lastRefreshedAt
-      }
-      if (typeof site.notes === 'string' && site.notes.trim()) {
-        normalized.notes = site.notes.trim()
-      }
-
-      return normalized
-    })
-    .filter((entry): entry is ImportedChromeSite => Boolean(entry))
-}
-
-function normalizeBrowserRuntimeStatusRecord(
-  value: unknown,
-): BrowserRuntimeStatusRecord | undefined {
+function normalizeBrowserSettings(value: unknown): BrowserSettings {
+  const defaults = defaultBrowserSettings()
   if (!value || typeof value !== 'object') {
-    return undefined
+    return defaults
   }
 
-  const status = value as Partial<BrowserRuntimeStatusRecord>
+  const entry = value as Partial<BrowserSettings> & {
+    lightpanda?: unknown
+    interactive?: unknown
+  }
+  const hasNewShape =
+    Object.prototype.hasOwnProperty.call(entry, 'lightpanda') ||
+    Object.prototype.hasOwnProperty.call(entry, 'interactive')
+
+  if (!hasNewShape) {
+    return defaults
+  }
+
   return {
-    systemChromeDetected: status.systemChromeDetected === true,
-    systemChromePath:
-      typeof status.systemChromePath === 'string' && status.systemChromePath.trim()
-        ? status.systemChromePath.trim()
-        : undefined,
-    managedChromeInstalled: status.managedChromeInstalled === true,
-    managedChromePath:
-      typeof status.managedChromePath === 'string' && status.managedChromePath.trim()
-        ? status.managedChromePath.trim()
-        : undefined,
-    managedChromeSizeBytes:
-      typeof status.managedChromeSizeBytes === 'number' && Number.isFinite(status.managedChromeSizeBytes)
-        ? status.managedChromeSizeBytes
-        : undefined,
-    customExecutablePath:
-      typeof status.customExecutablePath === 'string' && status.customExecutablePath.trim()
-        ? status.customExecutablePath.trim()
-        : undefined,
-    customExecutableValid:
-      typeof status.customExecutableValid === 'boolean'
-        ? status.customExecutableValid
-        : undefined,
-    lastCheckedAt:
-      typeof status.lastCheckedAt === 'number' && Number.isFinite(status.lastCheckedAt)
-        ? status.lastCheckedAt
-        : Date.now(),
+    lightpanda: normalizeLightpandaSettings(entry.lightpanda),
+    interactive: normalizeInteractiveBrowserSettings(entry.interactive),
   }
 }
 
@@ -1386,11 +1193,8 @@ function parseSettings(raw: string | null): AgentSettings {
       providerFailureRecoveryMaxAttempts: normalizeProviderFailureRecoveryMaxAttempts(
         parsed.providerFailureRecoveryMaxAttempts,
       ),
-      browser: normalizeBrowserRuntimeSettings(parsed.browser),
+      browser: normalizeBrowserSettings(parsed.browser),
       web: normalizeWebToolsSettings(parsed.web),
-      chromeImportSources: normalizeChromeImportSources(parsed.chromeImportSources),
-      importedChromeSites: normalizeImportedChromeSites(parsed.importedChromeSites),
-      browserRuntimeStatus: normalizeBrowserRuntimeStatusRecord(parsed.browserRuntimeStatus),
       mcpServers: normalizeMcpServers(parsed.mcpServers),
     })
   } catch {

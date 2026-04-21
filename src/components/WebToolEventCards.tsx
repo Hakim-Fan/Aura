@@ -251,10 +251,6 @@ export function WebResearchEventCard({
     typeof output.usedSearchContentTotal === 'number' ? output.usedSearchContentTotal : 0
   const sourceDiversity = typeof output.sourceDiversity === 'number' ? output.sourceDiversity : 0
   const tookMs = typeof output.tookMs === 'number' ? output.tookMs : 0
-  const browserFallbackSuggested = output.browserFallbackSuggested === true
-  const browserFallbackStrategy = asText(output.browserFallbackStrategy)
-  const browserFallbackReason = asText(output.browserFallbackReason)
-  const browserFallbackTargets = asTextArray(output.browserFallbackTargets)
   const crossSourceInsights = isRecord(output.crossSourceInsights)
     ? output.crossSourceInsights
     : null
@@ -274,27 +270,6 @@ export function WebResearchEventCard({
         <MetaPill label="Domains" value={sourceDiversity || undefined} />
         {tookMs > 0 ? <MetaPill label="Time" value={`${tookMs}ms`} /> : null}
       </div>
-
-      {browserFallbackSuggested ? (
-        <div className="rounded-lg border border-amber-200 bg-[rgba(255,248,235,0.88)] px-3 py-2 text-[12px] leading-relaxed text-amber-800">
-          <div>
-            当前研究结果提示可能需要浏览器兜底
-            {browserFallbackStrategy ? ` · ${browserFallbackStrategy}` : ''}
-          </div>
-          {browserFallbackReason ? (
-            <div className="mt-1 text-[11px] text-amber-700/85">{browserFallbackReason}</div>
-          ) : null}
-          {browserFallbackTargets.length > 0 ? (
-            <div className="mt-2 flex flex-col gap-1">
-              {browserFallbackTargets.map(target => (
-                <div key={target} className="truncate text-[11px] text-amber-900/80">
-                  {target}
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
 
       {crossSourceInsights ? (
         <div className="rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/70 px-3 py-2">

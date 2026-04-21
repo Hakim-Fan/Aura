@@ -2,7 +2,6 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { buildBrowserTools } from './browserRuntime.mjs'
 import { createStructuredError } from './runtimeErrors.mjs'
 import { resolveWorkspacePath, stringifyOutput, truncate } from './utils.mjs'
 
@@ -242,17 +241,17 @@ function buildComputerTools({ settings, context }) {
   ]
 }
 
-function buildChromeTools({ settings }) {
-  if (!settings.enableChromeAutomation) {
+function buildSystemBrowserTools({ settings, context }) {
+  if (settings?.browser?.interactive?.enabled === false) {
     return []
   }
 
   return [
     {
       source: 'builtin',
-      name: 'chrome_open_url',
-      approvalCategory: 'chrome_automation',
-      description: 'Open a URL in Google Chrome and bring it to the front.',
+      name: 'system_browser_open',
+      approvalCategory: 'computer_use',
+      description: 'Open a URL in the system default browser for explicit interactive web tasks.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -263,66 +262,46 @@ function buildChromeTools({ settings }) {
         },
         required: ['url'],
       },
-      async run(args) {
-        ensureMacOs('Chrome automation')
-        const url = escapeAppleScriptString(args.url)
-        await runAppleScript([
-          'tell application "Google Chrome"',
-          'activate',
-          `open location "${url}"`,
-          'end tell',
-        ], 'Chrome automation')
-        return `Opened ${args.url} in Google Chrome.`
-      },
-    },
-    {
-      source: 'builtin',
-      name: 'chrome_get_active_tab',
-      approvalCategory: 'chrome_automation',
-      description: 'Read the title and URL of the active Google Chrome tab.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-      },
-      async run() {
-        ensureMacOs('Chrome automation')
-        const result = await runAppleScript([
-          'tell application "Google Chrome"',
-          'set tabTitle to title of active tab of front window',
-          'set tabUrl to URL of active tab of front window',
-          'return tabTitle & linefeed & tabUrl',
-          'end tell',
-        ], 'Chrome automation')
-        const [title = '', url = ''] = result.split('\n')
-        return `Title: ${title}\nURL: ${url}`
-      },
-    },
-    {
-      source: 'builtin',
-      name: 'chrome_run_javascript',
-      approvalCategory: 'chrome_automation',
-      description:
-        'Execute JavaScript in the active tab of the frontmost Google Chrome window.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          script: {
-            type: 'string',
-            description: 'JavaScript source to evaluate in the active tab.',
-          },
-        },
-        required: ['script'],
-      },
-      async run(args) {
-        ensureMacOs('Chrome automation')
-        const script = escapeAppleScriptString(args.script)
-        const result = await runAppleScript([
-          'tell application "Google Chrome"',
-          `set jsResult to execute active tab of front window javascript "${script}"`,
-          'return jsResult',
-          'end tell',
-        ], 'Chrome automation')
-        return result || '(javascript executed with empty result)'
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+
+        let normalizedUrl
+        try {
+          normalizedUrl = new URL(String(args.url || '').trim()).toString()
+        } catch {
+          throw createStructuredError('系统浏览器打开失败，URL 无效。', {
+            source: 'tool',
+            category: 'invalid_input',
+            code: 'SYSTEM_BROWSER_INVALID_URL',
+            suggestedAction: '请提供包含协议头的完整网址，例如 https://example.com。',
+          })
+        }
+
+        const command =
+          process.platform === 'darwin'
+            ? { file: 'open', args: [normalizedUrl] }
+            : process.platform === 'win32'
+              ? { file: 'cmd', args: ['/c', 'start', '', normalizedUrl] }
+              : { file: 'xdg-open', args: [normalizedUrl] }
+
+        try {
+          await execFileAsync(command.file, command.args, {
+            cwd: context.cwd,
+            signal: runtime.signal,
+            timeout: 10_000,
+          })
+        } catch (error) {
+          throw createStructuredError('无法打开系统浏览器。', {
+            source: 'tool',
+            category: 'execution_failed',
+            code: 'SYSTEM_BROWSER_OPEN_FAILED',
+            detail: error instanceof Error ? error.message : String(error),
+            suggestedAction: '请确认系统默认浏览器可正常启动后再试。',
+            retryable: true,
+          })
+        }
+
+        return `Opened ${normalizedUrl} in the system browser.`
       },
     },
   ]
@@ -431,8 +410,7 @@ function buildMultiAgentTools({
 export function createAdvancedTools(options) {
   return [
     ...buildMultiAgentTools(options),
-    ...buildBrowserTools(options),
     ...buildComputerTools(options),
-    ...buildChromeTools(options),
+    ...buildSystemBrowserTools(options),
   ]
 }

@@ -146,8 +146,6 @@ type Props = {
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
   onCancelCurrentStep: () => void
   onToggleMessageActivity: (messageId: string) => void
-  onRequestBrowserTakeover: (reason: string) => void
-  onContinueBrowserTakeover: (reason: string) => void
   onStop: () => void
 }
 
@@ -1745,8 +1743,6 @@ function MessageEventCard({
   const isApproval = event.kind === 'approval' && event.status === 'awaiting_approval'
   const parsedOutput = parseJsonOutput(event.output)
   const toolName = typeof event.toolName === 'string' ? event.toolName : ''
-  const isStructuredBrowserEvent =
-    toolName.startsWith('browser_') && Boolean(parsedOutput)
   const isStructuredWebResearchEvent = toolName === 'web_research' && Boolean(parsedOutput)
   const isStructuredWebSearchEvent = toolName === 'web_search' && Boolean(parsedOutput)
   const isStructuredWebFetchEvent = toolName === 'web_fetch' && Boolean(parsedOutput)
@@ -1819,9 +1815,6 @@ function MessageEventCard({
         </div>
       </div>
       <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
-      {!isApproval && isStructuredBrowserEvent && parsedOutput ? (
-        <BrowserStructuredEventCard event={event} output={parsedOutput} onCopyText={onCopyText} />
-      ) : null}
       {!isApproval && isStructuredWebResearchEvent && parsedOutput ? (
         <WebResearchEventCard event={event} output={parsedOutput} />
       ) : null}
@@ -3206,8 +3199,6 @@ export function ChatView({
   onForceExecuteAppendedInput,
   onCancelCurrentStep,
   onToggleMessageActivity,
-  onRequestBrowserTakeover,
-  onContinueBrowserTakeover,
   onStop,
 }: Props) {
   const [inspectorOpen, setInspectorOpen] = useState(false)
@@ -3262,11 +3253,6 @@ export function ChatView({
       isRunning ? 'running' : 'idle',
     ].join(':')
   }, [isRunning, messages])
-  const browserTakeoverState = useMemo(
-    () => deriveBrowserTakeoverState(displayedToolEvents),
-    [displayedToolEvents],
-  )
-
   function isNearBottom() {
     const container = scrollRef.current
     if (!container) {
@@ -3484,14 +3470,6 @@ export function ChatView({
               </div>
             ) : (
               <div className="max-w-980px mx-auto px-8 flex flex-col gap-14">
-                {browserTakeoverState ? (
-                  <BrowserTakeoverBanner
-                    reason={browserTakeoverState.reason}
-                    state={browserTakeoverState.state}
-                    onOpenTakeover={() => onRequestBrowserTakeover(browserTakeoverState.reason)}
-                    onContinue={() => onContinueBrowserTakeover(browserTakeoverState.reason)}
-                  />
-                ) : null}
                 {messages.map(message =>
                   message.role === 'user' ? (
                     <UserMessageCard

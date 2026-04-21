@@ -2,7 +2,7 @@ export const builtinSkills = [
   {
     id: 'aura-browser-operator',
     name: 'Aura Browser Operator',
-    description: '在网页任务中优先用 Aura browser_* 工具，并按观察-操作-验证闭环推进。',
+    description: '资料任务优先走 web_* 与 Lightpanda；只有显式网页操作时才打开系统浏览器。',
   },
   {
     id: 'repair-planner',

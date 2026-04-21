@@ -168,6 +168,18 @@ struct BrowserRuntimeStatusRecord {
 }
 
 #[derive(Clone, Serialize)]
+struct LightpandaRuntimeStatusRecord {
+    detected: bool,
+    #[serde(rename = "executablePath")]
+    executable_path: Option<String>,
+    version: Option<String>,
+    valid: bool,
+    #[serde(rename = "lastCheckedAt")]
+    last_checked_at: u64,
+    error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
 struct ManagedBrowserInstallProgressPayload {
     stage: String,
     message: String,
@@ -1016,6 +1028,48 @@ fn resolve_browser_executable_path(path: &Path) -> Option<PathBuf> {
     }
 
     resolve_app_bundle_executable(path)
+}
+
+fn detect_lightpanda_path() -> Option<PathBuf> {
+    let finder = if cfg!(target_os = "windows") {
+        ("where", vec!["lightpanda"])
+    } else {
+        ("which", vec!["lightpanda"])
+    };
+
+    let output = Command::new(finder.0).args(finder.1).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let candidate = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|entry| !entry.is_empty())?;
+    resolve_browser_executable_path(Path::new(candidate))
+}
+
+fn read_lightpanda_version(executable_path: &Path) -> Option<String> {
+    let output = Command::new(executable_path)
+        .arg("--version")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Some(stdout);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return Some(stderr);
+    }
+
+    None
 }
 
 fn total_path_size(path: &Path) -> Option<u64> {
@@ -3427,6 +3481,50 @@ fn ensure_aura_home<R: Runtime>(app: tauri::AppHandle<R>) -> Result<AuraHomeStat
 }
 
 #[tauri::command]
+fn detect_lightpanda_runtime(
+    executable_path: Option<String>,
+) -> Result<LightpandaRuntimeStatusRecord, String> {
+    let requested_path = executable_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let resolved_path = match requested_path {
+        Some(path) => resolve_browser_executable_path(Path::new(path)),
+        None => detect_lightpanda_path(),
+    };
+    let version = resolved_path
+        .as_ref()
+        .and_then(|path| read_lightpanda_version(path));
+    let error = if let Some(path) = requested_path {
+        if resolved_path.is_none() {
+            Some(format!("未找到可用的 Lightpanda 可执行文件: {path}"))
+        } else if version.is_none() {
+            Some("已找到 Lightpanda，但无法读取版本信息。".to_string())
+        } else {
+            None
+        }
+    } else if resolved_path.is_none() {
+        Some("未在系统 PATH 中检测到 Lightpanda。".to_string())
+    } else if version.is_none() {
+        Some("已检测到 Lightpanda，但无法读取版本信息。".to_string())
+    } else {
+        None
+    };
+
+    Ok(LightpandaRuntimeStatusRecord {
+        detected: resolved_path.is_some(),
+        executable_path: resolved_path
+            .as_ref()
+            .map(|path| canonical_display_path(path))
+            .or_else(|| requested_path.map(String::from)),
+        version,
+        valid: resolved_path.is_some(),
+        last_checked_at: current_timestamp_ms(),
+        error,
+    })
+}
+
+#[tauri::command]
 fn detect_browser_runtime<R: Runtime>(
     app: tauri::AppHandle<R>,
     custom_executable_path: Option<String>,
@@ -4255,6 +4353,7 @@ fn main() {
             run_provider_action,
             run_mcp_action,
             ensure_aura_home,
+            detect_lightpanda_runtime,
             detect_browser_runtime,
             install_managed_browser,
             cancel_managed_browser_install,

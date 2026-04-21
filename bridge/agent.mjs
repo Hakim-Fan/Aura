@@ -15,7 +15,6 @@ import {
   inferRouteState,
   selectAgentStrategy,
 } from './agentRouting.mjs'
-import { closeHeadlessBrowserSession } from './browserRuntime.mjs'
 import { buildSkillPrompt, loadPluginTools, loadSkillCatalog } from './extensions.mjs'
 import { classifyIntent } from './intentClassifier.mjs'
 import { connectMcpTools } from './mcp.mjs'
@@ -1275,7 +1274,6 @@ export async function runRouteFirstAgent(request) {
     }
     throw enriched
   } finally {
-    await closeHeadlessBrowserSession().catch(() => {})
     await mcp.close()
   }
 }

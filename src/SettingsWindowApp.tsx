@@ -3,22 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { ask, open } from '@tauri-apps/plugin-dialog'
 import { ChevronDown, ChevronUp, FolderOpen, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { builtinPlugins, builtinSkills } from './catalog'
-import {
-  BROWSER_INSTALL_PROGRESS_EVENT,
-  cancelManagedBrowserInstall,
-  clearAuraSiteCookies,
-  detectBrowserRuntime,
-  discoverChromeImportSources,
-  getBrowserRuntimeSourceLabel,
-  importChromeSiteCookies,
-  installManagedBrowser,
-  isBrowserRuntimeSourceAvailable,
-  resetAuraBrowserProfile,
-  resetAuraSiteSessions,
-  resolveAuraBrowserProfilePath,
-  uninstallManagedBrowser,
-  validateCustomSearchTemplate,
-} from './lib/browser'
+import { detectLightpandaRuntime, resolveLightpandaExecutablePath } from './lib/browser'
 import {
   inspectMcpServer,
   type McpInspectResult,
@@ -36,8 +21,7 @@ import { ConfirmModal } from './components/ConfirmModal'
 import { broadcastSettingsUpdated, closeCurrentWindow, openMcpEditorWindow } from './lib/windows'
 import type {
   AgentSettings,
-  BrowserRuntimeSource,
-  ManagedBrowserInstallProgress,
+  LightpandaRuntimeStatusRecord,
   ProviderMode,
   ProviderProfile,
 } from './types'
@@ -88,50 +72,11 @@ type ProviderStatusState = {
   message: string
 }
 
-const browserRuntimeOptions: Array<{
-  id: BrowserRuntimeSource
-  label: string
-  description: string
-}> = [
-    {
-      id: 'system-chrome',
-      label: '系统 Chrome',
-      description: '复用本机已安装的 Chrome，但会使用 Aura 自己的 Profile。',
-    },
-    {
-      id: 'managed-chrome',
-      label: 'Aura 托管浏览器',
-      description: '支持一键安装和卸载，和系统浏览器隔离更彻底。',
-    },
-    {
-      id: 'custom-executable',
-      label: '自定义可执行文件',
-      description: '使用你指定的独立浏览器程序，仍然搭配 Aura Profile 运行。',
-    },
-  ]
-
 function formatTimestamp(value?: number) {
   if (!value) {
     return '尚未检测'
   }
   return new Date(value).toLocaleString()
-}
-
-function formatBytes(value?: number) {
-  if (!value || value <= 0) {
-    return '未知'
-  }
-
-  const units = ['B', 'KB', 'MB', 'GB']
-  let size = value
-  let unitIndex = 0
-
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024
-    unitIndex += 1
-  }
-
-  return `${size.toFixed(size >= 100 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
 }
 
 function formatTokenCount(value?: number) {
@@ -145,37 +90,6 @@ function formatTokenCount(value?: number) {
     return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`
   }
   return `${Math.round(value)}`
-}
-
-function formatProgressPercent(value?: number) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return '进行中'
-  }
-
-  return `${Math.max(0, Math.min(100, Math.round(value * 100)))}%`
-}
-
-function getManagedBrowserStageLabel(stage?: ManagedBrowserInstallProgress['stage']) {
-  switch (stage) {
-    case 'preparing':
-      return '准备环境'
-    case 'resolving-download':
-      return '获取版本'
-    case 'downloading':
-      return '下载安装包'
-    case 'extracting':
-      return '解压文件'
-    case 'verifying':
-      return '校验安装'
-    case 'cancelled':
-      return '已取消'
-    case 'completed':
-      return '安装完成'
-    case 'failed':
-      return '安装失败'
-    default:
-      return '等待开始'
-  }
 }
 
 type Props = {
@@ -194,21 +108,12 @@ export function SettingsWindowApp({ initialTab }: Props) {
   const [saveState, setSaveState] = useState<'idle' | 'saved'>('idle')
   const [providerStatus, setProviderStatus] = useState<ProviderStatusState | null>(null)
   const [browserStatus, setBrowserStatus] = useState<ProviderStatusState | null>(null)
+  const [lightpandaStatus, setLightpandaStatus] = useState<LightpandaRuntimeStatusRecord | null>(
+    null,
+  )
   const [isTestingProvider, setIsTestingProvider] = useState(false)
   const [isFetchingModels, setIsFetchingModels] = useState(false)
   const [isRefreshingBrowserRuntime, setIsRefreshingBrowserRuntime] = useState(false)
-  const [isInstallingManagedBrowser, setIsInstallingManagedBrowser] = useState(false)
-  const [isUninstallingManagedBrowser, setIsUninstallingManagedBrowser] = useState(false)
-  const [isCancellingManagedBrowserInstall, setIsCancellingManagedBrowserInstall] = useState(false)
-  const [managedBrowserInstallProgress, setManagedBrowserInstallProgress] =
-    useState<ManagedBrowserInstallProgress | null>(null)
-  const [isDiscoveringChromeProfiles, setIsDiscoveringChromeProfiles] = useState(false)
-  const [isImportingChromeSite, setIsImportingChromeSite] = useState(false)
-  const [isBrowserAdvancedOpen, setIsBrowserAdvancedOpen] = useState(false)
-  const [siteActionKey, setSiteActionKey] = useState('')
-  const [profileActionKey, setProfileActionKey] = useState('')
-  const [selectedChromeImportSourceId, setSelectedChromeImportSourceId] = useState('')
-  const [chromeImportDomainInput, setChromeImportDomainInput] = useState('')
   const [availableSkills, setAvailableSkills] = useState<AuraAsset[]>(() =>
     builtinSkills.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '', readonly: true })),
   )
@@ -271,32 +176,16 @@ export function SettingsWindowApp({ initialTab }: Props) {
     : []
 
   const browserValidationError = useMemo(() => {
-    if (
-      draftSettings.browser.search.engine === 'custom' &&
-      validateCustomSearchTemplate(draftSettings.browser.search.customTemplate || '')
-    ) {
-      return validateCustomSearchTemplate(draftSettings.browser.search.customTemplate || '')
-    }
-
-    if (
-      draftSettings.browser.enabled &&
-      draftSettings.browserRuntimeStatus &&
-      !isBrowserRuntimeSourceAvailable(
-        draftSettings.browserRuntimeStatus,
-        draftSettings.browser.source,
-      )
-    ) {
-      return `当前浏览器来源不可用：${getBrowserRuntimeSourceLabel(draftSettings.browser.source)}。请先重新检测环境，或切换到可用来源。`
+    if (draftSettings.browser.lightpanda.enabled && !lightpandaStatus?.valid) {
+      return lightpandaStatus?.error || 'Lightpanda 已启用，但当前不可用。'
     }
 
     return ''
-  }, [draftSettings.browser, draftSettings.browserRuntimeStatus])
+  }, [draftSettings.browser.lightpanda.enabled, lightpandaStatus])
 
   useEffect(() => {
     let unlistenOpenTab: (() => void) | undefined
     let unlistenSettingsUpdated: (() => void) | undefined
-    let unlistenBrowserInstallProgress: (() => void) | undefined
-
     void (async () => {
       try {
         const hydrated = await hydrateStorageFromAuraHome()
@@ -304,8 +193,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
         setSavedSettings(hydrated.settings)
         setDraftSettings(cloneSettings(hydrated.settings))
         setSelectedProviderProfileId(hydrated.settings.activeProviderProfileId)
-        await refreshBrowserRuntimeStatus(hydrated.settings, { useAsBaseline: true }).catch(() => {
-          // Keep startup resilient even if browser detection is unavailable.
+        await refreshLightpandaStatus(hydrated.settings, { useAsBaseline: true, silent: true }).catch(() => {
+          // Keep startup resilient even if Lightpanda detection is unavailable.
         })
       } catch {
         // Fall back to cached settings if Aura initialization is unavailable.
@@ -346,30 +235,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
         setSavedSettings(latest)
         setDraftSettings(cloneSettings(latest))
         setSelectedProviderProfileId(latest.activeProviderProfileId)
-        void refreshBrowserRuntimeStatus(latest, { useAsBaseline: true }).catch(() => {
-          // Ignore background browser detection refresh errors.
+        void refreshLightpandaStatus(latest, { useAsBaseline: true, silent: true }).catch(() => {
+          // Ignore background Lightpanda detection refresh errors.
         })
       })
-
-      unlistenBrowserInstallProgress = await listen<ManagedBrowserInstallProgress>(
-        BROWSER_INSTALL_PROGRESS_EVENT,
-        event => {
-          setManagedBrowserInstallProgress(event.payload)
-          if (
-            event.payload.stage === 'completed' ||
-            event.payload.stage === 'cancelled' ||
-            event.payload.stage === 'failed'
-          ) {
-            setIsCancellingManagedBrowserInstall(false)
-          }
-        },
-      )
     })()
 
     return () => {
       unlistenOpenTab?.()
       unlistenSettingsUpdated?.()
-      unlistenBrowserInstallProgress?.()
     }
   }, [])
 
@@ -389,29 +263,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
     const timer = window.setTimeout(() => setBrowserStatus(null), 2200)
     return () => window.clearTimeout(timer)
   }, [browserStatus])
-
-  useEffect(() => {
-    if (
-      managedBrowserInstallProgress?.stage !== 'completed' &&
-      managedBrowserInstallProgress?.stage !== 'cancelled'
-    ) {
-      return
-    }
-
-    const timer = window.setTimeout(() => setManagedBrowserInstallProgress(null), 1600)
-    return () => window.clearTimeout(timer)
-  }, [managedBrowserInstallProgress])
-
-  useEffect(() => {
-    if (
-      selectedChromeImportSourceId &&
-      draftSettings.chromeImportSources.some(source => source.id === selectedChromeImportSourceId)
-    ) {
-      return
-    }
-
-    setSelectedChromeImportSourceId(draftSettings.chromeImportSources[0]?.id || '')
-  }, [draftSettings.chromeImportSources, selectedChromeImportSourceId])
 
   function handleSettingsChange<K extends keyof AgentSettings>(
     key: K,
@@ -439,29 +290,14 @@ export function SettingsWindowApp({ initialTab }: Props) {
     await broadcastSettingsUpdated()
   }
 
-  function updateBrowserSettings(patch: Partial<AgentSettings['browser']>) {
+  function updateLightpandaSettings(patch: Partial<AgentSettings['browser']['lightpanda']>) {
     setDraftSettings(current => ({
       ...current,
       browser: {
         ...current.browser,
-        ...patch,
-      },
-    }))
-    setSaveState('idle')
-    setBrowserStatus(null)
-  }
-
-  function updateBrowserSearch<K extends keyof AgentSettings['browser']['search']>(
-    key: K,
-    value: AgentSettings['browser']['search'][K],
-  ) {
-    setDraftSettings(current => ({
-      ...current,
-      browser: {
-        ...current.browser,
-        search: {
-          ...current.browser.search,
-          [key]: value,
+        lightpanda: {
+          ...current.browser.lightpanda,
+          ...patch,
         },
       },
     }))
@@ -469,17 +305,16 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setBrowserStatus(null)
   }
 
-  function updateBrowserBehavior<K extends keyof AgentSettings['browser']['behavior']>(
-    key: K,
-    value: AgentSettings['browser']['behavior'][K],
+  function updateInteractiveBrowserSettings(
+    patch: Partial<AgentSettings['browser']['interactive']>,
   ) {
     setDraftSettings(current => ({
       ...current,
       browser: {
         ...current.browser,
-        behavior: {
-          ...current.browser.behavior,
-          [key]: value,
+        interactive: {
+          ...current.browser.interactive,
+          ...patch,
         },
       },
     }))
@@ -1154,59 +989,75 @@ export function SettingsWindowApp({ initialTab }: Props) {
     }
   }
 
-  async function refreshBrowserRuntimeStatus(
+  async function refreshLightpandaStatus(
     settingsOverride?: AgentSettings,
-    options?: { useAsBaseline?: boolean },
+    options?: { useAsBaseline?: boolean; silent?: boolean },
   ) {
     const targetSettings = settingsOverride || draftSettings
+    const executablePath = resolveLightpandaExecutablePath(
+      targetSettings.browser.lightpanda.executablePath,
+    )
+
     setIsRefreshingBrowserRuntime(true)
-    setBrowserStatus(null)
+    if (!options?.silent) {
+      setBrowserStatus(null)
+    }
 
     try {
-      const status = await detectBrowserRuntime({
-        customExecutablePath: targetSettings.browser.executablePath,
-        managedExecutablePath: targetSettings.browser.managedExecutablePath,
+      const status = await detectLightpandaRuntime({
+        executablePath: executablePath || undefined,
       })
+      setLightpandaStatus(status)
 
       const nextSettings: AgentSettings = {
         ...targetSettings,
         browser: {
           ...targetSettings.browser,
-          executablePath:
-            status.customExecutableValid === true && status.customExecutablePath
-              ? status.customExecutablePath
-              : targetSettings.browser.executablePath,
-          managedExecutablePath:
-            status.managedChromePath || targetSettings.browser.managedExecutablePath,
+          lightpanda: {
+            ...targetSettings.browser.lightpanda,
+            executablePath: status.valid
+              ? status.executablePath || executablePath
+              : executablePath,
+          },
         },
-        browserRuntimeStatus: status,
       }
 
       setDraftSettings(cloneSettings(nextSettings))
       if (options?.useAsBaseline) {
         setSavedSettings(cloneSettings(nextSettings))
-      } else {
+      } else if (
+        nextSettings.browser.lightpanda.executablePath !==
+        targetSettings.browser.lightpanda.executablePath
+      ) {
         setSaveState('idle')
       }
-      setBrowserStatus({
-        tone: 'success',
-        message: '浏览器运行环境检测已完成。',
-      })
+
+      if (!options?.silent) {
+        setBrowserStatus({
+          tone: status.valid ? 'success' : 'error',
+          message: status.valid
+            ? 'Lightpanda 环境检测已完成。'
+            : status.error || '未检测到可用的 Lightpanda。',
+        })
+      }
     } catch (caught) {
-      setBrowserStatus({
-        tone: 'error',
-        message: caught instanceof Error ? caught.message : '浏览器环境检测失败。',
-      })
+      setLightpandaStatus(null)
+      if (!options?.silent) {
+        setBrowserStatus({
+          tone: 'error',
+          message: caught instanceof Error ? caught.message : 'Lightpanda 检测失败。',
+        })
+      }
     } finally {
       setIsRefreshingBrowserRuntime(false)
     }
   }
 
-  async function chooseCustomBrowserExecutable() {
+  async function chooseLightpandaExecutable() {
     const selected = await open({
       directory: false,
       multiple: false,
-      title: '选择浏览器可执行文件',
+      title: '选择 Lightpanda 可执行文件',
     })
 
     if (typeof selected !== 'string') {
@@ -1217,21 +1068,16 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setBrowserStatus(null)
 
     try {
-      const status = await detectBrowserRuntime({
-        customExecutablePath: selected,
-        managedExecutablePath: draftSettings.browser.managedExecutablePath,
+      const status = await detectLightpandaRuntime({
+        executablePath: selected,
       })
+      setLightpandaStatus(status)
 
-      if (status.customExecutableValid !== true || !status.customExecutablePath) {
-        setDraftSettings(current => ({
-          ...current,
-          browserRuntimeStatus: status,
-        }))
+      if (!status.valid || !status.executablePath) {
         setBrowserStatus({
           tone: 'error',
-          message: '所选路径不是可用的浏览器可执行文件，请重新选择。',
+          message: status.error || '所选路径不是可用的 Lightpanda 可执行文件。',
         })
-        setSaveState('idle')
         return
       }
 
@@ -1239,393 +1085,42 @@ export function SettingsWindowApp({ initialTab }: Props) {
         ...current,
         browser: {
           ...current.browser,
-          source: 'custom-executable',
-          executablePath: status.customExecutablePath,
+          lightpanda: {
+            ...current.browser.lightpanda,
+            executablePath: status.executablePath,
+          },
         },
-        browserRuntimeStatus: status,
       }))
       setBrowserStatus({
         tone: 'success',
-        message: '已验证并保存自定义浏览器路径。',
+        message: '已验证并保存 Lightpanda 路径。',
       })
       setSaveState('idle')
     } catch (caught) {
       setBrowserStatus({
         tone: 'error',
-        message: caught instanceof Error ? caught.message : '自定义浏览器校验失败。',
+        message: caught instanceof Error ? caught.message : 'Lightpanda 校验失败。',
       })
     } finally {
       setIsRefreshingBrowserRuntime(false)
     }
   }
 
-  async function openAuraBrowserProfileFolder() {
-    const nextAura = auraHome || (await ensureAuraHome())
-    setAuraHome(nextAura)
-    await openPathInDefaultApp(resolveAuraBrowserProfilePath(nextAura, draftSettings.browser))
-  }
-
-  async function handleResetAuraBrowserProfile() {
-    const confirmed = await ask(
-      '确认清空 Aura 浏览器 Profile？这会删除 Aura 浏览器中的 Cookie、本地存储和缓存，并清空待应用的导入 Cookie 队列。',
-      {
-        title: '清空 Aura 浏览器 Profile',
-        kind: 'warning',
-      },
-    )
-
-    if (!confirmed) {
-      return
-    }
-
-    setProfileActionKey('clear-profile')
-    setBrowserStatus(null)
-
-    try {
-      const result = await resetAuraBrowserProfile({
-        settings: draftSettings.browser,
-      })
-      setDraftSettings(current => ({
-        ...current,
-        importedChromeSites: [],
-      }))
-      setBrowserStatus({
-        tone: 'success',
-        message: result.clearedProfile
-          ? `Aura 浏览器 Profile 已清空，待应用 Cookie 队列里还清掉了 ${result.pendingRemovedCount} 条记录。`
-          : `Aura 浏览器 Profile 原本就是空的，待应用 Cookie 队列里清掉了 ${result.pendingRemovedCount} 条记录。`,
-      })
-      setSaveState('idle')
-    } catch (caught) {
-      setBrowserStatus({
-        tone: 'error',
-        message: caught instanceof Error ? caught.message : '清空 Aura 浏览器 Profile 失败。',
-      })
-    } finally {
-      setProfileActionKey('')
-    }
-  }
-
-  async function handleResetAuraSiteSessions() {
-    const confirmed = await ask(
-      '确认重置全部站点会话？这会清空 Aura 浏览器中所有站点 Cookie，并删除待应用的导入 Cookie 队列，但会保留 Profile 目录本身。',
-      {
-        title: '重置全部站点会话',
-        kind: 'warning',
-      },
-    )
-
-    if (!confirmed) {
-      return
-    }
-
-    setProfileActionKey('reset-site-sessions')
-    setBrowserStatus(null)
-
-    try {
-      const result = await resetAuraSiteSessions({
-        settings: draftSettings.browser,
-      })
-      setDraftSettings(current => ({
-        ...current,
-        importedChromeSites: current.importedChromeSites.map(site => ({
-          ...site,
-          cookieCount: 0,
-        })),
-      }))
-      setBrowserStatus({
-        tone: 'success',
-        message: `已重置 Aura 浏览器里的全部站点会话，移除了 ${result.removedCount} 条 Cookie，待应用队列里还清掉了 ${result.pendingRemovedCount} 条。`,
-      })
-      setSaveState('idle')
-    } catch (caught) {
-      setBrowserStatus({
-        tone: 'error',
-        message: caught instanceof Error ? caught.message : '重置 Aura 站点会话失败。',
-      })
-    } finally {
-      setProfileActionKey('')
-    }
-  }
-
-  async function handleInstallManagedBrowser() {
-    setIsInstallingManagedBrowser(true)
-    setIsCancellingManagedBrowserInstall(false)
-    setBrowserStatus(null)
-    setManagedBrowserInstallProgress({
-      stage: 'preparing',
-      message: '正在准备 Aura 托管浏览器安装环境…',
-      progress: 0.01,
-    })
-
-    try {
-      const status = await installManagedBrowser()
-      setDraftSettings(current => ({
-        ...current,
-        browser: {
-          ...current.browser,
-          managedExecutablePath: status.managedChromePath || current.browser.managedExecutablePath,
-        },
-        browserRuntimeStatus: status,
-      }))
-      setManagedBrowserInstallProgress({
-        stage: 'completed',
-        message: 'Aura 托管浏览器安装完成。',
-        progress: 1,
-      })
-      setBrowserStatus({
-        tone: 'success',
-        message: 'Aura 托管浏览器安装完成。',
-      })
-      setSaveState('idle')
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : '托管浏览器安装失败。'
-      const wasCancelled = message.includes('已取消')
-
-      setManagedBrowserInstallProgress({
-        stage: wasCancelled ? 'cancelled' : 'failed',
-        message,
-      })
-      setBrowserStatus({
-        tone: wasCancelled ? 'success' : 'error',
-        message,
-      })
-    } finally {
-      setIsInstallingManagedBrowser(false)
-      setIsCancellingManagedBrowserInstall(false)
-    }
-  }
-
-  async function handleCancelManagedBrowserInstall() {
-    if (!isInstallingManagedBrowser || isCancellingManagedBrowserInstall) {
-      return
-    }
-
-    setIsCancellingManagedBrowserInstall(true)
-    setManagedBrowserInstallProgress(current =>
-      current
-        ? {
-          ...current,
-          message: '正在取消 Aura 托管浏览器安装…',
-        }
-        : current,
-    )
-
-    try {
-      await cancelManagedBrowserInstall()
-    } catch (caught) {
-      setIsCancellingManagedBrowserInstall(false)
-      setBrowserStatus({
-        tone: 'error',
-        message: caught instanceof Error ? caught.message : '取消托管浏览器安装失败。',
-      })
-    }
-  }
-
-  async function handleUninstallManagedBrowser() {
-    setIsUninstallingManagedBrowser(true)
-    setBrowserStatus(null)
-
-    try {
-      const status = await uninstallManagedBrowser()
-      setDraftSettings(current => {
-        let nextSource = current.browser.source
-        let nextEnabled = current.browser.enabled
-        if (nextSource === 'managed-chrome') {
-          if (status.systemChromeDetected) {
-            nextSource = 'system-chrome'
-          } else if (status.customExecutableValid) {
-            nextSource = 'custom-executable'
-          } else {
-            nextEnabled = false
-          }
-        }
-
-        return {
-          ...current,
-          browser: {
-            ...current.browser,
-            enabled: nextEnabled,
-            source: nextSource,
-            managedExecutablePath: undefined,
-          },
-          browserRuntimeStatus: status,
-        }
-      })
-      setManagedBrowserInstallProgress(null)
-      setBrowserStatus({
-        tone: 'success',
-        message: 'Aura 托管浏览器已卸载。',
-      })
-      setSaveState('idle')
-    } catch (caught) {
-      setBrowserStatus({
-        tone: 'error',
-        message: caught instanceof Error ? caught.message : '托管浏览器卸载失败。',
-      })
-    } finally {
-      setIsUninstallingManagedBrowser(false)
-    }
-  }
-
-  async function handleDiscoverChromeProfiles() {
-    setIsDiscoveringChromeProfiles(true)
-    setBrowserStatus(null)
-
-    try {
-      const sources = await discoverChromeImportSources()
-      setDraftSettings(current => ({
-        ...current,
-        chromeImportSources: sources,
-      }))
-      setSelectedChromeImportSourceId(sources[0]?.id || '')
-      setBrowserStatus({
-        tone: 'success',
-        message:
-          sources.length > 0
-            ? `已发现 ${sources.length} 个 Chrome Profile。`
-            : '没有发现可导入的 Chrome Profile。',
-      })
-      setSaveState('idle')
-    } catch (caught) {
-      setBrowserStatus({
-        tone: 'error',
-        message: caught instanceof Error ? caught.message : '发现 Chrome Profile 失败。',
-      })
-    } finally {
-      setIsDiscoveringChromeProfiles(false)
-    }
-  }
-
-  async function handleImportChromeSiteCookies(options?: {
-    domain?: string
-    sourceProfileId?: string
-    actionKey?: string
-  }) {
-    const normalizedDomain = (options?.domain || chromeImportDomainInput)
-      .trim()
-      .replace(/^https?:\/\//i, '')
-      .replace(/\/.*$/, '')
-      .trim()
-    const source = draftSettings.chromeImportSources.find(
-      entry => entry.id === (options?.sourceProfileId || selectedChromeImportSourceId),
-    )
-
-    if (!source) {
-      setBrowserStatus({
-        tone: 'error',
-        message: '请先选择一个 Chrome Profile。',
-      })
-      return
-    }
-
-    if (!normalizedDomain) {
-      setBrowserStatus({
-        tone: 'error',
-        message: '请输入要导入的站点域名。',
-      })
-      return
-    }
-
-    setIsImportingChromeSite(true)
-    setSiteActionKey(options?.actionKey || '')
-    setBrowserStatus(null)
-
-    try {
-      const result = await importChromeSiteCookies({
-        sourceProfilePath: source.profilePath,
-        domain: normalizedDomain,
-      })
-
-      setDraftSettings(current => {
-        const existing = current.importedChromeSites.find(site => site.domain === result.domain)
-        const nextImportedSites = existing
-          ? current.importedChromeSites.map(site =>
-            site.domain === result.domain
-              ? {
-                ...site,
-                sourceProfileId: source.id,
-                importedAt: result.importedAt,
-                lastRefreshedAt: result.importedAt,
-                cookieCount: result.cookieCount,
-              }
-              : site,
-          )
-          : [
-            {
-              id: `imported-site-${Math.random().toString(36).slice(2, 8)}`,
-              domain: result.domain,
-              sourceProfileId: source.id,
-              importedAt: result.importedAt,
-              cookieCount: result.cookieCount,
-            },
-            ...current.importedChromeSites,
-          ]
-
-        return {
-          ...current,
-          importedChromeSites: nextImportedSites,
-        }
-      })
-      setBrowserStatus({
-        tone: 'success',
-        message: `已导入 ${result.domain} 的 ${result.cookieCount} 条 Cookie，Aura 浏览器下次使用时会自动应用。`,
-      })
-      setSaveState('idle')
-    } catch (caught) {
-      setBrowserStatus({
-        tone: 'error',
-        message: caught instanceof Error ? caught.message : 'Chrome 站点登录态导入失败。',
-      })
-    } finally {
-      setIsImportingChromeSite(false)
-      setSiteActionKey('')
-    }
-  }
-
-  async function handleClearAuraSiteCookies(domain: string) {
-    setSiteActionKey(`clear:${domain}`)
-    setBrowserStatus(null)
-
-    try {
-      const result = await clearAuraSiteCookies({
-        domain,
-        settings: draftSettings.browser,
-      })
-      setDraftSettings(current => ({
-        ...current,
-        importedChromeSites: current.importedChromeSites.map(site =>
-          site.domain === domain
-            ? {
-              ...site,
-              cookieCount: 0,
-            }
-            : site,
-        ),
-      }))
-      setBrowserStatus({
-        tone: 'success',
-        message: `已从 Aura Profile 中清理 ${domain} 的站点状态，移除了 ${result.removedCount} 条已写入 Cookie，待应用队列里还清掉了 ${result.pendingRemovedCount} 条。`,
-      })
-      setSaveState('idle')
-    } catch (caught) {
-      setBrowserStatus({
-        tone: 'error',
-        message: caught instanceof Error ? caught.message : '清理 Aura 站点状态失败。',
-      })
-    } finally {
-      setSiteActionKey('')
-    }
-  }
-
-  function handleDeleteImportedChromeSiteRecord(domain: string) {
+  function clearLightpandaExecutablePath() {
     setDraftSettings(current => ({
       ...current,
-      importedChromeSites: current.importedChromeSites.filter(site => site.domain !== domain),
+      browser: {
+        ...current.browser,
+        lightpanda: {
+          ...current.browser.lightpanda,
+          executablePath: '',
+        },
+      },
     }))
+    setLightpandaStatus(null)
     setBrowserStatus({
       tone: 'success',
-      message: `已删除 ${domain} 的导入记录。Aura Profile 中的站点状态如果还需要清理，请再执行一次“清理 Aura 状态”。`,
+      message: '已清除自定义 Lightpanda 路径，将改为仅检测系统 PATH。',
     })
     setSaveState('idle')
   }
@@ -2128,58 +1623,47 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   function renderBrowser() {
-    const runtimeStatus = draftSettings.browserRuntimeStatus
-    const profilePath = resolveAuraBrowserProfilePath(auraHome, draftSettings.browser)
-    const chromeImportSourcesById = new Map(
-      draftSettings.chromeImportSources.map(source => [source.id, source] as const),
+    const lightpandaPath = resolveLightpandaExecutablePath(
+      draftSettings.browser.lightpanda.executablePath,
     )
-    const latestImportedSite = draftSettings.importedChromeSites[0]
-    const installProgressValue = managedBrowserInstallProgress?.progress
-    const showManagedBrowserProgress = Boolean(managedBrowserInstallProgress)
-    const managedBrowserStage =
-      managedBrowserInstallProgress?.stage ||
-      (runtimeStatus?.managedChromeInstalled ? 'completed' : undefined)
-    const isManagedBrowserFailed = managedBrowserInstallProgress?.stage === 'failed'
-    const isAdvancedVisible = isBrowserAdvancedOpen || Boolean(browserValidationError)
-    const managedBrowserPrimaryText = runtimeStatus?.managedChromeInstalled
-      ? runtimeStatus.managedChromePath || '已安装'
-      : managedBrowserInstallProgress?.message || '未安装'
-    const managedBrowserSecondaryText =
-      managedBrowserInstallProgress?.downloadedBytes && managedBrowserInstallProgress?.totalBytes
-        ? `${formatBytes(managedBrowserInstallProgress.downloadedBytes)} / ${formatBytes(managedBrowserInstallProgress.totalBytes)}`
-        : runtimeStatus?.managedChromeInstalled
-          ? formatBytes(runtimeStatus.managedChromeSizeBytes)
-          : '建议安装后作为默认运行时，和系统 Chrome 隔离。'
+    const lightpandaStatusLabel = lightpandaStatus?.valid
+      ? '可用'
+      : lightpandaStatus?.detected
+        ? '已检测但不可用'
+        : '未检测到'
+    const lightpandaDetail = lightpandaStatus?.version
+      ? `版本: ${lightpandaStatus.version}`
+      : lightpandaStatus?.error || '可用于资料搜索和网页内容读取。'
 
     return (
       <section className="section-shell settings-panel">
         <header className="section-header">
           <div>
-            <div className="eyebrow">Browser Runtime</div>
-            <h2>浏览器</h2>
+            <div className="eyebrow">Web + Browser</div>
+            <h2>网页与浏览器</h2>
             <p className="muted mt-2">
-              默认网页任务已经统一走 Aura 自己维护的浏览器运行时与 Profile。现在把常用设置放前面，安装、登录态和高级偏好按用途分组，阅读成本会低很多。
+              资料获取和网页操作现在分成两条路径: 搜资料时只走 `web_* + Lightpanda`，显式操作网页时只走系统浏览器。
             </p>
           </div>
           <div className="header-actions">
             <button
               className="secondary-button"
               disabled={isRefreshingBrowserRuntime}
-              onClick={() => void refreshBrowserRuntimeStatus()}
+              onClick={() => void refreshLightpandaStatus()}
             >
               <RefreshCw
                 size={14}
                 className={isRefreshingBrowserRuntime ? 'spin-icon' : undefined}
               />
-              重新检测环境
+              检测 Lightpanda
             </button>
             <button
               className="secondary-button"
               disabled={isRefreshingBrowserRuntime}
-              onClick={() => void chooseCustomBrowserExecutable()}
+              onClick={() => void chooseLightpandaExecutable()}
             >
               <FolderOpen size={14} />
-              选择自定义浏览器
+              选择路径
             </button>
           </div>
         </header>
@@ -2198,1089 +1682,591 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
         <div className="settings-grid">
           <section className="dashboard-card full-span browser-overview-card">
-            <div className="section-title">浏览器总览</div>
+            <div className="section-title">运行模式总览</div>
             <div className="browser-summary-grid">
               <div className="browser-summary-item">
-                <span className="browser-summary-label">当前来源</span>
-                <strong>{getBrowserRuntimeSourceLabel(draftSettings.browser.source)}</strong>
-                <span className="muted">
-                  {draftSettings.browser.enabled ? 'Aura 浏览器运行时已启用' : 'Aura 浏览器运行时已关闭'}
-                </span>
+                <span className="browser-summary-label">Lightpanda</span>
+                <strong>{lightpandaStatusLabel}</strong>
+                <span className="muted">{lightpandaDetail}</span>
               </div>
               <div className="browser-summary-item">
-                <span className="browser-summary-label">Aura 托管浏览器</span>
-                <strong>{runtimeStatus?.managedChromeInstalled ? '已安装' : '未安装'}</strong>
-                <span className="muted">{managedBrowserSecondaryText}</span>
-              </div>
-              <div className="browser-summary-item">
-                <span className="browser-summary-label">Profile</span>
-                <strong>{draftSettings.browser.persistAuraProfile ? '持久化保存' : '按需使用'}</strong>
-                <span
-                  className="muted truncate w-full"
-                  title={profilePath || '等待 Aura 目录初始化'}
-                >
-                  {profilePath || '等待 Aura 目录初始化'}
-                </span>
-              </div>
-              <div className="browser-summary-item">
-                <span className="browser-summary-label">人工接管</span>
+                <span className="browser-summary-label">资料获取</span>
                 <strong>
-                  {draftSettings.browser.takeoverMode === 'ask'
-                    ? '先询问再接管'
-                    : '阻塞时自动打开可见浏览器'}
+                  {draftSettings.browser.lightpanda.enabled ? '启用 Lightpanda' : '仅保留 web_*'}
+                </strong>
+                <span className="muted">失败不会自动拉起系统浏览器。</span>
+              </div>
+              <div className="browser-summary-item">
+                <span className="browser-summary-label">浏览器操作</span>
+                <strong>
+                  {draftSettings.browser.interactive.enabled ? '系统浏览器可用' : '已禁用'}
+                </strong>
+                <span className="muted">只服务登录、点击、表单和人工处理等显式网页操作。</span>
+              </div>
+              <div className="browser-summary-item">
+                <span className="browser-summary-label">Computer Use</span>
+                <strong>
+                  {draftSettings.browser.interactive.allowComputerUse ? '允许配合使用' : '不参与'}
                 </strong>
                 <span className="muted">
-                  {draftSettings.browser.headlessByDefault ? '默认先无头执行' : '默认直接可见执行'}
+                  {draftSettings.enableComputerUse
+                    ? '系统级桌面交互仍受全局 Computer Use 开关约束。'
+                    : '当前全局 Computer Use 已关闭。'}
                 </span>
               </div>
             </div>
-
-            {showManagedBrowserProgress ? (
-              <div
-                className={`browser-install-panel ${isManagedBrowserFailed ? 'error' : runtimeStatus?.managedChromeInstalled ? 'success' : ''}`}
-              >
-                <div className="browser-install-panel-head">
-                  <div>
-                    <div className="browser-install-stage">
-                      {getManagedBrowserStageLabel(managedBrowserStage)}
-                    </div>
-                    <strong>{managedBrowserPrimaryText}</strong>
-                  </div>
-                  <span className="browser-install-percent">
-                    {runtimeStatus?.managedChromeInstalled && !managedBrowserInstallProgress
-                      ? '已就绪'
-                      : formatProgressPercent(installProgressValue)}
-                  </span>
-                </div>
-                <div className="browser-progress-track">
-                  <div
-                    className={`browser-progress-fill ${isManagedBrowserFailed ? 'error' : ''}`}
-                    style={{
-                      width: `${Math.max(
-                        0,
-                        Math.min(
-                          100,
-                          Math.round(
-                            ((runtimeStatus?.managedChromeInstalled && !managedBrowserInstallProgress
-                              ? 1
-                              : installProgressValue || 0) *
-                              100),
-                          ),
-                        ),
-                      )
-                        }%`,
-                    }}
-                  />
-                </div>
-                <div className="browser-install-meta">
-                  <span>{managedBrowserInstallProgress?.message || managedBrowserPrimaryText}</span>
-                  <span>{managedBrowserSecondaryText}</span>
-                </div>
-              </div>
-            ) : null}
           </section>
 
           <section className="dashboard-card">
-            <div className="section-title">基础运行环境</div>
+            <div className="section-title">资料获取</div>
             <div className="toggle-stack">
               <label className="toggle-inline">
                 <input
-                  checked={draftSettings.browser.enabled}
-                  onChange={event => updateBrowserSettings({ enabled: event.target.checked })}
+                  checked={draftSettings.browser.lightpanda.enabled}
+                  onChange={event =>
+                    updateLightpandaSettings({ enabled: event.target.checked })
+                  }
                   type="checkbox"
                 />
                 <div className="flex flex-col">
-                  <strong>启用 Aura 浏览器运行时</strong>
-                  <span className="muted">默认网页工具优先走 Aura 浏览器，而不是系统前台 Chrome。</span>
+                  <strong>启用 Lightpanda 读取层</strong>
+                  <span className="muted">用于搜索资料、执行少量 JS、抽取正文；失败不会升级为系统浏览器。</span>
                 </div>
               </label>
             </div>
 
             <div className="dashboard-list mt-4">
               <div className="dashboard-row">
-                <strong>默认浏览器来源</strong>
-                <span>{getBrowserRuntimeSourceLabel(draftSettings.browser.source)}</span>
+                <strong>检测状态</strong>
+                <span>{lightpandaStatusLabel}</span>
               </div>
               <div className="dashboard-row">
                 <strong>最近检测时间</strong>
-                <span>{formatTimestamp(runtimeStatus?.lastCheckedAt)}</span>
+                <span>{formatTimestamp(lightpandaStatus?.lastCheckedAt)}</span>
               </div>
-              <div className="dashboard-row">
-                <strong>自定义浏览器路径</strong>
-                <span>
-                  {runtimeStatus?.customExecutablePath
-                    ? runtimeStatus.customExecutableValid
-                      ? runtimeStatus.customExecutablePath
-                      : `${runtimeStatus.customExecutablePath}（当前无效）`
-                    : '未选择'}
-                </span>
-              </div>
-            </div>
-
-            <div className="settings-mode-stack">
-              {browserRuntimeOptions.map(option => {
-                const isAvailable = isBrowserRuntimeSourceAvailable(runtimeStatus, option.id)
-                return (
-                  <label
-                    key={option.id}
-                    className={`toggle-inline ${!isAvailable ? 'disabled' : ''}`}
-                  >
-                    <input
-                      checked={draftSettings.browser.source === option.id}
-                      disabled={!isAvailable}
-                      onChange={() => updateBrowserSettings({ source: option.id })}
-                      type="radio"
-                    />
-                    <div className="flex flex-col">
-                      <strong>{option.label}</strong>
-                      <span className="muted">{option.description}</span>
-                    </div>
-                  </label>
-                )
-              })}
-            </div>
-          </section>
-
-          <section className="dashboard-card">
-            <div className="section-title">安装与环境检测</div>
-            <div className="dashboard-list">
-              <div className="dashboard-row">
-                <strong>系统 Chrome</strong>
-                <span>
-                  {runtimeStatus?.systemChromeDetected
-                    ? runtimeStatus.systemChromePath || '已检测到'
-                    : '未检测到'}
-                </span>
-              </div>
-              <div className="dashboard-row">
-                <strong>Aura 托管浏览器</strong>
-                <span>
-                  {runtimeStatus?.managedChromeInstalled
-                    ? `${runtimeStatus.managedChromePath || '已安装'} · ${formatBytes(runtimeStatus.managedChromeSizeBytes)}`
-                    : '未安装'}
-                </span>
-              </div>
-            </div>
-
-            <div className="provider-note mt-3">
-              <p>推荐优先安装 Aura 托管浏览器。它会放在 Aura 自己的运行时目录里，和系统浏览器隔离，环境也更稳定。</p>
-            </div>
-            <div className="header-actions mt-4">
-              <button
-                className="secondary-button"
-                disabled={
-                  runtimeStatus?.managedChromeInstalled ||
-                  isInstallingManagedBrowser ||
-                  isUninstallingManagedBrowser
-                }
-                onClick={() => void handleInstallManagedBrowser()}
-              >
-                <RefreshCw
-                  size={14}
-                  className={isInstallingManagedBrowser ? 'spin-icon' : undefined}
-                />
-                {runtimeStatus?.managedChromeInstalled
-                  ? 'Aura 托管浏览器已安装'
-                  : isInstallingManagedBrowser
-                    ? '正在安装...'
-                    : '安装 Aura 托管浏览器'}
-              </button>
-              {isInstallingManagedBrowser ? (
-                <button
-                  className="secondary-button"
-                  disabled={isCancellingManagedBrowserInstall}
-                  onClick={() => void handleCancelManagedBrowserInstall()}
-                >
-                  <Trash2 size={14} />
-                  {isCancellingManagedBrowserInstall ? '正在取消...' : '取消安装'}
-                </button>
-              ) : null}
-              <button
-                className="secondary-button"
-                disabled={
-                  !runtimeStatus?.managedChromeInstalled ||
-                  isInstallingManagedBrowser ||
-                  isUninstallingManagedBrowser
-                }
-                onClick={() => void handleUninstallManagedBrowser()}
-              >
-                <Trash2 size={14} />
-                {isUninstallingManagedBrowser ? '正在卸载...' : '卸载托管浏览器'}
-              </button>
-            </div>
-          </section>
-
-          <section className="dashboard-card">
-            <div className="section-title">Profile 与会话</div>
-            <div className="toggle-stack">
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.browser.persistAuraProfile}
-                  onChange={event => updateBrowserSettings({ persistAuraProfile: event.target.checked })}
-                  type="checkbox"
-                />
-                <div className="flex flex-col">
-                  <strong>持久化 Aura Profile</strong>
-                  <span className="muted">登录态和站点会话会保存在 Aura 自己的浏览器目录中。</span>
-                </div>
-              </label>
-            </div>
-
-            <div className="dashboard-list mt-4">
               <div className="dashboard-row overflow-hidden">
-                <strong className="shrink-0">Profile 路径</strong>
-                <span
-                  className="truncate flex-1 text-right"
-                  title={profilePath || '等待 Aura 目录初始化'}
-                >
-                  {profilePath || '等待 Aura 目录初始化'}
-                </span>
+                <strong className="shrink-0">可执行路径</strong>
+                <span>{lightpandaStatus?.executablePath || lightpandaPath || '使用系统 PATH 检测'}</span>
               </div>
               <div className="dashboard-row">
-                <strong>当前会话模式</strong>
-                <span>{draftSettings.browser.headlessByDefault ? '默认无头执行' : '默认可见窗口'}</span>
+                <strong>并发会话上限</strong>
+                <span>{draftSettings.browser.lightpanda.maxConcurrency}</span>
+              </div>
+              <div className="dashboard-row">
+                <strong>单次超时</strong>
+                <span>{draftSettings.browser.lightpanda.timeoutSeconds} 秒</span>
               </div>
             </div>
 
-            <div className="header-actions mt-4">
-              <button
-                className="secondary-button"
-                disabled={!profilePath || Boolean(profileActionKey)}
-                onClick={() => void openAuraBrowserProfileFolder()}
-              >
-                <FolderOpen size={14} />
-                打开 Profile 文件夹
-              </button>
-              <button
-                className="secondary-button"
-                disabled={!profilePath || Boolean(profileActionKey)}
-                onClick={() => void handleResetAuraSiteSessions()}
-              >
-                <RefreshCw
-                  size={14}
-                  className={profileActionKey === 'reset-site-sessions' ? 'spin-icon' : undefined}
-                />
-                重置全部站点会话
-              </button>
-              <button
-                className="secondary-button"
-                disabled={!profilePath || Boolean(profileActionKey)}
-                onClick={() => void handleResetAuraBrowserProfile()}
-              >
-                <Trash2
-                  size={14}
-                  className={profileActionKey === 'clear-profile' ? 'spin-icon' : undefined}
-                />
-                清空 Aura 浏览器 Profile
-              </button>
-            </div>
-            <div className="provider-note mt-3">
-              <p>“重置全部站点会话”会清空全部 Cookie，但保留 Profile；“清空 Aura 浏览器 Profile”会直接重建整个目录。</p>
-            </div>
-          </section>
-
-          <section className="dashboard-card">
-            <div className="section-title">人工接管与可见浏览器</div>
-            <div className="toggle-stack">
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.browser.takeoverMode === 'ask'}
-                  onChange={() => updateBrowserSettings({ takeoverMode: 'ask' })}
-                  type="radio"
-                />
-                <div className="flex flex-col">
-                  <strong>遇到阻塞时先询问</strong>
-                  <span className="muted">更稳妥，适合希望保留更多手动确认的场景。</span>
-                </div>
-              </label>
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.browser.takeoverMode === 'auto-visible-on-blocker'}
-                  onChange={() => updateBrowserSettings({ takeoverMode: 'auto-visible-on-blocker' })}
-                  type="radio"
-                />
-                <div className="flex flex-col">
-                  <strong>遇到阻塞时自动打开可见浏览器</strong>
-                  <span className="muted">适合登录、验证码、2FA 之类需要尽快人工接管的流程。</span>
-                </div>
-              </label>
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.browser.headlessByDefault}
-                  onChange={event => updateBrowserSettings({ headlessByDefault: event.target.checked })}
-                  type="checkbox"
-                />
-                <div className="flex flex-col">
-                  <strong>默认无头执行</strong>
-                  <span className="muted">关闭后，会优先以可见窗口启动 Aura 浏览器。</span>
-                </div>
-              </label>
-            </div>
-
-            <div className="provider-note mt-3">
-              <p>登录、验证码或授权页出现阻塞时，Aura 会通过接管卡片提醒你切到可见浏览器处理。</p>
-            </div>
-          </section>
-
-          <section className="dashboard-card full-span">
-            <div className="section-title">站点登录态导入</div>
-            <div className="browser-summary-grid compact">
-              <div className="browser-summary-item">
-                <span className="browser-summary-label">已发现导入源</span>
-                <strong>{draftSettings.chromeImportSources.length} 个</strong>
-                <span className="muted">扫描本机 Chrome Profile 后可选择来源。</span>
-              </div>
-              <div className="browser-summary-item">
-                <span className="browser-summary-label">最近一次导入</span>
-                <strong>{latestImportedSite ? latestImportedSite.domain : '暂无'}</strong>
-                <span className="muted">
-                  {latestImportedSite ? formatTimestamp(latestImportedSite.importedAt) : '还没有导入任何站点'}
-                </span>
-              </div>
-            </div>
-
-            <div className="provider-note mt-4">
-              <p>这里只会导入所选站点的 Cookie / Session，不会导入密码、书签、扩展或完整浏览历史。</p>
-              <p>导入完成后，Aura 会把这些 Cookie 写入自己的待应用队列，在下次浏览器会话中自动加载。</p>
-            </div>
-            <div className="header-actions mt-4">
-              <button
-                className="secondary-button"
-                disabled={isDiscoveringChromeProfiles}
-                onClick={() => void handleDiscoverChromeProfiles()}
-              >
-                <RefreshCw
-                  size={14}
-                  className={isDiscoveringChromeProfiles ? 'spin-icon' : undefined}
-                />
-                {isDiscoveringChromeProfiles ? '正在扫描...' : '扫描本机 Chrome Profile'}
-              </button>
-            </div>
             <div className="form-container mt-4">
               <div className="form-row">
-                <label>来源 Profile</label>
-                <select
-                  className="settings-select"
-                  value={selectedChromeImportSourceId}
-                  onChange={event => setSelectedChromeImportSourceId(event.target.value)}
-                  disabled={draftSettings.chromeImportSources.length === 0}
-                >
-                  {draftSettings.chromeImportSources.length === 0 ? (
-                    <option value="">请先扫描本机 Chrome</option>
-                  ) : null}
-                  {draftSettings.chromeImportSources.map(source => (
-                    <option key={source.id} value={source.id}>
-                      {source.profileName}
-                    </option>
-                  ))}
-                </select>
+                <label>并发会话上限</label>
+                <input
+                  min={1}
+                  max={12}
+                  onChange={event =>
+                    updateLightpandaSettings({
+                      maxConcurrency:
+                        Number(event.target.value) ||
+                        draftSettings.browser.lightpanda.maxConcurrency,
+                    })
+                  }
+                  type="number"
+                  value={draftSettings.browser.lightpanda.maxConcurrency}
+                />
               </div>
               <div className="form-row">
-                <label>站点域名</label>
+                <label>单次超时（秒）</label>
                 <input
-                  value={chromeImportDomainInput}
-                  onChange={event => setChromeImportDomainInput(event.target.value)}
-                  placeholder="例如 github.com / x.com / notion.so"
-                  type="text"
+                  min={3}
+                  max={90}
+                  onChange={event =>
+                    updateLightpandaSettings({
+                      timeoutSeconds:
+                        Number(event.target.value) ||
+                        draftSettings.browser.lightpanda.timeoutSeconds,
+                    })
+                  }
+                  type="number"
+                  value={draftSettings.browser.lightpanda.timeoutSeconds}
                 />
               </div>
             </div>
+
             <div className="header-actions mt-4">
               <button
                 className="secondary-button"
-                disabled={
-                  draftSettings.chromeImportSources.length === 0 ||
-                  !chromeImportDomainInput.trim() ||
-                  isImportingChromeSite
-                }
-                onClick={() => void handleImportChromeSiteCookies()}
+                disabled={isRefreshingBrowserRuntime}
+                onClick={() => void refreshLightpandaStatus()}
               >
                 <RefreshCw
                   size={14}
-                  className={isImportingChromeSite ? 'spin-icon' : undefined}
+                  className={isRefreshingBrowserRuntime ? 'spin-icon' : undefined}
                 />
-                {isImportingChromeSite ? '正在导入...' : '导入站点登录态'}
+                重新检测
               </button>
-            </div>
-          </section>
-
-          <section className="dashboard-card full-span">
-            <div className="section-title">已导入站点管理</div>
-            {draftSettings.importedChromeSites.length > 0 ? (
-              <div className="dashboard-list">
-                {draftSettings.importedChromeSites.map(site => (
-                  <div key={site.id} className="dashboard-row">
-                    <div className="flex flex-col gap-1">
-                      <strong>{site.domain}</strong>
-                      <span>
-                        来源 Profile:{' '}
-                        {chromeImportSourcesById.get(site.sourceProfileId)?.profileName || site.sourceProfileId}
-                      </span>
-                      <span>首次导入: {formatTimestamp(site.importedAt)}</span>
-                      <span>
-                        最近刷新: {formatTimestamp(site.lastRefreshedAt || site.importedAt)} · {site.cookieCount} cookies
-                      </span>
-                    </div>
-                    <div className="header-actions">
-                      <button
-                        className="secondary-button"
-                        disabled={isImportingChromeSite || Boolean(siteActionKey)}
-                        onClick={() =>
-                          void handleImportChromeSiteCookies({
-                            domain: site.domain,
-                            sourceProfileId: site.sourceProfileId,
-                            actionKey: `refresh:${site.domain}`,
-                          })
-                        }
-                      >
-                        <RefreshCw
-                          size={14}
-                          className={
-                            isImportingChromeSite && siteActionKey === `refresh:${site.domain}`
-                              ? 'spin-icon'
-                              : undefined
-                          }
-                        />
-                        刷新导入
-                      </button>
-                      <button
-                        className="secondary-button"
-                        disabled={Boolean(siteActionKey)}
-                        onClick={() => void handleClearAuraSiteCookies(site.domain)}
-                      >
-                        <Trash2
-                          size={14}
-                          className={siteActionKey === `clear:${site.domain}` ? 'spin-icon' : undefined}
-                        />
-                        清理 Aura 状态
-                      </button>
-                      <button
-                        className="secondary-button"
-                        disabled={Boolean(siteActionKey)}
-                        onClick={() => handleDeleteImportedChromeSiteRecord(site.domain)}
-                      >
-                        删除记录
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="muted">
-                还没有导入任何站点。建议先扫描本机 Chrome Profile，再按站点导入登录态。
-              </p>
-            )}
-          </section>
-
-          <section className="dashboard-card full-span">
-            <div className="section-header">
-              <div>
-                <div className="section-title">高级偏好</div>
-                <p className="muted">把不常改的搜索、浏览器行为和备用模式收在这里，默认先不打扰。</p>
-              </div>
               <button
                 className="secondary-button"
-                onClick={() => setIsBrowserAdvancedOpen(current => !current)}
+                disabled={isRefreshingBrowserRuntime}
+                onClick={() => void chooseLightpandaExecutable()}
               >
-                {isAdvancedVisible ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                {isAdvancedVisible ? '收起高级偏好' : '展开高级偏好'}
+                <FolderOpen size={14} />
+                选择路径
+              </button>
+              <button
+                className="secondary-button"
+                disabled={!lightpandaPath}
+                onClick={() => clearLightpandaExecutablePath()}
+              >
+                清除自定义路径
               </button>
             </div>
 
-            {isAdvancedVisible ? (
-              <div className="settings-grid browser-advanced-grid mt-4">
-                <section className="dashboard-card nested">
-                  <div className="section-title">搜索设置</div>
-                  <div className="form-container">
-                    <div className="form-row">
-                      <label>搜索引擎</label>
-                      <select
-                        className="settings-select"
-                        value={draftSettings.browser.search.engine}
-                        onChange={event => updateBrowserSearch('engine', event.target.value as AgentSettings['browser']['search']['engine'])}
-                      >
-                        <option value="google">Google</option>
-                        <option value="bing">Bing</option>
-                        <option value="duckduckgo">DuckDuckGo</option>
-                        <option value="baidu">百度</option>
-                        <option value="custom">自定义</option>
-                      </select>
-                    </div>
+            <div className="provider-note mt-3">
+              <p>如果未填写路径，Aura 会只从系统 PATH 查找 `lightpanda`。</p>
+              <p>Lightpanda 不负责登录、验证码、表单和人工处理，这些任务会走系统浏览器路径。</p>
+            </div>
+          </section>
 
-                    {draftSettings.browser.search.engine === 'custom' ? (
-                      <div className="form-row top-align">
-                        <label>搜索模板</label>
-                        <div>
-                          <input
-                            className="monospace"
-                            value={draftSettings.browser.search.customTemplate || ''}
-                            onChange={event => updateBrowserSearch('customTemplate', event.target.value)}
-                            placeholder="https://example.com/search?q={query}"
-                            type="text"
-                          />
-                          <p className="muted mt-2">
-                            模板必须包含 <code>{'{query}'}</code>，并以 `http://` 或 `https://` 开头。
-                          </p>
-                        </div>
-                      </div>
-                    ) : null}
+          <section className="dashboard-card">
+            <div className="section-title">浏览器操作</div>
+            <div className="toggle-stack">
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.browser.interactive.enabled}
+                  onChange={event =>
+                    updateInteractiveBrowserSettings({ enabled: event.target.checked })
+                  }
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>允许系统浏览器处理显式网页操作</strong>
+                  <span className="muted">仅在意图明确是“打开网页并继续操作”时使用系统默认浏览器。</span>
+                </div>
+              </label>
 
-                    <div className="form-row">
-                      <label>搜索区域</label>
-                      <input
-                        value={draftSettings.browser.search.region || ''}
-                        onChange={event => updateBrowserSearch('region', event.target.value)}
-                        placeholder="auto / us / cn"
-                        type="text"
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label>搜索语言</label>
-                      <input
-                        value={draftSettings.browser.search.language || ''}
-                        onChange={event => updateBrowserSearch('language', event.target.value)}
-                        placeholder="auto / en / zh-CN"
-                        type="text"
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label>安全搜索</label>
-                      <select
-                        className="settings-select"
-                        value={draftSettings.browser.search.safeSearch || 'moderate'}
-                        onChange={event => updateBrowserSearch('safeSearch', event.target.value as AgentSettings['browser']['search']['safeSearch'])}
-                      >
-                        <option value="off">关闭</option>
-                        <option value="moderate">适中</option>
-                        <option value="strict">严格</option>
-                      </select>
-                    </div>
-                  </div>
-                </section>
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.browser.interactive.allowComputerUse}
+                  onChange={event =>
+                    updateInteractiveBrowserSettings({
+                      allowComputerUse: event.target.checked,
+                    })
+                  }
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>允许配合 `computer_*` 工具</strong>
+                  <span className="muted">打开系统浏览器后，Agent 可以继续用桌面交互工具协助完成操作。</span>
+                </div>
+              </label>
+            </div>
 
-                <section className="dashboard-card nested">
-                  <div className="section-title">Web Research</div>
-                  <div className="form-container">
-                    <label className="toggle-inline">
-                      <input
-                        checked={draftSettings.web.research.enabled}
-                        onChange={event =>
-                          updateWebResearchSettings('enabled', event.target.checked)
-                        }
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>启用 `web_research`</strong>
-                        <span className="muted">把搜索、候选筛选和正文证据收集整合成一次调用，适合最新信息、文档和多来源调研。</span>
-                      </div>
-                    </label>
+            <div className="provider-note mt-3">
+              <p>这里不再维护托管浏览器、浏览器来源切换、登录态导入和自动接管。</p>
+              <p>网页操作就是系统浏览器，资料获取就是 `web_* + Lightpanda`。</p>
+            </div>
+          </section>
 
-                    <label className="toggle-inline">
-                      <input
-                        checked={draftSettings.web.research.preferSearchContent}
-                        onChange={event =>
-                          updateWebResearchSettings('preferSearchContent', event.target.checked)
-                        }
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>优先复用搜索结果正文</strong>
-                        <span className="muted">当 Tavily / 其他 provider 已经返回足够长的原文时，优先直接用它，减少重复抓取和等待。</span>
-                      </div>
-                    </label>
+          <section className="dashboard-card">
+            <div className="section-title">Web Research</div>
+            <div className="form-container">
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.web.research.enabled}
+                  onChange={event =>
+                    updateWebResearchSettings('enabled', event.target.checked)
+                  }
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>启用 `web_research`</strong>
+                  <span className="muted">适合资料搜集、横向对比和生成带引用结论。</span>
+                </div>
+              </label>
 
-                    <label className="toggle-inline">
-                      <input
-                        checked={draftSettings.web.research.allowBrowserFallback}
-                        onChange={event =>
-                          updateWebResearchSettings('allowBrowserFallback', event.target.checked)
-                        }
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>允许最终降级到浏览器研究</strong>
-                        <span className="muted">仅在 `web_*` 结果不足、被风控拦截，或工具明确建议浏览器兜底时，才允许升级到 `browser_search` / `browser_open`。</span>
-                      </div>
-                    </label>
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.web.research.preferSearchContent}
+                  onChange={event =>
+                    updateWebResearchSettings('preferSearchContent', event.target.checked)
+                  }
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>优先复用搜索摘要正文</strong>
+                  <span className="muted">摘要够长时少发一次抓取请求。</span>
+                </div>
+              </label>
 
-                    <div className="form-row">
-                      <label>普通模式搜索结果数</label>
-                      <input
-                        min={1}
-                        max={10}
-                        onChange={event =>
-                          updateWebResearchSettings(
-                            'defaultSearchLimit',
-                            Number(event.target.value) ||
-                              draftSettings.web.research.defaultSearchLimit,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.research.defaultSearchLimit}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>普通模式抓取页数</label>
-                      <input
-                        min={1}
-                        max={6}
-                        onChange={event =>
-                          updateWebResearchSettings(
-                            'defaultFetchLimit',
-                            Number(event.target.value) ||
-                              draftSettings.web.research.defaultFetchLimit,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.research.defaultFetchLimit}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>普通模式单页正文上限</label>
-                      <input
-                        min={500}
-                        max={20000}
-                        onChange={event =>
-                          updateWebResearchSettings(
-                            'defaultMaxChars',
-                            Number(event.target.value) ||
-                              draftSettings.web.research.defaultMaxChars,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.research.defaultMaxChars}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>复用搜索正文的最小长度</label>
-                      <input
-                        min={200}
-                        max={8000}
-                        onChange={event =>
-                          updateWebResearchSettings(
-                            'searchContentMinChars',
-                            Number(event.target.value) ||
-                              draftSettings.web.research.searchContentMinChars,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.research.searchContentMinChars}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>深度研究搜索结果数</label>
-                      <input
-                        min={2}
-                        max={10}
-                        onChange={event =>
-                          updateWebResearchSettings(
-                            'deepSearchLimit',
-                            Number(event.target.value) ||
-                              draftSettings.web.research.deepSearchLimit,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.research.deepSearchLimit}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>深度研究抓取页数</label>
-                      <input
-                        min={1}
-                        max={6}
-                        onChange={event =>
-                          updateWebResearchSettings(
-                            'deepFetchLimit',
-                            Number(event.target.value) ||
-                              draftSettings.web.research.deepFetchLimit,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.research.deepFetchLimit}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>深度研究单页正文上限</label>
-                      <input
-                        min={800}
-                        max={20000}
-                        onChange={event =>
-                          updateWebResearchSettings(
-                            'deepMaxChars',
-                            Number(event.target.value) ||
-                              draftSettings.web.research.deepMaxChars,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.research.deepMaxChars}
-                      />
-                    </div>
-
-                    <label className="toggle-inline">
-                      <input
-                        checked={draftSettings.web.search.enabled}
-                        onChange={event => updateWebSearchSettings('enabled', event.target.checked)}
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>启用 `web_search`</strong>
-                        <span className="muted">用于候选来源发现和结构化排序；`web_research` 会复用这里的 provider 配置。</span>
-                      </div>
-                    </label>
-
-                    <div className="form-row">
-                      <label>搜索 Provider</label>
-                      <select
-                        className="settings-select"
-                        value={draftSettings.web.search.provider}
-                        onChange={event =>
-                          updateWebSearchSettings(
-                            'provider',
-                            event.target.value as AgentSettings['web']['search']['provider'],
-                          )
-                        }
-                      >
-                        <option value="auto">Auto（Tavily → Brave → DuckDuckGo）</option>
-                        <option value="tavily">Tavily</option>
-                        <option value="brave">Brave</option>
-                        <option value="duckduckgo">DuckDuckGo</option>
-                      </select>
-                    </div>
-
-                    <div className="form-row">
-                      <label>Tavily API Key</label>
-                      <input
-                        className="monospace"
-                        value={draftSettings.web.search.providers.tavilyApiKey}
-                        onChange={event =>
-                          updateWebSearchProviderSettings('tavilyApiKey', event.target.value)
-                        }
-                        placeholder="tvly-..."
-                        type="password"
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>Brave API Key</label>
-                      <input
-                        className="monospace"
-                        value={draftSettings.web.search.providers.braveApiKey}
-                        onChange={event =>
-                          updateWebSearchProviderSettings('braveApiKey', event.target.value)
-                        }
-                        placeholder="BSA..."
-                        type="password"
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>搜索超时（秒）</label>
-                      <input
-                        min={3}
-                        max={60}
-                        onChange={event =>
-                          updateWebSearchSettings(
-                            'timeoutSeconds',
-                            Number(event.target.value) || draftSettings.web.search.timeoutSeconds,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.search.timeoutSeconds}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>缓存 TTL（分钟）</label>
-                      <input
-                        min={0}
-                        max={1440}
-                        onChange={event =>
-                          updateWebSearchSettings(
-                            'cacheTtlMinutes',
-                            Number(event.target.value) || draftSettings.web.search.cacheTtlMinutes,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.search.cacheTtlMinutes}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>默认结果数</label>
-                      <input
-                        min={1}
-                        max={10}
-                        onChange={event =>
-                          updateWebSearchSettings(
-                            'maxResults',
-                            Number(event.target.value) || draftSettings.web.search.maxResults,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.search.maxResults}
-                      />
-                    </div>
-
-                    <div className="provider-note">
-                      <p>`web_search` 和 `web_research` 共用这里的搜索 provider 配置；浏览器搜索页仍由上方的 `browser.search` 控制。</p>
-                    </div>
-                  </div>
-                </section>
-
-                <section className="dashboard-card nested">
-                  <div className="section-title">浏览器行为</div>
-                  <div className="form-container">
-                    <div className="form-row">
-                      <label>请求语言</label>
-                      <input
-                        value={draftSettings.browser.behavior.acceptLanguage || ''}
-                        onChange={event => updateBrowserBehavior('acceptLanguage', event.target.value)}
-                        placeholder="auto / zh-CN,zh;q=0.9"
-                        type="text"
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label>时区</label>
-                      <input
-                        value={draftSettings.browser.behavior.timezone || ''}
-                        onChange={event => updateBrowserBehavior('timezone', event.target.value)}
-                        placeholder="system / Asia/Shanghai"
-                        type="text"
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label>地区 Locale</label>
-                      <input
-                        value={draftSettings.browser.behavior.locale || ''}
-                        onChange={event => updateBrowserBehavior('locale', event.target.value)}
-                        placeholder="system / zh-CN"
-                        type="text"
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label>配色方案</label>
-                      <select
-                        className="settings-select"
-                        value={draftSettings.browser.behavior.colorScheme || 'system'}
-                        onChange={event => updateBrowserBehavior('colorScheme', event.target.value as AgentSettings['browser']['behavior']['colorScheme'])}
-                      >
-                        <option value="system">跟随系统</option>
-                        <option value="light">浅色</option>
-                        <option value="dark">深色</option>
-                      </select>
-                    </div>
-                    <div className="form-row">
-                      <label>User-Agent 策略</label>
-                      <select
-                        className="settings-select"
-                        value={draftSettings.browser.behavior.userAgentMode || 'default'}
-                        onChange={event => updateBrowserBehavior('userAgentMode', event.target.value as AgentSettings['browser']['behavior']['userAgentMode'])}
-                      >
-                        <option value="default">默认</option>
-                        <option value="desktop">优先桌面站</option>
-                      </select>
-                    </div>
-                  </div>
-                </section>
-
-                <section className="dashboard-card nested">
-                  <div className="section-title">Web Fetch</div>
-                  <div className="form-container">
-                    <label className="toggle-inline">
-                      <input
-                        checked={draftSettings.web.fetch.enabled}
-                        onChange={event => updateWebFetchSettings('enabled', event.target.checked)}
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>启用 `web_fetch`</strong>
-                        <span className="muted">用于 HTTP 拉取和正文抽取，和浏览器自动化分开维护。</span>
-                      </div>
-                    </label>
-
-                    <label className="toggle-inline">
-                      <input
-                        checked={draftSettings.web.fetch.readability}
-                        onChange={event => updateWebFetchSettings('readability', event.target.checked)}
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>优先正文抽取</strong>
-                        <span className="muted">开启后，`web_fetch` 会优先走更适合文章正文的抽取策略。</span>
-                      </div>
-                    </label>
-
-                    <label className="toggle-inline">
-                      <input
-                        checked={draftSettings.web.fetch.providers.jinaEnabled}
-                        onChange={event =>
-                          updateWebFetchProviderSettings('jinaEnabled', event.target.checked)
-                        }
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>启用 Jina Reader fallback</strong>
-                        <span className="muted">默认开启；仅在本地提取明显不足时，才把页面交给第三方云端抓取。</span>
-                      </div>
-                    </label>
-
-                    <label className="toggle-inline">
-                      <input
-                        checked={draftSettings.web.fetch.providers.jinaAllowAnonymous}
-                        disabled={!draftSettings.web.fetch.providers.jinaEnabled}
-                        onChange={event =>
-                          updateWebFetchProviderSettings('jinaAllowAnonymous', event.target.checked)
-                        }
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>允许匿名调用 Jina</strong>
-                        <span className="muted">默认开启；如果填写了 API Key，请求会自动优先带 Key 以提高限额和稳定性。</span>
-                      </div>
-                    </label>
-
-                    <div className="form-row">
-                      <label>Jina API Key</label>
-                      <input
-                        className="monospace"
-                        disabled={!draftSettings.web.fetch.providers.jinaEnabled}
-                        value={draftSettings.web.fetch.providers.jinaApiKey}
-                        onChange={event =>
-                          updateWebFetchProviderSettings('jinaApiKey', event.target.value)
-                        }
-                        placeholder="jina_..."
-                        type="password"
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>抓取超时（秒）</label>
-                      <input
-                        min={3}
-                        max={90}
-                        onChange={event =>
-                          updateWebFetchSettings(
-                            'timeoutSeconds',
-                            Number(event.target.value) || draftSettings.web.fetch.timeoutSeconds,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.fetch.timeoutSeconds}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>最大返回字符数</label>
-                      <input
-                        min={500}
-                        max={100000}
-                        onChange={event =>
-                          updateWebFetchSettings(
-                            'maxCharsCap',
-                            Number(event.target.value) || draftSettings.web.fetch.maxCharsCap,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.fetch.maxCharsCap}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>最大响应字节数</label>
-                      <input
-                        min={32000}
-                        max={10000000}
-                        onChange={event =>
-                          updateWebFetchSettings(
-                            'maxResponseBytes',
-                            Number(event.target.value) || draftSettings.web.fetch.maxResponseBytes,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.fetch.maxResponseBytes}
-                      />
-                    </div>
-
-                    <div className="form-row">
-                      <label>最大跳转次数</label>
-                      <input
-                        min={0}
-                        max={10}
-                        onChange={event =>
-                          updateWebFetchSettings(
-                            'maxRedirects',
-                            Number(event.target.value) || draftSettings.web.fetch.maxRedirects,
-                          )
-                        }
-                        type="number"
-                        value={draftSettings.web.fetch.maxRedirects}
-                      />
-                    </div>
-
-                    <div className="provider-note">
-                      <p>Jina Reader 是第三方服务。默认作为 `web_fetch` 的 fallback 启用；若填写了 Jina API Key，运行时会自动优先使用你的 Key。</p>
-                    </div>
-                  </div>
-                </section>
-
-                <section className="dashboard-card nested">
-                  <div className="section-title">系统 Chrome 备用模式</div>
-                  <div className="toggle-stack">
-                    <label className="toggle-inline">
-                      <input
-                        checked={draftSettings.enableChromeAutomation}
-                        onChange={event => handleSettingsChange('enableChromeAutomation', event.target.checked)}
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>允许系统前台 Chrome 自动化</strong>
-                        <span className="muted">仅在运行时不可用，或你明确要求直接操作系统 Chrome 时使用。</span>
-                      </div>
-                    </label>
-                    <label className={`toggle-inline ${!draftSettings.enableChromeAutomation ? 'disabled' : ''}`}>
-                      <input
-                        checked={draftSettings.browser.allowChromeAutomationFallback}
-                        disabled={!draftSettings.enableChromeAutomation}
-                        onChange={event =>
-                          updateBrowserSettings({ allowChromeAutomationFallback: event.target.checked })
-                        }
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>运行时不可用时允许自动降级</strong>
-                        <span className="muted">只在 Aura 浏览器启动失败或来源不可用时，才允许回退到系统 Chrome。</span>
-                      </div>
-                    </label>
-                    <label className={`toggle-inline ${!draftSettings.enableChromeAutomation ? 'disabled' : ''}`}>
-                      <input
-                        checked={draftSettings.autoApproveChromeAutomation}
-                        disabled={!draftSettings.enableChromeAutomation}
-                        onChange={event =>
-                          void handleApprovalSettingChange(
-                            'autoApproveChromeAutomation',
-                            event.target.checked,
-                          )
-                        }
-                        type="checkbox"
-                      />
-                      <div className="flex flex-col">
-                        <strong>Chrome 自动化默认自动允许</strong>
-                        <span className="muted">仅影响 `chrome_*` 备用工具的审批，不影响 Aura 浏览器运行时。</span>
-                      </div>
-                    </label>
-                  </div>
-                  <div className="provider-note mt-4">
-                    <p>风险提示：启用后，Agent 可能切换到你的前台 Chrome 窗口并打断当前桌面操作。</p>
-                  </div>
-                </section>
+              <div className="form-row">
+                <label>普通模式搜索结果数</label>
+                <input
+                  min={1}
+                  max={10}
+                  onChange={event =>
+                    updateWebResearchSettings(
+                      'defaultSearchLimit',
+                      Number(event.target.value) ||
+                        draftSettings.web.research.defaultSearchLimit,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.research.defaultSearchLimit}
+                />
               </div>
-            ) : null}
+
+              <div className="form-row">
+                <label>普通模式抓取页数</label>
+                <input
+                  min={1}
+                  max={6}
+                  onChange={event =>
+                    updateWebResearchSettings(
+                      'defaultFetchLimit',
+                      Number(event.target.value) ||
+                        draftSettings.web.research.defaultFetchLimit,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.research.defaultFetchLimit}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>普通模式单页正文上限</label>
+                <input
+                  min={500}
+                  max={20000}
+                  onChange={event =>
+                    updateWebResearchSettings(
+                      'defaultMaxChars',
+                      Number(event.target.value) ||
+                        draftSettings.web.research.defaultMaxChars,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.research.defaultMaxChars}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>复用搜索正文的最小长度</label>
+                <input
+                  min={200}
+                  max={8000}
+                  onChange={event =>
+                    updateWebResearchSettings(
+                      'searchContentMinChars',
+                      Number(event.target.value) ||
+                        draftSettings.web.research.searchContentMinChars,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.research.searchContentMinChars}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>深度研究搜索结果数</label>
+                <input
+                  min={2}
+                  max={10}
+                  onChange={event =>
+                    updateWebResearchSettings(
+                      'deepSearchLimit',
+                      Number(event.target.value) ||
+                        draftSettings.web.research.deepSearchLimit,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.research.deepSearchLimit}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>深度研究抓取页数</label>
+                <input
+                  min={1}
+                  max={6}
+                  onChange={event =>
+                    updateWebResearchSettings(
+                      'deepFetchLimit',
+                      Number(event.target.value) ||
+                        draftSettings.web.research.deepFetchLimit,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.research.deepFetchLimit}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>深度研究单页正文上限</label>
+                <input
+                  min={800}
+                  max={20000}
+                  onChange={event =>
+                    updateWebResearchSettings(
+                      'deepMaxChars',
+                      Number(event.target.value) || draftSettings.web.research.deepMaxChars,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.research.deepMaxChars}
+                />
+              </div>
+            </div>
+          </section>
+
+          <section className="dashboard-card">
+            <div className="section-title">Web Search</div>
+            <div className="form-container">
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.web.search.enabled}
+                  onChange={event => updateWebSearchSettings('enabled', event.target.checked)}
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>启用 `web_search`</strong>
+                  <span className="muted">负责候选来源发现和排序，`web_research` 会复用这里的 provider。</span>
+                </div>
+              </label>
+
+              <div className="form-row">
+                <label>搜索 Provider</label>
+                <select
+                  className="settings-select"
+                  value={draftSettings.web.search.provider}
+                  onChange={event =>
+                    updateWebSearchSettings(
+                      'provider',
+                      event.target.value as AgentSettings['web']['search']['provider'],
+                    )
+                  }
+                >
+                  <option value="auto">Auto（Tavily → Brave → DuckDuckGo）</option>
+                  <option value="tavily">Tavily</option>
+                  <option value="brave">Brave</option>
+                  <option value="duckduckgo">DuckDuckGo</option>
+                </select>
+              </div>
+
+              <div className="form-row">
+                <label>Tavily API Key</label>
+                <input
+                  className="monospace"
+                  value={draftSettings.web.search.providers.tavilyApiKey}
+                  onChange={event =>
+                    updateWebSearchProviderSettings('tavilyApiKey', event.target.value)
+                  }
+                  placeholder="tvly-..."
+                  type="password"
+                />
+              </div>
+
+              <div className="form-row">
+                <label>Brave API Key</label>
+                <input
+                  className="monospace"
+                  value={draftSettings.web.search.providers.braveApiKey}
+                  onChange={event =>
+                    updateWebSearchProviderSettings('braveApiKey', event.target.value)
+                  }
+                  placeholder="BSA..."
+                  type="password"
+                />
+              </div>
+
+              <div className="form-row">
+                <label>搜索超时（秒）</label>
+                <input
+                  min={3}
+                  max={60}
+                  onChange={event =>
+                    updateWebSearchSettings(
+                      'timeoutSeconds',
+                      Number(event.target.value) || draftSettings.web.search.timeoutSeconds,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.search.timeoutSeconds}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>缓存 TTL（分钟）</label>
+                <input
+                  min={0}
+                  max={1440}
+                  onChange={event =>
+                    updateWebSearchSettings(
+                      'cacheTtlMinutes',
+                      Number(event.target.value) || draftSettings.web.search.cacheTtlMinutes,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.search.cacheTtlMinutes}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>默认结果数</label>
+                <input
+                  min={1}
+                  max={10}
+                  onChange={event =>
+                    updateWebSearchSettings(
+                      'maxResults',
+                      Number(event.target.value) || draftSettings.web.search.maxResults,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.search.maxResults}
+                />
+              </div>
+            </div>
+          </section>
+
+          <section className="dashboard-card full-span">
+            <div className="section-title">Web Fetch</div>
+            <div className="form-container">
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.web.fetch.enabled}
+                  onChange={event => updateWebFetchSettings('enabled', event.target.checked)}
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>启用 `web_fetch`</strong>
+                  <span className="muted">用于 HTTP 拉取和正文抽取，和交互式浏览器分开维护。</span>
+                </div>
+              </label>
+
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.web.fetch.readability}
+                  onChange={event => updateWebFetchSettings('readability', event.target.checked)}
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>优先正文抽取</strong>
+                  <span className="muted">开启后优先走更适合文章正文的提取策略。</span>
+                </div>
+              </label>
+
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.web.fetch.providers.jinaEnabled}
+                  onChange={event =>
+                    updateWebFetchProviderSettings('jinaEnabled', event.target.checked)
+                  }
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>启用 Jina Reader fallback</strong>
+                  <span className="muted">本地提取不足时，允许交给第三方云端抓取。</span>
+                </div>
+              </label>
+
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.web.fetch.providers.jinaAllowAnonymous}
+                  disabled={!draftSettings.web.fetch.providers.jinaEnabled}
+                  onChange={event =>
+                    updateWebFetchProviderSettings('jinaAllowAnonymous', event.target.checked)
+                  }
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>允许匿名调用 Jina</strong>
+                  <span className="muted">填写 API Key 后会自动优先带 Key 以提高限额和稳定性。</span>
+                </div>
+              </label>
+
+              <div className="form-row">
+                <label>Jina API Key</label>
+                <input
+                  className="monospace"
+                  disabled={!draftSettings.web.fetch.providers.jinaEnabled}
+                  value={draftSettings.web.fetch.providers.jinaApiKey}
+                  onChange={event =>
+                    updateWebFetchProviderSettings('jinaApiKey', event.target.value)
+                  }
+                  placeholder="jina_..."
+                  type="password"
+                />
+              </div>
+
+              <div className="form-row">
+                <label>抓取超时（秒）</label>
+                <input
+                  min={3}
+                  max={90}
+                  onChange={event =>
+                    updateWebFetchSettings(
+                      'timeoutSeconds',
+                      Number(event.target.value) || draftSettings.web.fetch.timeoutSeconds,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.fetch.timeoutSeconds}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>最大返回字符数</label>
+                <input
+                  min={500}
+                  max={100000}
+                  onChange={event =>
+                    updateWebFetchSettings(
+                      'maxCharsCap',
+                      Number(event.target.value) || draftSettings.web.fetch.maxCharsCap,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.fetch.maxCharsCap}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>最大响应字节数</label>
+                <input
+                  min={32000}
+                  max={10000000}
+                  onChange={event =>
+                    updateWebFetchSettings(
+                      'maxResponseBytes',
+                      Number(event.target.value) || draftSettings.web.fetch.maxResponseBytes,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.fetch.maxResponseBytes}
+                />
+              </div>
+
+              <div className="form-row">
+                <label>最大跳转次数</label>
+                <input
+                  min={0}
+                  max={10}
+                  onChange={event =>
+                    updateWebFetchSettings(
+                      'maxRedirects',
+                      Number(event.target.value) || draftSettings.web.fetch.maxRedirects,
+                    )
+                  }
+                  type="number"
+                  value={draftSettings.web.fetch.maxRedirects}
+                />
+              </div>
+
+              <div className="provider-note">
+                <p>Jina Reader 是第三方服务。默认作为 `web_fetch` 的补充层，而不是浏览器兜底的替代说法。</p>
+              </div>
+            </div>
           </section>
         </div>
       </section>
