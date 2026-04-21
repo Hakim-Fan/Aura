@@ -601,6 +601,7 @@ export type AgentSettings = {
   executionMode: ExecutionMode
   memoryMode: MemoryMode
   reasoningEffort: ReasoningEffort
+  showDetailedExecutionDetails: boolean
   enableProviderFailureRecovery: boolean
   providerFailureRecoveryMaxAttempts: number
   enableMultiAgent: boolean

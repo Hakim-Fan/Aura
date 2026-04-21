@@ -376,6 +376,94 @@ button {
   animation: streamingTailReveal 0.56s cubic-bezier(0.18, 0.72, 0.18, 1);
 }
 
+.execution-digest-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.execution-digest-log__viewport {
+  position: relative;
+  max-height: calc(1.72em * 5.4);
+  overflow-y: auto;
+  padding-right: 0.15rem;
+  scrollbar-width: none;
+}
+
+.execution-digest-log__viewport--masked {
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 1) 78%, rgba(0, 0, 0, 0) 100%);
+  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 1) 78%, rgba(0, 0, 0, 0) 100%);
+}
+
+.execution-digest-log__viewport--interactive {
+  cursor: default;
+}
+
+.execution-digest-log__viewport::-webkit-scrollbar {
+  display: none;
+}
+
+.execution-digest-log__viewport--expanded {
+  max-height: none;
+  overflow: visible;
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+
+.execution-digest-log__entry {
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.45rem;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.05);
+}
+
+.execution-digest-log__entry:last-child {
+  margin-bottom: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.execution-digest-log__entry-label {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 0.18rem;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--accent-soft-strong);
+  opacity: 0.78;
+}
+
+.execution-digest-log__entry-text {
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.72;
+  color: var(--text-secondary);
+  opacity: 0.88;
+}
+
+.execution-digest-log__entry--error .execution-digest-log__entry-label,
+.execution-digest-log__entry--error .execution-digest-log__entry-text {
+  color: #dc2626;
+  opacity: 0.92;
+}
+
+.execution-digest-log__toggle {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  opacity: 0.42;
+}
+
+.execution-digest-log__toggle:hover {
+  opacity: 0.72;
+  background: rgba(15, 23, 42, 0.04);
+}
+
 .spin-icon {
   animation: spin 0.8s linear infinite;
 }

@@ -969,6 +969,350 @@ function buildExecutionTimeline(
   })
 }
 
+type ExecutionTimelineItem = ReturnType<typeof buildExecutionTimeline>[number]
+type ExecutionDigestPreview = {
+  label: string
+  text: string
+  tone?: 'default' | 'error'
+}
+
+const EXECUTION_DIGEST_BATCH_DELAY_MS = 900
+const EXECUTION_DIGEST_MIN_BATCH_CHARS = 48
+
+function isSameExecutionDigestPreview(
+  left: ExecutionDigestPreview | null,
+  right: ExecutionDigestPreview | null,
+) {
+  return (
+    left?.label === right?.label &&
+    left?.text === right?.text &&
+    (left?.tone || 'default') === (right?.tone || 'default')
+  )
+}
+
+function isExecutionEventItem(
+  item: ExecutionTimelineItem,
+): item is Extract<ExecutionTimelineItem, { kind: 'event' }> {
+  return item.kind === 'event'
+}
+
+function isAwaitingApprovalEvent(event: MessageEvent) {
+  return event.kind === 'approval' && event.status === 'awaiting_approval'
+}
+
+function stripMarkdownForPreview(value: string) {
+  return value
+    .replace(/```[\s\S]*?```/g, '\n[代码段]\n')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^(#{1,6}\s*)/gm, '')
+    .replace(/(\*\*|__|\*|_|~~)/g, '')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*\d+\.\s+/gm, '')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function extractTailPreview(value: string, maxLines = 3, maxChars = 180) {
+  const normalized = stripMarkdownForPreview(value)
+  if (!normalized) {
+    return ''
+  }
+
+  const lines = normalized
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+
+  if (lines.length === 0) {
+    return ''
+  }
+
+  const tailLines = lines.slice(-maxLines)
+  const joined = tailLines.join('\n')
+  if (joined.length > maxChars) {
+    return `...${joined.slice(-maxChars).trimStart()}`
+  }
+
+  return lines.length > maxLines ? `...${joined}` : joined
+}
+
+function findLatestTaskSummary(nodes: TaskNode[]) {
+  let latestSummary = ''
+
+  function visit(node: TaskNode) {
+    if (normalizeComparableText(node.summary)) {
+      latestSummary = node.summary
+    }
+    node.children.forEach(visit)
+  }
+
+  nodes.forEach(visit)
+  return latestSummary
+}
+
+function buildExecutionDigestPreview(options: {
+  executionTimeline: ExecutionTimelineItem[]
+  taskNodes: TaskNode[]
+  messageError?: string
+  failureSummary?: string
+}) {
+  const { executionTimeline, taskNodes, messageError, failureSummary } = options
+
+  for (let index = executionTimeline.length - 1; index >= 0; index -= 1) {
+    const item = executionTimeline[index]
+
+    if (item.kind === 'event') {
+      const event = item.event
+      if (isAwaitingApprovalEvent(event) || isSearchControllerDecisionEvent(event)) {
+        continue
+      }
+
+      const rawText =
+        event.status === 'error'
+          ? event.errorInfo?.summary || event.error || event.output || event.summary || event.title
+          : event.kind === 'shell'
+            ? event.output || event.summary || event.input || event.title
+            : event.summary || event.output || event.input || event.title
+      const text = extractTailPreview(rawText)
+
+      if (text) {
+        return {
+          label: event.status === 'error' ? '执行异常' : event.title || '最新进展',
+          text,
+          tone: event.status === 'error' ? 'error' : 'default',
+        } satisfies ExecutionDigestPreview
+      }
+    }
+
+    if (item.kind === 'phase_output') {
+      const text = extractTailPreview(item.output.content)
+      if (text) {
+        return {
+          label: '阶段输出',
+          text,
+        } satisfies ExecutionDigestPreview
+      }
+    }
+
+    if (item.kind === 'reasoning') {
+      const text = extractTailPreview(item.entry.content)
+      if (text) {
+        return {
+          label: item.entry.kind === 'summary' ? '执行摘要' : '执行进展',
+          text,
+        } satisfies ExecutionDigestPreview
+      }
+    }
+  }
+
+  if (failureSummary) {
+    return {
+      label: '执行异常',
+      text: extractTailPreview(failureSummary),
+      tone: 'error',
+    } satisfies ExecutionDigestPreview
+  }
+
+  const taskSummary = extractTailPreview(findLatestTaskSummary(taskNodes))
+  if (taskSummary) {
+    return {
+      label: '执行计划',
+      text: taskSummary,
+    } satisfies ExecutionDigestPreview
+  }
+
+  if (messageError) {
+    return {
+      label: '执行异常',
+      text: extractTailPreview(messageError),
+      tone: 'error',
+    } satisfies ExecutionDigestPreview
+  }
+
+  return null
+}
+
+function ExecutionDigestLog({ preview }: { preview: ExecutionDigestPreview }) {
+  const [entries, setEntries] = useState<ExecutionDigestPreview[]>([preview])
+  const [expanded, setExpanded] = useState(false)
+  const [hasOverflow, setHasOverflow] = useState(false)
+  const queuedPreviewRef = useRef<ExecutionDigestPreview | null>(null)
+  const flushTimerRef = useRef<number | null>(null)
+  const lastCommitAtRef = useRef(Date.now())
+  const viewportRef = useRef<HTMLDivElement>(null)
+
+  const clearTimers = useCallback(() => {
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current)
+      flushTimerRef.current = null
+    }
+  }, [])
+
+  const appendPreview = useCallback(
+    (nextPreview: ExecutionDigestPreview) => {
+      clearTimers()
+      queuedPreviewRef.current = null
+      setEntries(current => {
+        const lastEntry = current.at(-1)
+        if (lastEntry && isSameExecutionDigestPreview(lastEntry, nextPreview)) {
+          return current
+        }
+        const next = [...current, nextPreview]
+        return next.slice(-80)
+      })
+      lastCommitAtRef.current = Date.now()
+    },
+    [clearTimers],
+  )
+
+  useEffect(() => {
+    if (entries.length === 0) {
+      setEntries([preview])
+      lastCommitAtRef.current = Date.now()
+      return
+    }
+
+    const lastEntry = entries.at(-1)
+    if (lastEntry && isSameExecutionDigestPreview(lastEntry, preview)) {
+      return
+    }
+
+    const labelChanged = lastEntry?.label !== preview.label
+    const toneChanged = (lastEntry?.tone || 'default') !== (preview.tone || 'default')
+    const currentLineCount = (lastEntry?.text || '').split('\n').filter(Boolean).length
+    const nextLineCount = preview.text.split('\n').filter(Boolean).length
+    const deltaChars = Math.abs(preview.text.length - (lastEntry?.text.length || 0))
+    const elapsed = Date.now() - lastCommitAtRef.current
+    const shouldCommitImmediately =
+      labelChanged ||
+      toneChanged ||
+      nextLineCount !== currentLineCount ||
+      deltaChars >= EXECUTION_DIGEST_MIN_BATCH_CHARS ||
+      elapsed >= EXECUTION_DIGEST_BATCH_DELAY_MS
+
+    if (shouldCommitImmediately) {
+      appendPreview(preview)
+      return
+    }
+
+    queuedPreviewRef.current = preview
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current)
+    }
+    flushTimerRef.current = window.setTimeout(() => {
+      if (queuedPreviewRef.current) {
+        appendPreview(queuedPreviewRef.current)
+      }
+      flushTimerRef.current = null
+    }, Math.max(120, EXECUTION_DIGEST_BATCH_DELAY_MS - elapsed))
+  }, [appendPreview, entries, preview])
+
+  useEffect(() => {
+    return () => {
+      clearTimers()
+    }
+  }, [clearTimers])
+
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport || expanded) {
+      return
+    }
+
+    const measureOverflow = () => {
+      setHasOverflow(viewport.scrollHeight - viewport.clientHeight > 2)
+    }
+
+    measureOverflow()
+    const observer = new ResizeObserver(measureOverflow)
+    observer.observe(viewport)
+    return () => observer.disconnect()
+  }, [entries, expanded])
+
+  useEffect(() => {
+    if (!viewportRef.current) {
+      return
+    }
+    viewportRef.current.scrollTop = viewportRef.current.scrollHeight
+  }, [entries, expanded])
+
+  const canToggle = hasOverflow || expanded
+
+  return (
+    <div className="execution-digest-log">
+      <div
+        ref={viewportRef}
+        className={`execution-digest-log__viewport custom-scrollbar ${
+          expanded ? 'execution-digest-log__viewport--expanded' : ''
+        } ${!expanded && hasOverflow ? 'execution-digest-log__viewport--masked' : ''}${
+          canToggle ? ' execution-digest-log__viewport--interactive' : ''
+        }`}
+      >
+        {entries.map((entry, index) => (
+          <div
+            key={`${entry.label}-${entry.text}-${index}`}
+            className={`execution-digest-log__entry ${
+              (entry.tone || 'default') === 'error' ? 'execution-digest-log__entry--error' : ''
+            }`}
+          >
+            <span className="execution-digest-log__entry-label">{entry.label}</span>
+            <div className="execution-digest-log__entry-text">{entry.text}</div>
+          </div>
+        ))}
+      </div>
+      {canToggle ? (
+        <button
+          type="button"
+          className="execution-digest-log__toggle"
+          onClick={() => setExpanded(current => !current)}
+          title={expanded ? '收起' : '展开'}
+          aria-label={expanded ? '收起' : '展开'}
+        >
+          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+function ExecutionDigest({
+  activity,
+  preview,
+}: {
+  activity?: ChatMessage['activity']
+  preview: ExecutionDigestPreview | null
+}) {
+  const meta = [
+    // activity?.toolCount ? `${activity.toolCount} 个工具` : null,
+    // activity?.skillCount ? `${activity.skillCount} 个技能` : null,
+  ].filter(Boolean)
+
+  return (
+    <section className="flex flex-col gap-2 border-l border-[rgba(79,123,116,0.14)] pl-3">
+      {meta.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {meta.map(item => (
+            <span
+              key={item}
+              className="inline-flex items-center rounded-full border border-[rgba(15,23,42,0.06)] bg-white/75 px-2 py-0.5 text-[11px] text-[var(--text-secondary)] opacity-80"
+            >
+              {item}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {preview ? (
+        <ExecutionDigestLog preview={preview} />
+      ) : null}
+    </section>
+  )
+}
+
 function ReasoningPhaseCard({
   content,
   outputContent,
@@ -2247,6 +2591,7 @@ function AssistantMessageCard({
   onRegenerateMessage,
   onRegenerateMessageWithModel,
   onForceExecuteAppendedInput,
+  showDetailedExecutionDetails,
   onCancelCurrentStep,
   onHandleApproval,
   onToggleActivity,
@@ -2262,6 +2607,7 @@ function AssistantMessageCard({
   onRegenerateMessage: (messageId: string) => void
   onRegenerateMessageWithModel: (messageId: string, profileId: string, modelId: string) => void
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
+  showDetailedExecutionDetails: boolean
   onCancelCurrentStep: () => void
   onHandleApproval: (decision: 'approve' | 'deny') => void
   onToggleActivity: (messageId: string) => void
@@ -2310,7 +2656,6 @@ function AssistantMessageCard({
       duration ? formatDuration(duration) : null,
       activity.toolCount > 0 ? `${activity.toolCount} 个工具` : null,
       activity.skillCount > 0 ? `${activity.skillCount} 个技能` : null,
-      activity.stepCount > 0 ? `${activity.stepCount} 个步骤` : null,
     ]
       .filter(Boolean)
       .join(' · ')
@@ -2350,11 +2695,6 @@ function AssistantMessageCard({
       hasLinkedOutput: phaseOutputBlockIds.has(entry.id),
     }),
   )
-  const hasExecution =
-    (message.events?.length || 0) > 0 ||
-    visibleSteps.length > 0 ||
-    filteredReasoning.length > 0 ||
-    visiblePhaseOutputs.length > 0
   const providerReasoning = filteredReasoning.filter(entry => entry.kind === 'provider')
   const summaryReasoning = filteredReasoning.filter(entry => entry.kind === 'summary')
   const displayReasoning =
@@ -2371,7 +2711,33 @@ function AssistantMessageCard({
     visiblePhaseOutputs,
     message.events || [],
   )
+  const approvalEvents = executionTimeline.filter(
+    (item): item is Extract<ExecutionTimelineItem, { kind: 'event' }> =>
+      isExecutionEventItem(item) && isAwaitingApprovalEvent(item.event),
+  )
+  const nonApprovalTimeline = executionTimeline.filter(
+    item => !(isExecutionEventItem(item) && isAwaitingApprovalEvent(item.event)),
+  )
   const latestReasoningId = displayReasoning.at(-1)?.id || ''
+  const executionDigestPreview = buildExecutionDigestPreview({
+    executionTimeline: nonApprovalTimeline,
+    taskNodes: visibleSteps,
+    messageError: message.error,
+    failureSummary: messageFailureSummary,
+  })
+  const shouldShowDetailedTimeline =
+    activity?.expanded === true &&
+    showDetailedExecutionDetails &&
+    (nonApprovalTimeline.length > 0 || visibleSteps.length > 0)
+  const shouldShowCompactDigest =
+    activity?.expanded === true &&
+    !showDetailedExecutionDetails &&
+    Boolean(executionDigestPreview)
+  const shouldShowApprovalEvents = approvalEvents.length > 0
+  const shouldSuppressStreamingAnswerBody =
+    isStreaming &&
+    !showDetailedExecutionDetails &&
+    ((message.events?.length || 0) > 0 || visiblePhaseOutputs.length > 0 || visibleSteps.length > 0)
 
   const usedTools = Array.from(
     new Set(
@@ -2513,10 +2879,24 @@ function AssistantMessageCard({
             ) : null}
           </div>
 
-          {hasExecution && activity?.expanded ? (
+          {shouldShowApprovalEvents ? (
+            <section className="flex flex-col gap-2.5">
+              {approvalEvents.map(item => (
+                <MessageEventCard
+                  key={item.key}
+                  event={item.event}
+                  onHandleApproval={onHandleApproval}
+                  onCancelCurrentStep={onCancelCurrentStep}
+                  onCopyText={onCopyText}
+                />
+              ))}
+            </section>
+          ) : null}
+
+          {shouldShowDetailedTimeline ? (
             <section className="flex flex-col gap-3 border-l border-[rgba(15,23,42,0.08)] pl-4">
               <div className="flex flex-col gap-2.5">
-                {executionTimeline.map(item =>
+                {nonApprovalTimeline.map(item =>
                   item.kind === 'reasoning' ? (
                     <ReasoningPhaseCard
                       key={item.key}
@@ -2545,6 +2925,13 @@ function AssistantMessageCard({
             </section>
           ) : null}
 
+          {shouldShowCompactDigest ? (
+            <ExecutionDigest
+              activity={activity}
+              preview={executionDigestPreview}
+            />
+          ) : null}
+
           {message.deliveryNote ? (
             <div className="rounded-xl border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-4 py-3 text-13px leading-relaxed text-[var(--text-secondary)]">
               {message.deliveryNote}
@@ -2569,7 +2956,7 @@ function AssistantMessageCard({
             />
           ) : null}
 
-          {shouldShowAnswer ? (
+          {shouldShowAnswer && !shouldSuppressStreamingAnswerBody ? (
             isStreaming ? (
               <StreamingMarkdownAnswer content={message.content} onCopyText={onCopyText} />
             ) : (
@@ -2590,7 +2977,7 @@ function AssistantMessageCard({
                 </div>
               ) : null}
             </div>
-          ) : (
+          ) : shouldSuppressStreamingAnswerBody ? null : (
             <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
               <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
               {phaseSummary || '正在整理信息并生成最终回答...'}
@@ -3131,6 +3518,7 @@ export function ChatView({
                       onRegenerateMessage={onRegenerateMessage}
                       onRegenerateMessageWithModel={onRegenerateMessageWithModel}
                       onForceExecuteAppendedInput={onForceExecuteAppendedInput}
+                      showDetailedExecutionDetails={settings.showDetailedExecutionDetails}
                       onCancelCurrentStep={onCancelCurrentStep}
                       onHandleApproval={onHandleApproval}
                       onToggleActivity={onToggleMessageActivity}

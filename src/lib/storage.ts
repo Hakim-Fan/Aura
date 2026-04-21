@@ -208,6 +208,7 @@ export const defaultSettings: AgentSettings = {
   executionMode: 'bounded',
   memoryMode: 'summary',
   reasoningEffort: 'medium',
+  showDetailedExecutionDetails: false,
   enableProviderFailureRecovery: true,
   providerFailureRecoveryMaxAttempts: 3,
   enableMultiAgent: true,
@@ -1378,6 +1379,9 @@ function parseSettings(raw: string | null): AgentSettings {
       executionMode: normalizeExecutionMode(parsed.executionMode),
       memoryMode: normalizeMemoryMode(parsed.memoryMode),
       reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
+      showDetailedExecutionDetails: normalizeDetailedExecutionSetting(
+        parsed.showDetailedExecutionDetails,
+      ),
       enableProviderFailureRecovery: parsed.enableProviderFailureRecovery !== false,
       providerFailureRecoveryMaxAttempts: normalizeProviderFailureRecoveryMaxAttempts(
         parsed.providerFailureRecoveryMaxAttempts,
@@ -1417,6 +1421,10 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort {
     return value
   }
   return defaultSettings.reasoningEffort
+}
+
+function normalizeDetailedExecutionSetting(value: unknown) {
+  return value === true
 }
 
 function normalizeMaxSteps(value: unknown) {

@@ -2009,6 +2009,31 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
+            <div className="section-title">执行详情展示</div>
+            <div className="toggle-stack">
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.showDetailedExecutionDetails}
+                  onChange={event =>
+                    handleSettingsChange('showDetailedExecutionDetails', event.target.checked)
+                  }
+                  type="checkbox"
+                />
+                <div className="flex flex-col">
+                  <strong>显示详细执行信息</strong>
+                  <span className="muted">
+                    关闭时，聊天页默认只显示轻量执行摘要和待审批步骤；开启后恢复完整执行时间线。
+                  </span>
+                </div>
+              </label>
+            </div>
+            <div className="provider-note mt-3">
+              <p>这个开关只影响 UI 展示，不会裁剪 reasoning、工具事件、阶段输出或任务树的实际记录。</p>
+              <p>切换后当前会话和历史消息都会按新模式重新渲染。</p>
+            </div>
+          </section>
+
+          <section className="dashboard-card">
             <div className="section-title">失败恢复</div>
             <div className="toggle-stack">
               <label className="toggle-inline">
