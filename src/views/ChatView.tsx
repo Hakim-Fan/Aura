@@ -891,6 +891,30 @@ function isSameExecutionDigestPreview(
   )
 }
 
+function isExecutionDigestPreviewRefinement(
+  left: ExecutionDigestPreview | null,
+  right: ExecutionDigestPreview | null,
+) {
+  if (!left || !right) {
+    return false
+  }
+  if (left.label !== right.label || (left.tone || 'default') !== (right.tone || 'default')) {
+    return false
+  }
+
+  const previousText = normalizeComparableText(left.text)
+  const nextText = normalizeComparableText(right.text)
+  if (!previousText || !nextText || nextText.length <= previousText.length) {
+    return false
+  }
+
+  return nextText.startsWith(previousText) || (previousText.length >= 18 && nextText.includes(previousText))
+}
+
+function phaseOutputLabel(output: MessagePhaseOutput) {
+  return output.blockId.startsWith('appended-input:') ? '补充输入' : '阶段输出'
+}
+
 function isExecutionEventItem(
   item: ExecutionTimelineItem,
 ): item is Extract<ExecutionTimelineItem, { kind: 'event' }> {
@@ -935,10 +959,10 @@ function extractTailPreview(value: string, maxLines = 3, maxChars = 180) {
   const tailLines = lines.slice(-maxLines)
   const joined = tailLines.join('\n')
   if (joined.length > maxChars) {
-    return `...${joined.slice(-maxChars).trimStart()}`
+    return joined.slice(-maxChars).trimStart()
   }
 
-  return lines.length > maxLines ? `...${joined}` : joined
+  return joined
 }
 
 function findLatestTaskSummary(nodes: TaskNode[]) {
@@ -993,7 +1017,7 @@ function buildExecutionDigestPreview(options: {
       const text = extractTailPreview(item.output.content)
       if (text) {
         return {
-          label: '阶段输出',
+          label: phaseOutputLabel(item.output),
           text,
         } satisfies ExecutionDigestPreview
       }
@@ -1061,6 +1085,9 @@ function ExecutionDigestLog({ preview }: { preview: ExecutionDigestPreview }) {
         const lastEntry = current.at(-1)
         if (lastEntry && isSameExecutionDigestPreview(lastEntry, nextPreview)) {
           return current
+        }
+        if (lastEntry && isExecutionDigestPreviewRefinement(lastEntry, nextPreview)) {
+          return [...current.slice(0, -1), nextPreview]
         }
         const next = [...current, nextPreview]
         return next.slice(-80)
@@ -1290,11 +1317,17 @@ function ReasoningPhaseCard({
   )
 }
 
-function PhaseOutputCard({ content }: { content: string }) {
+function PhaseOutputCard({
+  content,
+  label = '阶段输出',
+}: {
+  content: string
+  label?: string
+}) {
   return (
     <article className="stream-reveal-item rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.04)] px-3 py-2.5">
       <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--accent-soft-strong)] opacity-80">
-        阶段输出
+        {label}
       </div>
       <RevealTextSegments
         text={content.trim()}
@@ -2535,7 +2568,11 @@ function AssistantMessageCard({
                       isActive={isStreaming && item.entry.id === latestReasoningId}
                     />
                   ) : item.kind === 'phase_output' ? (
-                    <PhaseOutputCard key={item.key} content={item.output.content} />
+                    <PhaseOutputCard
+                      key={item.key}
+                      content={item.output.content}
+                      label={phaseOutputLabel(item.output)}
+                    />
                   ) : (
                     <MessageEventCard
                       key={item.key}

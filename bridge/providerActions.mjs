@@ -1,4 +1,7 @@
 import { normalizeBaseUrl } from './utils.mjs'
+import { guardedFetch } from './web/net/guardedFetch.mjs'
+
+const PROXY_CONNECTIVITY_TEST_URL = 'https://api.ipify.org?format=json'
 
 async function parseJsonResponse(response) {
   const text = await response.text()
@@ -88,11 +91,20 @@ function toProviderModel(entry) {
 
 async function fetchOpenAiModels(settings) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
-  const response = await fetch(`${apiBase}/models`, {
-    headers: {
-      authorization: `Bearer ${settings.apiKey}`,
+  const response = await guardedFetch(
+    `${apiBase}/models`,
+    {
+      headers: {
+        authorization: `Bearer ${settings.apiKey}`,
+      },
     },
-  })
+    {
+      settings,
+      proxyMode: 'provider-explicit',
+      timeoutMs: 20_000,
+      timeoutMessage: 'Timed out while fetching provider models.',
+    },
+  )
   const data = await parseJsonResponse(response)
   if (!response.ok) {
     throw new Error(data.error?.message || 'Failed to fetch models from OpenAI-compatible provider')
@@ -110,8 +122,15 @@ async function fetchGoogleModels(settings) {
     settings.baseUrl,
     'https://generativelanguage.googleapis.com/v1beta',
   )
-  const response = await fetch(
+  const response = await guardedFetch(
     `${apiBase}/models?key=${encodeURIComponent(settings.apiKey)}`,
+    {},
+    {
+      settings,
+      proxyMode: 'provider-explicit',
+      timeoutMs: 20_000,
+      timeoutMessage: 'Timed out while fetching provider models.',
+    },
   )
   const data = await parseJsonResponse(response)
   if (!response.ok) {
@@ -138,8 +157,53 @@ async function fetchGoogleModels(settings) {
   }
 }
 
+async function testProxyConnectivity(settings = {}) {
+  const configuredProxy =
+    typeof settings.networkProxy === 'string' ? settings.networkProxy.trim() : ''
+
+  const response = await guardedFetch(
+    PROXY_CONNECTIVITY_TEST_URL,
+    {},
+    {
+      settings,
+      networkProxy: configuredProxy,
+      proxyMode: configuredProxy ? 'always' : 'direct',
+      timeoutMs: 15_000,
+      timeoutMessage: 'Timed out while testing proxy connectivity.',
+    },
+  )
+
+  if (!response.ok) {
+    throw new Error(
+      `${configuredProxy ? '代理地址' : '直连'}连通性测试失败：测试地址返回 HTTP ${response.status}。`,
+    )
+  }
+
+  let ipAddress = ''
+  try {
+    const payload = await response.json()
+    ipAddress = typeof payload?.ip === 'string' ? payload.ip.trim() : ''
+  } catch {
+    ipAddress = ''
+  }
+
+  const modeLabel = configuredProxy ? '代理地址' : '直连'
+  return {
+    ok: true,
+    message: ipAddress
+      ? `${modeLabel}连通性测试成功，当前出口 IP 为 ${ipAddress}。`
+      : `${modeLabel}连通性测试成功，已访问 ${PROXY_CONNECTIVITY_TEST_URL}。`,
+    models: [],
+  }
+}
+
 async function runAction(payload) {
   const { action, settings } = payload
+
+  if (action === 'test-proxy') {
+    return testProxyConnectivity(settings)
+  }
+
   if (!settings?.apiKey?.trim()) {
     throw new Error('Missing API key.')
   }

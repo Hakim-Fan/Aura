@@ -530,6 +530,7 @@ export type AgentSettings = {
   providerProfiles: ProviderProfile[]
   agentArchitectureMode: AgentArchitectureMode
   cwd: string
+  providerProxyEnabled: boolean
   networkProxy?: string
   maxSteps: number
   executionMode: ExecutionMode

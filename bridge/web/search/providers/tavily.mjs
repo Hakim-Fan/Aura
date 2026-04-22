@@ -49,6 +49,8 @@ export function createTavilySearchProvider() {
         {
           signal: runtime.signal,
           timeoutMs: args.timeoutMs,
+          settings: runtime.settings,
+          proxyMode: 'web-auto',
         },
       )
 

@@ -2,6 +2,7 @@ import { invokeTool } from './tools.mjs'
 import { createStructuredError } from './runtimeErrors.mjs'
 import { buildDeliveryPolicy } from './agentEvidence.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
+import { guardedFetch } from './web/net/guardedFetch.mjs'
 
 function flattenOpenAiMessageContent(content) {
   if (typeof content === 'string') {
@@ -259,19 +260,20 @@ async function parseJsonResponse(response) {
   }
 }
 
-async function fetchWithTimeout(url, init, { timeoutMs, timeoutMessage, messages }) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => {
-    controller.abort(new Error(timeoutMessage))
-  }, timeoutMs)
-
+async function fetchWithTimeout(url, init, { timeoutMs, timeoutMessage, messages, settings }) {
   try {
-    return await fetch(url, {
-      ...init,
-      signal: controller.signal,
+    return await guardedFetch(url, init, {
+      timeoutMs,
+      timeoutMessage,
+      settings,
+      proxyMode: 'provider-explicit',
     })
   } catch (error) {
-    if (controller.signal.aborted) {
+    const detail = error instanceof Error ? error.message : String(error)
+    if (
+      detail.includes(timeoutMessage) ||
+      detail.includes('Request timed out after')
+    ) {
       throw createClassifiedError('模型服务响应超时。', {
         source: 'provider',
         category: 'timeout',
@@ -282,8 +284,6 @@ async function fetchWithTimeout(url, init, { timeoutMs, timeoutMessage, messages
       })
     }
     throw error
-  } finally {
-    clearTimeout(timer)
   }
 }
 
@@ -1007,6 +1007,7 @@ export async function finalizeOpenAiCompatibleAnswer({
         timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
         timeoutMessage: 'Timed out while waiting for the final answer completion request.',
         messages,
+        settings,
       },
     )
 
@@ -1092,6 +1093,7 @@ export async function finalizeGoogleAnswer({
         timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
         timeoutMessage: 'Timed out while waiting for the final answer completion request.',
         messages,
+        settings,
       },
     )
 
@@ -1178,6 +1180,7 @@ export async function runOpenAiCompatibleAgent({
             timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
             timeoutMessage: 'Timed out while waiting for the streaming response to start.',
             messages: conversationMessages,
+            settings,
           },
         )
 
@@ -1447,6 +1450,7 @@ export async function runGoogleAgent({
             timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
             timeoutMessage: 'Timed out while waiting for the streaming response to start.',
             messages: conversationMessages,
+            settings,
           },
         )
 

@@ -728,6 +728,63 @@ async function tryJinaFallback({
   }
 }
 
+function summarizeFetchFallbackError(error, fallbackLabel) {
+  if (error?.errorInfo?.summary) {
+    return error.errorInfo.summary
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim()
+  }
+  return fallbackLabel
+}
+
+function buildFetchConnectivityError({
+  normalizedUrl,
+  directError,
+  lightpandaFallback,
+  jinaFallback,
+  runtime,
+  settings,
+}) {
+  const availability = getJinaProviderAvailability(runtime, settings)
+  const details = [
+    `URL: ${normalizedUrl}`,
+    `Direct fetch: ${summarizeFetchFallbackError(directError, '连接目标页面失败。')}`,
+  ]
+
+  if (lightpandaFallback?.error) {
+    details.push(
+      `Lightpanda fallback: ${summarizeFetchFallbackError(
+        lightpandaFallback.error,
+        'Lightpanda 未能返回可用内容。',
+      )}`,
+    )
+  } else if (!isLightpandaEnabled(settings)) {
+    details.push('Lightpanda fallback: 当前未启用。')
+  }
+
+  if (jinaFallback?.error) {
+    details.push(
+      `Jina Reader fallback: ${summarizeFetchFallbackError(
+        jinaFallback.error,
+        'Jina Reader 未能返回可用内容。',
+      )}`,
+    )
+  } else if (!availability.usable && !availability.blocked) {
+    details.push('Jina Reader fallback: 当前未启用或没有可用鉴权方式。')
+  }
+
+  return createStructuredError('网页抓取无法连接到目标页面，本地抓取链路没有建立成功。', {
+    source: 'tool',
+    category: 'network',
+    code: 'WEB_FETCH_CONNECTION_FAILED',
+    detail: details.join('\n'),
+    suggestedAction:
+      '请检查当前网络和代理是否可用；如果目标站点更依赖浏览器环境，建议启用 Lightpanda / Jina Reader，或显式要求打开系统浏览器。',
+    retryable: true,
+  })
+}
+
 export async function runWebFetch(args, runtime = {}) {
   runtime.throwIfAborted?.()
   const settings = runtime.settings || {}
@@ -820,18 +877,62 @@ export async function runWebFetch(args, runtime = {}) {
     }
   }
 
-  const response = await guardedFetch(
-    normalizedUrl,
-    {
-      method: 'GET',
-      redirect: 'follow',
-    },
-    {
-      signal: runtime.signal,
-      timeoutMs: fetchSettings.timeoutMs,
-      maxRedirects: fetchSettings.maxRedirects,
-    },
-  )
+  let response
+  try {
+    response = await guardedFetch(
+      normalizedUrl,
+      {
+        method: 'GET',
+        redirect: 'follow',
+      },
+      {
+        signal: runtime.signal,
+        timeoutMs: fetchSettings.timeoutMs,
+        maxRedirects: fetchSettings.maxRedirects,
+        settings: runtime.settings,
+        proxyMode: 'web-auto',
+      },
+    )
+  } catch (directError) {
+    const lightpandaFallback = await tryLightpandaFallback({
+      normalizedUrl,
+      finalUrl: normalizedUrl,
+      mode,
+      maxChars,
+      startedAt,
+      cacheKey,
+      cacheTtlMs,
+      runtime,
+    })
+    if (lightpandaFallback?.result) {
+      return lightpandaFallback.result
+    }
+
+    const jinaFallback = await tryJinaFallback({
+      normalizedUrl,
+      finalUrl: normalizedUrl,
+      mode,
+      maxChars,
+      title: '',
+      startedAt,
+      cacheKey,
+      cacheTtlMs,
+      runtime,
+      fetchSettings,
+    })
+    if (jinaFallback?.result) {
+      return jinaFallback.result
+    }
+
+    throw buildFetchConnectivityError({
+      normalizedUrl,
+      directError,
+      lightpandaFallback,
+      jinaFallback,
+      runtime,
+      settings,
+    })
+  }
 
   if ([401, 403, 429].includes(response.status)) {
     const lightpandaFallback = await tryLightpandaFallback({

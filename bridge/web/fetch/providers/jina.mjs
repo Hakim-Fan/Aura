@@ -236,6 +236,7 @@ export function createJinaFetchProvider() {
           timeoutMs,
           maxRedirects: 2,
           settings: runtime.settings,
+          proxyMode: 'web-auto',
         },
       )
 

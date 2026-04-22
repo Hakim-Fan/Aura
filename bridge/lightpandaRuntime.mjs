@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { createStructuredError } from './runtimeErrors.mjs'
+import { buildProxyEnvironment, resolveProxyAddress } from './web/net/guardedFetch.mjs'
 
 const execFileAsync = promisify(execFile)
 const LIGHTPANDA_PROVIDER_ID = 'lightpanda'
@@ -15,7 +16,7 @@ let activeLightpandaRuns = 0
 const lightpandaWaiters = []
 
 function resolveAuraLightpandaInstallDir() {
-  return path.join(os.homedir(), '.aura', 'lightpanda')
+  return path.join(os.homedir(), '.aura', 'browser')
 }
 
 function lightpandaNameScore(entryPath) {
@@ -206,10 +207,11 @@ function releaseLightpandaSlot() {
   }
 }
 
-async function runLightpandaCommand({ executablePath, args, cwd, timeoutMs, signal }) {
+async function runLightpandaCommand({ executablePath, args, cwd, timeoutMs, signal, env }) {
   try {
     const { stdout, stderr } = await execFileAsync(executablePath, args, {
       cwd,
+      env,
       signal,
       timeout: timeoutMs,
       maxBuffer: LIGHTPANDA_MAX_BUFFER,
@@ -236,10 +238,12 @@ async function runDump({
   cwd,
   timeoutMs,
   signal,
+  env,
 }) {
   return runLightpandaCommand({
     executablePath,
     cwd,
+    env,
     timeoutMs,
     signal,
     args: [
@@ -281,48 +285,81 @@ export async function runLightpandaFetch(
 
   await acquireLightpandaSlot(resolved.maxConcurrency)
   try {
-    const markdown = await runDump({
-      executablePath: resolved.executablePath,
-      url,
-      dump: 'markdown',
-      cwd: runtime.cwd || process.cwd(),
-      timeoutMs: resolved.timeoutMs,
-      signal: runtime.signal,
-    })
-    const plain = stripMarkdown(markdown)
+    const proxyAddress = resolveProxyAddress({ settings: runtime.settings || {} })
+    const envVariants = [
+      buildProxyEnvironment(
+        { settings: runtime.settings || {}, proxyMode: 'direct' },
+        process.env,
+      ),
+      ...(proxyAddress
+        ? [
+          buildProxyEnvironment(
+            {
+              settings: runtime.settings || {},
+              proxyMode: 'always',
+              networkProxy: proxyAddress,
+            },
+            process.env,
+          ),
+        ]
+        : []),
+    ]
 
-    if (markdown || plain) {
-      return {
-        provider: LIGHTPANDA_PROVIDER_ID,
-        title: extractTitleFromMarkdown(markdown, url),
-        markdown,
-        plain,
+    let lastError = null
+    for (const runtimeEnv of envVariants) {
+      try {
+        const markdown = await runDump({
+          executablePath: resolved.executablePath,
+          url,
+          dump: 'markdown',
+          cwd: runtime.cwd || process.cwd(),
+          env: runtimeEnv,
+          timeoutMs: resolved.timeoutMs,
+          signal: runtime.signal,
+        })
+        const plain = stripMarkdown(markdown)
+
+        if (markdown || plain) {
+          return {
+            provider: LIGHTPANDA_PROVIDER_ID,
+            title: extractTitleFromMarkdown(markdown, url),
+            markdown,
+            plain,
+          }
+        }
+
+        const semanticTree = await runDump({
+          executablePath: resolved.executablePath,
+          url,
+          dump: 'semantic_tree_text',
+          cwd: runtime.cwd || process.cwd(),
+          env: runtimeEnv,
+          timeoutMs: resolved.timeoutMs,
+          signal: runtime.signal,
+        })
+        const normalizedText = collapseWhitespace(semanticTree)
+        if (!normalizedText) {
+          throw createStructuredError('Lightpanda 没有返回可用内容。', {
+            source: 'tool',
+            category: 'unsupported',
+            code: 'LIGHTPANDA_EMPTY_CONTENT',
+            suggestedAction: '请稍后重试，或改为显式要求打开系统浏览器。',
+          })
+        }
+
+        return {
+          provider: LIGHTPANDA_PROVIDER_ID,
+          title: extractTitleFromMarkdown('', url),
+          markdown: normalizedText,
+          plain: normalizedText,
+        }
+      } catch (error) {
+        lastError = error
       }
     }
 
-    const semanticTree = await runDump({
-      executablePath: resolved.executablePath,
-      url,
-      dump: 'semantic_tree_text',
-      cwd: runtime.cwd || process.cwd(),
-      timeoutMs: resolved.timeoutMs,
-      signal: runtime.signal,
-    })
-    const normalizedText = collapseWhitespace(semanticTree)
-    if (!normalizedText) {
-      throw createStructuredError('Lightpanda 没有返回可用内容。', {
-        source: 'tool',
-        category: 'unsupported',
-        code: 'LIGHTPANDA_EMPTY_CONTENT',
-        suggestedAction: '请稍后重试，或改为显式要求打开系统浏览器。',
-      })
-    }
-
-    return {
-      provider: LIGHTPANDA_PROVIDER_ID,
-      title: extractTitleFromMarkdown('', url),
-      markdown: normalizedText,
-      plain: normalizedText,
+    if (lastError) {
+      throw lastError
     }
   } finally {
     releaseLightpandaSlot()

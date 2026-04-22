@@ -7,8 +7,10 @@ export type ProviderActionResult = {
   models: ProviderModel[]
 }
 
+type ProviderAction = 'test' | 'fetch-models' | 'test-proxy'
+
 async function runProviderAction(
-  action: 'test' | 'fetch-models',
+  action: ProviderAction,
   settings: AgentSettings,
 ): Promise<ProviderActionResult> {
   return invoke<ProviderActionResult>('run_provider_action', {
@@ -25,4 +27,8 @@ export async function testProviderConnection(settings: AgentSettings) {
 
 export async function fetchProviderModels(settings: AgentSettings) {
   return runProviderAction('fetch-models', settings)
+}
+
+export async function testProxyConnectivity(settings: AgentSettings) {
+  return runProviderAction('test-proxy', settings)
 }

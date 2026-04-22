@@ -9,7 +9,11 @@ import {
   type McpInspectResult,
   validateMcpServerInput,
 } from './lib/mcp'
-import { fetchProviderModels, testProviderConnection } from './lib/provider'
+import {
+  fetchProviderModels,
+  testProviderConnection,
+  testProxyConnectivity,
+} from './lib/provider'
 import { ensureAuraHome, deleteAuraAsset, resetAuraHome, type AuraAsset, type AuraHomeState } from './lib/aura'
 import {
   hydrateStorageFromAuraHome,
@@ -118,6 +122,20 @@ function isPathInsideDirectory(candidate?: string, directory?: string) {
   )
 }
 
+function formatMiddleEllipsis(value?: string, maxLength = 44) {
+  const normalizedValue = typeof value === 'string' ? value.trim() : ''
+  if (!normalizedValue || normalizedValue.length <= maxLength) {
+    return normalizedValue
+  }
+  if (maxLength <= 5) {
+    return `${normalizedValue.slice(0, Math.max(1, maxLength - 1))}…`
+  }
+
+  const tailLength = Math.max(10, Math.floor((maxLength - 1) * 0.38))
+  const headLength = Math.max(8, maxLength - tailLength - 1)
+  return `${normalizedValue.slice(0, headLength)}…${normalizedValue.slice(-tailLength)}`
+}
+
 type Props = {
   initialTab: SettingsTab
 }
@@ -134,13 +152,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
   const [saveState, setSaveState] = useState<'idle' | 'saved'>('idle')
   const [providerStatus, setProviderStatus] = useState<ProviderStatusState | null>(null)
   const [browserStatus, setBrowserStatus] = useState<ProviderStatusState | null>(null)
+  const [proxyStatus, setProxyStatus] = useState<ProviderStatusState | null>(null)
   const [lightpandaStatus, setLightpandaStatus] = useState<LightpandaRuntimeStatusRecord | null>(
     null,
   )
   const [isTestingProvider, setIsTestingProvider] = useState(false)
+  const [isTestingProxy, setIsTestingProxy] = useState(false)
   const [isFetchingModels, setIsFetchingModels] = useState(false)
   const [isRefreshingLightpandaStatus, setIsRefreshingLightpandaStatus] = useState(false)
-  const [isWaitingForLightpandaInstall, setIsWaitingForLightpandaInstall] = useState(false)
+  const [isAwaitingLightpandaSelection, setIsAwaitingLightpandaSelection] = useState(false)
   const [availableSkills, setAvailableSkills] = useState<AuraAsset[]>(() =>
     createReadonlyBuiltinAssets(builtinSkills),
   )
@@ -274,18 +294,28 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }, [browserStatus])
 
   useEffect(() => {
-    if (!isWaitingForLightpandaInstall) {
+    if (!proxyStatus) {
+      return
+    }
+
+    const timer = window.setTimeout(() => setProxyStatus(null), 2600)
+    return () => window.clearTimeout(timer)
+  }, [proxyStatus])
+
+  useEffect(() => {
+    if (!isAwaitingLightpandaSelection) {
       return
     }
 
     const unlistenPromise = listen('tauri://focus', () => {
-      void handleLightpandaInstallFocusReturn()
+      setIsAwaitingLightpandaSelection(false)
+      void syncLightpandaExecutableRecord({ silent: true })
     })
 
     return () => {
       unlistenPromise.then(unlisten => unlisten())
     }
-  }, [isWaitingForLightpandaInstall, auraHome, draftSettings])
+  }, [isAwaitingLightpandaSelection])
 
   function handleSettingsChange<K extends keyof AgentSettings>(
     key: K,
@@ -296,6 +326,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
       [key]: value,
     }))
     setSaveState('idle')
+    if (key === 'networkProxy' || key === 'providerProxyEnabled') {
+      setProxyStatus(null)
+    }
   }
 
   async function handleApprovalSettingChange<K extends keyof AgentSettings>(
@@ -1080,44 +1113,16 @@ export function SettingsWindowApp({ initialTab }: Props) {
     }
   }
 
-  async function handleLightpandaInstallFocusReturn() {
-    setIsWaitingForLightpandaInstall(false)
-    const nextAura = auraHome || (await ensureAuraHome())
-    setAuraHome(nextAura)
-
-    const status = await refreshLightpandaStatus(undefined, { silent: true })
-    if (status?.executablePath && isPathInsideDirectory(status.executablePath, nextAura.lightpandaDir)) {
-      setBrowserStatus({
-        tone: 'success',
-        message: '已在 Aura 安装目录中检测到 Lightpanda。',
-      })
-      return
-    }
-
-    if (status?.executablePath) {
-      setBrowserStatus({
-        tone: 'error',
-        message: '安装目录里还没有检测到新的 Lightpanda，当前仍在使用系统 PATH 或已有自定义路径。',
-      })
-      return
-    }
-
-    setBrowserStatus({
-      tone: 'error',
-      message: '安装目录里还没有检测到可用的 Lightpanda，请把下载的启动文件拖进去。',
-    })
-  }
-
   async function openLightpandaInstallDirectory() {
     const nextAura = auraHome || (await ensureAuraHome())
     setAuraHome(nextAura)
     setBrowserStatus(null)
-    setIsWaitingForLightpandaInstall(true)
+    setIsAwaitingLightpandaSelection(true)
 
     try {
-      await openPathInDefaultApp(nextAura.lightpandaDir)
+      await openPathInDefaultApp(nextAura.browserDir)
     } catch (caught) {
-      setIsWaitingForLightpandaInstall(false)
+      setIsAwaitingLightpandaSelection(false)
       setBrowserStatus({
         tone: 'error',
         message: caught instanceof Error ? caught.message : '打开 Lightpanda 安装目录失败。',
@@ -1125,29 +1130,91 @@ export function SettingsWindowApp({ initialTab }: Props) {
     }
   }
 
-  async function resetLightpandaExecutablePath() {
-    const nextSettings: AgentSettings = {
-      ...draftSettings,
+  async function syncLightpandaExecutableRecord(options?: { silent?: boolean }) {
+    const nextAura = auraHome || (await ensureAuraHome())
+    setAuraHome(nextAura)
+    if (!options?.silent) {
+      setBrowserStatus(null)
+    }
+    setIsRefreshingLightpandaStatus(true)
+
+    let status: LightpandaRuntimeStatusRecord | null = null
+    try {
+      status = await detectLightpandaRuntime()
+      setLightpandaStatus(status)
+    } catch (caught) {
+      if (!options?.silent) {
+        setBrowserStatus({
+          tone: 'error',
+          message: caught instanceof Error ? caught.message : 'Lightpanda 检测失败。',
+        })
+      }
+      return
+    } finally {
+      setIsRefreshingLightpandaStatus(false)
+    }
+
+    const detectedBrowserPath =
+      status?.valid &&
+      status.executablePath &&
+      isPathInsideDirectory(status.executablePath, nextAura.browserDir)
+        ? status.executablePath
+        : ''
+    const persistedSettings = loadSettings()
+    const persistedPath = resolveLightpandaExecutablePath(
+      persistedSettings.browser.lightpanda.executablePath,
+    )
+    const shouldClearPersistedPath =
+      !detectedBrowserPath && isPathInsideDirectory(persistedPath, nextAura.browserDir)
+
+    if (!detectedBrowserPath && !shouldClearPersistedPath) {
+      return
+    }
+
+    const nextSavedSettings: AgentSettings = {
+      ...persistedSettings,
       browser: {
-        ...draftSettings.browser,
+        ...persistedSettings.browser,
         lightpanda: {
-          ...draftSettings.browser.lightpanda,
-          executablePath: '',
+          ...persistedSettings.browser.lightpanda,
+          executablePath: detectedBrowserPath,
         },
       },
     }
 
-    setDraftSettings(nextSettings)
-    setSaveState('idle')
-    setBrowserStatus(null)
-
-    const status = await refreshLightpandaStatus(nextSettings, { silent: true })
-    setBrowserStatus({
-      tone: status?.valid ? 'success' : 'error',
-      message: status?.valid
-        ? '已改回自动检测 Lightpanda。'
-        : status?.error || '已清除自定义路径，当前还没有检测到可用的 Lightpanda。',
-    })
+    try {
+      await saveSettingsAndAwaitPersistence(nextSavedSettings)
+      setSavedSettings(cloneSettings(nextSavedSettings))
+      setDraftSettings(current => ({
+        ...current,
+        browser: {
+          ...current.browser,
+          lightpanda: {
+            ...current.browser.lightpanda,
+            executablePath: detectedBrowserPath,
+          },
+        },
+      }))
+      if (!options?.silent) {
+        setSaveState('saved')
+      }
+      await broadcastSettingsUpdated()
+      if (!options?.silent) {
+        setBrowserStatus({
+          tone: 'success',
+          message: detectedBrowserPath
+            ? '已记录 Lightpanda 可执行文件，后续会直接调用这个路径。'
+            : '已清除无效的启动实例记录。',
+        })
+      }
+    } catch (caught) {
+      if (!options?.silent) {
+        setBrowserStatus({
+          tone: 'error',
+          message: caught instanceof Error ? caught.message : '保存 Lightpanda 路径失败。',
+        })
+      }
+    }
   }
 
   async function chooseDefaultWorkspace() {
@@ -1234,6 +1301,25 @@ export function SettingsWindowApp({ initialTab }: Props) {
     }
   }
 
+  async function handleTestProxyConnectivity() {
+    setIsTestingProxy(true)
+    setProxyStatus(null)
+    try {
+      const result = await testProxyConnectivity(draftSettings)
+      setProxyStatus({
+        tone: 'success',
+        message: result.message,
+      })
+    } catch (caught) {
+      setProxyStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '代理连通性测试失败。',
+      })
+    } finally {
+      setIsTestingProxy(false)
+    }
+  }
+
   function renderGeneral() {
     const isLongTaskMode = draftSettings.executionMode === 'long-task'
 
@@ -1257,16 +1343,43 @@ export function SettingsWindowApp({ initialTab }: Props) {
           <section className="dashboard-card">
             <div className="section-title">网络连接代理 (Network Proxy)</div>
             <p className="muted">
-              配置全局 HTTP/HTTPS 代理。当你需要抓取海外网站或访问专业提供商时，建议填入你的本机梯子代理地址。例如：<code>http://127.0.0.1:7890</code>
+              Provider 走显式代理，Web 工具走自动策略。模型连接只会按下面的开关决定是否使用代理；`web_search / web_fetch / web_research` 会先直连，只有直连失败时才自动尝试下面的代理地址。
             </p>
+            <label className="toggle-inline mt-3">
+              <input
+                checked={draftSettings.providerProxyEnabled}
+                onChange={event => handleSettingsChange('providerProxyEnabled', event.target.checked)}
+                type="checkbox"
+              />
+              <div className="flex flex-col">
+                <strong>{draftSettings.providerProxyEnabled ? '模型连接将使用代理' : '模型连接当前直连'}</strong>
+                <span className="muted">关闭后只影响 Provider；下面填写的代理地址仍会作为 Web 工具的自动兜底线路。</span>
+              </div>
+            </label>
             <input
               type="text"
-              placeholder="留空则直连网络或跟随环境变量"
+              placeholder="http://127.0.0.1:7890"
               value={draftSettings.networkProxy || ''}
               className="settings-text-input mt-3"
               onChange={event => handleSettingsChange('networkProxy', event.target.value)}
               style={{ width: '100%', maxWidth: '400px' }}
             />
+            <div className="header-actions mt-3">
+              <button
+                className="secondary-button"
+                disabled={isTestingProxy}
+                onClick={() => void handleTestProxyConnectivity()}
+                type="button"
+              >
+                <RefreshCw className={isTestingProxy ? 'animate-spin' : ''} size={14} />
+                <span>{isTestingProxy ? '正在测试...' : (draftSettings.networkProxy || '').trim() ? '测试代理地址' : '测试当前直连'}</span>
+              </button>
+            </div>
+            {proxyStatus ? (
+              <div className={`provider-feedback ${proxyStatus.tone === 'success' ? 'success' : 'error'} mt-3`}>
+                <strong>{proxyStatus.message}</strong>
+              </div>
+            ) : null}
           </section>
 
           <section className="dashboard-card">
@@ -1648,9 +1761,19 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   function renderBrowser() {
-    const lightpandaPath = resolveLightpandaExecutablePath(
+    const savedLightpandaPath = resolveLightpandaExecutablePath(
       draftSettings.browser.lightpanda.executablePath,
     )
+    const detectedBrowserPath =
+      auraHome &&
+      isPathInsideDirectory(lightpandaStatus?.executablePath, auraHome.browserDir)
+        ? lightpandaStatus?.executablePath || ''
+        : ''
+    const lightpandaInstanceLabel =
+      savedLightpandaPath || detectedBrowserPath || '选择启动路径'
+    const lightpandaInstanceDisplay = savedLightpandaPath || detectedBrowserPath
+      ? formatMiddleEllipsis(lightpandaInstanceLabel, 46)
+      : lightpandaInstanceLabel
     const lightpandaStatusLabel = lightpandaStatus?.valid
       ? '可用'
       : lightpandaStatus?.detected
@@ -1724,17 +1847,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
               </div>
             ) : null}
 
-            <div className="header-actions mt-4">
-              <button
-                className="secondary-button"
-                disabled={isRefreshingLightpandaStatus}
-                onClick={() => void chooseLightpandaExecutable()}
-              >
-                <FolderOpen size={14} />
-                选择启动路径
-              </button>
-            </div>
-
             <div className="toggle-stack">
               <label className="toggle-inline">
                 <input
@@ -1752,17 +1864,20 @@ export function SettingsWindowApp({ initialTab }: Props) {
             </div>
 
             <div className="dashboard-list mt-4">
-              <div className="dashboard-row">
-                <strong>检测状态</strong>
-                <span>{lightpandaStatusLabel}</span>
-              </div>
-              <div className="dashboard-row">
-                <strong>最近检测时间</strong>
-                <span>{formatTimestamp(lightpandaStatus?.lastCheckedAt)}</span>
-              </div>
-              <div className="dashboard-row overflow-hidden">
-                <strong className="shrink-0">可执行路径</strong>
-                <span>{lightpandaStatus?.executablePath || lightpandaPath || '使用系统 PATH 检测'}</span>
+              <div className="dashboard-row gap-3">
+                <strong className="shrink-0">启动实例</strong>
+                <div className="ml-auto min-w-0 max-w-[32rem]">
+                  <button
+                    className="inline-flex min-w-0 max-w-full items-center gap-2 rounded-lg px-2 py-1 text-12px font-500 text-black/45 transition-colors hover:bg-black/5 hover:text-black/65 disabled:opacity-40"
+                    disabled={isRefreshingLightpandaStatus}
+                    onClick={() => void openLightpandaInstallDirectory()}
+                    title={lightpandaInstanceLabel}
+                    type="button"
+                  >
+                    <FolderOpen size={13} className="shrink-0" />
+                    <span className="min-w-0 text-left leading-relaxed">{lightpandaInstanceDisplay}</span>
+                  </button>
+                </div>
               </div>
               <div className="dashboard-row">
                 <strong>并发会话上限</strong>
@@ -1810,8 +1925,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
             </div>
 
             <div className="provider-note mt-3">
-              <p>如果未填写路径，Aura 会只从系统 PATH 查找 `lightpanda`。</p>
-              <p>如果你手动下载了 Lightpanda，可直接在这里选择可执行文件；如果是 macOS / Linux，也可以先给文件执行权限再加入系统 PATH。</p>
+              <p>安装目录: `{auraHome?.browserDir || '正在初始化 Aura 数据目录…'}`。点击上面的启动实例会直接打开这个 `browser` 文件夹，把浏览器执行文件移动进去后返回应用即可自动识别并记录。</p>
+              <p>支持直接放入 `Lightpanda.app`、`lightpanda.exe` 或 `lightpanda` 二进制；如果是压缩包，请先解压再移动进去。</p>
               <p>Lightpanda 不负责登录、验证码、表单和人工处理，这些任务会走系统浏览器路径。</p>
             </div>
           </section>

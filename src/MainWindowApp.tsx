@@ -54,7 +54,9 @@ import type {
   MessageAttachment,
   MessageActivity,
   MessageEvent,
+  MessagePhaseOutput,
   MessageModelInfo,
+  MessageReasoning,
   ProjectCapabilityOverrides,
   ProviderProfile,
   ReasoningEffort,
@@ -594,6 +596,28 @@ function approvalCategoryLabel(category?: string) {
   }
 }
 
+function buildSnapshotMessageEvents(snapshot: AgentTaskSnapshot): MessageEvent[] {
+  return [
+    ...snapshot.toolEvents.map(mapToolEventToMessageEvent),
+    ...(snapshot.pendingApproval
+      ? [
+        {
+          id: snapshot.pendingApproval.id,
+          kind: 'approval' as const,
+          title: snapshot.pendingApproval.toolName,
+          summary: `${approvalCategoryLabel(snapshot.pendingApproval.category)} · ${snapshot.pendingApproval.summary}`,
+          order:
+            (snapshot.toolEvents
+              .map(event => event.order || 0)
+              .reduce((max, value) => Math.max(max, value), 0) || 0) + 1,
+          status: 'awaiting_approval' as const,
+          input: snapshot.pendingApproval.input,
+        },
+      ]
+      : []),
+  ]
+}
+
 function buildMessageActivity(
   status: AgentTaskSnapshot['status'],
   startedAt: number,
@@ -649,6 +673,83 @@ function createPendingAssistantMessage(): ChatMessage {
   }
 }
 
+const REPLAN_ARCHIVE_PREFIX = 'replan-archive'
+const REPLAN_ARCHIVE_ORDER_OFFSET = 10_000
+
+function archiveExecutionId(kind: string, value: string) {
+  return `${REPLAN_ARCHIVE_PREFIX}:${kind}:${value}`
+}
+
+function isArchivedExecutionId(value?: string) {
+  return typeof value === 'string' && value.startsWith(`${REPLAN_ARCHIVE_PREFIX}:`)
+}
+
+function archiveExecutionOrder(order?: number) {
+  return typeof order === 'number' ? order - REPLAN_ARCHIVE_ORDER_OFFSET : undefined
+}
+
+function archiveReasoningEntries(entries: MessageReasoning[] = []): MessageReasoning[] {
+  return entries.map(entry => ({
+    ...entry,
+    id: archiveExecutionId('reasoning', entry.id),
+    order: archiveExecutionOrder(entry.order),
+  }))
+}
+
+function archivePhaseOutputs(outputs: MessagePhaseOutput[] = []): MessagePhaseOutput[] {
+  return outputs.map(output => ({
+    ...output,
+    id: archiveExecutionId('phase-output', output.id),
+    blockId: archiveExecutionId('phase-block', output.blockId),
+    order: archiveExecutionOrder(output.order),
+  }))
+}
+
+function archiveMessageEvents(events: MessageEvent[] = []): MessageEvent[] {
+  return events.map(event => ({
+    ...event,
+    id: archiveExecutionId('event', event.id),
+    order: archiveExecutionOrder(event.order),
+  }))
+}
+
+function archiveTaskTreeNodes(nodes: TaskNode[] = []): TaskNode[] {
+  return nodes.map(node => ({
+    ...node,
+    id: archiveExecutionId('task', node.id),
+    children: archiveTaskTreeNodes(node.children),
+  }))
+}
+
+function summarizeAppendedInputForTimeline(input: AppendedInput, maxLength = 180) {
+  const normalized = (input.content || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    const attachmentCount = Array.isArray(input.attachments) ? input.attachments.length : 0
+    return attachmentCount > 0 ? `补充输入同时携带了 ${attachmentCount} 个附件。` : '已接入新的补充输入。'
+  }
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`
+    : normalized
+}
+
+function buildAppendedInputPhaseOutput(input: AppendedInput, order?: number): MessagePhaseOutput {
+  const attachmentCount = Array.isArray(input.attachments) ? input.attachments.length : 0
+  const lines = [
+    attachmentCount > 0
+      ? `已接入新的补充要求，并带入 ${attachmentCount} 个附件。`
+      : '已接入新的补充要求。',
+    summarizeAppendedInputForTimeline(input),
+    'Aura 正在基于这条补充要求继续执行。',
+  ]
+
+  return {
+    id: `appended-input-output:${input.id}`,
+    blockId: `appended-input:${input.id}`,
+    content: lines.join('\n'),
+    order,
+  }
+}
+
 function toMessageVariant(message: ChatMessage): ChatMessageVariant {
   return {
     content: message.content,
@@ -674,6 +775,149 @@ function toMessageVariant(message: ChatMessage): ChatMessageVariant {
     completionState: message.completionState,
     evidenceSummary: message.evidenceSummary,
     deliveryNote: message.deliveryNote,
+  }
+}
+
+function getActiveMessageVariant(message: ChatMessage): ChatMessageVariant {
+  const variants = ensureMessageVariants(message)
+  const activeIndex =
+    typeof message.activeVersionIndex === 'number'
+      ? Math.max(0, Math.min(message.activeVersionIndex, variants.length - 1))
+      : variants.length - 1
+  return variants[activeIndex] || toMessageVariant(message)
+}
+
+function mergeEntriesById<T extends { id: string }>(existing: T[] = [], incoming: T[] = []): T[] {
+  if (existing.length === 0) {
+    return incoming
+  }
+  if (incoming.length === 0) {
+    return existing
+  }
+
+  const merged = [...existing]
+  const indexById = new Map(merged.map((entry, index) => [entry.id, index]))
+
+  for (const entry of incoming) {
+    const existingIndex = indexById.get(entry.id)
+    if (typeof existingIndex === 'number') {
+      merged[existingIndex] = entry
+      continue
+    }
+    indexById.set(entry.id, merged.length)
+    merged.push(entry)
+  }
+
+  return merged
+}
+
+function mergeMessageEvents(existing: MessageEvent[] = [], incoming: MessageEvent[] = []): MessageEvent[] {
+  const preservedExisting = existing.filter(
+    event => event.kind !== 'approval' || isArchivedExecutionId(event.id),
+  )
+  return mergeEntriesById(preservedExisting, incoming)
+}
+
+function mergeTaskTreeRoots(existing: TaskNode[] = [], incoming: TaskNode[] = []): TaskNode[] {
+  if (existing.length === 0) {
+    return incoming
+  }
+  if (incoming.length === 0) {
+    return existing
+  }
+
+  const merged = [...existing]
+  const indexById = new Map(merged.map((node, index) => [node.id, index]))
+
+  for (const node of incoming) {
+    const existingIndex = indexById.get(node.id)
+    if (typeof existingIndex === 'number') {
+      merged[existingIndex] = node
+      continue
+    }
+    indexById.set(node.id, merged.length)
+    merged.push(node)
+  }
+
+  return merged
+}
+
+function resolveMaxExecutionOrder(
+  reasoning: MessageReasoning[] = [],
+  phaseOutputs: MessagePhaseOutput[] = [],
+  events: MessageEvent[] = [],
+) {
+  const orders = [
+    ...reasoning.map(entry => entry.order).filter((value): value is number => typeof value === 'number'),
+    ...phaseOutputs.map(entry => entry.order).filter((value): value is number => typeof value === 'number'),
+    ...events.map(entry => entry.order).filter((value): value is number => typeof value === 'number'),
+  ]
+  return orders.length > 0 ? Math.max(...orders) : 0
+}
+
+function collectConsumedAppendedInputPhaseOutputs(options: {
+  currentPhaseOutputs?: MessagePhaseOutput[]
+  nextAppendedInputs?: AppendedInput[]
+  reasoning?: MessageReasoning[]
+  events?: MessageEvent[]
+}) {
+  const currentPhaseOutputs = options.currentPhaseOutputs || []
+  const nextAppendedInputs = options.nextAppendedInputs || []
+  const existingIds = new Set(currentPhaseOutputs.map(output => output.id))
+  let nextOrder =
+    resolveMaxExecutionOrder(
+      options.reasoning || [],
+      currentPhaseOutputs,
+      options.events || [],
+    ) + 0.1
+
+  return nextAppendedInputs.flatMap(input => {
+    if (input.status !== 'consumed') {
+      return []
+    }
+    const outputId = `appended-input-output:${input.id}`
+    if (existingIds.has(outputId)) {
+      return []
+    }
+    existingIds.add(outputId)
+    const output = buildAppendedInputPhaseOutput(input, nextOrder)
+    nextOrder += 0.1
+    return [output]
+  })
+}
+
+function mergeExecutionArtifacts(
+  currentVariant: ChatMessageVariant,
+  snapshot: AgentTaskSnapshot,
+  snapshotMessageEvents: MessageEvent[],
+) {
+  const reasoning = mergeEntriesById(
+    currentVariant.reasoning || [],
+    snapshot.reasoning || [],
+  )
+  const events = mergeMessageEvents(
+    currentVariant.events || [],
+    snapshotMessageEvents,
+  )
+  const basePhaseOutputs = mergeEntriesById(
+    currentVariant.phaseOutputs || [],
+    snapshot.phaseOutputs || [],
+  )
+  const appendedInputPhaseOutputs = collectConsumedAppendedInputPhaseOutputs({
+    currentPhaseOutputs: basePhaseOutputs,
+    nextAppendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
+    reasoning,
+    events,
+  })
+
+  return {
+    reasoning,
+    events,
+    phaseOutputs: mergeEntriesById(basePhaseOutputs, appendedInputPhaseOutputs),
+    steps: mergeTaskTreeRoots(
+      currentVariant.steps || [],
+      snapshot.taskTree || [],
+    ),
   }
 }
 
@@ -1216,65 +1460,56 @@ export function MainWindowApp() {
           [sessionId]: snapshot,
         }))
 
+        const snapshotMessageEvents = buildSnapshotMessageEvents(snapshot)
+
         updateSession(sessionId, session => ({
           ...session,
           messages: session.messages.map(message =>
             message.id === binding.messageId
-              ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
-                ...currentVariant,
-                content: snapshot.message || currentVariant.content,
-                reasoning: snapshot.reasoning || currentVariant.reasoning,
-                phaseOutputs: snapshot.phaseOutputs || currentVariant.phaseOutputs,
-                usage: snapshot.usage || currentVariant.usage,
-                capabilitySnapshot:
-                  snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
-                status:
-                  snapshot.status === 'failed'
-                    ? ('failed' as const)
-                    : snapshot.status === 'completed'
-                      ? ('completed' as const)
-                      : ('streaming' as const),
-                events: [
-                  ...snapshot.toolEvents.map(mapToolEventToMessageEvent),
-                  ...(snapshot.pendingApproval
-                    ? [
-                      {
-                        id: snapshot.pendingApproval.id,
-                        kind: 'approval' as const,
-                        title: snapshot.pendingApproval.toolName,
-                        summary: `${approvalCategoryLabel(snapshot.pendingApproval.category)} · ${snapshot.pendingApproval.summary}`,
-                        order:
-                          (snapshot.toolEvents
-                            .map(event => event.order || 0)
-                            .reduce((max, value) => Math.max(max, value), 0) || 0) + 1,
-                        status: 'awaiting_approval' as const,
-                        input: snapshot.pendingApproval.input,
-                      },
-                    ]
-                    : []),
-                ],
-                steps: snapshot.taskTree,
-                activity: buildMessageActivity(
-                  snapshot.status,
-                  currentVariant.createdAt || Date.now(),
-                  snapshot.toolEvents,
-                  snapshot.taskTree,
+              ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => {
+                const mergedArtifacts = mergeExecutionArtifacts(
+                  currentVariant,
                   snapshot,
-                  currentVariant.activity?.expanded ?? true,
-                ),
-                appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
-                error: snapshot.error,
-                errorInfo: snapshot.errorInfo,
-                retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
-                agentMode: snapshot.agentMode || currentVariant.agentMode,
-                routeDecision: snapshot.routeDecision || currentVariant.routeDecision,
-                completionState:
-                  snapshot.completionState || currentVariant.completionState,
-                evidenceSummary:
-                  snapshot.evidenceSummary || currentVariant.evidenceSummary,
-                deliveryNote:
-                  snapshot.deliveryNote || currentVariant.deliveryNote,
-              }))
+                  snapshotMessageEvents,
+                )
+                return {
+                  ...currentVariant,
+                  content: snapshot.message || currentVariant.content,
+                  reasoning: mergedArtifacts.reasoning,
+                  phaseOutputs: mergedArtifacts.phaseOutputs,
+                  usage: snapshot.usage || currentVariant.usage,
+                  capabilitySnapshot:
+                    snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
+                  status:
+                    snapshot.status === 'failed'
+                      ? ('failed' as const)
+                      : snapshot.status === 'completed'
+                        ? ('completed' as const)
+                        : ('streaming' as const),
+                  events: mergedArtifacts.events,
+                  steps: mergedArtifacts.steps,
+                  activity: buildMessageActivity(
+                    snapshot.status,
+                    currentVariant.createdAt || Date.now(),
+                    snapshot.toolEvents,
+                    snapshot.taskTree,
+                    snapshot,
+                    currentVariant.activity?.expanded ?? true,
+                  ),
+                  appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
+                  error: snapshot.error,
+                  errorInfo: snapshot.errorInfo,
+                  retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
+                  agentMode: snapshot.agentMode || currentVariant.agentMode,
+                  routeDecision: snapshot.routeDecision || currentVariant.routeDecision,
+                  completionState:
+                    snapshot.completionState || currentVariant.completionState,
+                  evidenceSummary:
+                    snapshot.evidenceSummary || currentVariant.evidenceSummary,
+                  deliveryNote:
+                    snapshot.deliveryNote || currentVariant.deliveryNote,
+                }
+              })
               : message,
           ),
           toolEvents: snapshot.toolEvents,
@@ -1294,53 +1529,60 @@ export function MainWindowApp() {
                     ...session,
                     messages: session.messages.map(message =>
                       message.id === binding.messageId
-                        ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => ({
-                          ...currentVariant,
-                          content:
-                            snapshot.status === 'completed'
-                              ? snapshot.message || ''
-                              : snapshot.message || currentVariant.content,
-                          reasoning: snapshot.reasoning || currentVariant.reasoning,
-                          phaseOutputs: snapshot.phaseOutputs || currentVariant.phaseOutputs,
-                          usage: snapshot.usage || currentVariant.usage,
-                          capabilitySnapshot:
-                            snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
-                          status:
-                            snapshot.status === 'completed'
-                              ? ('completed' as const)
-                              : ('failed' as const),
-                          events: snapshot.toolEvents.map(mapToolEventToMessageEvent),
-                          steps: snapshot.taskTree,
-                          activity: buildMessageActivity(
-                            snapshot.status,
-                            currentVariant.createdAt || Date.now(),
-                            snapshot.toolEvents,
-                            snapshot.taskTree,
+                        ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => {
+                          const mergedArtifacts = mergeExecutionArtifacts(
+                            currentVariant,
                             snapshot,
-                            currentVariant.activity?.expanded ??
-                              (snapshot.status !== 'completed'),
-                          ),
-                          appendedInputs:
-                            snapshot.appendedInputs || currentVariant.appendedInputs,
-                          error:
-                            snapshot.status === 'failed'
-                              ? snapshot.error || 'Agent 执行失败。'
-                              : undefined,
-                          errorInfo:
-                            snapshot.status === 'failed'
-                              ? snapshot.errorInfo
-                              : undefined,
-                          retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
-                          agentMode: snapshot.agentMode || currentVariant.agentMode,
-                          routeDecision:
-                            snapshot.routeDecision || currentVariant.routeDecision,
-                          completionState:
-                            snapshot.completionState || currentVariant.completionState,
-                          evidenceSummary:
-                            snapshot.evidenceSummary || currentVariant.evidenceSummary,
-                          deliveryNote:
-                            snapshot.deliveryNote || currentVariant.deliveryNote,
-                        }))
+                            snapshotMessageEvents,
+                          )
+                          return {
+                            ...currentVariant,
+                            content:
+                              snapshot.status === 'completed'
+                                ? snapshot.message || ''
+                                : snapshot.message || currentVariant.content,
+                            reasoning: mergedArtifacts.reasoning,
+                            phaseOutputs: mergedArtifacts.phaseOutputs,
+                            usage: snapshot.usage || currentVariant.usage,
+                            capabilitySnapshot:
+                              snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
+                            status:
+                              snapshot.status === 'completed'
+                                ? ('completed' as const)
+                                : ('failed' as const),
+                            events: mergedArtifacts.events,
+                            steps: mergedArtifacts.steps,
+                            activity: buildMessageActivity(
+                              snapshot.status,
+                              currentVariant.createdAt || Date.now(),
+                              snapshot.toolEvents,
+                              snapshot.taskTree,
+                              snapshot,
+                              currentVariant.activity?.expanded ??
+                                (snapshot.status !== 'completed'),
+                            ),
+                            appendedInputs:
+                              snapshot.appendedInputs || currentVariant.appendedInputs,
+                            error:
+                              snapshot.status === 'failed'
+                                ? snapshot.error || 'Agent 执行失败。'
+                                : undefined,
+                            errorInfo:
+                              snapshot.status === 'failed'
+                                ? snapshot.errorInfo
+                                : undefined,
+                            retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
+                            agentMode: snapshot.agentMode || currentVariant.agentMode,
+                            routeDecision:
+                              snapshot.routeDecision || currentVariant.routeDecision,
+                            completionState:
+                              snapshot.completionState || currentVariant.completionState,
+                            evidenceSummary:
+                              snapshot.evidenceSummary || currentVariant.evidenceSummary,
+                            deliveryNote:
+                              snapshot.deliveryNote || currentVariant.deliveryNote,
+                          }
+                        })
                         : message,
                     ),
                     toolEvents: snapshot.toolEvents,
@@ -1977,6 +2219,7 @@ export function MainWindowApp() {
     }
 
     const assistantMessage = activeSession.messages[assistantIndex]
+    const currentAssistantVariant = getActiveMessageVariant(assistantMessage)
     const appendedInputs = assistantMessage.appendedInputs || []
     const targetInput = appendedInputs.find(input => input.id === inputId)
     if (!targetInput || targetInput.status !== 'queued') {
@@ -2070,6 +2313,13 @@ export function MainWindowApp() {
     }))
     const pendingAssistantVariant: ChatMessageVariant = {
       ...toMessageVariant(createPendingAssistantMessage()),
+      reasoning: archiveReasoningEntries(currentAssistantVariant.reasoning || []),
+      phaseOutputs: mergeEntriesById(
+        archivePhaseOutputs(currentAssistantVariant.phaseOutputs || []),
+        [buildAppendedInputPhaseOutput(targetInput, -1)],
+      ),
+      events: archiveMessageEvents(currentAssistantVariant.events || []),
+      steps: archiveTaskTreeNodes(currentAssistantVariant.steps || []),
       capabilitySnapshot: resolvedCapabilities.usage,
       modelInfo: buildMessageModelInfo(latestProviderProfile, latestEffectiveModel),
       appendedInputs: appendedInputs.map(input => ({

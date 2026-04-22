@@ -83,6 +83,8 @@ export function createBraveSearchProvider() {
         {
           signal: runtime.signal,
           timeoutMs: args.timeoutMs,
+          settings: runtime.settings,
+          proxyMode: 'web-auto',
         },
       )
 

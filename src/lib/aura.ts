@@ -23,7 +23,7 @@ export type AuraHomeState = {
   mcpDir: string
   workspaceDir: string
   logsDir: string
-  lightpandaDir: string
+  browserDir: string
   settingsPath: string
   sessionsPath: string
   mcpServersPath: string

@@ -190,6 +190,7 @@ export const defaultSettings: AgentSettings = {
   providerProfiles: defaultProfiles(),
   agentArchitectureMode: 'route-first',
   cwd: '',
+  providerProxyEnabled: false,
   networkProxy: '',
   maxSteps: 8,
   executionMode: 'bounded',
@@ -1165,7 +1166,10 @@ function parseSettings(raw: string | null): AgentSettings {
   }
 
   try {
-    const parsed = JSON.parse(raw) as Partial<AgentSettings> & { provider?: unknown }
+    const parsed = JSON.parse(raw) as Partial<AgentSettings> & {
+      provider?: unknown
+      networkProxyEnabled?: boolean
+    }
     const providerProfiles = normalizeProfiles(parsed)
     const activeProviderProfileId =
       resolveActiveProfile(
@@ -1180,6 +1184,12 @@ function parseSettings(raw: string | null): AgentSettings {
       ...parsed,
       providerProfiles,
       activeProviderProfileId,
+      providerProxyEnabled:
+        typeof parsed.providerProxyEnabled === 'boolean'
+          ? parsed.providerProxyEnabled
+          : typeof parsed.networkProxyEnabled === 'boolean'
+            ? parsed.networkProxyEnabled
+            : typeof parsed.networkProxy === 'string' && parsed.networkProxy.trim().length > 0,
       networkProxy: typeof parsed.networkProxy === 'string' ? parsed.networkProxy : '',
       agentArchitectureMode: normalizeAgentArchitectureMode(parsed.agentArchitectureMode),
       maxSteps: normalizeMaxSteps(parsed.maxSteps),

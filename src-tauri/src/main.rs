@@ -117,8 +117,8 @@ struct AuraHomeState {
     workspace_dir: String,
     #[serde(rename = "logsDir")]
     logs_dir: String,
-    #[serde(rename = "lightpandaDir")]
-    lightpanda_dir: String,
+    #[serde(rename = "browserDir")]
+    browser_dir: String,
     #[serde(rename = "settingsPath")]
     settings_path: String,
     #[serde(rename = "sessionsPath")]
@@ -824,7 +824,7 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
     let mcp_dir = home_dir.join("mcp");
     let workspace_dir = home_dir.join("workspace");
     let logs_dir = home_dir.join("logs");
-    let lightpanda_dir = home_dir.join("lightpanda");
+    let browser_dir = home_dir.join("browser");
 
     for dir in [
         &home_dir,
@@ -834,7 +834,7 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
         &mcp_dir,
         &workspace_dir,
         &logs_dir,
-        &lightpanda_dir,
+        &browser_dir,
     ] {
         ensure_directory(dir)?;
     }
@@ -854,7 +854,7 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
         mcp_dir: mcp_dir.display().to_string(),
         workspace_dir: workspace_dir.display().to_string(),
         logs_dir: logs_dir.display().to_string(),
-        lightpanda_dir: lightpanda_dir.display().to_string(),
+        browser_dir: browser_dir.display().to_string(),
         settings_path: settings_path.display().to_string(),
         sessions_path: sessions_path.display().to_string(),
         mcp_servers_path: mcp_servers_path.display().to_string(),
@@ -2793,7 +2793,7 @@ fn detect_lightpanda_runtime<R: Runtime>(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let install_dir = ensure_aura_layout(&app)?.lightpanda_dir;
+    let install_dir = ensure_aura_layout(&app)?.browser_dir;
     let resolved_path = match requested_path {
         Some(path) => resolve_executable_path(Path::new(path)),
         None => detect_lightpanda_installation(Path::new(&install_dir)).or_else(detect_lightpanda_path),

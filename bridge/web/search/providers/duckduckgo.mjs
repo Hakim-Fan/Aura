@@ -157,6 +157,8 @@ export function createDuckDuckGoSearchProvider() {
           signal: runtime.signal,
           timeoutMs: args.timeoutMs,
           maxRedirects: 3,
+          settings: runtime.settings,
+          proxyMode: 'web-auto',
         },
       )
 
