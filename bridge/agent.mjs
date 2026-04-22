@@ -7,6 +7,7 @@ import {
   buildRouteFirstSystemPrompt,
 } from './agentPrompting.mjs'
 import {
+  applyHardSignalIntentOverrides,
   applyRouteToolBudgets,
   deriveHardSignals,
   escalateRouteState,
@@ -892,7 +893,10 @@ export async function runRouteFirstAgent(request) {
     ...mcp.tools,
   ]
   const hardSignals = deriveHardSignals(messages)
-  const strategy = selectAgentStrategy(classification, hardSignals, {
+  const normalizedClassification = classification
+    ? applyHardSignalIntentOverrides(classification, hardSignals)
+    : null
+  const strategy = selectAgentStrategy(normalizedClassification, hardSignals, {
     orchestratedAvailable: ORCHESTRATED_AGENT_AVAILABLE,
   })
 
@@ -902,7 +906,7 @@ export async function runRouteFirstAgent(request) {
   }
 
   let routeState = inferRouteState(messages, {
-    classification,
+    classification: normalizedClassification,
     hardSignals,
     settings,
   })
@@ -913,7 +917,7 @@ export async function runRouteFirstAgent(request) {
   let lastSystemPrompt = ''
   let lastRouteDecision = {
     strategyDecision: strategy,
-    intentClassification: classification || undefined,
+    intentClassification: normalizedClassification || undefined,
     answerMode: routeState.answerMode,
     capabilityTier: routeState.capabilityTier,
     budgets: {
@@ -948,7 +952,7 @@ export async function runRouteFirstAgent(request) {
         runtimeCapabilities: capabilities,
         skillEntries: skillCatalog,
         tools: routedTools,
-        classification,
+        classification: normalizedClassification,
         routeState,
       })
       lastSelectedCapabilities = selectedCapabilities
@@ -983,7 +987,7 @@ export async function runRouteFirstAgent(request) {
         escalationCount: routeNotes.length,
         availableEscalations,
         tierHistory: [...routeHistory.map(entry => entry.capabilityTier), routeState.capabilityTier],
-        classification,
+        classification: normalizedClassification,
         strategy,
       })
       const turnToolEventStart = toolEvents.length
@@ -1075,7 +1079,7 @@ export async function runRouteFirstAgent(request) {
         escalationCount: routeNotes.length,
         availableEscalations,
         tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),
-        classification,
+        classification: normalizedClassification,
         strategy,
         stopReason:
           routeStopReason ||

@@ -252,8 +252,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
         setAvailablePlugins(createReadonlyBuiltinAssets(builtinPlugins))
       })
 
-      // Dismiss splash after full hydration
-      ;(window as unknown as { __dismissSplash?: () => void }).__dismissSplash?.()
+        // Dismiss splash after full hydration
+        ; (window as unknown as { __dismissSplash?: () => void }).__dismissSplash?.()
 
       unlistenOpenTab = await listen<SettingsTab>('settings:open-tab', event => {
         setActiveTab(event.payload)
@@ -1156,8 +1156,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
     const detectedBrowserPath =
       status?.valid &&
-      status.executablePath &&
-      isPathInsideDirectory(status.executablePath, nextAura.browserDir)
+        status.executablePath &&
+        isPathInsideDirectory(status.executablePath, nextAura.browserDir)
         ? status.executablePath
         : ''
     const persistedSettings = loadSettings()
@@ -1352,8 +1352,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 type="checkbox"
               />
               <div className="flex flex-col">
-                <strong>{draftSettings.providerProxyEnabled ? '模型连接将使用代理' : '模型连接当前直连'}</strong>
-                <span className="muted">关闭后只影响 Provider；下面填写的代理地址仍会作为 Web 工具的自动兜底线路。</span>
+                <strong>{'使用代理'}</strong>
+                <span className="muted">开启后 Provider 将使用代理连接；Web 工具默认使用直连，当遇到错误会尝试代理连接。</span>
               </div>
             </label>
             <input
@@ -1766,7 +1766,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
     )
     const detectedBrowserPath =
       auraHome &&
-      isPathInsideDirectory(lightpandaStatus?.executablePath, auraHome.browserDir)
+        isPathInsideDirectory(lightpandaStatus?.executablePath, auraHome.browserDir)
         ? lightpandaStatus?.executablePath || ''
         : ''
     const lightpandaInstanceLabel =
@@ -2011,7 +2011,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     updateWebResearchSettings(
                       'defaultSearchLimit',
                       Number(event.target.value) ||
-                        draftSettings.web.research.defaultSearchLimit,
+                      draftSettings.web.research.defaultSearchLimit,
                     )
                   }
                   type="number"
@@ -2028,7 +2028,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     updateWebResearchSettings(
                       'defaultFetchLimit',
                       Number(event.target.value) ||
-                        draftSettings.web.research.defaultFetchLimit,
+                      draftSettings.web.research.defaultFetchLimit,
                     )
                   }
                   type="number"
@@ -2045,7 +2045,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     updateWebResearchSettings(
                       'defaultMaxChars',
                       Number(event.target.value) ||
-                        draftSettings.web.research.defaultMaxChars,
+                      draftSettings.web.research.defaultMaxChars,
                     )
                   }
                   type="number"
@@ -2062,7 +2062,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     updateWebResearchSettings(
                       'searchContentMinChars',
                       Number(event.target.value) ||
-                        draftSettings.web.research.searchContentMinChars,
+                      draftSettings.web.research.searchContentMinChars,
                     )
                   }
                   type="number"
@@ -2079,7 +2079,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     updateWebResearchSettings(
                       'deepSearchLimit',
                       Number(event.target.value) ||
-                        draftSettings.web.research.deepSearchLimit,
+                      draftSettings.web.research.deepSearchLimit,
                     )
                   }
                   type="number"
@@ -2096,7 +2096,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                     updateWebResearchSettings(
                       'deepFetchLimit',
                       Number(event.target.value) ||
-                        draftSettings.web.research.deepFetchLimit,
+                      draftSettings.web.research.deepFetchLimit,
                     )
                   }
                   type="number"
@@ -2483,10 +2483,10 @@ export function SettingsWindowApp({ initialTab }: Props) {
                       </div>
                       <div
                         className={`provider-feedback ${feedbackTone === 'success'
-                            ? 'success'
-                            : feedbackTone === 'error'
-                              ? 'error'
-                              : ''
+                          ? 'success'
+                          : feedbackTone === 'error'
+                            ? 'error'
+                            : ''
                           }`}
                       >
                         <strong>{feedbackMessage}</strong>

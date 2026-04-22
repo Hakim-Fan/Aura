@@ -1,3 +1,4 @@
+import { guardedFetch } from './web/net/guardedFetch.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
 
 const INTENT_CLASSIFIER_TIMEOUT_MS = 5_000
@@ -122,6 +123,8 @@ function buildClassifierSystemPrompt() {
     ),
     'Interpretation rules:',
     '- needsExternalFacts: true only when the task depends on current external facts, online documentation, live data, news, prices, schedules, or public web sources.',
+    '- If the user provides a public URL or asks to read, summarize, inspect, or analyze a linked page/article/post, treat that as needsExternalFacts: true unless they are only editing local code/config that happens to contain the URL.',
+    '- Reading or summarizing a linked webpage is not browser interaction by itself. Keep webInteractionRequired: false unless the user explicitly wants manual browser actions such as clicking, logging in, filling forms, submitting, solving CAPTCHA, or operating the system browser.',
     '- webInteractionRequired: true only when the user wants browser interaction like open, click, login, fill, submit, navigate, or other page actions.',
     '- workspaceRelated: true when the task concerns the local repo, workspace files, project code, logs, configs, tests, or attached local files.',
     '- answerMode: advise for explanation/recommendation, diagnose for analysis/debug/review, execute for making changes or taking actions.',
@@ -166,14 +169,6 @@ function buildGeminiClassifierPayload(messages) {
       maxOutputTokens: 220,
     },
   }
-}
-
-function withTimeout(timeoutMs, work) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(new Error('intent-classifier-timeout')), timeoutMs)
-  return Promise.resolve()
-    .then(() => work(controller.signal))
-    .finally(() => clearTimeout(timer))
 }
 
 async function parseJsonResponse(response) {
@@ -256,8 +251,9 @@ export function parseAndValidateClassification(rawValue) {
 async function classifyWithOpenAiCompatible(settings, messages) {
   const classifierSettings = resolveIntentClassifierSettings(settings)
   const apiBase = normalizeBaseUrl(classifierSettings.baseUrl, 'https://api.openai.com/v1')
-  const response = await withTimeout(INTENT_CLASSIFIER_TIMEOUT_MS, signal =>
-    fetch(`${apiBase}/chat/completions`, {
+  const response = await guardedFetch(
+    `${apiBase}/chat/completions`,
+    {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -270,8 +266,13 @@ async function classifyWithOpenAiCompatible(settings, messages) {
         temperature: 0,
         max_tokens: 220,
       }),
-      signal,
-    }),
+    },
+    {
+      settings,
+      proxyMode: 'provider-explicit',
+      timeoutMs: INTENT_CLASSIFIER_TIMEOUT_MS,
+      timeoutMessage: 'Timed out while classifying intent.',
+    },
   )
 
   if (!response.ok) {
@@ -289,16 +290,22 @@ async function classifyWithGoogle(settings, messages) {
     classifierSettings.baseUrl,
     'https://generativelanguage.googleapis.com/v1beta',
   )
-  const response = await withTimeout(INTENT_CLASSIFIER_TIMEOUT_MS, signal =>
-    fetch(`${apiBase}/models/${classifierSettings.model}:generateContent`, {
+  const response = await guardedFetch(
+    `${apiBase}/models/${classifierSettings.model}:generateContent`,
+    {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'x-goog-api-key': classifierSettings.apiKey,
       },
       body: JSON.stringify(buildGeminiClassifierPayload(messages)),
-      signal,
-    }),
+    },
+    {
+      settings,
+      proxyMode: 'provider-explicit',
+      timeoutMs: INTENT_CLASSIFIER_TIMEOUT_MS,
+      timeoutMessage: 'Timed out while classifying intent.',
+    },
   )
 
   if (!response.ok) {

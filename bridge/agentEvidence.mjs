@@ -150,8 +150,8 @@ function collectProducedEvidence(event, effectTypes) {
     if (name === 'web_fetch') {
       const contentFormat =
         structuredOutput &&
-        typeof structuredOutput === 'object' &&
-        typeof structuredOutput.contentFormat === 'string'
+          typeof structuredOutput === 'object' &&
+          typeof structuredOutput.contentFormat === 'string'
           ? structuredOutput.contentFormat
           : ''
       producedEvidence.push(

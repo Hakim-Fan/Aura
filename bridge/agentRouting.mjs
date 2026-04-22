@@ -12,41 +12,108 @@ function hasAny(text, patterns) {
   return patterns.some(pattern => text.includes(pattern))
 }
 
-function buildConversationText(messages) {
-  return normalizeText(
-    messages
-      .slice(-8)
-      .map(message => {
-        const parts = Array.isArray(message.parts)
-          ? message.parts
-            .map(part => {
-              if (part.type === 'text') {
-                return part.text || ''
-              }
-              if (part.type === 'image' || part.type === 'file') {
-                return [part.name, part.path].filter(Boolean).join(' ')
-              }
-              return ''
-            })
-            .join('\n')
-          : ''
+const PUBLIC_HTTP_URL_PATTERN = /\bhttps?:\/\/[^\s<>"')\]}]+/giu
 
-        return [message.content, parts].filter(Boolean).join('\n')
-      })
-      .join('\n'),
-  )
+function collectMessageText(message) {
+  const parts = Array.isArray(message?.parts)
+    ? message.parts
+        .map(part => {
+          if (part.type === 'text') {
+            return part.text || ''
+          }
+          if (part.type === 'image' || part.type === 'file') {
+            return [part.name, part.path].filter(Boolean).join(' ')
+          }
+          return ''
+        })
+        .join('\n')
+    : ''
+
+  return [message?.content, parts].filter(Boolean).join('\n')
+}
+
+function buildConversationText(messages) {
+  return normalizeText(buildConversationRawText(messages))
+}
+
+function buildConversationRawText(messages) {
+  return messages
+    .slice(-8)
+    .map(message => collectMessageText(message))
+    .filter(Boolean)
+    .join('\n')
 }
 
 function latestUserIntent(messages) {
-  return normalizeText(
-    [...messages].reverse().find(message => message.role === 'user')?.content || '',
-  )
+  return normalizeText(latestUserRawIntent(messages))
+}
+
+function latestUserRawIntent(messages) {
+  const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')
+  return latestUserMessage ? collectMessageText(latestUserMessage) : ''
 }
 
 function latestUserResearchMode(messages) {
   return [...messages].reverse().find(message => message.role === 'user')?.researchMode === 'deep'
     ? 'deep'
     : 'auto'
+}
+
+function isLikelyLocalHostname(hostname) {
+  const normalized = String(hostname || '').trim().toLowerCase()
+  if (!normalized) {
+    return true
+  }
+  if (
+    normalized === 'localhost' ||
+    normalized === '0.0.0.0' ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1'
+  ) {
+    return true
+  }
+  if (/^127\./u.test(normalized) || /^10\./u.test(normalized) || /^192\.168\./u.test(normalized)) {
+    return true
+  }
+  const match = normalized.match(/^172\.(\d{1,3})\./u)
+  if (match) {
+    const segment = Number(match[1])
+    if (segment >= 16 && segment <= 31) {
+      return true
+    }
+  }
+  return false
+}
+
+function extractPublicHttpUrls(text) {
+  const seen = new Set()
+  const matches = String(text || '').match(PUBLIC_HTTP_URL_PATTERN) || []
+
+  return matches
+    .map(match => match.replace(/[),.;!?]+$/u, ''))
+    .filter(candidate => {
+      try {
+        const url = new URL(candidate)
+        if (!['http:', 'https:'].includes(url.protocol)) {
+          return false
+        }
+        const hostname = String(url.hostname || '').trim().toLowerCase()
+        if (!hostname || isLikelyLocalHostname(hostname)) {
+          return false
+        }
+        if (seen.has(candidate)) {
+          return false
+        }
+        seen.add(candidate)
+        return true
+      } catch {
+        return false
+      }
+    })
+}
+
+function stripPublicHttpUrls(text) {
+  return String(text || '').replace(PUBLIC_HTTP_URL_PATTERN, ' ')
 }
 
 function detectExplicitWebInteraction(text) {
@@ -59,7 +126,61 @@ function detectExplicitWebInteraction(text) {
     return true
   }
 
-  return hasAny(normalized, WEB_SURFACE_KEYWORDS) && hasAny(normalized, WEB_ACTION_KEYWORDS)
+  return hasAny(normalized, BROWSER_SURFACE_KEYWORDS) && hasAny(normalized, BROWSER_ACTION_KEYWORDS)
+}
+
+function detectExplicitWebLookupRead(text, options = {}) {
+  const raw = String(text || '')
+  const normalized = normalizeText(raw)
+  const publicUrlCount = Math.max(0, Number(options.publicUrlCount) || 0)
+  const hasContextualPublicUrl = options.hasContextualPublicUrl === true
+  if (!normalized && publicUrlCount <= 0 && hasContextualPublicUrl !== true) {
+    return false
+  }
+  if (detectExplicitWebInteraction(raw)) {
+    return false
+  }
+  if (detectLiteralUrlEditIntent(raw)) {
+    return false
+  }
+
+  const mentionsContentReference = hasAny(normalized, WEB_CONTENT_REFERENCE_KEYWORDS)
+  const mentionsReadAction = hasAny(normalized, WEB_READ_ACTION_KEYWORDS)
+  const mentionsDeicticReference = hasAny(normalized, WEB_DEICTIC_REFERENCE_KEYWORDS)
+  const textWithoutUrls = normalizeText(stripPublicHttpUrls(raw))
+  const urlOnly = publicUrlCount > 0 && !textWithoutUrls
+
+  if (urlOnly) {
+    return true
+  }
+
+  if (
+    mentionsReadAction &&
+    (
+      mentionsContentReference ||
+      publicUrlCount > 0 ||
+      (hasContextualPublicUrl && mentionsDeicticReference)
+    )
+  ) {
+    return true
+  }
+
+  return mentionsContentReference && (publicUrlCount > 0 || hasContextualPublicUrl)
+}
+
+function detectLiteralUrlEditIntent(text) {
+  const normalized = normalizeText(text)
+  if (!normalized) {
+    return false
+  }
+
+  return (
+    hasAny(normalized, URL_LITERAL_EDIT_KEYWORDS) &&
+    (
+      hasAny(normalized, URL_LITERAL_CONTEXT_KEYWORDS) ||
+      hasAny(normalized, WORKSPACE_KEYWORDS)
+    )
+  )
 }
 
 const EXECUTION_KEYWORDS = [
@@ -96,6 +217,10 @@ const EXECUTION_KEYWORDS = [
   '增加',
   '运行',
   '新增',
+  '改成',
+  '改为',
+  '替换成',
+  '替换为',
 ]
 
 const DIAGNOSIS_KEYWORDS = [
@@ -214,54 +339,179 @@ const WEB_INTERACTION_KEYWORDS = [
   'login',
   'sign in',
   'captcha',
-  'consent',
-  'click',
-  'form',
-  '登录',
-  '点击',
-  '表单',
-  '验证码',
-]
-
-const WEB_SURFACE_KEYWORDS = [
-  'chrome',
-  'browser',
-  'website',
-  'url',
-  'page',
-  'tab',
-  '网页',
-  '浏览器',
-  '网址',
-  '页面',
-  '标签页',
-]
-
-const WEB_ACTION_KEYWORDS = [
-  'open',
-  'navigate',
-  'visit',
-  'go to',
-  'log in',
-  'login',
-  'sign in',
   'click',
   'type',
   'fill',
   'submit',
   'scroll',
-  'switch tab',
-  'take over',
-  '打开',
-  '访问',
-  '进入',
+  'drag',
+  'select',
+  'consent',
+  'form',
   '登录',
   '点击',
   '输入',
   '填写',
   '提交',
   '滚动',
+  '拖动',
+  '选择',
+  '表单',
+  '验证码',
+]
+
+const BROWSER_SURFACE_KEYWORDS = [
+  'chrome',
+  'browser',
+  'tab',
+  'browser window',
+  'chrome window',
+  'system browser',
+  'frontmost browser',
+  'frontmost chrome',
+  '浏览器',
+  '标签页',
+  '浏览器窗口',
+]
+
+const BROWSER_ACTION_KEYWORDS = [
+  'open',
+  'navigate',
+  'visit',
+  'go to',
+  'switch tab',
+  'take over',
+  'activate',
+  'bring to front',
+  'new tab',
+  '打开',
+  '访问',
+  '进入',
   '切换标签',
+  '接管',
+  '激活',
+]
+
+const WEB_CONTENT_REFERENCE_KEYWORDS = [
+  'link',
+  'url',
+  'page',
+  'webpage',
+  'website',
+  'article',
+  'articles',
+  'post',
+  'blog',
+  'blog post',
+  'column',
+  'doc',
+  'docs',
+  'documentation',
+  'source',
+  'sources',
+  '链接',
+  '网址',
+  '页面',
+  '网页',
+  '网站',
+  '文章',
+  '专栏',
+  '帖子',
+  '博文',
+  '文档',
+  '资料',
+  '来源',
+]
+
+const WEB_READ_ACTION_KEYWORDS = [
+  'read',
+  'summarize',
+  'summary',
+  'analyze',
+  'analysis',
+  'inspect',
+  'review',
+  'check',
+  'extract',
+  'fetch',
+  'look at',
+  'take a look',
+  'go through',
+  '帮我看',
+  '看看',
+  '看下',
+  '看一下',
+  '读一下',
+  '读取',
+  '总结',
+  '概括',
+  '分析',
+  '解读',
+  '提取',
+  '抓取',
+  '梳理',
+]
+
+const WEB_DEICTIC_REFERENCE_KEYWORDS = [
+  'this',
+  'that',
+  'this one',
+  'that one',
+  'it',
+  'these',
+  'those',
+  'this page',
+  'this link',
+  'this article',
+  '上面这个',
+  '这个',
+  '那个',
+  '它',
+  '这篇',
+  '那篇',
+  '这个链接',
+  '这个网址',
+  '这个页面',
+  '这篇文章',
+]
+
+const URL_LITERAL_EDIT_KEYWORDS = [
+  'replace',
+  'swap',
+  'change to',
+  'set to',
+  'point to',
+  '改成',
+  '改为',
+  '替换成',
+  '替换为',
+  '设为',
+  '指向',
+]
+
+const URL_LITERAL_CONTEXT_KEYWORDS = [
+  'config',
+  'setting',
+  'settings',
+  'env',
+  'environment variable',
+  'variable',
+  'field',
+  'parameter',
+  'api url',
+  'base url',
+  'endpoint',
+  'callback url',
+  'redirect url',
+  '配置',
+  '设置',
+  '环境变量',
+  '变量',
+  '字段',
+  '参数',
+  '接口地址',
+  '回调地址',
+  '重定向地址',
 ]
 
 const SYSTEM_BROWSER_REQUEST_KEYWORDS = [
@@ -1423,9 +1673,23 @@ function buildRouteStateFromSignals({
 export function deriveHardSignals(messages) {
   const text = buildConversationText(messages)
   const intent = latestUserIntent(messages)
+  const rawText = buildConversationRawText(messages)
+  const rawIntent = latestUserRawIntent(messages)
+  const publicUrlsInConversation = extractPublicHttpUrls(rawText)
+  const publicUrlsInIntent = extractPublicHttpUrls(rawIntent)
+  const visiblePublicUrlCount = Math.max(
+    publicUrlsInIntent.length,
+    publicUrlsInConversation.length,
+  )
+  const explicitWebInteraction = detectExplicitWebInteraction(rawIntent)
 
   return {
-    explicitWebInteraction: detectExplicitWebInteraction(intent),
+    explicitWebInteraction,
+    explicitWebLookupRead: detectExplicitWebLookupRead(rawIntent, {
+      publicUrlCount: publicUrlsInIntent.length,
+      hasContextualPublicUrl: visiblePublicUrlCount > 0,
+    }),
+    publicWebUrlReference: publicUrlsInConversation.length > 0,
     explicitWorkspaceWrite:
       hasAny(intent, EXECUTION_KEYWORDS) && hasAny(text, WORKSPACE_KEYWORDS),
     explicitSystemBrowserRequest: hasAny(text, SYSTEM_BROWSER_REQUEST_KEYWORDS),
@@ -1433,8 +1697,42 @@ export function deriveHardSignals(messages) {
   }
 }
 
-export function inferRouteStateFromClassification(classification, hardSignals = {}, settings = {}) {
+export function applyHardSignalIntentOverrides(classification, hardSignals = {}) {
   if (!classification || typeof classification !== 'object') {
+    return classification
+  }
+
+  const explicitWebLookupRead = hardSignals.explicitWebLookupRead === true
+  const explicitWebInteraction = hardSignals.explicitWebInteraction === true
+  const explicitWorkspaceWrite = hardSignals.explicitWorkspaceWrite === true
+  const explicitSystemBrowserRequest = hardSignals.explicitSystemBrowserRequest === true
+
+  const workspaceRelated =
+    classification.workspaceRelated === true || explicitWorkspaceWrite
+  const webInteractionRequired =
+    explicitWebInteraction ||
+    (classification.webInteractionRequired === true && explicitWebLookupRead !== true)
+  const needsExternalFacts =
+    classification.needsExternalFacts === true || explicitWebLookupRead
+
+  return {
+    ...classification,
+    answerMode:
+      webInteractionRequired || explicitWorkspaceWrite
+        ? 'execute'
+        : classification.answerMode,
+    needsExternalFacts,
+    webInteractionRequired,
+    workspaceRelated,
+    systemBrowserRequested:
+      classification.systemBrowserRequested === true || explicitSystemBrowserRequest,
+  }
+}
+
+export function inferRouteStateFromClassification(classification, hardSignals = {}, settings = {}) {
+  const normalizedClassification = applyHardSignalIntentOverrides(classification, hardSignals)
+
+  if (!normalizedClassification || typeof normalizedClassification !== 'object') {
     throw createStructuredError('缺少有效的意图分类结果，无法基于分类推导路由状态。', {
       source: 'system',
       category: 'invalid_input',
@@ -1445,17 +1743,17 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
   }
 
   let answerMode =
-    classification.answerMode === 'execute' ||
-    classification.answerMode === 'diagnose' ||
-    classification.answerMode === 'advise'
-      ? classification.answerMode
+    normalizedClassification.answerMode === 'execute' ||
+    normalizedClassification.answerMode === 'diagnose' ||
+    normalizedClassification.answerMode === 'advise'
+      ? normalizedClassification.answerMode
       : 'advise'
 
   const webInteractionRequired =
-    classification.webInteractionRequired === true ||
+    normalizedClassification.webInteractionRequired === true ||
     hardSignals.explicitWebInteraction === true
   const workspaceRelated =
-    classification.workspaceRelated === true || hardSignals.explicitWorkspaceWrite === true
+    normalizedClassification.workspaceRelated === true || hardSignals.explicitWorkspaceWrite === true
 
   if (webInteractionRequired || hardSignals.explicitWorkspaceWrite === true) {
     answerMode = 'execute'
@@ -1463,22 +1761,25 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
 
   return buildRouteStateFromSignals({
     answerMode,
-    needsExternalFacts: classification.needsExternalFacts === true,
+    needsExternalFacts:
+      normalizedClassification.needsExternalFacts === true ||
+      hardSignals.explicitWebLookupRead === true,
     webInteractionRequired,
     workspaceRelated,
-    isCapabilityAdminTask: classification.isCapabilityAdmin === true,
+    isCapabilityAdminTask: normalizedClassification.isCapabilityAdmin === true,
     explicitSystemBrowserRequest:
-      classification.systemBrowserRequested === true ||
+      normalizedClassification.systemBrowserRequested === true ||
       hardSignals.explicitSystemBrowserRequest === true,
     researchMode: hardSignals.researchMode || 'auto',
-    taskComplexity: classification.taskComplexity,
-    planDepth: classification.planDepth,
+    taskComplexity: normalizedClassification.taskComplexity,
+    planDepth: normalizedClassification.planDepth,
   })
 }
 
 export function inferRouteStateFromKeywords(messages, settings = {}) {
   const text = buildConversationText(messages)
   const intent = latestUserIntent(messages)
+  const hardSignals = deriveHardSignals(messages)
   const asksInformational = hasAny(intent, INFORMATIONAL_KEYWORDS)
   const asksDiagnosis =
     hasAny(text, DIAGNOSIS_KEYWORDS) || (asksInformational && hasAny(text, WORKSPACE_KEYWORDS))
@@ -1486,9 +1787,10 @@ export function inferRouteStateFromKeywords(messages, settings = {}) {
     hasAny(intent, EXECUTION_KEYWORDS) &&
     !asksInformational &&
     !hasAny(intent, ['怎么', 'why', 'how', '原因', '解释', '分析', '看看', 'review', 'check'])
-  const explicitWebInteraction = detectExplicitWebInteraction(intent)
+  const explicitWebInteraction = hardSignals.explicitWebInteraction === true
   const explicitSystemBrowserRequest = hasAny(text, SYSTEM_BROWSER_REQUEST_KEYWORDS)
-  const needsExternalFacts = hasAny(text, EXTERNAL_FACT_KEYWORDS)
+  const needsExternalFacts =
+    hasAny(text, EXTERNAL_FACT_KEYWORDS) || hardSignals.explicitWebLookupRead === true
   const workspaceRelated = hasAny(text, WORKSPACE_KEYWORDS)
   const isCapabilityAdminTask = hasAny(text, CAPABILITY_ADMIN_KEYWORDS)
 

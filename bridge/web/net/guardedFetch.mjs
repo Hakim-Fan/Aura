@@ -6,6 +6,7 @@ import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
 const DEFAULT_TIMEOUT_MS = 15_000
 const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 AuraWebTools/2.0'
+const WEB_AUTO_PROXY_RETRYABLE_STATUS = new Set([403, 408, 421, 425, 429, 451, 500, 502, 503, 504])
 
 function readTrimmedString(value) {
   return typeof value === 'string' ? value.trim() : ''
@@ -159,6 +160,10 @@ function shouldRetryWebAutoWithProxy(error) {
     'tls',
     'certificate',
   ].some(pattern => normalized.includes(pattern))
+}
+
+function shouldRetryWebAutoResponseWithProxy(response) {
+  return WEB_AUTO_PROXY_RETRYABLE_STATUS.has(Number(response?.status) || 0)
 }
 
 function normalizeRequestBody(body) {
@@ -344,6 +349,16 @@ export async function guardedFetch(url, init = {}, options = {}) {
             )
             combined.cause = proxyError
             throw combined
+          }
+        }
+
+        if (proxyAddress && shouldRetryWebAutoResponseWithProxy(response)) {
+          const directResponse = response
+          try {
+            response = await executeSingleFetch(currentUrl, fetchInit, linked.signal, proxyAddress)
+            directResponse.body?.cancel?.().catch?.(() => {})
+          } catch {
+            response = directResponse
           }
         }
       } else {
