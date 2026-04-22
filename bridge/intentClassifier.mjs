@@ -112,7 +112,7 @@ function buildClassifierSystemPrompt() {
         webInteractionRequired: false,
         workspaceRelated: true,
         isCapabilityAdmin: false,
-        systemChromeRequested: false,
+        systemBrowserRequested: false,
         taskComplexity: 'low | medium | high',
         planDepth: 'single_step | multi_step | long_horizon',
         confidence: 'low | medium | high',
@@ -126,7 +126,7 @@ function buildClassifierSystemPrompt() {
     '- workspaceRelated: true when the task concerns the local repo, workspace files, project code, logs, configs, tests, or attached local files.',
     '- answerMode: advise for explanation/recommendation, diagnose for analysis/debug/review, execute for making changes or taking actions.',
     '- isCapabilityAdmin: true only for enabling, disabling, importing, editing, or managing skills, plugins, MCP, or agent capabilities.',
-    '- systemChromeRequested: true only when the user explicitly requests system Chrome or the frontmost Chrome window.',
+    '- systemBrowserRequested: true only when the user explicitly requests the system browser or the frontmost browser window.',
     '- taskComplexity: high only for clearly multi-stage or cross-system work; medium for moderate coordination; low for straightforward work.',
     '- planDepth: single_step for one-pass tasks, multi_step for several dependent steps, long_horizon for extended staged execution or automation.',
     '- confidence should reflect semantic certainty from the messages only.',
@@ -219,7 +219,7 @@ export function parseAndValidateClassification(rawValue) {
     webInteractionRequired: parsed.webInteractionRequired,
     workspaceRelated: parsed.workspaceRelated,
     isCapabilityAdmin: parsed.isCapabilityAdmin,
-    systemChromeRequested: parsed.systemChromeRequested,
+    systemBrowserRequested: parsed.systemBrowserRequested,
     taskComplexity: parsed.taskComplexity,
     planDepth: parsed.planDepth,
     confidence: parsed.confidence,
@@ -243,7 +243,7 @@ export function parseAndValidateClassification(rawValue) {
     'webInteractionRequired',
     'workspaceRelated',
     'isCapabilityAdmin',
-    'systemChromeRequested',
+    'systemBrowserRequested',
   ]) {
     if (typeof classification[key] !== 'boolean') {
       throw new Error(`Invalid boolean field: ${key}`)

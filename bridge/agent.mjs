@@ -252,7 +252,7 @@ function buildRouteDecisionSnapshot({
           webInteractionRequired: classification.webInteractionRequired,
           workspaceRelated: classification.workspaceRelated,
           isCapabilityAdmin: classification.isCapabilityAdmin,
-          systemChromeRequested: classification.systemChromeRequested,
+          systemBrowserRequested: classification.systemBrowserRequested,
           taskComplexity: classification.taskComplexity,
           planDepth: classification.planDepth,
           confidence: classification.confidence,

@@ -340,7 +340,6 @@ button {
 }
 
 .stream-reveal-item {
-  /* TODO: Tune duration / translate / blur below if you want thought cards to feel heavier or lighter. */
   animation: streamItemReveal 0.5s cubic-bezier(0.2, 0.78, 0.18, 1);
   transform-origin: top center;
   will-change: opacity, transform, filter;
@@ -360,7 +359,6 @@ button {
   left: -0.4rem;
   right: -0.4rem;
   bottom: -0.35rem;
-  /* TODO: Tune height / opacity / shadow here if you want stronger or softer answer reveal feedback. */
   height: min(7.2rem, 42%);
   pointer-events: none;
   border-radius: 1rem;
@@ -1637,10 +1635,6 @@ textarea:focus {
   gap: 14px;
 }
 
-.browser-summary-grid.compact {
-  margin-top: 6px;
-}
-
 .browser-summary-item {
   display: flex;
   flex-direction: column;
@@ -1663,97 +1657,6 @@ textarea:focus {
   letter-spacing: 0.04em;
   color: var(--text-secondary);
   text-transform: uppercase;
-}
-
-.browser-install-panel {
-  margin-top: 18px;
-  padding: 18px 20px;
-  border-radius: 18px;
-  border: 1px solid rgba(79, 123, 116, 0.16);
-  background: rgba(79, 123, 116, 0.06);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.browser-install-panel.success {
-  border-color: rgba(34, 197, 94, 0.2);
-  background: rgba(34, 197, 94, 0.08);
-}
-
-.browser-install-panel.error {
-  border-color: rgba(239, 68, 68, 0.2);
-  background: rgba(239, 68, 68, 0.08);
-}
-
-.browser-install-panel-head,
-.browser-install-meta {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.browser-install-panel-head strong {
-  display: block;
-  margin-top: 4px;
-  font-size: 14px;
-}
-
-.browser-install-stage,
-.browser-install-percent {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-secondary);
-}
-
-.browser-install-percent {
-  white-space: nowrap;
-}
-
-.browser-progress-track {
-  width: 100%;
-  height: 8px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.08);
-}
-
-.browser-progress-fill {
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, rgba(79, 123, 116, 0.72), rgba(79, 123, 116, 1));
-  transition: width 0.25s ease;
-}
-
-.browser-progress-fill.error {
-  background: linear-gradient(90deg, rgba(239, 68, 68, 0.78), rgba(239, 68, 68, 1));
-}
-
-.browser-install-meta {
-  align-items: center;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.browser-install-meta span:last-child {
-  text-align: right;
-}
-
-.browser-advanced-grid {
-  align-items: start;
-}
-
-@media (max-width: 900px) {
-  .browser-install-panel-head,
-  .browser-install-meta {
-    flex-direction: column;
-  }
-
-  .browser-install-meta span:last-child {
-    text-align: left;
-  }
 }
 
 input:focus,

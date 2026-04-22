@@ -724,16 +724,3 @@ The next implementation step should be:
 3. remove automatic browser fallback flags from web research settings
 
 This gives us the new product boundary first, before we spend engineering effort on Lightpanda runtime internals.
-
-
-已经推进到“新架构主干成型，旧链路大半拆掉”的阶段了，核心进度是：
-
-已完成：配置模型切到 Lightpanda + system browser 新结构；设置页重做成“资料获取 / 浏览器操作 / Web Research / Web Search / Web Fetch”这套新 UI。
-已完成：加了真实的 Lightpanda 检测命令和前端桥接；web_fetch 已接入 Lightpanda fallback，不再自动建议 browser_*。
-已完成：web_research 的浏览器兜底逻辑已移除；system_browser_open 新工具已加上；chrome_* 和旧浏览器运行时已从 bridge 主链路移除。
-已完成：前端 tsc --noEmit 通过，pnpm build:bridge 通过；旧的 bridge/browserRuntime.mjs 和 bridge/browserProfileActions.mjs 已删掉。
-还在收尾的部分：
-
-聊天页和主窗口里残留的旧“browser takeover / browser structured card” UI 清理。
-Rust 侧旧浏览器安装/导入/清理命令的删减，以及构建/依赖的最终瘦身。
-最后一轮全局搜索、删死代码、再跑验证。

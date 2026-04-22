@@ -18,14 +18,12 @@ export async function deleteAuraAsset(relativePath: string): Promise<void> {
 export type AuraHomeState = {
   homeDir: string
   configDir: string
-  browserDir: string
-  browserProfilesDir: string
-  browserRuntimesDir: string
   skillsDir: string
   pluginsDir: string
   mcpDir: string
   workspaceDir: string
   logsDir: string
+  lightpandaDir: string
   settingsPath: string
   sessionsPath: string
   mcpServersPath: string

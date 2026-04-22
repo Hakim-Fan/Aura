@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { promisify } from 'node:util'
 import { createStructuredError } from './runtimeErrors.mjs'
 
@@ -10,6 +13,115 @@ const LIGHTPANDA_MAX_BUFFER = 8 * 1024 * 1024
 
 let activeLightpandaRuns = 0
 const lightpandaWaiters = []
+
+function resolveAuraLightpandaInstallDir() {
+  return path.join(os.homedir(), '.aura', 'lightpanda')
+}
+
+function lightpandaNameScore(entryPath) {
+  const fileName = path.basename(String(entryPath || '')).toLowerCase()
+  if (
+    fileName === 'lightpanda' ||
+    fileName === 'lightpanda.exe' ||
+    fileName === 'lightpanda.app'
+  ) {
+    return 3
+  }
+  if (fileName.includes('lightpanda')) {
+    return 2
+  }
+  return 0
+}
+
+function resolveAppBundleExecutable(entryPath) {
+  if (!String(entryPath || '').toLowerCase().endsWith('.app')) {
+    return ''
+  }
+
+  const executableName = path.basename(entryPath, '.app')
+  const macosDir = path.join(entryPath, 'Contents', 'MacOS')
+  const namedCandidate = path.join(macosDir, executableName)
+  if (fs.existsSync(namedCandidate) && fs.statSync(namedCandidate).isFile()) {
+    return namedCandidate
+  }
+
+  try {
+    const entries = fs.readdirSync(macosDir)
+    const fallbackEntry = entries.find(entry => {
+      const candidate = path.join(macosDir, entry)
+      return fs.existsSync(candidate) && fs.statSync(candidate).isFile()
+    })
+    return fallbackEntry ? path.join(macosDir, fallbackEntry) : ''
+  } catch {
+    return ''
+  }
+}
+
+function resolveExecutablePath(entryPath) {
+  if (!entryPath) {
+    return ''
+  }
+
+  try {
+    const stat = fs.statSync(entryPath)
+    if (stat.isFile()) {
+      return entryPath
+    }
+    if (stat.isDirectory()) {
+      return resolveAppBundleExecutable(entryPath)
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
+function collectLightpandaInstallCandidates(dirPath, remainingDepth, candidates) {
+  let entries = []
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true })
+  } catch {
+    return
+  }
+
+  for (const entry of entries) {
+    const entryPath = path.join(dirPath, entry.name)
+    if (entry.isDirectory()) {
+      if (entry.name.toLowerCase().endsWith('.app')) {
+        if (lightpandaNameScore(entryPath) > 0) {
+          const executable = resolveAppBundleExecutable(entryPath)
+          if (executable) {
+            candidates.push(executable)
+          }
+        }
+        continue
+      }
+
+      if (remainingDepth > 0) {
+        collectLightpandaInstallCandidates(entryPath, remainingDepth - 1, candidates)
+      }
+      continue
+    }
+
+    if (entry.isFile() && lightpandaNameScore(entryPath) > 0) {
+      candidates.push(entryPath)
+    }
+  }
+}
+
+function resolveInstalledLightpandaExecutable() {
+  const candidates = []
+  collectLightpandaInstallCandidates(resolveAuraLightpandaInstallDir(), 2, candidates)
+  candidates.sort((left, right) => {
+    const scoreDelta = lightpandaNameScore(right) - lightpandaNameScore(left)
+    if (scoreDelta !== 0) {
+      return scoreDelta
+    }
+    return left.localeCompare(right)
+  })
+  return candidates[0] || ''
+}
 
 function collapseWhitespace(value) {
   return String(value || '')
@@ -51,12 +163,15 @@ function extractTitleFromMarkdown(markdown, url) {
 
 function resolveLightpandaSettings(settings) {
   const runtimeSettings = settings?.browser?.lightpanda || {}
+  const configuredPath =
+    typeof runtimeSettings.executablePath === 'string' && runtimeSettings.executablePath.trim()
+      ? runtimeSettings.executablePath.trim()
+      : ''
+  const resolvedConfiguredPath = resolveExecutablePath(configuredPath)
+  const installedPath = resolveInstalledLightpandaExecutable()
   return {
     enabled: runtimeSettings.enabled === true,
-    executablePath:
-      typeof runtimeSettings.executablePath === 'string' && runtimeSettings.executablePath.trim()
-        ? runtimeSettings.executablePath.trim()
-        : 'lightpanda',
+    executablePath: resolvedConfiguredPath || installedPath || configuredPath || 'lightpanda',
     timeoutMs: Math.max(
       3_000,
       Math.round((Number(runtimeSettings.timeoutSeconds) || 12) * 1_000),

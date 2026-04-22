@@ -2,20 +2,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Cursor, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
-use aes::Aes128;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use pbkdf2::pbkdf2_hmac;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
-use sha1::Sha1;
+use serde::Serialize;
 use tauri::{Emitter, Manager, Runtime, State};
 use tauri_plugin_shell::ShellExt;
 
@@ -83,16 +79,6 @@ struct AgentTaskStore {
     tasks: Mutex<HashMap<String, AgentTaskHandle>>,
 }
 
-#[derive(Clone)]
-struct ManagedBrowserInstallHandle {
-    cancel_requested: Arc<AtomicBool>,
-}
-
-#[derive(Default)]
-struct ManagedBrowserInstallStore {
-    current: Mutex<Option<ManagedBrowserInstallHandle>>,
-}
-
 #[derive(Clone, Serialize)]
 struct WorkspaceNode {
     name: String,
@@ -121,12 +107,6 @@ struct AuraHomeState {
     home_dir: String,
     #[serde(rename = "configDir")]
     config_dir: String,
-    #[serde(rename = "browserDir")]
-    browser_dir: String,
-    #[serde(rename = "browserProfilesDir")]
-    browser_profiles_dir: String,
-    #[serde(rename = "browserRuntimesDir")]
-    browser_runtimes_dir: String,
     #[serde(rename = "skillsDir")]
     skills_dir: String,
     #[serde(rename = "pluginsDir")]
@@ -137,6 +117,8 @@ struct AuraHomeState {
     workspace_dir: String,
     #[serde(rename = "logsDir")]
     logs_dir: String,
+    #[serde(rename = "lightpandaDir")]
+    lightpanda_dir: String,
     #[serde(rename = "settingsPath")]
     settings_path: String,
     #[serde(rename = "sessionsPath")]
@@ -145,26 +127,6 @@ struct AuraHomeState {
     mcp_servers_path: String,
     skills: Vec<AuraAssetMetadata>,
     plugins: Vec<AuraAssetMetadata>,
-}
-
-#[derive(Clone, Serialize)]
-struct BrowserRuntimeStatusRecord {
-    #[serde(rename = "systemChromeDetected")]
-    system_chrome_detected: bool,
-    #[serde(rename = "systemChromePath")]
-    system_chrome_path: Option<String>,
-    #[serde(rename = "managedChromeInstalled")]
-    managed_chrome_installed: bool,
-    #[serde(rename = "managedChromePath")]
-    managed_chrome_path: Option<String>,
-    #[serde(rename = "managedChromeSizeBytes")]
-    managed_chrome_size_bytes: Option<u64>,
-    #[serde(rename = "customExecutablePath")]
-    custom_executable_path: Option<String>,
-    #[serde(rename = "customExecutableValid")]
-    custom_executable_valid: Option<bool>,
-    #[serde(rename = "lastCheckedAt")]
-    last_checked_at: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -177,84 +139,6 @@ struct LightpandaRuntimeStatusRecord {
     #[serde(rename = "lastCheckedAt")]
     last_checked_at: u64,
     error: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-struct ManagedBrowserInstallProgressPayload {
-    stage: String,
-    message: String,
-    progress: Option<f64>,
-    #[serde(rename = "downloadedBytes")]
-    downloaded_bytes: Option<u64>,
-    #[serde(rename = "totalBytes")]
-    total_bytes: Option<u64>,
-}
-
-#[derive(Clone, Serialize)]
-struct ChromeImportSource {
-    id: String,
-    #[serde(rename = "profileName")]
-    profile_name: String,
-    #[serde(rename = "profilePath")]
-    profile_path: String,
-    #[serde(rename = "isDefault")]
-    is_default: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChromeLocalState {
-    profile: Option<ChromeLocalStateProfile>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChromeLocalStateProfile {
-    #[serde(rename = "info_cache")]
-    info_cache: Option<HashMap<String, ChromeProfileInfo>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChromeProfileInfo {
-    name: Option<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct PendingBrowserCookie {
-    name: String,
-    value: String,
-    domain: String,
-    path: String,
-    secure: bool,
-    #[serde(rename = "httpOnly")]
-    http_only: bool,
-    #[serde(rename = "sameSite", skip_serializing_if = "Option::is_none")]
-    same_site: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires: Option<f64>,
-}
-
-#[derive(Clone, Serialize)]
-struct ChromeImportResult {
-    domain: String,
-    #[serde(rename = "cookieCount")]
-    cookie_count: usize,
-    #[serde(rename = "importedAt")]
-    imported_at: u64,
-}
-
-#[derive(Clone, Serialize)]
-struct ClearAuraSiteCookiesResult {
-    #[serde(rename = "removedCount")]
-    removed_count: usize,
-    #[serde(rename = "pendingRemovedCount")]
-    pending_removed_count: usize,
-}
-
-#[derive(Clone, Serialize)]
-struct ResetAuraBrowserProfileResult {
-    #[serde(rename = "clearedProfile")]
-    cleared_profile: bool,
-    #[serde(rename = "pendingRemovedCount")]
-    pending_removed_count: usize,
 }
 
 fn resolve_user_home() -> Result<PathBuf, String> {
@@ -473,9 +357,10 @@ fn infer_skill_support(content: &str) -> (bool, Option<String>) {
         "computercapturescreen",
         "computertypetext",
         "computerpressshortcut",
-        "chromeopenurl",
-        "chromegetactivetab",
-        "chromerunjavascript",
+        "websearch",
+        "webfetch",
+        "webresearch",
+        "systembrowseropen",
         "spawnsubagent",
         "subagent",
         "delegate",
@@ -934,26 +819,22 @@ fn seed_directory_from_defaults<R: Runtime>(
 fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeState, String> {
     let home_dir = resolve_aura_home()?;
     let config_dir = home_dir.join("config");
-    let browser_dir = home_dir.join("browser");
-    let browser_profiles_dir = browser_dir.join("profiles");
-    let browser_runtimes_dir = browser_dir.join("runtimes");
     let skills_dir = home_dir.join("skills");
     let plugins_dir = home_dir.join("plugins");
     let mcp_dir = home_dir.join("mcp");
     let workspace_dir = home_dir.join("workspace");
     let logs_dir = home_dir.join("logs");
+    let lightpanda_dir = home_dir.join("lightpanda");
 
     for dir in [
         &home_dir,
         &config_dir,
-        &browser_dir,
-        &browser_profiles_dir,
-        &browser_runtimes_dir,
         &skills_dir,
         &plugins_dir,
         &mcp_dir,
         &workspace_dir,
         &logs_dir,
+        &lightpanda_dir,
     ] {
         ensure_directory(dir)?;
     }
@@ -968,14 +849,12 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
     Ok(AuraHomeState {
         home_dir: home_dir.display().to_string(),
         config_dir: config_dir.display().to_string(),
-        browser_dir: browser_dir.display().to_string(),
-        browser_profiles_dir: browser_profiles_dir.display().to_string(),
-        browser_runtimes_dir: browser_runtimes_dir.display().to_string(),
         skills_dir: skills_dir.display().to_string(),
         plugins_dir: plugins_dir.display().to_string(),
         mcp_dir: mcp_dir.display().to_string(),
         workspace_dir: workspace_dir.display().to_string(),
         logs_dir: logs_dir.display().to_string(),
+        lightpanda_dir: lightpanda_dir.display().to_string(),
         settings_path: settings_path.display().to_string(),
         sessions_path: sessions_path.display().to_string(),
         mcp_servers_path: mcp_servers_path.display().to_string(),
@@ -1022,12 +901,75 @@ fn resolve_app_bundle_executable(path: &Path) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn resolve_browser_executable_path(path: &Path) -> Option<PathBuf> {
+fn resolve_executable_path(path: &Path) -> Option<PathBuf> {
     if path.is_file() {
         return Some(path.to_path_buf());
     }
 
     resolve_app_bundle_executable(path)
+}
+
+fn lightpanda_name_score(path: &Path) -> usize {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if file_name == "lightpanda"
+        || file_name == "lightpanda.exe"
+        || file_name == "lightpanda.app"
+    {
+        return 3;
+    }
+    if file_name.contains("lightpanda") {
+        return 2;
+    }
+    0
+}
+
+fn collect_lightpanda_install_candidates(
+    dir: &Path,
+    remaining_depth: usize,
+    candidates: &mut Vec<PathBuf>,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.extension().and_then(|value| value.to_str()) == Some("app") {
+                if lightpanda_name_score(&path) > 0 {
+                    if let Some(executable) = resolve_app_bundle_executable(&path) {
+                        candidates.push(executable);
+                    }
+                }
+                continue;
+            }
+
+            if remaining_depth > 0 {
+                collect_lightpanda_install_candidates(&path, remaining_depth - 1, candidates);
+            }
+            continue;
+        }
+
+        if path.is_file() && lightpanda_name_score(&path) > 0 {
+            candidates.push(path);
+        }
+    }
+}
+
+fn detect_lightpanda_installation(dir: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    collect_lightpanda_install_candidates(dir, 2, &mut candidates);
+    candidates.sort_by(|left, right| {
+        lightpanda_name_score(right)
+            .cmp(&lightpanda_name_score(left))
+            .then_with(|| left.as_os_str().cmp(right.as_os_str()))
+    });
+    candidates.into_iter().next()
 }
 
 fn detect_lightpanda_path() -> Option<PathBuf> {
@@ -1042,11 +984,12 @@ fn detect_lightpanda_path() -> Option<PathBuf> {
         return None;
     }
 
-    let candidate = String::from_utf8_lossy(&output.stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let candidate = stdout
         .lines()
         .map(str::trim)
         .find(|entry| !entry.is_empty())?;
-    resolve_browser_executable_path(Path::new(candidate))
+    resolve_executable_path(Path::new(candidate))
 }
 
 fn read_lightpanda_version(executable_path: &Path) -> Option<String> {
@@ -1070,645 +1013,6 @@ fn read_lightpanda_version(executable_path: &Path) -> Option<String> {
     }
 
     None
-}
-
-fn total_path_size(path: &Path) -> Option<u64> {
-    let metadata = fs::metadata(path).ok()?;
-    if metadata.is_file() {
-        return Some(metadata.len());
-    }
-    if !metadata.is_dir() {
-        return None;
-    }
-
-    let mut total = 0_u64;
-    for entry in fs::read_dir(path).ok()? {
-        let entry = entry.ok()?;
-        total = total.saturating_add(total_path_size(&entry.path())?);
-    }
-    Some(total)
-}
-
-fn detect_system_chrome_path() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        let mut candidates = vec![
-            PathBuf::from("/Applications/Google Chrome.app"),
-            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        ];
-
-        if let Ok(home) = resolve_user_home() {
-            candidates.push(home.join("Applications/Google Chrome.app"));
-            candidates
-                .push(home.join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"));
-        }
-
-        return candidates
-            .into_iter()
-            .find_map(|candidate| resolve_browser_executable_path(&candidate));
-    }
-
-    None
-}
-
-fn detect_managed_chrome_path(runtime_root: &Path, explicit_path: Option<&str>) -> Option<PathBuf> {
-    if let Some(path) = explicit_path
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return resolve_browser_executable_path(Path::new(path));
-    }
-
-    let mut candidates = vec![
-        runtime_root.join("chrome").join("Google Chrome.app"),
-        runtime_root
-            .join("chrome")
-            .join("Google Chrome for Testing.app"),
-        runtime_root
-            .join("chrome")
-            .join("Google Chrome.app")
-            .join("Contents/MacOS/Google Chrome"),
-        runtime_root
-            .join("chrome")
-            .join("Google Chrome for Testing.app")
-            .join("Contents/MacOS/Google Chrome for Testing"),
-        runtime_root.join("chrome").join("chrome"),
-        runtime_root
-            .join("chrome")
-            .join("chrome-mac")
-            .join("Google Chrome for Testing.app"),
-        runtime_root
-            .join("chrome")
-            .join("chrome-mac")
-            .join("Google Chrome for Testing"),
-    ];
-
-    if chrome_for_testing_platform() != "unsupported" {
-        let platform_dir = runtime_root
-            .join("chrome")
-            .join(format!("chrome-{}", chrome_for_testing_platform()));
-        candidates.push(platform_dir.join("Google Chrome for Testing.app"));
-        candidates.push(
-            platform_dir
-                .join("Google Chrome for Testing.app")
-                .join("Contents/MacOS/Google Chrome for Testing"),
-        );
-        candidates.push(platform_dir.join("Google Chrome for Testing"));
-        candidates.push(platform_dir.join("chrome"));
-    }
-
-    candidates
-        .into_iter()
-        .find_map(|candidate| resolve_browser_executable_path(&candidate))
-}
-
-fn managed_browser_install_cancelled_error() -> String {
-    "Aura 托管浏览器安装已取消。".to_string()
-}
-
-fn ensure_managed_browser_install_not_cancelled(cancel_requested: &Arc<AtomicBool>) -> Result<(), String> {
-    if cancel_requested.load(Ordering::SeqCst) {
-        Err(managed_browser_install_cancelled_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn cleanup_managed_browser_runtime(runtime_root: &Path) {
-    if runtime_root.exists() {
-        let _ = fs::remove_dir_all(runtime_root);
-    }
-}
-
-fn start_managed_browser_install(
-    store: &State<'_, ManagedBrowserInstallStore>,
-) -> Result<Arc<AtomicBool>, String> {
-    let mut current = store
-        .current
-        .lock()
-        .map_err(|_| "Managed browser install state is unavailable.".to_string())?;
-    if current.is_some() {
-        return Err("Aura 托管浏览器已经在安装中。".into());
-    }
-
-    let cancel_requested = Arc::new(AtomicBool::new(false));
-    *current = Some(ManagedBrowserInstallHandle {
-        cancel_requested: Arc::clone(&cancel_requested),
-    });
-    Ok(cancel_requested)
-}
-
-fn finish_managed_browser_install(
-    store: &State<'_, ManagedBrowserInstallStore>,
-    cancel_requested: &Arc<AtomicBool>,
-) {
-    if let Ok(mut current) = store.current.lock() {
-        if current
-            .as_ref()
-            .map(|handle| Arc::ptr_eq(&handle.cancel_requested, cancel_requested))
-            == Some(true)
-        {
-            *current = None;
-        }
-    }
-}
-
-fn emit_managed_browser_install_progress<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-    stage: &str,
-    message: impl Into<String>,
-    progress: Option<f64>,
-    downloaded_bytes: Option<u64>,
-    total_bytes: Option<u64>,
-) {
-    let payload = ManagedBrowserInstallProgressPayload {
-        stage: stage.to_string(),
-        message: message.into(),
-        progress: progress.map(|value| value.clamp(0.0, 1.0)),
-        downloaded_bytes,
-        total_bytes,
-    };
-
-    let _ = app.emit("browser-install-progress", payload);
-}
-
-fn extract_zip_archive<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-    bytes: &[u8],
-    destination: &Path,
-    cancel_requested: &Arc<AtomicBool>,
-) -> Result<(), String> {
-    let cursor = Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|error| format!("Failed to open browser archive: {error}"))?;
-    let total_entries = archive.len();
-
-    for index in 0..archive.len() {
-        ensure_managed_browser_install_not_cancelled(cancel_requested)?;
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|error| format!("Failed to read browser archive entry: {error}"))?;
-        let Some(relative_path) = entry.enclosed_name().map(|value| value.to_path_buf()) else {
-            continue;
-        };
-        let target_path = destination.join(relative_path);
-
-        if entry.name().ends_with('/') {
-            if let Some(parent) = target_path.parent() {
-                ensure_directory(parent)?;
-            }
-            ensure_directory(&target_path)?;
-            continue;
-        }
-
-        if let Some(parent) = target_path.parent() {
-            ensure_directory(parent)?;
-        }
-
-        let mut output = fs::File::create(&target_path).map_err(|error| {
-            format!(
-                "Failed to create extracted browser file {}: {error}",
-                target_path.display()
-            )
-        })?;
-        std::io::copy(&mut entry, &mut output).map_err(|error| {
-            format!(
-                "Failed to write extracted browser file {}: {error}",
-                target_path.display()
-            )
-        })?;
-
-        if total_entries > 0 && (index == 0 || index + 1 == total_entries || (index + 1) % 25 == 0)
-        {
-            emit_managed_browser_install_progress(
-                app,
-                "extracting",
-                format!("正在解压浏览器文件（{}/{}）", index + 1, total_entries),
-                Some((index + 1) as f64 / total_entries as f64),
-                None,
-                None,
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn fetch_managed_browser_download_url() -> Result<String, String> {
-    if chrome_for_testing_platform() == "unsupported" {
-        return Err("Managed browser installation is currently implemented for macOS only.".into());
-    }
-
-    let response = reqwest::blocking::get(
-        "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
-    )
-    .map_err(|error| format!("Failed to fetch Chrome download metadata: {error}"))?
-    .error_for_status()
-    .map_err(|error| format!("Chrome download metadata request failed: {error}"))?;
-
-    let payload: serde_json::Value = response
-        .json()
-        .map_err(|error| format!("Failed to parse Chrome download metadata: {error}"))?;
-
-    payload["channels"]["Stable"]["downloads"]["chrome"]
-        .as_array()
-        .and_then(|entries| {
-            entries.iter().find_map(|entry| {
-                let platform = entry["platform"].as_str()?;
-                let url = entry["url"].as_str()?;
-                if platform == chrome_for_testing_platform() {
-                    Some(url.to_string())
-                } else {
-                    None
-                }
-            })
-        })
-        .ok_or_else(|| {
-            "Failed to locate a Chrome for Testing download for this platform.".to_string()
-        })
-}
-
-fn install_managed_browser_inner<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-    cancel_requested: &Arc<AtomicBool>,
-) -> Result<(), String> {
-    let aura = ensure_aura_layout(app)?;
-    let runtime_root = managed_browser_runtime_root(Path::new(&aura.browser_runtimes_dir));
-    if let Some(parent) = runtime_root.parent() {
-        ensure_directory(parent)?;
-    }
-    ensure_managed_browser_install_not_cancelled(cancel_requested)?;
-
-    emit_managed_browser_install_progress(
-        app,
-        "preparing",
-        "正在准备 Aura 托管浏览器安装环境…",
-        Some(0.02),
-        None,
-        None,
-    );
-
-    emit_managed_browser_install_progress(
-        app,
-        "resolving-download",
-        "正在获取可用的 Chrome 版本信息…",
-        Some(0.08),
-        None,
-        None,
-    );
-    ensure_managed_browser_install_not_cancelled(cancel_requested)?;
-    let download_url = fetch_managed_browser_download_url()?;
-
-    emit_managed_browser_install_progress(
-        app,
-        "downloading",
-        "正在下载 Aura 托管浏览器…",
-        Some(0.12),
-        Some(0),
-        None,
-    );
-    ensure_managed_browser_install_not_cancelled(cancel_requested)?;
-    let mut response = reqwest::blocking::get(&download_url)
-        .map_err(|error| format!("Failed to download managed browser: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("Managed browser download failed: {error}"))?;
-
-    let total_bytes = response.content_length();
-    let mut archive_bytes = Vec::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut downloaded_bytes = 0_u64;
-    loop {
-        ensure_managed_browser_install_not_cancelled(cancel_requested).inspect_err(|_| {
-            cleanup_managed_browser_runtime(&runtime_root);
-        })?;
-        let bytes_read = response
-            .read(&mut buffer)
-            .map_err(|error| format!("Failed to read managed browser archive: {error}"))?;
-        if bytes_read == 0 {
-            break;
-        }
-        archive_bytes.extend_from_slice(&buffer[..bytes_read]);
-        downloaded_bytes = downloaded_bytes.saturating_add(bytes_read as u64);
-        let progress = total_bytes
-            .filter(|total| *total > 0)
-            .map(|total| downloaded_bytes as f64 / total as f64);
-        emit_managed_browser_install_progress(
-            app,
-            "downloading",
-            if let Some(total) = total_bytes {
-                format!(
-                    "正在下载 Aura 托管浏览器（{} / {}）",
-                    human_readable_size(downloaded_bytes),
-                    human_readable_size(total),
-                )
-            } else {
-                format!(
-                    "正在下载 Aura 托管浏览器（已下载 {}）",
-                    human_readable_size(downloaded_bytes)
-                )
-            },
-            progress.map(|value| 0.12 + value * 0.58).or(Some(0.2)),
-            Some(downloaded_bytes),
-            total_bytes,
-        );
-    }
-
-    if runtime_root.exists() {
-        fs::remove_dir_all(&runtime_root).map_err(|error| {
-            format!(
-                "Failed to clear old managed browser runtime {}: {error}",
-                runtime_root.display()
-            )
-        })?;
-    }
-    ensure_directory(&runtime_root)?;
-
-    ensure_managed_browser_install_not_cancelled(cancel_requested).inspect_err(|_| {
-        cleanup_managed_browser_runtime(&runtime_root);
-    })?;
-    emit_managed_browser_install_progress(
-        app,
-        "extracting",
-        "下载完成，正在解压浏览器文件…",
-        Some(0.74),
-        Some(downloaded_bytes),
-        total_bytes,
-    );
-
-    if let Err(error) = extract_zip_archive(app, &archive_bytes, &runtime_root, cancel_requested) {
-        if error == managed_browser_install_cancelled_error() {
-            cleanup_managed_browser_runtime(&runtime_root);
-        }
-        return Err(error);
-    }
-
-    ensure_managed_browser_install_not_cancelled(cancel_requested).inspect_err(|_| {
-        cleanup_managed_browser_runtime(&runtime_root);
-    })?;
-    emit_managed_browser_install_progress(
-        app,
-        "verifying",
-        "正在验证托管浏览器是否可用…",
-        Some(0.96),
-        Some(downloaded_bytes),
-        total_bytes,
-    );
-    Ok(())
-}
-
-fn human_readable_size(value: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut size = value as f64;
-    let mut unit_index = 0_usize;
-
-    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_index += 1;
-    }
-
-    if unit_index == 0 || size >= 100.0 {
-        format!("{:.0} {}", size, UNITS[unit_index])
-    } else {
-        format!("{:.1} {}", size, UNITS[unit_index])
-    }
-}
-
-fn chrome_profile_name_map() -> HashMap<String, String> {
-    let local_state_path = chrome_user_data_root()
-        .map(|root| root.join("Local State"))
-        .ok();
-
-    let Some(local_state_path) = local_state_path else {
-        return HashMap::new();
-    };
-
-    let Ok(content) = fs::read_to_string(local_state_path) else {
-        return HashMap::new();
-    };
-
-    let Ok(parsed) = serde_json::from_str::<ChromeLocalState>(&content) else {
-        return HashMap::new();
-    };
-
-    parsed
-        .profile
-        .and_then(|profile| profile.info_cache)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let name = value.name.unwrap_or_default().trim().to_string();
-            if name.is_empty() {
-                None
-            } else {
-                Some((key, name))
-            }
-        })
-        .collect()
-}
-
-fn pending_cookie_imports_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
-    Ok(PathBuf::from(ensure_aura_layout(app)?.browser_dir).join("pending-cookie-imports.json"))
-}
-
-fn chrome_safe_storage_password() -> Result<String, String> {
-    let output = Command::new("security")
-        .args(["find-generic-password", "-w", "-s", "Chrome Safe Storage"])
-        .output()
-        .map_err(|error| format!("Failed to access macOS keychain for Chrome cookies: {error}"))?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-
-    let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if password.is_empty() {
-        return Err("Chrome Safe Storage password is empty.".into());
-    }
-
-    Ok(password)
-}
-
-fn decrypt_chrome_cookie_value(
-    encrypted_value: &[u8],
-    safe_storage_password: &str,
-) -> Result<String, String> {
-    if encrypted_value.is_empty() {
-        return Ok(String::new());
-    }
-
-    let payload = if encrypted_value.starts_with(b"v10") || encrypted_value.starts_with(b"v11") {
-        &encrypted_value[3..]
-    } else {
-        encrypted_value
-    };
-
-    let mut key = [0_u8; 16];
-    pbkdf2_hmac::<Sha1>(
-        safe_storage_password.as_bytes(),
-        b"saltysalt",
-        1003,
-        &mut key,
-    );
-    let iv = [b' '; 16];
-    let mut buffer = payload.to_vec();
-    let decrypted = cbc::Decryptor::<Aes128>::new(&key.into(), &iv.into())
-        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
-        .map_err(|error| format!("Failed to decrypt Chrome cookie value: {error}"))?;
-
-    String::from_utf8(decrypted.to_vec())
-        .map_err(|error| format!("Decrypted Chrome cookie value was not valid UTF-8: {error}"))
-}
-
-fn chrome_epoch_to_unix_seconds(value: i64) -> Option<f64> {
-    if value <= 0 {
-        return None;
-    }
-
-    let unix_seconds = (value as f64 / 1_000_000.0) - 11_644_473_600.0;
-    if unix_seconds.is_finite() && unix_seconds > 0.0 {
-        Some(unix_seconds)
-    } else {
-        None
-    }
-}
-
-fn chrome_same_site_label(value: i64) -> Option<String> {
-    match value {
-        1 => Some("None".to_string()),
-        2 => Some("Lax".to_string()),
-        3 => Some("Strict".to_string()),
-        _ => None,
-    }
-}
-
-fn host_matches_domain(host: &str, domain: &str) -> bool {
-    let normalized_host = host.trim_start_matches('.').to_ascii_lowercase();
-    let normalized_domain = domain.trim_start_matches('.').to_ascii_lowercase();
-
-    normalized_host == normalized_domain
-        || normalized_host.ends_with(&format!(".{normalized_domain}"))
-}
-
-fn load_pending_cookie_imports<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-) -> Result<Vec<PendingBrowserCookie>, String> {
-    let path = pending_cookie_imports_path(app)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let content = fs::read_to_string(&path).map_err(|error| {
-        format!(
-            "Failed to read pending cookie imports {}: {error}",
-            path.display()
-        )
-    })?;
-    serde_json::from_str::<Vec<PendingBrowserCookie>>(&content).map_err(|error| {
-        format!(
-            "Failed to parse pending cookie imports {}: {error}",
-            path.display()
-        )
-    })
-}
-
-fn save_pending_cookie_imports<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-    cookies: &[PendingBrowserCookie],
-) -> Result<(), String> {
-    let path = pending_cookie_imports_path(app)?;
-    if let Some(parent) = path.parent() {
-        ensure_directory(parent)?;
-    }
-    let content = serde_json::to_string_pretty(cookies)
-        .map_err(|error| format!("Failed to serialize pending cookie imports: {error}"))?;
-    fs::write(&path, content).map_err(|error| {
-        format!(
-            "Failed to write pending cookie imports {}: {error}",
-            path.display()
-        )
-    })
-}
-
-fn remove_pending_site_cookie_imports<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-    domain: &str,
-) -> Result<usize, String> {
-    let mut pending = load_pending_cookie_imports(app)?;
-    let original_len = pending.len();
-    pending.retain(|cookie| !host_matches_domain(&cookie.domain, domain));
-    if pending.len() == original_len {
-        return Ok(0);
-    }
-    save_pending_cookie_imports(app, &pending)?;
-    Ok(original_len - pending.len())
-}
-
-fn clear_pending_cookie_imports<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<usize, String> {
-    let path = pending_cookie_imports_path(app)?;
-    if !path.exists() {
-        return Ok(0);
-    }
-
-    let pending = load_pending_cookie_imports(app)?;
-    fs::remove_file(&path).map_err(|error| {
-        format!(
-            "Failed to remove pending cookie imports {}: {error}",
-            path.display()
-        )
-    })?;
-    Ok(pending.len())
-}
-
-fn resolve_aura_browser_profile_target<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-    aura_profile_path: Option<String>,
-) -> Result<PathBuf, String> {
-    let aura = ensure_aura_layout(app)?;
-    let profiles_root = PathBuf::from(&aura.browser_profiles_dir);
-    let browser_root = PathBuf::from(&aura.browser_dir);
-    let target = aura_profile_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| profiles_root.join("default"));
-
-    if !target.starts_with(&profiles_root) || target == profiles_root || target == browser_root {
-        return Err(format!(
-            "Refusing to modify browser profile outside Aura profiles directory: {}",
-            target.display()
-        ));
-    }
-
-    Ok(target)
-}
-
-fn managed_browser_runtime_root(runtime_root: &Path) -> PathBuf {
-    runtime_root.join("chrome")
-}
-
-fn chrome_for_testing_platform() -> &'static str {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "mac-arm64"
-    }
-
-    #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
-    {
-        "mac-x64"
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        "unsupported"
-    }
-}
-
-fn chrome_user_data_root() -> Result<PathBuf, String> {
-    Ok(resolve_user_home()?
-        .join("Library")
-        .join("Application Support")
-        .join("Google")
-        .join("Chrome"))
 }
 
 fn resolve_app_db_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
@@ -3481,20 +2785,26 @@ fn ensure_aura_home<R: Runtime>(app: tauri::AppHandle<R>) -> Result<AuraHomeStat
 }
 
 #[tauri::command]
-fn detect_lightpanda_runtime(
+fn detect_lightpanda_runtime<R: Runtime>(
+    app: tauri::AppHandle<R>,
     executable_path: Option<String>,
 ) -> Result<LightpandaRuntimeStatusRecord, String> {
     let requested_path = executable_path
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let install_dir = ensure_aura_layout(&app)?.lightpanda_dir;
     let resolved_path = match requested_path {
-        Some(path) => resolve_browser_executable_path(Path::new(path)),
-        None => detect_lightpanda_path(),
+        Some(path) => resolve_executable_path(Path::new(path)),
+        None => detect_lightpanda_installation(Path::new(&install_dir)).or_else(detect_lightpanda_path),
     };
     let version = resolved_path
         .as_ref()
         .and_then(|path| read_lightpanda_version(path));
+    let installed_in_aura = resolved_path
+        .as_ref()
+        .map(|path| path.starts_with(Path::new(&install_dir)))
+        .unwrap_or(false);
     let error = if let Some(path) = requested_path {
         if resolved_path.is_none() {
             Some(format!("未找到可用的 Lightpanda 可执行文件: {path}"))
@@ -3504,9 +2814,13 @@ fn detect_lightpanda_runtime(
             None
         }
     } else if resolved_path.is_none() {
-        Some("未在系统 PATH 中检测到 Lightpanda。".to_string())
+        Some("未在 Aura 安装目录或系统 PATH 中检测到 Lightpanda。".to_string())
     } else if version.is_none() {
-        Some("已检测到 Lightpanda，但无法读取版本信息。".to_string())
+        Some(if installed_in_aura {
+            "已在 Aura 安装目录中发现 Lightpanda，但无法读取版本信息。".to_string()
+        } else {
+            "已检测到 Lightpanda，但无法读取版本信息。".to_string()
+        })
     } else {
         None
     };
@@ -3521,459 +2835,6 @@ fn detect_lightpanda_runtime(
         valid: resolved_path.is_some(),
         last_checked_at: current_timestamp_ms(),
         error,
-    })
-}
-
-#[tauri::command]
-fn detect_browser_runtime<R: Runtime>(
-    app: tauri::AppHandle<R>,
-    custom_executable_path: Option<String>,
-    managed_executable_path: Option<String>,
-) -> Result<BrowserRuntimeStatusRecord, String> {
-    let aura = ensure_aura_layout(&app)?;
-    let runtime_root = PathBuf::from(aura.browser_runtimes_dir);
-
-    let system_chrome_path = detect_system_chrome_path();
-    let managed_chrome_path =
-        detect_managed_chrome_path(&runtime_root, managed_executable_path.as_deref());
-
-    let custom_path_input = custom_executable_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let custom_resolved_path =
-        custom_path_input.and_then(|value| resolve_browser_executable_path(Path::new(value)));
-
-    Ok(BrowserRuntimeStatusRecord {
-        system_chrome_detected: system_chrome_path.is_some(),
-        system_chrome_path: system_chrome_path
-            .as_ref()
-            .map(|path| canonical_display_path(path)),
-        managed_chrome_installed: managed_chrome_path.is_some(),
-        managed_chrome_path: managed_chrome_path
-            .as_ref()
-            .map(|path| canonical_display_path(path)),
-        managed_chrome_size_bytes: {
-            let managed_root = managed_browser_runtime_root(&runtime_root);
-            if managed_root.exists() {
-                total_path_size(&managed_root)
-            } else {
-                managed_chrome_path
-                    .as_ref()
-                    .and_then(|path| total_path_size(path))
-            }
-        },
-        custom_executable_path: custom_resolved_path
-            .as_ref()
-            .map(|path| canonical_display_path(path))
-            .or_else(|| custom_path_input.map(String::from)),
-        custom_executable_valid: custom_path_input.map(|_| custom_resolved_path.is_some()),
-        last_checked_at: current_timestamp_ms(),
-    })
-}
-
-#[tauri::command]
-async fn install_managed_browser<R: Runtime>(
-    app: tauri::AppHandle<R>,
-    install_store: State<'_, ManagedBrowserInstallStore>,
-) -> Result<BrowserRuntimeStatusRecord, String> {
-    let cancel_requested = start_managed_browser_install(&install_store)?;
-
-    let app_for_task = app.clone();
-    let cancel_for_task = Arc::clone(&cancel_requested);
-    let install_result = tauri::async_runtime::spawn_blocking(move || {
-        match install_managed_browser_inner(&app_for_task, &cancel_for_task) {
-            Ok(()) => {
-                let status = detect_browser_runtime(app_for_task.clone(), None, None)?;
-                emit_managed_browser_install_progress(
-                    &app_for_task,
-                    "completed",
-                    "Aura 托管浏览器安装完成。",
-                    Some(1.0),
-                    None,
-                    None,
-                );
-                Ok(status)
-            }
-            Err(error) => {
-                let stage = if error == managed_browser_install_cancelled_error() {
-                    "cancelled"
-                } else {
-                    "failed"
-                };
-                emit_managed_browser_install_progress(
-                    &app_for_task,
-                    stage,
-                    error.clone(),
-                    None,
-                    None,
-                    None,
-                );
-                Err(error)
-            }
-        }
-    })
-    .await
-    .map_err(|error| format!("Managed browser install task failed: {error}"));
-
-    finish_managed_browser_install(&install_store, &cancel_requested);
-
-    install_result?
-}
-
-#[tauri::command]
-fn cancel_managed_browser_install(
-    install_store: State<'_, ManagedBrowserInstallStore>,
-) -> Result<(), String> {
-    let current = install_store
-        .current
-        .lock()
-        .map_err(|_| "Managed browser install state is unavailable.".to_string())?;
-    let Some(handle) = current.as_ref() else {
-        return Err("当前没有正在进行的 Aura 托管浏览器安装。".into());
-    };
-
-    handle.cancel_requested.store(true, Ordering::SeqCst);
-    Ok(())
-}
-
-#[tauri::command]
-fn uninstall_managed_browser<R: Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<BrowserRuntimeStatusRecord, String> {
-    let aura = ensure_aura_layout(&app)?;
-    let runtime_root = managed_browser_runtime_root(Path::new(&aura.browser_runtimes_dir));
-    if runtime_root.exists() {
-        fs::remove_dir_all(&runtime_root).map_err(|error| {
-            format!(
-                "Failed to remove managed browser runtime {}: {error}",
-                runtime_root.display()
-            )
-        })?;
-    }
-    detect_browser_runtime(app, None, None)
-}
-
-#[tauri::command]
-fn discover_chrome_import_sources() -> Result<Vec<ChromeImportSource>, String> {
-    let chrome_root = chrome_user_data_root()?;
-    if !chrome_root.exists() {
-        return Ok(Vec::new());
-    }
-
-    let profile_names = chrome_profile_name_map();
-    let mut sources = fs::read_dir(&chrome_root)
-        .map_err(|error| {
-            format!(
-                "Failed to read Chrome user data directory {}: {error}",
-                chrome_root.display()
-            )
-        })?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .filter_map(|path| {
-            let directory_name = path.file_name()?.to_str()?.to_string();
-            let is_profile_dir =
-                directory_name == "Default" || directory_name.starts_with("Profile ");
-            if !is_profile_dir {
-                return None;
-            }
-
-            let profile_name = profile_names
-                .get(&directory_name)
-                .cloned()
-                .unwrap_or_else(|| {
-                    if directory_name == "Default" {
-                        "Default".to_string()
-                    } else {
-                        directory_name.clone()
-                    }
-                });
-
-            Some(ChromeImportSource {
-                id: directory_name.clone(),
-                profile_name,
-                profile_path: path.display().to_string(),
-                is_default: directory_name == "Default",
-            })
-        })
-        .collect::<Vec<_>>();
-
-    sources.sort_by(|left, right| {
-        right
-            .is_default
-            .cmp(&left.is_default)
-            .then_with(|| left.profile_name.cmp(&right.profile_name))
-    });
-
-    Ok(sources)
-}
-
-#[tauri::command]
-fn import_chrome_site_cookies<R: Runtime>(
-    app: tauri::AppHandle<R>,
-    source_profile_path: String,
-    domain: String,
-) -> Result<ChromeImportResult, String> {
-    let normalized_domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
-    if normalized_domain.is_empty() {
-        return Err("Import domain cannot be empty.".into());
-    }
-
-    let cookies_db = PathBuf::from(&source_profile_path).join("Cookies");
-    if !cookies_db.exists() {
-        return Err(format!(
-            "Chrome cookie database not found: {}",
-            cookies_db.display()
-        ));
-    }
-
-    let temp_db = std::env::temp_dir().join(format!(
-        "aura-chrome-cookies-{}-{}.sqlite",
-        normalized_domain,
-        current_timestamp_ms()
-    ));
-    fs::copy(&cookies_db, &temp_db)
-        .map_err(|error| format!("Failed to copy Chrome cookie database: {error}"))?;
-
-    let safe_storage_password = chrome_safe_storage_password()?;
-    let connection = Connection::open(&temp_db)
-        .map_err(|error| format!("Failed to open copied Chrome cookie database: {error}"))?;
-
-    let mut statement = connection
-        .prepare(
-            "SELECT host_key, path, name, value, encrypted_value, expires_utc, is_secure, is_httponly, has_expires, same_site
-             FROM cookies",
-        )
-        .map_err(|error| format!("Failed to query Chrome cookie database: {error}"))?;
-
-    let mut rows = statement
-        .query([])
-        .map_err(|error| format!("Failed to iterate Chrome cookie database rows: {error}"))?;
-
-    let mut imported_cookies = Vec::new();
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| format!("Failed to read Chrome cookie row: {error}"))?
-    {
-        let host_key: String = row.get(0).unwrap_or_default();
-        if !host_matches_domain(&host_key, &normalized_domain) {
-            continue;
-        }
-
-        let name: String = row.get(2).unwrap_or_default();
-        if name.trim().is_empty() {
-            continue;
-        }
-
-        let plaintext_value: String = row.get(3).unwrap_or_default();
-        let encrypted_value: Vec<u8> = row.get(4).unwrap_or_default();
-        let value = if !plaintext_value.is_empty() {
-            plaintext_value
-        } else if !encrypted_value.is_empty() {
-            decrypt_chrome_cookie_value(&encrypted_value, &safe_storage_password)?
-        } else {
-            String::new()
-        };
-
-        imported_cookies.push(PendingBrowserCookie {
-            name,
-            value,
-            domain: host_key,
-            path: row.get::<_, String>(1).unwrap_or_else(|_| "/".to_string()),
-            secure: row.get::<_, i64>(6).unwrap_or(0) != 0,
-            http_only: row.get::<_, i64>(7).unwrap_or(0) != 0,
-            same_site: chrome_same_site_label(row.get::<_, i64>(9).unwrap_or(0)),
-            expires: if row.get::<_, i64>(8).unwrap_or(0) != 0 {
-                chrome_epoch_to_unix_seconds(row.get::<_, i64>(5).unwrap_or(0))
-            } else {
-                None
-            },
-        });
-    }
-
-    let _ = fs::remove_file(&temp_db);
-
-    if imported_cookies.is_empty() {
-        return Err(format!(
-            "No Chrome cookies were found for domain {normalized_domain}."
-        ));
-    }
-
-    let mut pending = load_pending_cookie_imports(&app)?;
-    pending.retain(|cookie| !host_matches_domain(&cookie.domain, &normalized_domain));
-    pending.extend(imported_cookies.clone());
-    save_pending_cookie_imports(&app, &pending)?;
-
-    Ok(ChromeImportResult {
-        domain: normalized_domain,
-        cookie_count: imported_cookies.len(),
-        imported_at: current_timestamp_ms(),
-    })
-}
-
-#[tauri::command]
-fn clear_aura_site_cookies<R: Runtime>(
-    app: tauri::AppHandle<R>,
-    domain: String,
-    browser_source: String,
-    executable_path: Option<String>,
-    managed_executable_path: Option<String>,
-    aura_profile_path: Option<String>,
-) -> Result<ClearAuraSiteCookiesResult, String> {
-    let normalized_domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
-    if normalized_domain.is_empty() {
-        return Err("Domain cannot be empty when clearing Aura site cookies.".into());
-    }
-
-    let pending_removed_count = remove_pending_site_cookie_imports(&app, &normalized_domain)?;
-    let script_path = resolve_bridge_script_path(&app, "browserProfileActions.mjs")?;
-    let bridge_cwd = resolve_bridge_cwd(&app)?;
-    let payload = serde_json::json!({
-        "action": "clear-site-cookies",
-        "domain": normalized_domain,
-        "settings": {
-            "browser": {
-                "enabled": true,
-                "source": browser_source,
-                "executablePath": executable_path,
-                "managedExecutablePath": managed_executable_path,
-                "auraProfilePath": aura_profile_path,
-                "headlessByDefault": true,
-                "search": {
-                    "engine": "google",
-                    "region": "auto",
-                    "language": "auto",
-                    "safeSearch": "moderate"
-                },
-                "behavior": {
-                    "acceptLanguage": "auto",
-                    "timezone": "system",
-                    "locale": "system",
-                    "colorScheme": "system",
-                    "userAgentMode": "default"
-                }
-            }
-        }
-    });
-
-    let output = build_node_command(&app, &bridge_cwd)?
-        .arg(script_path)
-        .arg(serde_json::to_string(&payload).map_err(|error| {
-            format!("Failed to serialize browser profile action payload: {error}")
-        })?)
-        .output()
-        .map_err(|error| format!("Failed to run browser profile action bridge: {}", format_node_launch_error(&error)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "Clearing Aura site cookies failed.".into()
-        } else {
-            stderr
-        });
-    }
-
-    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .map_err(|error| format!("Failed to parse browser profile action response: {error}"))?;
-    let removed_count = parsed["removedCount"].as_u64().unwrap_or(0) as usize;
-
-    Ok(ClearAuraSiteCookiesResult {
-        removed_count,
-        pending_removed_count,
-    })
-}
-
-#[tauri::command]
-fn reset_aura_site_sessions<R: Runtime>(
-    app: tauri::AppHandle<R>,
-    browser_source: String,
-    executable_path: Option<String>,
-    managed_executable_path: Option<String>,
-    aura_profile_path: Option<String>,
-) -> Result<ClearAuraSiteCookiesResult, String> {
-    let pending_removed_count = clear_pending_cookie_imports(&app)?;
-    let script_path = resolve_bridge_script_path(&app, "browserProfileActions.mjs")?;
-    let bridge_cwd = resolve_bridge_cwd(&app)?;
-    let payload = serde_json::json!({
-        "action": "clear-all-cookies",
-        "settings": {
-            "browser": {
-                "enabled": true,
-                "source": browser_source,
-                "executablePath": executable_path,
-                "managedExecutablePath": managed_executable_path,
-                "auraProfilePath": aura_profile_path,
-                "headlessByDefault": true,
-                "search": {
-                    "engine": "google",
-                    "region": "auto",
-                    "language": "auto",
-                    "safeSearch": "moderate"
-                },
-                "behavior": {
-                    "acceptLanguage": "auto",
-                    "timezone": "system",
-                    "locale": "system",
-                    "colorScheme": "system",
-                    "userAgentMode": "default"
-                }
-            }
-        }
-    });
-
-    let output = build_node_command(&app, &bridge_cwd)?
-        .arg(script_path)
-        .arg(serde_json::to_string(&payload).map_err(|error| {
-            format!("Failed to serialize browser profile action payload: {error}")
-        })?)
-        .output()
-        .map_err(|error| format!("Failed to run browser profile action bridge: {}", format_node_launch_error(&error)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "Resetting Aura site sessions failed.".into()
-        } else {
-            stderr
-        });
-    }
-
-    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .map_err(|error| format!("Failed to parse browser profile action response: {error}"))?;
-    let removed_count = parsed["removedCount"].as_u64().unwrap_or(0) as usize;
-
-    Ok(ClearAuraSiteCookiesResult {
-        removed_count,
-        pending_removed_count,
-    })
-}
-
-#[tauri::command]
-fn reset_aura_browser_profile<R: Runtime>(
-    app: tauri::AppHandle<R>,
-    aura_profile_path: Option<String>,
-) -> Result<ResetAuraBrowserProfileResult, String> {
-    let profile_path = resolve_aura_browser_profile_target(&app, aura_profile_path)?;
-    let pending_removed_count = clear_pending_cookie_imports(&app)?;
-    let cleared_profile = profile_path.exists();
-
-    if cleared_profile {
-        fs::remove_dir_all(&profile_path).map_err(|error| {
-            format!(
-                "Failed to clear Aura browser profile {}: {error}",
-                profile_path.display()
-            )
-        })?;
-    }
-
-    ensure_directory(&profile_path)?;
-
-    Ok(ResetAuraBrowserProfileResult {
-        cleared_profile,
-        pending_removed_count,
     })
 }
 
@@ -4322,7 +3183,6 @@ fn main() {
             Ok(())
         })
         .manage(AgentTaskStore::default())
-        .manage(ManagedBrowserInstallStore::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_shell::init())
@@ -4354,15 +3214,6 @@ fn main() {
             run_mcp_action,
             ensure_aura_home,
             detect_lightpanda_runtime,
-            detect_browser_runtime,
-            install_managed_browser,
-            cancel_managed_browser_install,
-            uninstall_managed_browser,
-            discover_chrome_import_sources,
-            import_chrome_site_cookies,
-            clear_aura_site_cookies,
-            reset_aura_site_sessions,
-            reset_aura_browser_profile,
             read_aura_file,
             write_aura_file,
             read_workspace_tree,

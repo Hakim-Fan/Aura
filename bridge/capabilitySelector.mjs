@@ -237,7 +237,7 @@ function inferTaskSignalsFromClassification(classification, text) {
     isBrowserTask:
       localSignals.isBrowserTask ||
       classification.webInteractionRequired === true ||
-      classification.systemChromeRequested === true,
+      classification.systemBrowserRequested === true,
     isResearchTask:
       localSignals.isResearchTask || classification.needsExternalFacts === true,
     isComplexTask:
@@ -421,24 +421,14 @@ function scoreToolGroup(group, context) {
     if (group.id === 'advanced:computer-use' && context.signals.isDesktopTask) {
       score += 6
     }
-    if (group.id === 'advanced:browser-runtime' && context.signals.isBrowserTask) {
+    if (group.id === 'advanced:browser-interaction' && context.signals.isBrowserTask) {
       score += 8
     }
     if (
-      group.id === 'advanced:browser-runtime' &&
+      group.id === 'advanced:browser-interaction' &&
       context.routeState?.capabilityTier === 'browser-interactive'
     ) {
       score += 8
-    }
-    if (group.id === 'advanced:chrome-automation' && context.signals.isBrowserTask) {
-      score += 4
-    }
-    if (
-      group.id === 'advanced:chrome-automation' &&
-      context.routeState?.capabilityTier === 'browser-interactive' &&
-      context.routeState?.explicitSystemChromeRequest === true
-    ) {
-      score += 4
     }
   }
 

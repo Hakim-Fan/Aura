@@ -217,7 +217,6 @@ const WEB_INTERACTION_KEYWORDS = [
   'consent',
   'click',
   'form',
-  'browser takeover',
   '登录',
   '点击',
   '表单',
@@ -265,16 +264,22 @@ const WEB_ACTION_KEYWORDS = [
   '切换标签',
 ]
 
-const SYSTEM_CHROME_REQUEST_KEYWORDS = [
+const SYSTEM_BROWSER_REQUEST_KEYWORDS = [
+  'system browser',
   'google chrome',
   'system chrome',
+  'frontmost browser',
   'frontmost chrome',
+  'browser window',
   'chrome window',
+  '系统浏览器',
   '系统 chrome',
   '系统chrome',
   '谷歌浏览器',
+  '当前浏览器',
   '当前 chrome',
   '当前chrome',
+  '浏览器窗口',
   'chrome 窗口',
   'chrome窗口',
 ]
@@ -1344,7 +1349,7 @@ function buildRouteStateFromSignals({
   webInteractionRequired,
   workspaceRelated,
   isCapabilityAdminTask,
-  explicitSystemChromeRequest,
+  explicitSystemBrowserRequest,
   researchMode = 'auto',
   taskComplexity = 'medium',
   planDepth = 'single_step',
@@ -1411,7 +1416,7 @@ function buildRouteStateFromSignals({
       requiresEvidenceForDone: answerMode === 'execute',
     },
     isCapabilityAdminTask,
-    explicitSystemChromeRequest,
+    explicitSystemBrowserRequest,
   }
 }
 
@@ -1423,7 +1428,7 @@ export function deriveHardSignals(messages) {
     explicitWebInteraction: detectExplicitWebInteraction(intent),
     explicitWorkspaceWrite:
       hasAny(intent, EXECUTION_KEYWORDS) && hasAny(text, WORKSPACE_KEYWORDS),
-    explicitSystemChromeRequest: hasAny(text, SYSTEM_CHROME_REQUEST_KEYWORDS),
+    explicitSystemBrowserRequest: hasAny(text, SYSTEM_BROWSER_REQUEST_KEYWORDS),
     forceOrchestrated: hasAny(intent, FORCE_ORCHESTRATED_KEYWORDS),
   }
 }
@@ -1462,9 +1467,9 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
     webInteractionRequired,
     workspaceRelated,
     isCapabilityAdminTask: classification.isCapabilityAdmin === true,
-    explicitSystemChromeRequest:
-      classification.systemChromeRequested === true ||
-      hardSignals.explicitSystemChromeRequest === true,
+    explicitSystemBrowserRequest:
+      classification.systemBrowserRequested === true ||
+      hardSignals.explicitSystemBrowserRequest === true,
     researchMode: hardSignals.researchMode || 'auto',
     taskComplexity: classification.taskComplexity,
     planDepth: classification.planDepth,
@@ -1482,7 +1487,7 @@ export function inferRouteStateFromKeywords(messages, settings = {}) {
     !asksInformational &&
     !hasAny(intent, ['怎么', 'why', 'how', '原因', '解释', '分析', '看看', 'review', 'check'])
   const explicitWebInteraction = detectExplicitWebInteraction(intent)
-  const explicitSystemChromeRequest = hasAny(text, SYSTEM_CHROME_REQUEST_KEYWORDS)
+  const explicitSystemBrowserRequest = hasAny(text, SYSTEM_BROWSER_REQUEST_KEYWORDS)
   const needsExternalFacts = hasAny(text, EXTERNAL_FACT_KEYWORDS)
   const workspaceRelated = hasAny(text, WORKSPACE_KEYWORDS)
   const isCapabilityAdminTask = hasAny(text, CAPABILITY_ADMIN_KEYWORDS)
@@ -1500,7 +1505,7 @@ export function inferRouteStateFromKeywords(messages, settings = {}) {
     webInteractionRequired: explicitWebInteraction,
     workspaceRelated: workspaceRelated || answerMode === 'execute',
     isCapabilityAdminTask,
-    explicitSystemChromeRequest,
+    explicitSystemBrowserRequest,
     researchMode: latestUserResearchMode(messages),
   })
 }
@@ -1557,7 +1562,7 @@ export function selectAgentStrategy(classification, hardSignals = {}, options = 
 
 function allowReadonlyPluginLikeTool(tool, routeState) {
   return tool.source === 'plugin' || tool.source === 'mcp'
-    ? !tool.approvalCategory && !routeState.explicitSystemChromeRequest
+    ? !tool.approvalCategory && !routeState.explicitSystemBrowserRequest
     : true
 }
 

@@ -1961,18 +1961,6 @@ export function MainWindowApp() {
     }
   }
 
-  async function requestBrowserTakeover(reason: string) {
-    await appendPromptToRunningTask(
-      `检测到浏览器流程阻塞：${reason}\n\n请立即调用 browser_takeover_visible 打开 Aura 可见浏览器，并等待我完成登录、验证码或授权操作。`,
-    )
-  }
-
-  async function continueAfterBrowserTakeover(reason: string) {
-    await appendPromptToRunningTask(
-      `我已经完成浏览器接管步骤，可以继续执行了。\n\n阻塞原因是：${reason}\n\n请继续当前流程；如果已经不需要保持可见窗口，请在合适时机调用 browser_resume_after_takeover。`,
-    )
-  }
-
   async function forceExecuteAppendedInput(messageId: string, inputId: string) {
     if (!activeSession || !activeRunningTask || !agentTask?.id) {
       return
@@ -3035,8 +3023,6 @@ export function MainWindowApp() {
               }
               onCancelCurrentStep={() => void handleCancelCurrentStep()}
               onToggleMessageActivity={toggleMessageActivity}
-              onRequestBrowserTakeover={reason => void requestBrowserTakeover(reason)}
-              onContinueBrowserTakeover={reason => void continueAfterBrowserTakeover(reason)}
               onStop={() => void handleStopAgentTask()}
             />
           ) : (

@@ -199,7 +199,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       sections.push(
         'Use web_research, web_search, and web_fetch for information gathering. Use system_browser_open only to hand off an explicit browser workflow to the user-facing system browser.',
       )
-      if (routeState.explicitSystemChromeRequest) {
+      if (routeState.explicitSystemBrowserRequest) {
         sections.push('The user explicitly asked to use the system browser. Prefer system_browser_open and then computer_* tools when needed.')
       }
     }

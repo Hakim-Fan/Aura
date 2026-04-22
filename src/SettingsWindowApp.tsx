@@ -50,6 +50,19 @@ function mergeAuraAssets(items: AuraAsset[], fallback: typeof builtinSkills | ty
   }))
 }
 
+function createReadonlyBuiltinAssets(
+  items: typeof builtinSkills | typeof builtinPlugins,
+): AuraAsset[] {
+  return items.map(item => ({
+    ...item,
+    path: '',
+    entryPath: '',
+    supported: true,
+    supportMessage: '',
+    readonly: true,
+  }))
+}
+
 function createProviderProfile(provider: ProviderMode = 'custom'): ProviderProfile {
   return {
     id: `profile-${provider}-${Math.random().toString(36).slice(2, 8)}`,
@@ -92,6 +105,19 @@ function formatTokenCount(value?: number) {
   return `${Math.round(value)}`
 }
 
+function isPathInsideDirectory(candidate?: string, directory?: string) {
+  const normalizedCandidate = typeof candidate === 'string' ? candidate.trim() : ''
+  const normalizedDirectory = typeof directory === 'string' ? directory.trim() : ''
+  if (!normalizedCandidate || !normalizedDirectory) {
+    return false
+  }
+  return (
+    normalizedCandidate === normalizedDirectory ||
+    normalizedCandidate.startsWith(`${normalizedDirectory}/`) ||
+    normalizedCandidate.startsWith(`${normalizedDirectory}\\`)
+  )
+}
+
 type Props = {
   initialTab: SettingsTab
 }
@@ -113,12 +139,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
   )
   const [isTestingProvider, setIsTestingProvider] = useState(false)
   const [isFetchingModels, setIsFetchingModels] = useState(false)
-  const [isRefreshingBrowserRuntime, setIsRefreshingBrowserRuntime] = useState(false)
+  const [isRefreshingLightpandaStatus, setIsRefreshingLightpandaStatus] = useState(false)
+  const [isWaitingForLightpandaInstall, setIsWaitingForLightpandaInstall] = useState(false)
   const [availableSkills, setAvailableSkills] = useState<AuraAsset[]>(() =>
-    builtinSkills.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '', readonly: true })),
+    createReadonlyBuiltinAssets(builtinSkills),
   )
   const [availablePlugins, setAvailablePlugins] = useState<AuraAsset[]>(() =>
-    builtinPlugins.map(item => ({ ...item, path: '', entryPath: '', supported: true, supportMessage: '', readonly: true })),
+    createReadonlyBuiltinAssets(builtinPlugins),
   )
   const [auraHome, setAuraHome] = useState<AuraHomeState | null>(null)
   const [assetSearch, setAssetSearch] = useState({
@@ -201,26 +228,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
       }
 
       await refreshAuraAssets().catch(() => {
-        setAvailableSkills(
-          builtinSkills.map(item => ({
-            ...item,
-            path: '',
-            entryPath: '',
-            supported: true,
-            supportMessage: '',
-            readonly: true,
-          })),
-        )
-        setAvailablePlugins(
-          builtinPlugins.map(item => ({
-            ...item,
-            path: '',
-            entryPath: '',
-            supported: true,
-            supportMessage: '',
-            readonly: true,
-          })),
-        )
+        setAvailableSkills(createReadonlyBuiltinAssets(builtinSkills))
+        setAvailablePlugins(createReadonlyBuiltinAssets(builtinPlugins))
       })
 
       // Dismiss splash after full hydration
@@ -263,6 +272,20 @@ export function SettingsWindowApp({ initialTab }: Props) {
     const timer = window.setTimeout(() => setBrowserStatus(null), 2200)
     return () => window.clearTimeout(timer)
   }, [browserStatus])
+
+  useEffect(() => {
+    if (!isWaitingForLightpandaInstall) {
+      return
+    }
+
+    const unlistenPromise = listen('tauri://focus', () => {
+      void handleLightpandaInstallFocusReturn()
+    })
+
+    return () => {
+      unlistenPromise.then(unlisten => unlisten())
+    }
+  }, [isWaitingForLightpandaInstall, auraHome, draftSettings])
 
   function handleSettingsChange<K extends keyof AgentSettings>(
     key: K,
@@ -992,13 +1015,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
   async function refreshLightpandaStatus(
     settingsOverride?: AgentSettings,
     options?: { useAsBaseline?: boolean; silent?: boolean },
-  ) {
+  ): Promise<LightpandaRuntimeStatusRecord | null> {
     const targetSettings = settingsOverride || draftSettings
     const executablePath = resolveLightpandaExecutablePath(
       targetSettings.browser.lightpanda.executablePath,
     )
 
-    setIsRefreshingBrowserRuntime(true)
+    setIsRefreshingLightpandaStatus(true)
     if (!options?.silent) {
       setBrowserStatus(null)
     }
@@ -1015,9 +1038,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
           ...targetSettings.browser,
           lightpanda: {
             ...targetSettings.browser.lightpanda,
-            executablePath: status.valid
-              ? status.executablePath || executablePath
-              : executablePath,
+            executablePath: executablePath
+              ? status.valid
+                ? status.executablePath || executablePath
+                : executablePath
+              : '',
           },
         },
       }
@@ -1040,6 +1065,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             : status.error || '未检测到可用的 Lightpanda。',
         })
       }
+      return status
     } catch (caught) {
       setLightpandaStatus(null)
       if (!options?.silent) {
@@ -1048,81 +1074,80 @@ export function SettingsWindowApp({ initialTab }: Props) {
           message: caught instanceof Error ? caught.message : 'Lightpanda 检测失败。',
         })
       }
+      return null
     } finally {
-      setIsRefreshingBrowserRuntime(false)
+      setIsRefreshingLightpandaStatus(false)
     }
   }
 
-  async function chooseLightpandaExecutable() {
-    const selected = await open({
-      directory: false,
-      multiple: false,
-      title: '选择 Lightpanda 可执行文件',
-    })
+  async function handleLightpandaInstallFocusReturn() {
+    setIsWaitingForLightpandaInstall(false)
+    const nextAura = auraHome || (await ensureAuraHome())
+    setAuraHome(nextAura)
 
-    if (typeof selected !== 'string') {
+    const status = await refreshLightpandaStatus(undefined, { silent: true })
+    if (status?.executablePath && isPathInsideDirectory(status.executablePath, nextAura.lightpandaDir)) {
+      setBrowserStatus({
+        tone: 'success',
+        message: '已在 Aura 安装目录中检测到 Lightpanda。',
+      })
       return
     }
 
-    setIsRefreshingBrowserRuntime(true)
-    setBrowserStatus(null)
-
-    try {
-      const status = await detectLightpandaRuntime({
-        executablePath: selected,
-      })
-      setLightpandaStatus(status)
-
-      if (!status.valid || !status.executablePath) {
-        setBrowserStatus({
-          tone: 'error',
-          message: status.error || '所选路径不是可用的 Lightpanda 可执行文件。',
-        })
-        return
-      }
-
-      setDraftSettings(current => ({
-        ...current,
-        browser: {
-          ...current.browser,
-          lightpanda: {
-            ...current.browser.lightpanda,
-            executablePath: status.executablePath,
-          },
-        },
-      }))
-      setBrowserStatus({
-        tone: 'success',
-        message: '已验证并保存 Lightpanda 路径。',
-      })
-      setSaveState('idle')
-    } catch (caught) {
+    if (status?.executablePath) {
       setBrowserStatus({
         tone: 'error',
-        message: caught instanceof Error ? caught.message : 'Lightpanda 校验失败。',
+        message: '安装目录里还没有检测到新的 Lightpanda，当前仍在使用系统 PATH 或已有自定义路径。',
       })
-    } finally {
-      setIsRefreshingBrowserRuntime(false)
+      return
+    }
+
+    setBrowserStatus({
+      tone: 'error',
+      message: '安装目录里还没有检测到可用的 Lightpanda，请把下载的启动文件拖进去。',
+    })
+  }
+
+  async function openLightpandaInstallDirectory() {
+    const nextAura = auraHome || (await ensureAuraHome())
+    setAuraHome(nextAura)
+    setBrowserStatus(null)
+    setIsWaitingForLightpandaInstall(true)
+
+    try {
+      await openPathInDefaultApp(nextAura.lightpandaDir)
+    } catch (caught) {
+      setIsWaitingForLightpandaInstall(false)
+      setBrowserStatus({
+        tone: 'error',
+        message: caught instanceof Error ? caught.message : '打开 Lightpanda 安装目录失败。',
+      })
     }
   }
 
-  function clearLightpandaExecutablePath() {
-    setDraftSettings(current => ({
-      ...current,
+  async function resetLightpandaExecutablePath() {
+    const nextSettings: AgentSettings = {
+      ...draftSettings,
       browser: {
-        ...current.browser,
+        ...draftSettings.browser,
         lightpanda: {
-          ...current.browser.lightpanda,
+          ...draftSettings.browser.lightpanda,
           executablePath: '',
         },
       },
-    }))
-    setLightpandaStatus(null)
-    setBrowserStatus({
-      tone: 'success',
-      message: '已清除自定义 Lightpanda 路径，将改为仅检测系统 PATH。',
-    })
+    }
+
+    setDraftSettings(nextSettings)
     setSaveState('idle')
+    setBrowserStatus(null)
+
+    const status = await refreshLightpandaStatus(nextSettings, { silent: true })
+    setBrowserStatus({
+      tone: status?.valid ? 'success' : 'error',
+      message: status?.valid
+        ? '已改回自动检测 Lightpanda。'
+        : status?.error || '已清除自定义路径，当前还没有检测到可用的 Lightpanda。',
+    })
   }
 
   async function chooseDefaultWorkspace() {
@@ -1645,40 +1670,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
               资料获取和网页操作现在分成两条路径: 搜资料时只走 `web_* + Lightpanda`，显式操作网页时只走系统浏览器。
             </p>
           </div>
-          <div className="header-actions">
-            <button
-              className="secondary-button"
-              disabled={isRefreshingBrowserRuntime}
-              onClick={() => void refreshLightpandaStatus()}
-            >
-              <RefreshCw
-                size={14}
-                className={isRefreshingBrowserRuntime ? 'spin-icon' : undefined}
-              />
-              检测 Lightpanda
-            </button>
-            <button
-              className="secondary-button"
-              disabled={isRefreshingBrowserRuntime}
-              onClick={() => void chooseLightpandaExecutable()}
-            >
-              <FolderOpen size={14} />
-              选择路径
-            </button>
-          </div>
         </header>
-
-        {browserStatus ? (
-          <div className={`provider-feedback ${browserStatus.tone === 'success' ? 'success' : 'error'}`}>
-            <strong>{browserStatus.message}</strong>
-          </div>
-        ) : null}
-
-        {browserValidationError ? (
-          <div className="provider-feedback error">
-            <strong>{browserValidationError}</strong>
-          </div>
-        ) : null}
 
         <div className="settings-grid">
           <section className="dashboard-card full-span browser-overview-card">
@@ -1719,6 +1711,30 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
           <section className="dashboard-card">
             <div className="section-title">资料获取</div>
+
+            {browserStatus ? (
+              <div className={`provider-feedback ${browserStatus.tone === 'success' ? 'success' : 'error'} mt-3`}>
+                <strong>{browserStatus.message}</strong>
+              </div>
+            ) : null}
+
+            {browserValidationError ? (
+              <div className="provider-feedback error mt-3">
+                <strong>{browserValidationError}</strong>
+              </div>
+            ) : null}
+
+            <div className="header-actions mt-4">
+              <button
+                className="secondary-button"
+                disabled={isRefreshingLightpandaStatus}
+                onClick={() => void chooseLightpandaExecutable()}
+              >
+                <FolderOpen size={14} />
+                选择启动路径
+              </button>
+            </div>
+
             <div className="toggle-stack">
               <label className="toggle-inline">
                 <input
@@ -1793,37 +1809,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
               </div>
             </div>
 
-            <div className="header-actions mt-4">
-              <button
-                className="secondary-button"
-                disabled={isRefreshingBrowserRuntime}
-                onClick={() => void refreshLightpandaStatus()}
-              >
-                <RefreshCw
-                  size={14}
-                  className={isRefreshingBrowserRuntime ? 'spin-icon' : undefined}
-                />
-                重新检测
-              </button>
-              <button
-                className="secondary-button"
-                disabled={isRefreshingBrowserRuntime}
-                onClick={() => void chooseLightpandaExecutable()}
-              >
-                <FolderOpen size={14} />
-                选择路径
-              </button>
-              <button
-                className="secondary-button"
-                disabled={!lightpandaPath}
-                onClick={() => clearLightpandaExecutablePath()}
-              >
-                清除自定义路径
-              </button>
-            </div>
-
             <div className="provider-note mt-3">
               <p>如果未填写路径，Aura 会只从系统 PATH 查找 `lightpanda`。</p>
+              <p>如果你手动下载了 Lightpanda，可直接在这里选择可执行文件；如果是 macOS / Linux，也可以先给文件执行权限再加入系统 PATH。</p>
               <p>Lightpanda 不负责登录、验证码、表单和人工处理，这些任务会走系统浏览器路径。</p>
             </div>
           </section>
