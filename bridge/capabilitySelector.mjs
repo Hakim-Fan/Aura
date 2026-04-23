@@ -295,7 +295,14 @@ const LOCAL_EXECUTION_TOOLS = new Set([
   'write_file',
   'edit_file',
   'multi_edit_file',
+  'exec_command',
+  'write_stdin',
   'run_shell',
+])
+
+const LONG_SESSION_EXECUTION_TOOLS = new Set([
+  'exec_command',
+  'write_stdin',
 ])
 
 const WEB_RETRIEVAL_TOOLS = new Set([
@@ -310,6 +317,17 @@ const DISCOVERY_TOOLS = new Set([
 
 function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
   let score = 0
+  const hasRouteSemantics = Boolean(context.routeState)
+  const isWorkspaceExecute =
+    context.routeState?.answerMode === 'execute' &&
+    context.routeState?.workspaceRelated === true
+  const isWorkspaceDiagnose =
+    context.routeState?.answerMode === 'diagnose' &&
+    context.routeState?.workspaceRelated === true
+  const isExternalLookup = context.routeState?.needsExternalFacts === true
+  const isBrowserInteraction =
+    context.routeState?.webInteractionRequired === true ||
+    context.routeState?.explicitSystemBrowserRequest === true
 
   if (tool.source === 'builtin') {
     score += 40
@@ -329,9 +347,25 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
     score += 70
   }
 
-  if (context.signals.isEditingTask) {
+  if (isWorkspaceExecute) {
+    if (tool.name === 'apply_patch') {
+      score += 110
+    } else if (LONG_SESSION_EXECUTION_TOOLS.has(tool.name)) {
+      score += 74
+    } else if (LOCAL_EXECUTION_TOOLS.has(tool.name)) {
+      score += 65
+    } else if (
+      tool.name === 'read_file' ||
+      tool.name === 'search_code' ||
+      tool.name === 'glob_files'
+    ) {
+      score += 45
+    }
+  } else if (context.signals.isEditingTask) {
     if (tool.name === 'apply_patch') {
       score += 90
+    } else if (LONG_SESSION_EXECUTION_TOOLS.has(tool.name)) {
+      score += 58
     } else if (LOCAL_EXECUTION_TOOLS.has(tool.name)) {
       score += 50
     } else if (tool.name === 'read_file' || tool.name === 'search_code' || tool.name === 'glob_files') {
@@ -339,15 +373,42 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
     }
   }
 
-  if (context.signals.isReviewTask) {
+  if (isWorkspaceDiagnose) {
+    if (tool.name === 'read_file' || tool.name === 'search_code') {
+      score += 55
+    } else if (tool.name === 'glob_files' || tool.name === 'list_files') {
+      score += 30
+    } else if (tool.name === 'exec_command' || tool.name === 'write_stdin') {
+      score += 24
+    } else if (tool.name === 'run_shell') {
+      score += 16
+    }
+  } else if (context.signals.isReviewTask) {
     if (tool.name === 'read_file' || tool.name === 'search_code') {
       score += 45
+    } else if (tool.name === 'exec_command' || tool.name === 'write_stdin') {
+      score += 22
     } else if (tool.name === 'run_shell') {
       score += 18
     }
   }
 
-  if (context.signals.isResearchTask && WEB_RETRIEVAL_TOOLS.has(tool.name)) {
+  if (isExternalLookup && WEB_RETRIEVAL_TOOLS.has(tool.name)) {
+    score += 95
+
+    if (
+      context.routeState?.responseStyle === 'research-structured' &&
+      tool.name === 'web_research'
+    ) {
+      score += 28
+    } else if (tool.name === 'web_search') {
+      score += 8
+    }
+
+    if (containsUrlLikeText(context.text) && tool.name === 'web_fetch') {
+      score += 24
+    }
+  } else if (context.signals.isResearchTask && WEB_RETRIEVAL_TOOLS.has(tool.name)) {
     score += 80
 
     if (
@@ -364,7 +425,14 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
     }
   }
 
-  if (context.signals.isBrowserTask) {
+  if (isBrowserInteraction) {
+    if (tool.name === 'system_browser_open') {
+      score += 95
+    }
+    if (tool.name.startsWith('computer_')) {
+      score += 75
+    }
+  } else if (context.signals.isBrowserTask) {
     if (tool.name === 'system_browser_open') {
       score += 70
     }
@@ -385,7 +453,7 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
       ...(Array.isArray(tool.aliases) ? tool.aliases : []),
     ])
     score += Math.min(24, countMatches(context.text, capabilityTerms) * 2)
-  } else {
+  } else if (!hasRouteSemantics) {
     const directToolTerms = [tool.name, ...(Array.isArray(tool.aliases) ? tool.aliases : [])]
     score += Math.min(18, countMatches(context.text, directToolTerms) * 2)
   }

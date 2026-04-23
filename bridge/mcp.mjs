@@ -60,6 +60,145 @@ function normalizeToolMetadata(tool) {
   }
 }
 
+function normalizeServerEnv(env) {
+  if (env && typeof env === 'object' && !Array.isArray(env)) {
+    return { ...env }
+  }
+
+  return parseLooseJson(typeof env === 'string' ? env : '{}', {})
+}
+
+function normalizeServerEntry(server) {
+  if (!server || typeof server !== 'object') {
+    return null
+  }
+
+  const command = typeof server.command === 'string' ? server.command.trim() : ''
+  const args = typeof server.args === 'string' ? server.args : ''
+  const env = normalizeServerEnv(server.env)
+
+  return {
+    ...server,
+    id: typeof server.id === 'string' && server.id.trim() ? server.id.trim() : server.name || 'mcp',
+    name:
+      typeof server.name === 'string' && server.name.trim()
+        ? server.name.trim()
+        : typeof server.id === 'string' && server.id.trim()
+          ? server.id.trim()
+          : 'MCP',
+    description: typeof server.description === 'string' ? server.description.trim() : '',
+    command,
+    args,
+    env,
+    enabled: server.enabled === true,
+    healthStatus:
+      server.healthStatus === 'ok' || server.healthStatus === 'error'
+        ? server.healthStatus
+        : 'unknown',
+  }
+}
+
+function buildMcpActivationHint(server) {
+  const reason =
+    server.enabled !== true
+      ? 'It is currently disabled.'
+      : server.healthStatus === 'error'
+        ? 'Its last recorded health status was error.'
+        : server.healthStatus !== 'ok'
+          ? `Its current health status is ${server.healthStatus}.`
+          : 'It is not active in the current session.'
+
+  return [
+    `Configured MCP server "${server.name}" is not active for the current workspace or session.`,
+    reason,
+    `Enable or fix this MCP server before trying to use its tools directly.`,
+  ].join(' ')
+}
+
+function buildMcpCatalogHint(server) {
+  return [
+    `Configured MCP server "${server.name}" may expose additional tools, but no cached tool metadata is available in this runtime yet.`,
+    `Enable or reconnect the server once to populate its tool catalog before expecting tool_search to surface individual MCP tools.`,
+  ].join(' ')
+}
+
+function buildMcpToolName(server, toolName) {
+  return `mcp__${server.name}__${toolName}`
+}
+
+function buildMcpToolObjects(server, toolMetadata, options = {}) {
+  const exposure =
+    options.exposure === 'discoverable-only'
+      ? 'discoverable-only'
+      : options.exposure === 'direct'
+        ? 'direct'
+        : 'deferred'
+  const activationHint =
+    typeof options.activationHint === 'string' ? options.activationHint.trim() : ''
+  const session = options.session || null
+
+  return toolMetadata.map(tool => ({
+    source: 'mcp',
+    capabilityId: server.id,
+    capabilityName: server.name,
+    capabilityDescription: server.description || '',
+    name: buildMcpToolName(server, tool.name),
+    description: `[MCP:${server.name}] ${tool.description || tool.name}`,
+    inputSchema: tool.inputSchema,
+    deferLoading: exposure !== 'direct',
+    discoverable: true,
+    discoverOnly: exposure === 'discoverable-only',
+    availability:
+      exposure === 'discoverable-only'
+        ? 'activation_required'
+        : exposure === 'deferred'
+          ? 'loadable'
+          : 'mounted',
+    activationHint,
+    async run(args, runtime = {}) {
+      if (!session) {
+        throw createStructuredError(`MCP 工具“${server.name}/${tool.name}”当前不可直接调用。`, {
+          source: 'mcp',
+          category: 'unavailable',
+          code: 'MCP_TOOL_NOT_ACTIVE',
+          detail: activationHint || `MCP server "${server.name}" is not active in the current turn.`,
+          suggestedAction: '请先启用或修复对应 MCP 服务，再重新加载工具后调用。',
+        })
+      }
+      return session.callTool(tool.name, args, runtime)
+    },
+  }))
+}
+
+function buildDiscoverableMcpCatalogEntry(server) {
+  return {
+    source: 'mcp',
+    capabilityId: server.id,
+    capabilityName: server.name,
+    capabilityDescription: server.description || '',
+    name: buildMcpToolName(server, 'catalog'),
+    aliases: [server.id, server.name],
+    description: `[MCP:${server.name}] Server catalog placeholder. Enable or reconnect this MCP server to expose its tools.`,
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+    discoverable: true,
+    discoverOnly: true,
+    availability: 'activation_required',
+    activationHint: buildMcpCatalogHint(server),
+    async run() {
+      throw createStructuredError(`MCP 服务“${server.name}”当前未激活。`, {
+        source: 'mcp',
+        category: 'unavailable',
+        code: 'MCP_SERVER_NOT_ACTIVE',
+        detail: buildMcpCatalogHint(server),
+        suggestedAction: '请先启用或修复对应 MCP 服务，再重新加载工具。',
+      })
+    },
+  }
+}
+
 function buildServerCacheKey(server, commandSpec, env) {
   return normalizeCacheKey(
     JSON.stringify({
@@ -197,12 +336,35 @@ function createMcpSession(server, commandSpec, env) {
 }
 
 export async function connectMcpTools(servers) {
-  const sessions = []
-  const tools = []
+  const inventory = await loadMcpToolInventory({
+    activeServers: servers,
+    configuredServers: servers,
+  })
+  return {
+    tools: inventory.activeTools,
+    close: inventory.close,
+  }
+}
 
-  for (const server of servers.filter(item => item.enabled && item.command.trim())) {
+export async function loadMcpToolInventory({
+  activeServers = [],
+  configuredServers = [],
+} = {}) {
+  const sessions = []
+  const activeTools = []
+  const discoverableTools = []
+
+  const normalizedActiveServers = activeServers
+    .map(normalizeServerEntry)
+    .filter(server => server && server.command)
+  const normalizedConfiguredServers = configuredServers
+    .map(normalizeServerEntry)
+    .filter(server => server && server.command)
+  const activeServerIds = new Set(normalizedActiveServers.map(server => server.id))
+
+  for (const server of normalizedActiveServers.filter(item => item.enabled && item.command.trim())) {
     const commandSpec = parseCommandSpec(server.command, server.args || '')
-    const env = parseLooseJson(server.env || '{}', {})
+    const env = server.env || {}
     const cacheKey = buildServerCacheKey(server, commandSpec, env)
     const session = createMcpSession(server, commandSpec, env)
     sessions.push(session)
@@ -213,24 +375,39 @@ export async function connectMcpTools(servers) {
       writeMcpToolMetadataCache(cacheKey, toolMetadata)
     }
 
-    for (const tool of toolMetadata) {
-      tools.push({
-        source: 'mcp',
-        capabilityId: server.id,
-        capabilityName: server.name,
-        capabilityDescription: server.description || '',
-        name: `mcp__${server.name}__${tool.name}`,
-        description: `[MCP:${server.name}] ${tool.description || tool.name}`,
-        inputSchema: tool.inputSchema,
-        async run(args, runtime = {}) {
-          return session.callTool(tool.name, args, runtime)
-        },
-      })
+    activeTools.push(
+      ...buildMcpToolObjects(server, toolMetadata, {
+        exposure: 'deferred',
+        session,
+      }),
+    )
+  }
+
+  for (const server of normalizedConfiguredServers) {
+    if (!server.command || activeServerIds.has(server.id)) {
+      continue
     }
+
+    const commandSpec = parseCommandSpec(server.command, server.args || '')
+    const cacheKey = buildServerCacheKey(server, commandSpec, server.env || {})
+    const cachedToolMetadata = readMcpToolMetadataCache(cacheKey)?.value
+
+    if (Array.isArray(cachedToolMetadata) && cachedToolMetadata.length > 0) {
+      discoverableTools.push(
+        ...buildMcpToolObjects(server, cachedToolMetadata, {
+          exposure: 'discoverable-only',
+          activationHint: buildMcpActivationHint(server),
+        }),
+      )
+      continue
+    }
+
+    discoverableTools.push(buildDiscoverableMcpCatalogEntry(server))
   }
 
   return {
-    tools,
+    activeTools,
+    discoverableTools,
     async close() {
       for (const session of sessions) {
         await session.close()

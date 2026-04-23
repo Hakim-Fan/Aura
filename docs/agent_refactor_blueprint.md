@@ -918,14 +918,3 @@ flowchart TD
 6. 精简 `agentRouting` 与 `capabilitySelector`
 
 这六步做完，Aura Agent 的底层能力会和现在是一个级别差异，而不是小修小补。
-
-这轮后我会把完成度更新成：
-
-Phase 1 完成态与写文件可靠性：100%
-Phase 2 apply_patch 与编辑主路径升级：95%
-Phase 3 ToolRegistry / ToolRouter：96%
-Phase 4 retrievalRuntime：100%
-Phase 5 tool_search + deferred tools：95%
-Phase 6 route 精简与 selector 降级：92%
-Phase 7 性能优化与缓存：91%
-如果按整体蓝图落地度来估，我会把现在提到 96%-97%。现在剩下的已经基本不是“主干没搭好”，而是最后的收尾和严格口径下的打磨。预先存在的 pnpm-lock.yaml 修改我没有动。

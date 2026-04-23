@@ -14,7 +14,9 @@ import {
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 import { createWebTools } from './webTools.mjs'
 import { applyPatchInWorkspace } from './editing/applyPatchTool.mjs'
+import { parseApplyPatchShellCommand } from './editing/applyPatchShell.mjs'
 import { verifyWorkspaceTextMutation } from './editing/fileVerification.mjs'
+import { createUnifiedExecRuntime } from './editing/unifiedExecRuntime.mjs'
 
 const execFileAsync = promisify(execFile)
 const ALWAYS_ON_SKILL_IDS = new Set([
@@ -57,6 +59,78 @@ function shouldSkipSearchEntry(name) {
 
 async function runShell(command, cwd, timeoutMs = 60_000) {
   return runShellStreaming(command, cwd, timeoutMs)
+}
+
+function resolveShellPatchInterception(tool, args, hooks = {}) {
+  if (tool?.name !== 'run_shell' || typeof args?.command !== 'string') {
+    return null
+  }
+
+  const parsed = parseApplyPatchShellCommand(args.command)
+  if (!parsed) {
+    return null
+  }
+
+  if (parsed.kind === 'invalid') {
+    return {
+      tool: {
+        ...tool,
+        name: 'apply_patch',
+        aliases: ['patch'],
+        description:
+          'Rejected an invalid apply_patch shell invocation before it could fall back to ordinary shell execution.',
+        async run() {
+          throw createStructuredError('检测到了无效的 apply_patch shell 调用。', {
+            source: 'tool',
+            category: 'invalid_input',
+            code: 'INVALID_APPLY_PATCH_INVOCATION',
+            detail: parsed.reason,
+            suggestedAction:
+              '请改用标准的 apply_patch 调用形式，或直接使用 apply_patch 工具而不是 run_shell。',
+          })
+        },
+      },
+      args: {
+        command: args.command,
+      },
+      originalCommand: args.command,
+      summary:
+        'Blocked an invalid apply_patch shell invocation before it could run as a normal shell command.',
+    }
+  }
+
+  if (!hooks?.settings?.cwd) {
+    return null
+  }
+
+  const patch = parsed.patch
+  const patchRoot = parsed.workdir
+    ? resolveWorkspacePath(hooks.settings.cwd, parsed.workdir)
+    : hooks.settings.cwd
+
+  return {
+    tool: {
+      ...tool,
+      name: 'apply_patch',
+      aliases: ['patch'],
+      approvalCategory: 'file_write',
+      description:
+        'Intercepted a structured apply_patch command from shell and applied it through the verified patch runtime.',
+      async run(nextArgs, runtime = {}) {
+        return applyPatchInWorkspace(
+          patchRoot,
+          typeof nextArgs?.patch === 'string' ? nextArgs.patch : patch,
+          runtime,
+        )
+      },
+    },
+    args: {
+      patch,
+    },
+    originalCommand: args.command,
+    summary:
+      'Intercepted a shell apply_patch command and routed it through the verified patch tool.',
+  }
 }
 
 function buildStepCancelledError(tool) {
@@ -859,6 +933,9 @@ async function removeMcpServer(context, serverId) {
 
 export function createBuiltinTools(context) {
   context.todoState ||= { items: [] }
+  const unifiedExec = createUnifiedExecRuntime()
+  context.cleanupHandlers ||= []
+  context.cleanupHandlers.push(() => unifiedExec.closeAllSessions())
 
   return [
     ...createWebTools(context),
@@ -1181,11 +1258,127 @@ export function createBuiltinTools(context) {
     },
     {
       source: 'builtin',
+      name: 'exec_command',
+      aliases: ['exec', 'shell_session', 'command_session'],
+      approvalCategory: 'shell',
+      description:
+        'Start a long-lived shell command session inside the workspace. Use this for watch tasks, repeated debugging, or commands that need follow-up interaction.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          cmd: {
+            type: 'string',
+            description: 'Shell command to execute.',
+          },
+          workdir: {
+            type: 'string',
+            description: 'Optional relative directory inside the workspace.',
+          },
+          login: {
+            type: 'boolean',
+            description: 'Use a login shell. Defaults to true.',
+          },
+          tty: {
+            type: 'boolean',
+            description: 'Reserved for future TTY support. Currently only false is supported.',
+          },
+          yieldTimeMs: {
+            type: 'number',
+            description: 'How long to wait for initial output before returning.',
+          },
+          timeoutMs: {
+            type: 'number',
+            description: 'Optional maximum lifetime for the command session in milliseconds before it is terminated.',
+          },
+          maxOutputChars: {
+            type: 'number',
+            description: 'Maximum number of output characters to include in each response.',
+          },
+        },
+        required: ['cmd'],
+      },
+      liveUpdates: true,
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const cwd = resolveWorkspacePath(context.cwd, args.workdir || '.')
+        return unifiedExec.execCommand(
+          {
+            cmd: args.cmd,
+            cwd,
+            login: args.login,
+            tty: args.tty,
+            yieldTimeMs: args.yieldTimeMs,
+            timeoutMs: args.timeoutMs,
+            maxOutputChars: args.maxOutputChars,
+          },
+          runtime,
+        )
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'write_stdin',
+      aliases: ['stdin', 'poll_command'],
+      description:
+        'Write to an existing exec_command session or poll it for more output.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionId: {
+            type: 'number',
+            description: 'Session id returned by exec_command.',
+          },
+          chars: {
+            type: 'string',
+            description: 'Optional text to write to stdin. Leave empty to only poll for more output.',
+          },
+          closeStdin: {
+            type: 'boolean',
+            description: 'Close stdin for the session after any optional chars are written.',
+          },
+          terminate: {
+            type: 'boolean',
+            description: 'Send a termination signal to the session before collecting more output.',
+          },
+          signal: {
+            type: 'string',
+            description: 'Optional signal name when terminate is true. Supported values: SIGINT, SIGTERM, SIGKILL.',
+          },
+          yieldTimeMs: {
+            type: 'number',
+            description: 'How long to wait for more output before returning.',
+          },
+          maxOutputChars: {
+            type: 'number',
+            description: 'Maximum number of output characters to include in each response.',
+          },
+        },
+        required: ['sessionId'],
+      },
+      liveUpdates: true,
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        return unifiedExec.writeStdin(
+          {
+            sessionId: args.sessionId,
+            chars: args.chars,
+            closeStdin: args.closeStdin,
+            terminate: args.terminate,
+            signal: args.signal,
+            yieldTimeMs: args.yieldTimeMs,
+            maxOutputChars: args.maxOutputChars,
+          },
+          runtime,
+        )
+      },
+    },
+    {
+      source: 'builtin',
       name: 'run_shell',
       aliases: ['bash', 'shell', 'terminal', 'command'],
       approvalCategory: 'shell',
       description:
-        'Run a shell command inside the workspace. Use carefully and keep commands focused.',
+        'Run a one-shot shell command inside the workspace. Prefer exec_command for long-running or interactive sessions, and keep run_shell focused on short commands.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1588,25 +1781,37 @@ function emitToolEvent(event, toolEvents, hooks) {
 }
 
 export async function invokeTool(tool, args, toolEvents, hooks = {}) {
+  const shellPatchInterception = resolveShellPatchInterception(tool, args, hooks)
+  const effectiveTool = shellPatchInterception?.tool || tool
+  const effectiveArgs = shellPatchInterception?.args || args
   const eventId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const shouldEmitEvent = tool.internalOnly !== true
+  const shouldEmitEvent = effectiveTool.internalOnly !== true
   const eventSummary =
-    typeof tool.getSummary === 'function'
-      ? tool.getSummary(args) || tool.description
-      : tool.description
+    shellPatchInterception?.summary ||
+    (typeof effectiveTool.getSummary === 'function'
+      ? effectiveTool.getSummary(effectiveArgs) || effectiveTool.description
+      : effectiveTool.description)
   const baseEvent = {
     id: eventId,
-    source: tool.source,
-    name: tool.name,
+    source: effectiveTool.source,
+    name: effectiveTool.name,
     summary: eventSummary,
     order:
       typeof hooks.timelineOrder === 'number'
         ? hooks.timelineOrder
         : undefined,
     input:
-      tool.name === 'run_shell' && typeof args?.command === 'string'
-        ? `$ ${args.command}`
-        : stringifyOutput(args ?? {}),
+      shellPatchInterception?.originalCommand
+        ? `$ ${shellPatchInterception.originalCommand}`
+        : (
+              effectiveTool.name === 'run_shell' &&
+              typeof effectiveArgs?.command === 'string'
+            ) || (
+              effectiveTool.name === 'exec_command' &&
+              typeof effectiveArgs?.cmd === 'string'
+            )
+          ? `$ ${effectiveTool.name === 'exec_command' ? effectiveArgs.cmd : effectiveArgs.command}`
+          : stringifyOutput(effectiveArgs ?? {}),
   }
 
   function updateEvent(partial) {
@@ -1623,21 +1828,21 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     )
   }
 
-  if (tool.approvalCategory && !isAutoApproved(tool, hooks.settings || {})) {
+  if (effectiveTool.approvalCategory && !isAutoApproved(effectiveTool, hooks.settings || {})) {
     const decision = await hooks.requestApproval?.({
       id: eventId,
-      category: tool.approvalCategory,
-      toolName: tool.name,
-      summary: tool.description,
-      input: stringifyOutput(args ?? {}),
+      category: effectiveTool.approvalCategory,
+      toolName: effectiveTool.name,
+      summary: effectiveTool.description,
+      input: stringifyOutput(effectiveArgs ?? {}),
     })
 
     if (decision !== 'approve') {
       const deniedError = createStructuredError('这一步已被用户拒绝执行。', {
         source:
-          tool.source === 'plugin'
+          effectiveTool.source === 'plugin'
             ? 'plugin'
-            : tool.source === 'mcp'
+            : effectiveTool.source === 'mcp'
               ? 'mcp'
               : 'tool',
         category: 'cancelled',
@@ -1651,7 +1856,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         error: deniedError.rawMessage,
         errorInfo: deniedError.errorInfo,
       })
-      return `Tool ${tool.name} was denied by the user.`
+      return `Tool ${effectiveTool.name} was denied by the user.`
     }
   }
 
@@ -1665,16 +1870,16 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       error: undefined,
       errorInfo: undefined,
     })
-    throwIfAborted(abortController?.signal, tool)
+    throwIfAborted(abortController?.signal, effectiveTool)
     const output = await runAbortable(
       Promise.resolve(
-        tool.run(args, {
+        effectiveTool.run(effectiveArgs, {
           signal: abortController?.signal,
           settings: hooks.settings,
           routeState: hooks.routeState,
           researchMode: hooks.researchMode,
           throwIfAborted() {
-            throwIfAborted(abortController?.signal, tool)
+            throwIfAborted(abortController?.signal, effectiveTool)
           },
           onUpdate(nextOutput) {
             updateEvent({
@@ -1688,7 +1893,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         }),
       ),
       abortController?.signal,
-      tool,
+      effectiveTool,
     )
     updateEvent({
       status: 'success',
@@ -1700,14 +1905,14 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     const detail = formatToolError(error)
     const normalized = normalizeRuntimeError(error, {
       source:
-        tool.source === 'plugin'
+        effectiveTool.source === 'plugin'
           ? 'plugin'
-          : tool.source === 'mcp'
+          : effectiveTool.source === 'mcp'
             ? 'mcp'
             : 'tool',
-      operationLabel: tool.description || tool.name,
+      operationLabel: effectiveTool.description || effectiveTool.name,
     })
-    if (hooks.rethrowToolError?.(error, normalized, tool) === true) {
+    if (hooks.rethrowToolError?.(error, normalized, effectiveTool) === true) {
       throw error
     }
     updateEvent({

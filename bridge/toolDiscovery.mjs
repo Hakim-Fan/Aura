@@ -69,7 +69,9 @@ function getCachedEntrySearchData(entry) {
 function buildDeferredEntryCacheKey(entry) {
   return normalizeCacheKey(
     JSON.stringify({
+      key: entry?.key || '',
       name: entry?.name || '',
+      callName: entry?.callName || '',
       namespace: entry?.namespace || '',
       source: entry?.source || '',
       capabilityId: entry?.tool?.capabilityId || '',
@@ -87,6 +89,8 @@ function buildSerializedSearchRecord(entry, key) {
   const data = getCachedEntrySearchData(entry)
   return {
     key,
+    toolKey: entry?.key || '',
+    callName: entry?.callName || '',
     corpus: data.corpus,
     terms: data.terms,
     normalizedName: data.normalizedName,
@@ -102,6 +106,8 @@ function normalizeSerializedSearchRecord(record) {
 
   return {
     key: typeof record.key === 'string' ? record.key : '',
+    toolKey: typeof record.toolKey === 'string' ? record.toolKey : '',
+    callName: typeof record.callName === 'string' ? record.callName : '',
     corpus: typeof record.corpus === 'string' ? record.corpus : '',
     terms: Array.isArray(record.terms)
       ? record.terms.filter(term => typeof term === 'string' && term)
@@ -243,6 +249,8 @@ export function createDeferredToolIndex(entries) {
     writeDeferredIndexCache(signature, {
       records: index.records.map(record => ({
         key: record.key,
+        toolKey: record.toolKey,
+        callName: record.callName,
         corpus: record.corpus,
         terms: record.terms,
         normalizedName: record.normalizedName,
@@ -278,7 +286,7 @@ function collectCandidateRecords(index, normalizedQuery, queryTerms) {
 
   for (const term of queryTerms) {
     for (const record of index.termIndex.get(term) || []) {
-      candidates.set(record.entry.name, record)
+      candidates.set(record.entry.key || record.entry.name, record)
     }
   }
 
@@ -290,7 +298,7 @@ function collectCandidateRecords(index, normalizedQuery, queryTerms) {
         record.normalizedCapabilityId.includes(normalizedQuery) ||
         record.normalizedCapabilityName.includes(normalizedQuery)
       ) {
-        candidates.set(record.entry.name, record)
+        candidates.set(record.entry.key || record.entry.name, record)
       }
     }
   }
@@ -357,12 +365,16 @@ export function searchDeferredToolEntries(entriesOrIndex, query, maxResults = 8,
 function summarizeMatch(result) {
   const entry = result.entry
   return {
+    toolKey: entry.key,
     name: entry.name,
+    callName: entry.callName || entry.name,
     source: entry.source,
     namespace: entry.namespace,
     capabilityId: entry.tool?.capabilityId || '',
     capabilityName: entry.tool?.capabilityName || '',
     description: entry.tool?.description || '',
+    availability: entry.availability || 'loadable',
+    activationHint: entry.activationHint || '',
     score: result.score,
   }
 }
@@ -370,6 +382,7 @@ function summarizeMatch(result) {
 export function createToolSearchTool({
   searchEntries,
   isSearchableEntry,
+  canLoadEntry,
   loadEntries,
 }) {
   const searchIndex = createDeferredToolIndex(searchEntries)
@@ -378,7 +391,7 @@ export function createToolSearchTool({
     source: 'builtin',
     name: 'tool_search',
     description:
-      'Search deferred plugin and MCP tools by capability name, description, or tool name. Matching tools can be loaded into the current turn so you can call them next.',
+      'Search deferred or discoverable plugin and MCP tools by capability name, description, or tool name. Loadable matches can be mounted into the current turn; discoverable-only matches return activation guidance.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -413,19 +426,27 @@ export function createToolSearchTool({
       if (matches.length === 0) {
         return {
           query,
+          loadedToolKeys: [],
           loadedToolNames: [],
           noResults: true,
           results: [],
         }
       }
 
-      const loadedTools = loadEntries(matches.map(match => match.entry))
+      const loadableEntries = matches
+        .map(match => match.entry)
+        .filter(entry =>
+          typeof canLoadEntry === 'function' ? canLoadEntry(entry) === true : true,
+        )
+      const loadedTools = loadEntries(loadableEntries)
       runtime.registerTools?.(loadedTools)
 
       return {
         query,
         noResults: false,
+        loadedToolKeys: loadedTools.map(tool => tool.toolKey || tool.name),
         loadedToolNames: loadedTools.map(tool => tool.name),
+        activationRequiredCount: Math.max(0, matches.length - loadableEntries.length),
         results: matches.map(summarizeMatch),
       }
     },

@@ -19,6 +19,10 @@ const LOCAL_DIAGNOSE_HINT_PATTERN =
   /\b(?:review|debug|diagnose|analyze|check|verify|inspect|explain|why)\b|审查|调试|排查|诊断|分析|检查|验证|查看|解释|为什么/iu
 const LOCAL_READ_HINT_PATTERN =
   /\b(?:read|open|show|summarize|describe)\b|读取|打开|查看|总结|概述|说明/iu
+const DOCUMENT_OUTPUT_HINT_PATTERN =
+  /\b(?:document|doc|markdown|readme|spec|design doc|proposal|plan doc|notes)\b|文档|说明文档|设计文档|设计稿|方案文档|markdown|md|笔记/iu
+const DOCUMENT_WRITE_ACTION_PATTERN =
+  /\b(?:write up|write down|save|store|put under|put into|write to|create in|save to|turn .* into a document|turn .* into documentation)\b|保存到|存到|写到|落到|整理成.*文档|落地成.*文档|输出成.*文档|生成.*文档|写一份.*文档/iu
 const CAPABILITY_ADMIN_HINT_PATTERN =
   /\b(?:skill|plugin|mcp|capability)\b|技能|插件|能力/iu
 const CAPABILITY_ADMIN_ACTION_PATTERN =
@@ -393,6 +397,31 @@ function resolveExternalAnswerMode(normalizedIntent) {
   return 'advise'
 }
 
+function isDocumentWriteIntent({
+  rawIntent,
+  normalizedIntent,
+  pathReferenceCount,
+  fileAttachmentCount,
+}) {
+  const hasGenericWriteHint = LOCAL_WRITE_HINT_PATTERN.test(normalizedIntent)
+  const hasDocumentWriteAction = DOCUMENT_WRITE_ACTION_PATTERN.test(rawIntent || '')
+  const hasDocumentOutputHint = DOCUMENT_OUTPUT_HINT_PATTERN.test(normalizedIntent)
+
+  if (hasDocumentWriteAction && hasDocumentOutputHint) {
+    return true
+  }
+
+  if (hasDocumentOutputHint && hasGenericWriteHint) {
+    return true
+  }
+
+  if (!hasGenericWriteHint && !hasDocumentWriteAction) {
+    return false
+  }
+
+  return pathReferenceCount + fileAttachmentCount > 0
+}
+
 function inferFallbackClassification(messages, options = {}) {
   const hardSignals = options.hardSignals || deriveHardSignals(messages)
   const latestUserMessage = getLatestUserMessage(messages)
@@ -405,6 +434,12 @@ function inferFallbackClassification(messages, options = {}) {
     pathReferenceCount > 0 ||
     WORKSPACE_HINT_PATTERN.test(normalizedIntent)
   const planningHints = resolveFastPathPlanningHints({
+    rawIntent,
+    normalizedIntent,
+    pathReferenceCount,
+    fileAttachmentCount,
+  })
+  const documentWriteRequested = isDocumentWriteIntent({
     rawIntent,
     normalizedIntent,
     pathReferenceCount,
@@ -423,7 +458,7 @@ function inferFallbackClassification(messages, options = {}) {
 
   let answerMode = 'advise'
   let webInteractionRequired = false
-  let workspaceRelated = workspaceSignal
+  let workspaceRelated = workspaceSignal || documentWriteRequested
   let isCapabilityAdmin = false
   let systemBrowserRequested = false
   let confidence = 'low'
@@ -441,6 +476,13 @@ function inferFallbackClassification(messages, options = {}) {
     workspaceRelated = false
     confidence = 'medium'
     reason = 'capability-admin'
+  } else if (documentWriteRequested) {
+    answerMode = 'execute'
+    confidence = needsExternalFacts ? 'high' : 'medium'
+    reason =
+      needsExternalFacts === true
+        ? 'document-write-with-external-facts'
+        : 'document-write'
   } else if (workspaceAnswerMode) {
     answerMode = workspaceAnswerMode
     confidence = needsExternalFacts ? 'medium' : 'low'
@@ -493,6 +535,12 @@ export function inferDeterministicClassification(messages, options = {}) {
     pathReferenceCount,
     fileAttachmentCount,
   })
+  const documentWriteRequested = isDocumentWriteIntent({
+    rawIntent,
+    normalizedIntent,
+    pathReferenceCount,
+    fileAttachmentCount,
+  })
   const hasExternalFactHint =
     hardSignals?.explicitWebLookupRead === true ||
     hardSignals?.publicWebUrlReference === true ||
@@ -538,6 +586,27 @@ export function inferDeterministicClassification(messages, options = {}) {
       }),
       source: 'fast-path',
       reason: 'capability-admin',
+    }
+  }
+
+  if (documentWriteRequested && capabilityAdminRequested !== true) {
+    return {
+      classification: buildFastPathClassification({
+        answerMode: 'execute',
+        needsExternalFacts: hasExternalFactHint,
+        webInteractionRequired: false,
+        workspaceRelated: true,
+        isCapabilityAdmin: false,
+        systemBrowserRequested: false,
+        taskComplexity: planningHints.taskComplexity,
+        planDepth: planningHints.planDepth,
+        confidence: hasExternalFactHint ? 'high' : 'medium',
+      }),
+      source: 'fast-path',
+      reason:
+        hasExternalFactHint === true
+          ? 'obvious-document-write-with-external-facts'
+          : 'obvious-document-write',
     }
   }
 
@@ -674,6 +743,10 @@ async function classifyWithGoogle(settings, messages) {
     .map(part => (typeof part?.text === 'string' ? part.text : ''))
     .filter(Boolean)
     .join('\n')
+}
+
+export function peekDeterministicIntentClassification(messages, options = {}) {
+  return inferDeterministicClassification(messages, options)
 }
 
 export async function classifyIntent(messages, settings) {

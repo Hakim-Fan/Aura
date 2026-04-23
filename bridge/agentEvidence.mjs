@@ -28,6 +28,8 @@ const WRITE_EFFECT_TOOLS = new Set([
 
 const EXECUTE_EFFECT_TOOLS = new Set([
   'run_shell',
+  'exec_command',
+  'write_stdin',
   'computer_open_app',
   'computer_type_text',
   'computer_press_shortcut',
@@ -43,6 +45,12 @@ const PAGE_STATE_TOOLS = new Set([
 
 const TEST_COMMAND_PATTERN =
   /\b(test|tests|testing|spec|specs|jest|vitest|mocha|ava|pytest|rspec|unittest|cargo test|cargo check|cargo clippy|pnpm test|pnpm lint|pnpm typecheck|npm test|npm run test|npm run lint|yarn test|go test|gradle test|mvn test)\b/i
+
+const COMMAND_SESSION_TOOLS = new Set([
+  'run_shell',
+  'exec_command',
+  'write_stdin',
+])
 
 function normalizeToolName(name) {
   return typeof name === 'string' ? name.trim() : ''
@@ -185,10 +193,47 @@ function collectProducedEvidence(event, effectTypes) {
       }
     }
 
-    if (name === 'run_shell') {
-      producedEvidence.push('command_output', 'command_exit_0')
+    if (COMMAND_SESSION_TOOLS.has(name)) {
+      producedEvidence.push('command_output')
+      if (
+        structuredOutput &&
+        typeof structuredOutput === 'object' &&
+        Object.prototype.hasOwnProperty.call(structuredOutput, 'sessionId')
+      ) {
+        producedEvidence.push('command_session')
+      }
+      if (
+        structuredOutput &&
+        typeof structuredOutput === 'object' &&
+        structuredOutput.running === false &&
+        structuredOutput.exitCode === 0
+      ) {
+        producedEvidence.push('command_exit_0')
+      } else if (
+        structuredOutput &&
+        typeof structuredOutput === 'object' &&
+        structuredOutput.running === false &&
+        typeof structuredOutput.exitCode === 'number' &&
+        structuredOutput.exitCode !== 0
+      ) {
+        producedEvidence.push('command_exit_nonzero')
+      }
+      if (
+        structuredOutput &&
+        typeof structuredOutput === 'object' &&
+        structuredOutput.timedOut === true
+      ) {
+        producedEvidence.push('command_timeout')
+      }
       if (TEST_COMMAND_PATTERN.test(String(event?.input || ''))) {
-        producedEvidence.push('test_pass')
+        if (
+          structuredOutput &&
+          typeof structuredOutput === 'object' &&
+          structuredOutput.running === false &&
+          structuredOutput.exitCode === 0
+        ) {
+          producedEvidence.push('test_pass')
+        }
       }
     }
 
@@ -231,7 +276,11 @@ function collectProducedEvidence(event, effectTypes) {
     }
   }
 
-  if (event?.status === 'error' && name === 'run_shell' && TEST_COMMAND_PATTERN.test(String(event?.input || ''))) {
+  if (
+    event?.status === 'error' &&
+    COMMAND_SESSION_TOOLS.has(name) &&
+    TEST_COMMAND_PATTERN.test(String(event?.input || ''))
+  ) {
     producedEvidence.push('test_fail')
   }
 
@@ -311,7 +360,9 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     artifactPaths: Array.from(artifactPaths),
     hasSuccessfulCommand: records.some(
       record =>
-        record.toolName === 'run_shell' &&
+        (record.toolName === 'run_shell' ||
+          record.toolName === 'exec_command' ||
+          record.toolName === 'write_stdin') &&
         record.status === 'success' &&
         record.producedEvidence.includes('command_exit_0'),
     ),
@@ -323,11 +374,14 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     hasCapabilityBlock: false,
     hasExecutionFailure: records.some(
       record =>
-        record.status === 'error' &&
-        record.effectTypes.some(
-          effectType =>
-            effectType === 'write' || effectType === 'execute' || effectType === 'browser',
-        ),
+        (
+          record.status === 'error' &&
+          record.effectTypes.some(
+            effectType =>
+              effectType === 'write' || effectType === 'execute' || effectType === 'browser',
+          )
+        ) ||
+        record.producedEvidence.includes('command_timeout'),
     ),
   }
 }

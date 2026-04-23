@@ -15,9 +15,30 @@ const PLUGIN_METADATA_NAMESPACE = 'plugin-tools'
 const PLUGIN_METADATA_CACHE_MAX_ENTRIES = 128
 const PLUGIN_METADATA_TTL_MS = 15 * 60_000
 const PLUGIN_RUNTIME_CACHE = new Map()
+const SKILL_METADATA_CACHE = new Map()
+const SKILL_METADATA_NAMESPACE = 'skill-catalog'
+const SKILL_METADATA_CACHE_MAX_ENTRIES = 128
+const SKILL_METADATA_TTL_MS = 15 * 60_000
 
 function resolveAuraHome() {
   return path.join(os.homedir(), '.aura')
+}
+
+function ensureAppControl(context) {
+  return typeof context?.appControl === 'function' ? context.appControl : null
+}
+
+async function getAuraState(context) {
+  const appControl = ensureAppControl(context)
+  if (!appControl) {
+    return null
+  }
+
+  try {
+    return await appControl('ensure_aura_home', {})
+  } catch {
+    return null
+  }
 }
 
 async function resolveAuraAssetPath(kind, id, extension) {
@@ -91,6 +112,22 @@ async function resolveBundledPluginModulePath(appRoot, id) {
   }
 
   return null
+}
+
+async function statAssetEntry(filePath) {
+  try {
+    const stat = await fs.stat(filePath)
+    return {
+      size: Number(stat.size) || 0,
+      mtimeMs: Math.round(Number(stat.mtimeMs) || 0),
+    }
+  } catch {
+    return null
+  }
+}
+
+function buildAssetVersionToken(filePath, stat) {
+  return `${filePath}:${stat?.size || 0}:${stat?.mtimeMs || 0}`
 }
 
 function prettifyIdentifier(value) {
@@ -380,26 +417,20 @@ function normalizeCachedPluginMetadata(value, fallbackPluginId) {
   )
 }
 
-async function statPluginEntry(filePath) {
-  try {
-    const stat = await fs.stat(filePath)
-    return {
-      size: Number(stat.size) || 0,
-      mtimeMs: Math.round(Number(stat.mtimeMs) || 0),
-    }
-  } catch {
-    return null
-  }
-}
-
-function buildPluginVersionToken(filePath, stat) {
-  return `${filePath}:${stat?.size || 0}:${stat?.mtimeMs || 0}`
-}
-
 function buildPluginMetadataCacheKey(pluginId, filePath, versionToken) {
   return normalizeCacheKey(
     JSON.stringify({
       pluginId,
+      filePath,
+      versionToken,
+    }),
+  )
+}
+
+function buildSkillMetadataCacheKey(skillId, filePath, versionToken) {
+  return normalizeCacheKey(
+    JSON.stringify({
+      skillId,
       filePath,
       versionToken,
     }),
@@ -441,6 +472,72 @@ function writePluginMetadataCache(cacheKey, value, ttlMs = PLUGIN_METADATA_TTL_M
   })
 }
 
+function readSkillMetadataCache(cacheKey) {
+  const inMemory = readCache(SKILL_METADATA_CACHE, cacheKey)
+  if (inMemory) {
+    return {
+      value: inMemory,
+      layer: 'memory',
+    }
+  }
+
+  const persisted = readPersistentCacheEntry(SKILL_METADATA_NAMESPACE, cacheKey, {
+    maxEntries: SKILL_METADATA_CACHE_MAX_ENTRIES,
+  })
+  if (!persisted) {
+    return null
+  }
+
+  writeCache(
+    SKILL_METADATA_CACHE,
+    cacheKey,
+    persisted.value,
+    Math.max(1, persisted.expiresAt - Date.now()),
+  )
+  return {
+    value: persisted.value,
+    layer: 'persistent',
+  }
+}
+
+function writeSkillMetadataCache(cacheKey, value, ttlMs = SKILL_METADATA_TTL_MS) {
+  writeCache(SKILL_METADATA_CACHE, cacheKey, value, ttlMs)
+  writePersistentCache(SKILL_METADATA_NAMESPACE, cacheKey, value, ttlMs, {
+    maxEntries: SKILL_METADATA_CACHE_MAX_ENTRIES,
+  })
+}
+
+function normalizeCachedSkillMetadata(value, fallbackSkillId, fallbackPath) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+
+  return {
+    id:
+      typeof value.id === 'string' && value.id.trim()
+        ? value.id.trim()
+        : fallbackSkillId,
+    name:
+      typeof value.name === 'string' && value.name.trim()
+        ? value.name.trim()
+        : prettifyIdentifier(fallbackSkillId),
+    filePath:
+      typeof value.filePath === 'string' && value.filePath.trim()
+        ? value.filePath
+        : fallbackPath,
+    content: typeof value.content === 'string' ? value.content : '',
+    body: typeof value.body === 'string' ? value.body : '',
+    description: typeof value.description === 'string' ? value.description : '',
+    summary: typeof value.summary === 'string' ? value.summary : '',
+    keywords: Array.isArray(value.keywords)
+      ? value.keywords.filter(entry => typeof entry === 'string' && entry.trim())
+      : [],
+    allowedTools: Array.isArray(value.allowedTools)
+      ? value.allowedTools.filter(entry => typeof entry === 'string' && entry.trim())
+      : [],
+  }
+}
+
 async function importPluginRuntime(filePath, versionToken, pluginId) {
   const runtimeKey = `${filePath}::${versionToken}`
   const cached = PLUGIN_RUNTIME_CACHE.get(runtimeKey)
@@ -479,7 +576,57 @@ async function importPluginRuntime(filePath, versionToken, pluginId) {
   return loadPromise
 }
 
-function buildPluginToolsFromMetadata(pluginMetadata, filePath, versionToken, context) {
+function buildPluginActivationHint(pluginEntry, pluginMetadata) {
+  const pluginName =
+    pluginMetadata?.name ||
+    (typeof pluginEntry?.name === 'string' && pluginEntry.name.trim()) ||
+    pluginEntry?.id ||
+    'this plugin'
+  const pluginId = pluginMetadata?.id || pluginEntry?.id || ''
+  return [
+    `Installed plugin "${pluginName}" is not enabled for the current workspace or session.`,
+    pluginId
+      ? `Enable it with aura_enable_plugin (pluginId: "${pluginId}") or via workspace capability settings before trying to call this tool directly.`
+      : 'Enable it in Aura settings before trying to call this tool directly.',
+  ].join(' ')
+}
+
+function normalizePluginEntry(entry) {
+  const pluginId = typeof entry === 'string' ? entry : entry?.id
+  if (!pluginId) {
+    return null
+  }
+
+  const explicitPath =
+    typeof entry === 'object' && typeof entry?.entryPath === 'string'
+      ? entry.entryPath
+      : typeof entry === 'object' && typeof entry?.path === 'string'
+        ? entry.path
+        : ''
+
+  return {
+    id: pluginId,
+    name: typeof entry === 'object' ? entry?.name || '' : '',
+    entryPath: explicitPath,
+  }
+}
+
+function buildPluginToolsFromMetadata(
+  pluginMetadata,
+  filePath,
+  versionToken,
+  context,
+  options = {},
+) {
+  const exposure =
+    options.exposure === 'discoverable-only'
+      ? 'discoverable-only'
+      : options.exposure === 'direct'
+        ? 'direct'
+        : 'deferred'
+  const activationHint =
+    typeof options.activationHint === 'string' ? options.activationHint.trim() : ''
+
   async function getPluginRuntime() {
     return importPluginRuntime(filePath, versionToken, pluginMetadata.id)
   }
@@ -494,6 +641,16 @@ function buildPluginToolsFromMetadata(pluginMetadata, filePath, versionToken, co
     approvalCategory: toolMetadata.approvalCategory,
     description: `[Plugin:${pluginMetadata.name}] ${toolMetadata.description}`,
     inputSchema: toolMetadata.inputSchema,
+    deferLoading: exposure !== 'direct',
+    discoverable: true,
+    discoverOnly: exposure === 'discoverable-only',
+    availability:
+      exposure === 'discoverable-only'
+        ? 'activation_required'
+        : exposure === 'deferred'
+          ? 'loadable'
+          : 'mounted',
+    activationHint,
     async run(args, runtime = {}) {
       const pluginRuntime = await getPluginRuntime()
       const tool = pluginRuntime.toolMap.get(toolMetadata.localName)
@@ -540,10 +697,24 @@ export async function loadSkillCatalog(appRoot, enabledSkills) {
     }
 
     const filePath = await resolveSkillFilePath(appRoot, entry)
+    const fileStat = await statAssetEntry(filePath)
+    const versionToken = buildAssetVersionToken(filePath, fileStat)
+    const cacheKey = buildSkillMetadataCacheKey(skillId, filePath, versionToken)
+    const cachedSkill = normalizeCachedSkillMetadata(
+      readSkillMetadataCache(cacheKey)?.value,
+      skillId,
+      filePath,
+    )
+
+    if (cachedSkill) {
+      entries.push(cachedSkill)
+      continue
+    }
+
     try {
       const content = await fs.readFile(filePath, 'utf8')
       const metadata = summarizeSkillContent(skillId, content)
-      entries.push({
+      const normalizedEntry = {
         id: skillId,
         name: metadata.title,
         filePath,
@@ -553,9 +724,11 @@ export async function loadSkillCatalog(appRoot, enabledSkills) {
         summary: metadata.summary,
         keywords: metadata.keywords,
         allowedTools: metadata.allowedTools,
-      })
+      }
+      writeSkillMetadataCache(cacheKey, normalizedEntry)
+      entries.push(normalizedEntry)
     } catch {
-      entries.push({
+      const missingEntry = {
         id: skillId,
         name: prettifyIdentifier(skillId),
         filePath,
@@ -565,7 +738,9 @@ export async function loadSkillCatalog(appRoot, enabledSkills) {
         summary: 'This skill file was not found.',
         keywords: [skillId],
         allowedTools: [],
-      })
+      }
+      writeSkillMetadataCache(cacheKey, missingEntry)
+      entries.push(missingEntry)
     }
   }
 
@@ -589,15 +764,21 @@ export function buildSkillPrompt(skillEntries) {
     .join('\n')
 }
 
-export async function loadPluginTools(appRoot, enabledPlugins, context) {
+async function loadPluginToolsForEntries(
+  appRoot,
+  pluginEntries,
+  context,
+  options = {},
+) {
   const tools = []
 
-  for (const entry of enabledPlugins) {
-    const pluginId = typeof entry === 'string' ? entry : entry?.id
-    const explicitPath = typeof entry === 'object' ? entry?.entryPath : ''
+  for (const entry of pluginEntries) {
+    const normalizedEntry = normalizePluginEntry(entry)
+    const pluginId = normalizedEntry?.id
     if (!pluginId) {
       continue
     }
+    const explicitPath = normalizedEntry?.entryPath || ''
     const filePath =
       explicitPath ||
       (await resolveAuraPluginModulePath(pluginId)) ||
@@ -605,8 +786,8 @@ export async function loadPluginTools(appRoot, enabledPlugins, context) {
     if (!filePath) {
       continue
     }
-    const fileStat = await statPluginEntry(filePath)
-    const versionToken = buildPluginVersionToken(filePath, fileStat)
+    const fileStat = await statAssetEntry(filePath)
+    const versionToken = buildAssetVersionToken(filePath, fileStat)
     const cacheKey = buildPluginMetadataCacheKey(pluginId, filePath, versionToken)
 
     let pluginMetadata = normalizeCachedPluginMetadata(
@@ -630,9 +811,80 @@ export async function loadPluginTools(appRoot, enabledPlugins, context) {
     }
 
     tools.push(
-      ...buildPluginToolsFromMetadata(pluginMetadata, filePath, versionToken, context),
+      ...buildPluginToolsFromMetadata(pluginMetadata, filePath, versionToken, context, {
+        exposure: options.exposure,
+        activationHint:
+          options.exposure === 'discoverable-only'
+            ? buildPluginActivationHint(normalizedEntry, pluginMetadata)
+            : '',
+      }),
     )
   }
 
   return tools
+}
+
+export async function loadPluginTools(appRoot, enabledPlugins, context) {
+  return loadPluginToolsForEntries(appRoot, enabledPlugins, context, {
+    exposure: 'deferred',
+  })
+}
+
+export async function loadPluginToolInventory(appRoot, enabledPlugins, context) {
+  const activeTools = await loadPluginToolsForEntries(
+    appRoot,
+    enabledPlugins,
+    context,
+    {
+      exposure: 'deferred',
+    },
+  )
+
+  const aura = await getAuraState(context)
+  if (!aura || !Array.isArray(aura.plugins)) {
+    return {
+      activeTools,
+      discoverableTools: [],
+    }
+  }
+
+  const enabledPluginIds = new Set(
+    enabledPlugins
+      .map(normalizePluginEntry)
+      .map(entry => entry?.id)
+      .filter(Boolean),
+  )
+  const discoverablePluginEntries = aura.plugins
+    .filter(
+      plugin =>
+        plugin &&
+        plugin.supported !== false &&
+        typeof plugin.id === 'string' &&
+        plugin.id.trim() &&
+        !enabledPluginIds.has(plugin.id),
+    )
+    .map(plugin => ({
+      id: plugin.id,
+      name: plugin.name || plugin.id,
+      entryPath:
+        typeof plugin.entryPath === 'string' && plugin.entryPath.trim()
+          ? plugin.entryPath
+          : typeof plugin.path === 'string' && plugin.path.trim()
+            ? plugin.path
+            : '',
+    }))
+
+  const discoverableTools = await loadPluginToolsForEntries(
+    appRoot,
+    discoverablePluginEntries,
+    context,
+    {
+      exposure: 'discoverable-only',
+    },
+  )
+
+  return {
+    activeTools,
+    discoverableTools,
+  }
 }

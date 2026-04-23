@@ -15,9 +15,16 @@ import {
   inferRouteState,
   selectAgentStrategy,
 } from './agentRouting.mjs'
-import { buildSkillPrompt, loadPluginTools, loadSkillCatalog } from './extensions.mjs'
-import { resolveIntentClassification } from './intentClassifier.mjs'
-import { connectMcpTools } from './mcp.mjs'
+import {
+  buildSkillPrompt,
+  loadPluginToolInventory,
+  loadSkillCatalog,
+} from './extensions.mjs'
+import {
+  peekDeterministicIntentClassification,
+  resolveIntentClassification,
+} from './intentClassifier.mjs'
+import { loadMcpToolInventory } from './mcp.mjs'
 import {
   finalizeGoogleAnswer,
   finalizeOpenAiCompatibleAnswer,
@@ -206,6 +213,20 @@ function buildEffectiveRunSettings(settings, routeState) {
   }
 
   return settings
+}
+
+function shouldLoadRuntimeCapabilityLayers(routeState) {
+  if (!routeState || typeof routeState !== 'object') {
+    return true
+  }
+
+  return (
+    routeState.workspaceRelated === true ||
+    routeState.needsExternalFacts === true ||
+    routeState.webInteractionRequired === true ||
+    routeState.explicitSystemBrowserRequest === true ||
+    routeState.isCapabilityAdminTask === true
+  )
 }
 
 function buildCompletionContext(routeState, toolEvents, runtimeBlocks = {}) {
@@ -568,15 +589,55 @@ function looksLikeStructuredUserAnswer(value) {
   return sentenceCount >= 2 || hasTerminalPunctuation(normalized)
 }
 
-function shouldRunFinalization(result, recentToolEvents, routeState) {
+function looksLikeExecutionCompletionClaim(value) {
+  const normalized = normalizeFinalAnswer(value).toLowerCase()
+  if (!normalized) {
+    return false
+  }
+
+  return (
+    /\b(done|completed|finished|fixed|resolved|implemented|updated|created|written|saved|patched|modified)\b/u.test(
+      normalized,
+    ) ||
+    /(已完成|已经完成|搞定了|已修复|已经修复|已实现|已经实现|已更新|已经更新|已创建|已经创建|已写好|已经写好|保存到|存到|写到|修改了|改好了)/u.test(
+      normalized,
+    )
+  )
+}
+
+function shouldRunFinalization(
+  result,
+  recentToolEvents,
+  routeState,
+  completionContext = null,
+) {
   const finalMessage = normalizeFinalAnswer(result.message)
   const providerReasoning = extractProviderReasoning(result.reasoning || [])
   const hasToolContext = Array.isArray(recentToolEvents) && recentToolEvents.length > 0
+  const completionState = completionContext?.completionState || result?.completionState
   if (!hasToolContext) {
     return false
   }
   if (!finalMessage || finalMessage === '模型没有返回文本内容。') {
     return true
+  }
+
+  if (
+    completionState === 'executed_verified' &&
+    finalMessage.length >= 80 &&
+    (looksLikeStructuredUserAnswer(finalMessage) || hasTerminalPunctuation(finalMessage))
+  ) {
+    return false
+  }
+
+  if (
+    completionState &&
+    completionState !== 'executed_verified' &&
+    finalMessage.length >= 90 &&
+    looksLikeStructuredUserAnswer(finalMessage) &&
+    !looksLikeExecutionCompletionClaim(finalMessage)
+  ) {
+    return false
   }
 
   if (
@@ -638,10 +699,10 @@ async function runProviderTurn({
     })
     const resolvedMessages = result.messages || messages
     const recentToolEvents = toolEvents.slice(startingToolEventCount)
+    const completionContext = buildCompletionContext(routeState, toolEvents)
 
-    if (shouldRunFinalization(result, recentToolEvents, routeState)) {
+    if (shouldRunFinalization(result, recentToolEvents, routeState, completionContext)) {
       try {
-        const completionContext = buildCompletionContext(routeState, toolEvents)
         hooks?.onPhaseChange?.('finalizing')
         const finalized = await finalizeGoogleAnswer({
           settings,
@@ -685,10 +746,10 @@ async function runProviderTurn({
     })
     const resolvedMessages = result.messages || messages
     const recentToolEvents = toolEvents.slice(startingToolEventCount)
+    const completionContext = buildCompletionContext(routeState, toolEvents)
 
-    if (shouldRunFinalization(result, recentToolEvents, routeState)) {
+    if (shouldRunFinalization(result, recentToolEvents, routeState, completionContext)) {
       try {
-        const completionContext = buildCompletionContext(routeState, toolEvents)
         hooks?.onPhaseChange?.('finalizing')
         const finalized = await finalizeOpenAiCompatibleAnswer({
           settings,
@@ -905,12 +966,32 @@ export async function runRouteFirstAgent(request) {
     appControl: hooks.appControl,
     todoState: runtime.todoState || { items: [] },
     settings,
+    cleanupHandlers: [],
   }
   const taskTracker =
     runtime.taskTracker || createTaskTracker(hooks, summarizeMessages(messages))
   const currentTaskId = runtime.currentTaskId || taskTracker.rootId
   taskTracker.setStatus(currentTaskId, 'running')
   const hardSignals = deriveHardSignals(messages)
+  const deterministicClassificationResult = peekDeterministicIntentClassification(
+    messages,
+    {
+      hardSignals,
+      settings,
+    },
+  )
+  const deterministicClassification = deterministicClassificationResult?.classification || null
+  const initialNormalizedClassification = deterministicClassification
+    ? applyHardSignalIntentOverrides(deterministicClassification, hardSignals)
+    : null
+  const initialRouteState = inferRouteState(messages, {
+    classification: initialNormalizedClassification,
+    hardSignals,
+    settings,
+  })
+  const shouldLoadCapabilityLayers = deterministicClassificationResult
+    ? shouldLoadRuntimeCapabilityLayers(initialRouteState)
+    : true
 
   const builtinTools = createBuiltinTools(context)
   const advancedTools = createAdvancedTools({
@@ -925,24 +1006,46 @@ export async function runRouteFirstAgent(request) {
     }),
     taskTracker,
   })
-  const [classificationResult, skillCatalog, pluginTools, mcp] = await Promise.all([
-    resolveIntentClassification(messages, settings, {
-      hardSignals,
-      settings,
-    }).catch(() => null),
-    loadSkillCatalog(appRoot, capabilities?.skills || settings.enabledSkillIds || []),
-    loadPluginTools(
-      appRoot,
-      capabilities?.plugins || settings.enabledPluginIds || [],
-      context,
-    ),
-    connectMcpTools(capabilities?.mcpServers || settings.mcpServers || []),
+  const [classificationResult, skillCatalog, pluginInventory, mcpInventory] = await Promise.all([
+    deterministicClassificationResult
+      ? Promise.resolve(deterministicClassificationResult)
+      : resolveIntentClassification(messages, settings, {
+          hardSignals,
+          settings,
+        }).catch(() => null),
+    shouldLoadCapabilityLayers
+      ? loadSkillCatalog(appRoot, capabilities?.skills || settings.enabledSkillIds || [])
+      : Promise.resolve([]),
+    shouldLoadCapabilityLayers
+      ? loadPluginToolInventory(
+          appRoot,
+          capabilities?.plugins || settings.enabledPluginIds || [],
+          context,
+        )
+      : Promise.resolve({
+          activeTools: [],
+          discoverableTools: [],
+        }),
+    shouldLoadCapabilityLayers
+      ? loadMcpToolInventory({
+          activeServers: capabilities?.mcpServers || settings.mcpServers || [],
+          configuredServers: settings.mcpServers || [],
+        })
+      : Promise.resolve({
+          activeTools: [],
+          discoverableTools: [],
+          async close() {},
+        }),
   ])
   const toolRegistry = createToolRegistry({
     builtinTools,
     advancedTools,
-    pluginTools,
-    mcpTools: mcp.tools,
+    pluginTools: pluginInventory.activeTools,
+    mcpTools: mcpInventory.activeTools,
+    discoverableTools: [
+      ...pluginInventory.discoverableTools,
+      ...mcpInventory.discoverableTools,
+    ],
   })
   const classification = classificationResult?.classification || null
   const normalizedClassification = classification
@@ -953,15 +1056,18 @@ export async function runRouteFirstAgent(request) {
   })
 
   if (strategy.chain === 'orchestrated' && ORCHESTRATED_AGENT_AVAILABLE) {
-    await mcp.close().catch(() => {})
+    await mcpInventory.close().catch(() => {})
     return runOrchestratedAgent(request)
   }
 
-  let routeState = inferRouteState(messages, {
-    classification: normalizedClassification,
-    hardSignals,
-    settings,
-  })
+  let routeState =
+    deterministicClassificationResult && initialNormalizedClassification
+      ? initialRouteState
+      : inferRouteState(messages, {
+          classification: normalizedClassification,
+          hardSignals,
+          settings,
+        })
   const visitedTiers = new Set([routeState.capabilityTier])
   const routeNotes = []
   const routeHistory = []
@@ -1018,6 +1124,7 @@ export async function runRouteFirstAgent(request) {
         {
           deferredToolCount: toolRouter.deferredTools.length,
           discoverableToolCount: toolRouter.discoverableToolCount,
+          discoverableOnlyToolCount: toolRouter.discoverableOnlyToolCount,
         },
       )
       lastSystemPrompt = appendCarryoverContextToPrompt(
@@ -1352,7 +1459,12 @@ export async function runRouteFirstAgent(request) {
     }
     throw enriched
   } finally {
-    await mcp.close()
+    await Promise.allSettled(
+      (Array.isArray(context.cleanupHandlers) ? context.cleanupHandlers : []).map(handler =>
+        Promise.resolve().then(() => handler?.()),
+      ),
+    )
+    await mcpInventory.close()
   }
 }
 

@@ -52,6 +52,27 @@ Aura 当前在代码修改类任务上的瓶颈，不是“模型不够聪明”
 
 这些方向会和本设计协同，但本次只聚焦“文件修改/代码修改类任务”。
 
+### 2.3 与外围架构的边界说明
+
+本专项需要和主 Agent 架构协同，但不等于把所有“对齐 Codex”的工作都塞进这里。
+
+针对当前和 Codex 的主要差距，这份文档的覆盖边界明确如下：
+
+1. 完整纳入本专项：
+   `apply_patch` 主路径、patch 预解析/预验证、shell patch 拦截、`file_verified + completion gate`、`exec_command / write_stdin` 长会话执行。
+2. 作为协同依赖，但不是本专项主目标：
+   `tool_search` 的搜索质量、namespace 聚合、discoverable inventory 丰富度。
+3. 作为协同依赖，但不应阻塞本专项：
+   route/selector 的继续瘦身。编辑主路径不应再依赖大面积关键词表，但这些改动仍属于更大的 agent 主链重构。
+4. 显式不在本专项范围内：
+   provider-native `web_search` 或与 Codex 完全等价的联网基础设施。
+
+这意味着：
+
+1. 本文档要解决“编辑子系统本身是否足够强”。
+2. 但不会把 `tool_search`、retrieval、browser 这些外围系统一起扩成新的总蓝图。
+3. 后续评估时，也要把“编辑子系统是否齐平”和“整机能力是否齐平”分开看。
+
 ---
 
 ## 3. 当前问题分析
@@ -470,6 +491,7 @@ flowchart TD
 1. 优先采用 freeform grammar tool
 2. grammar 与 Codex 尽量保持一致
 3. 允许一份 patch 包含多个文件操作
+4. 在当前模型/工具栈暂时不支持 freeform custom tool 的阶段，允许保留 JSON function 形态作为兼容 fallback，但它不应成为长期目标形态
 
 建议支持的操作：
 
@@ -547,6 +569,13 @@ flowchart TD
 
 1. 模型误用 shell
 2. patch 绕过验证和审批
+3. shell 形式与直接 patch 形式走出两套不一致逻辑
+
+进一步要求：
+
+1. 拦截不要只靠简单字符串切片。
+2. 至少要能稳定识别受限 shell 形式、heredoc 形式、可选 `cd && apply_patch` 形式。
+3. 识别失败时要明确报“不是合法 apply_patch 调用”，而不是静默退回普通 shell 改写路径。
 
 ---
 
@@ -576,6 +605,10 @@ flowchart TD
 3. 收集每个文件的操作类型
 4. 收集 move/rename 信息
 5. 收集 hunks
+6. 支持直接 `apply_patch <patch>` 形式
+7. 支持 shell/heredoc 形式
+8. 支持 `cd <path> && apply_patch <<'EOF' ... EOF` 这类受限 shell 变体
+9. 对“裸 patch body 被错误塞进 shell/command”的隐式调用做显式拒绝，而不是模糊容错
 
 输出建议：
 
@@ -613,6 +646,7 @@ type ParsedPatch = {
 4. 验证上下文是否可匹配
 5. 计算每个文件的新内容
 6. 生成结构化变更摘要
+7. 计算受影响文件集合，为审批、sandbox 和事件流提供稳定输入
 
 输出建议：
 
@@ -919,6 +953,13 @@ type FileVerificationResult = {
 1. 鼓励模型频繁整文件改写
 2. 鼓励模型把 patch 行为塞进 shell
 3. 修改完成后无脑重读整文件
+4. 让大面积关键词路由来决定编辑工具主路径
+
+补充原则：
+
+1. 编辑工具是否可用，应主要由 capability policy 和 mounted tool surface 决定。
+2. 关键词/regex 只应用于少量 deterministic hard signals，例如路径、文档输出、显式写入请求、显式交互命令请求。
+3. `apply_patch`、`write_file`、`exec_command`、`write_stdin` 不应因为宽泛关键词路由而长期处于“偶尔能见、偶尔看不见”的状态。
 
 ### 13.3 新的高效工作法
 

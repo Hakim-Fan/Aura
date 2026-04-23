@@ -2,36 +2,29 @@ import { createToolSearchTool } from './toolDiscovery.mjs'
 
 function buildCapabilityPolicy(routeState) {
   const capabilityTier = routeState?.capabilityTier || 'none'
-  const isWorkspaceExecutionTask =
-    routeState?.answerMode === 'execute' && routeState?.workspaceRelated === true
+  const answerMode = routeState?.answerMode || 'advise'
+  const workspaceRelated = routeState?.workspaceRelated === true
   const needsExternalFacts = routeState?.needsExternalFacts === true
+  const webInteractionRequired = routeState?.webInteractionRequired === true
+  const explicitSystemBrowserRequest =
+    routeState?.explicitSystemBrowserRequest === true
+  const isCapabilityAdminTask = routeState?.isCapabilityAdminTask === true
 
   return {
     capabilityTier,
-    allowReadonly:
-      capabilityTier !== 'none' ||
-      routeState?.workspaceRelated === true ||
-      needsExternalFacts,
+    answerMode,
+    allowReadonly: true,
     allowWrite:
-      capabilityTier === 'local-write' ||
-      capabilityTier === 'browser-interactive' ||
-      isWorkspaceExecutionTask,
-    allowWeb:
-      capabilityTier === 'web-lookup' ||
-      capabilityTier === 'browser-interactive' ||
-      needsExternalFacts,
-    allowBrowser: capabilityTier === 'browser-interactive',
-    allowComputer: capabilityTier === 'browser-interactive',
-    allowCapabilityAdmin: routeState?.isCapabilityAdminTask === true,
-    explicitSystemBrowserRequest: routeState?.explicitSystemBrowserRequest === true,
+      (answerMode === 'execute' && workspaceRelated) || isCapabilityAdminTask,
+    allowWeb: needsExternalFacts,
+    allowBrowser: webInteractionRequired || explicitSystemBrowserRequest,
+    allowComputer: webInteractionRequired || explicitSystemBrowserRequest,
+    allowCapabilityAdmin: isCapabilityAdminTask,
+    explicitSystemBrowserRequest,
   }
 }
 
 function allowPluginLikeEntry(entry, policy) {
-  if (policy.explicitSystemBrowserRequest) {
-    return false
-  }
-
   switch (entry.tool?.approvalCategory) {
     case 'file_write':
     case 'shell':
@@ -82,29 +75,43 @@ export function createToolRouter(registry, routeState) {
   const discoverableEntries = registry.discoverableEntries.filter(entry =>
     isAllowedByPolicy(entry, policy),
   )
-  const loadedDeferredToolNames = new Set()
+  const discoverableOnlyEntries = registry.discoverableOnlyEntries.filter(entry =>
+    isAllowedByPolicy(entry, policy),
+  )
+  const searchCatalogEntries = [
+    ...deferredEntries,
+    ...discoverableOnlyEntries.filter(
+      entry => !deferredEntries.some(deferredEntry => deferredEntry.key === entry.key),
+    ),
+  ]
+  const loadedDeferredToolKeys = new Set()
 
   function isSearchableEntry(entry) {
-    return Boolean(entry) && !loadedDeferredToolNames.has(entry.name)
+    return Boolean(entry) && !loadedDeferredToolKeys.has(entry.key)
+  }
+
+  function canLoadEntry(entry) {
+    return Boolean(entry) && entry.availability === 'loadable'
   }
 
   function loadEntries(entries) {
     const loadedTools = []
     for (const entry of Array.isArray(entries) ? entries : []) {
-      if (!entry || loadedDeferredToolNames.has(entry.name)) {
+      if (!entry || !canLoadEntry(entry) || loadedDeferredToolKeys.has(entry.key)) {
         continue
       }
-      loadedDeferredToolNames.add(entry.name)
+      loadedDeferredToolKeys.add(entry.key)
       loadedTools.push(entry.tool)
     }
     return loadedTools
   }
 
   const toolSearchTool =
-    deferredEntries.length > 0
+    searchCatalogEntries.length > 0
       ? createToolSearchTool({
-          searchEntries: deferredEntries,
+          searchEntries: searchCatalogEntries,
           isSearchableEntry,
+          canLoadEntry,
           loadEntries,
         })
       : null
@@ -118,12 +125,14 @@ export function createToolRouter(registry, routeState) {
     ],
     deferredTools: deferredEntries.map(entry => entry.tool),
     discoverableTools: discoverableEntries.map(entry => entry.tool),
+    discoverableOnlyTools: discoverableOnlyEntries.map(entry => entry.tool),
     discoverableToolCount: discoverableEntries.length,
+    discoverableOnlyToolCount: discoverableOnlyEntries.length,
     resolveTool(name) {
       if (toolSearchTool && name === toolSearchTool.name) {
         return toolSearchTool
       }
-      return registry.byName.get(name)?.tool || null
+      return registry.getEntry(name)?.tool || null
     },
   }
 }

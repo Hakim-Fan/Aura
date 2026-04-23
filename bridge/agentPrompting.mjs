@@ -42,17 +42,53 @@ function buildReasoningInstruction(settings) {
   return reasoningInstructions[settings.reasoningEffort] || reasoningInstructions.medium
 }
 
+function deriveCapabilityProfile(routeState) {
+  const answerMode = routeState?.answerMode || 'advise'
+  const workspaceRelated = routeState?.workspaceRelated === true
+  const needsExternalFacts = routeState?.needsExternalFacts === true
+  const webInteractionRequired = routeState?.webInteractionRequired === true
+  const explicitSystemBrowserRequest =
+    routeState?.explicitSystemBrowserRequest === true
+  const isCapabilityAdminTask = routeState?.isCapabilityAdminTask === true
+
+  return {
+    hasReadonlyWorkspaceTools: true,
+    hasWorkspaceWriteTools:
+      (answerMode === 'execute' && workspaceRelated) || isCapabilityAdminTask,
+    hasWebRetrievalTools: needsExternalFacts,
+    hasInteractiveBrowserTools:
+      webInteractionRequired || explicitSystemBrowserRequest,
+    hasCapabilityAdminTools: isCapabilityAdminTask,
+    mixedRetrievalAndWorkspaceExecution:
+      needsExternalFacts === true &&
+      workspaceRelated === true &&
+      answerMode === 'execute',
+  }
+}
+
 export function buildCapabilityExposureNote(snapshot, routeState, toolAvailability = {}) {
   const lines = [
     'Mounted direct tools follow runtime safety boundaries. They are ordered by likely relevance, but currently mounted tools remain callable when relevant.',
   ]
 
   if (routeState) {
+    const capabilityProfile = deriveCapabilityProfile(routeState)
+    const enabledModes = [
+      capabilityProfile.hasReadonlyWorkspaceTools ? 'safe local reads' : null,
+      capabilityProfile.hasWorkspaceWriteTools ? 'workspace writes' : null,
+      capabilityProfile.hasWebRetrievalTools ? 'web retrieval' : null,
+      capabilityProfile.hasInteractiveBrowserTools ? 'interactive browser handoff' : null,
+      capabilityProfile.hasCapabilityAdminTools ? 'capability management' : null,
+    ]
+      .filter(Boolean)
+      .join(', ')
     lines.push(
-      `Current answer mode: ${routeState.answerMode}. Current capability tier: ${routeState.capabilityTier}.`,
+      `Current answer mode: ${routeState.answerMode}. Active capability profile: ${enabledModes || 'safe local reads only'}.`,
     )
     if (Array.isArray(routeState.availableEscalations) && routeState.availableEscalations.length > 0) {
-      lines.push(`Allowed route escalations for this turn: ${routeState.availableEscalations.join(', ')}.`)
+      lines.push(
+        `Additional runtime escalations remain possible if the current capability profile is genuinely insufficient: ${routeState.availableEscalations.join(', ')}.`,
+      )
     }
     lines.push(
       'Internal route budgets and pass limits exist for planning only. Never mention budgets, route tiers, or pass limits to the user.',
@@ -81,10 +117,15 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
     Number.isFinite(toolAvailability.discoverableToolCount)
       ? Math.max(0, Math.round(toolAvailability.discoverableToolCount))
       : deferredCount
+  const discoverableOnlyCount =
+    typeof toolAvailability.discoverableOnlyToolCount === 'number' &&
+    Number.isFinite(toolAvailability.discoverableOnlyToolCount)
+      ? Math.max(0, Math.round(toolAvailability.discoverableOnlyToolCount))
+      : Math.max(0, discoverableCount - deferredCount)
 
-  if (deferredCount > 0) {
+  if (deferredCount > 0 || discoverableOnlyCount > 0) {
     lines.push(
-      `Additional deferred plugin/MCP tools are available via tool_search (${deferredCount} hidden tools, ${discoverableCount} currently discoverable in search). Search first, then call the loaded tool directly once it appears in the turn.`,
+      `Additional deferred plugin/MCP tools are available via tool_search (${deferredCount} hidden loadable tools, ${discoverableCount} currently discoverable in search, ${discoverableOnlyCount} requiring activation or enablement before direct use). Search first, then call the loaded tool directly once it appears in the turn.`,
     )
   }
 
@@ -114,15 +155,20 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
   ]
 
   if (routeState) {
-    const mixedRetrievalAndWorkspaceExecution =
-      routeState.needsExternalFacts === true &&
-      routeState.workspaceRelated === true &&
-      routeState.answerMode === 'execute'
+    const capabilityProfile = deriveCapabilityProfile(routeState)
 
     sections.push(
       [
         `Current answer mode: ${routeState.answerMode}.`,
-        `Current capability tier: ${routeState.capabilityTier}.`,
+        capabilityProfile.hasInteractiveBrowserTools
+          ? 'Interactive browser tools: enabled when explicitly required.'
+          : 'Interactive browser tools: not active unless the task explicitly requires them.',
+        capabilityProfile.hasWebRetrievalTools
+          ? 'Web retrieval tools: active.'
+          : 'Web retrieval tools: inactive unless external facts are clearly needed.',
+        capabilityProfile.hasWorkspaceWriteTools
+          ? 'Workspace write tools: active.'
+          : 'Workspace write tools: inactive for this turn.',
         routeState.researchMode === 'deep'
           ? 'Research mode: deep.'
           : 'Research mode: auto.',
@@ -160,11 +206,11 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       )
     }
 
-    if (routeState.capabilityTier === 'none') {
-      sections.push('No workspace or web tools are mounted for this turn. Answer directly with your best explanation.')
-    } else if (routeState.capabilityTier === 'local-readonly') {
-      sections.push('Only readonly workspace tools are mounted for this turn. Diagnose or explain first; do not imply that files were changed.')
-    } else if (routeState.capabilityTier === 'local-write') {
+    sections.push(
+      'Safe local inspection tools may be mounted even on advice-heavy turns. Use them when they materially reduce uncertainty, but do not imply that files were changed unless write evidence exists.',
+    )
+
+    if (capabilityProfile.hasWorkspaceWriteTools) {
       sections.push('Workspace read and write tools are mounted for this turn. Keep changes focused and verify before claiming completion.')
       sections.push(
         'For code changes, prefer apply_patch as the main editing path. Use write_file mainly for new files or full-document rewrites, and keep edit_file / multi_edit_file as exact-match fallbacks.',
@@ -172,9 +218,14 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       sections.push(
         'A high-quality local editing loop is: locate with search_code or glob_files, inspect with read_file, patch with apply_patch, then do targeted verification before the final answer.',
       )
-    } else if (routeState.capabilityTier === 'web-lookup') {
       sections.push(
-        mixedRetrievalAndWorkspaceExecution
+        'For longer-running or interactive commands, prefer exec_command and continue with write_stdin. Use write_stdin to send more input, poll more output, close stdin, or terminate the session. Keep run_shell for short one-shot commands.',
+      )
+    }
+
+    if (capabilityProfile.hasWebRetrievalTools) {
+      sections.push(
+        capabilityProfile.mixedRetrievalAndWorkspaceExecution
           ? 'This turn mixes external fact gathering with local workspace execution. Retrieval tools and workspace write tools may both be mounted. Gather just enough outside evidence, then return to concrete repo changes.'
           : 'Web retrieval tools are mounted for external facts and current information. Prefer local context first, then use the web only when necessary.',
       )
@@ -224,7 +275,9 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       sections.push(
         'When you stop searching, present it as a user-facing evidence boundary, not an internal budget boundary.',
       )
-    } else if (routeState.capabilityTier === 'browser-interactive') {
+    }
+
+    if (capabilityProfile.hasInteractiveBrowserTools) {
       sections.push(
         routeState.webInteractionRequired
           ? 'Interactive browser tools are mounted because the request explicitly requires web interaction. Stay focused on the requested workflow.'
@@ -239,7 +292,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
     }
   }
 
-  if (routeState?.capabilityTier === 'browser-interactive') {
+  if (deriveCapabilityProfile(routeState).hasInteractiveBrowserTools) {
     sections.push(
       'Open the site with system_browser_open when the user needs to log in, solve CAPTCHA, grant consent, submit forms, or otherwise interact manually.',
     )
@@ -250,7 +303,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
 
   if (skillPrompt.trim()) {
     sections.push('Selected skill summaries:\n' + skillPrompt)
-    if (routeState?.capabilityTier !== 'none') {
+    if (routeState) {
       sections.push(
         'If one of these selected skills is relevant and you need exact instructions, use aura_read_skill only when it is actually mounted for this turn.',
       )

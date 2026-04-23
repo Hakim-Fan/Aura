@@ -2,6 +2,13 @@ function normalizeText(value) {
   return String(value || '').trim()
 }
 
+const PATH_REFERENCE_PATTERN =
+  /(?:^|[\s`"'(])(?:\.{0,2}\/[^\s`"'():,]+|[a-z0-9_./-]+\.[a-z0-9]{1,8})(?=$|[\s`"'),:])/iu
+const ARTIFACT_ACTION_CLAIM_PATTERN =
+  /\b(saved?|wrote|written|created|updated|patched|edited|modified|changed|added|generated)\b|保存到|存到|写到|写入|已写好|创建了|生成了|更新了|修改了|改好了|补丁/u
+const ARTIFACT_NOUN_PATTERN =
+  /\b(file|files|document|doc|readme|markdown|patch|changes?)\b|文件|文档|目录|路径|补丁/u
+
 function messageClaimsCompletion(message) {
   const normalized = normalizeText(message).toLowerCase()
   if (!normalized) {
@@ -15,6 +22,27 @@ function messageClaimsCompletion(message) {
     /(已完成|已经完成|搞定了|已修复|已经修复|已实现|已经实现|已更新|已经更新|已创建|已经创建|已写好|已经写好|已修改|已经修改)/u.test(
       normalized,
     )
+  )
+}
+
+function messageClaimsArtifactMutation(message, evidenceSummary = {}) {
+  const normalized = normalizeText(message)
+  if (!normalized) {
+    return false
+  }
+
+  const artifactPaths = Array.isArray(evidenceSummary?.artifactPaths)
+    ? evidenceSummary.artifactPaths.filter(Boolean)
+    : []
+  const pathMentioned =
+    PATH_REFERENCE_PATTERN.test(normalized) ||
+    artifactPaths.some(artifactPath =>
+      normalized.includes(String(artifactPath).split('/').filter(Boolean).at(-1) || ''),
+    )
+
+  return (
+    ARTIFACT_ACTION_CLAIM_PATTERN.test(normalized) &&
+    (ARTIFACT_NOUN_PATTERN.test(normalized) || pathMentioned)
   )
 }
 
@@ -63,7 +91,14 @@ export function applyCompletionGate(result, routeState) {
     }
   }
 
-  if (!messageClaimsCompletion(nextMessage)) {
+  const evidenceSummary = result?.evidenceSummary
+  const claimsCompletion = messageClaimsCompletion(nextMessage)
+  const claimsArtifactMutation = messageClaimsArtifactMutation(
+    nextMessage,
+    evidenceSummary,
+  )
+
+  if (!claimsCompletion && !claimsArtifactMutation) {
     return result
   }
 

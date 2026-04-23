@@ -2,9 +2,16 @@ import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mj
 import { runWebFetch as runFetchRuntime } from './web/fetch/runtime.mjs'
 import { runWebResearch as runResearchRuntime } from './web/research/runtime.mjs'
 import { runWebSearch as runSearchRuntime } from './web/search/runtime.mjs'
+import { normalizeCacheKey, readCache, writeCache } from './web/shared/cache.mjs'
 
 const DOMAIN_FAILURE_MEMORY = new Map()
+const RETRIEVAL_RESULT_CACHE = new Map()
 const MAX_FAILURE_MEMORY_ENTRIES = 256
+const RETRIEVAL_RESULT_TTL_MS = {
+  web_search: 90_000,
+  web_fetch: 120_000,
+  web_research: 120_000,
+}
 
 const FAILURE_COOLDOWN_MS_BY_CATEGORY = {
   network: 60_000,
@@ -51,6 +58,36 @@ function resolveOperationLabel(operation) {
 
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function cloneJsonValue(value) {
+  if (value === undefined) {
+    return undefined
+  }
+  return JSON.parse(JSON.stringify(value))
+}
+
+function buildRetrievalResultCacheKey(operation, args) {
+  return normalizeCacheKey(
+    JSON.stringify({
+      operation,
+      args: isRecord(args) || Array.isArray(args) ? args : String(args || ''),
+    }),
+  )
+}
+
+function readRetrievalResultCache(operation, args) {
+  return readCache(RETRIEVAL_RESULT_CACHE, buildRetrievalResultCacheKey(operation, args))
+}
+
+function writeRetrievalResultCache(operation, args, result) {
+  const ttlMs = RETRIEVAL_RESULT_TTL_MS[operation] || 60_000
+  writeCache(
+    RETRIEVAL_RESULT_CACHE,
+    buildRetrievalResultCacheKey(operation, args),
+    cloneJsonValue(result),
+    ttlMs,
+  )
 }
 
 function resolveNestedRetrievalParent(runtime = {}) {
@@ -299,7 +336,14 @@ function resolveBackends(operation, result) {
   return []
 }
 
-function resolveCacheMetadata(result) {
+function resolveCacheMetadata(result, overrides = {}) {
+  if (overrides?.cacheHit === true) {
+    return {
+      cacheHit: true,
+      cacheLayer: typeof overrides.cacheLayer === 'string' ? overrides.cacheLayer : '',
+    }
+  }
+
   const cache = isRecord(result?.cache) ? result.cache : null
   const cacheHit = cache?.hit === true
   const cacheLayer = typeof cache?.layer === 'string' ? cache.layer : ''
@@ -349,6 +393,7 @@ function buildRetrievalMetadata(
   runtime = {},
   childOperations = [],
   now = Date.now(),
+  cacheOverrides = {},
 ) {
   const domains = unique([
     ...extractDomainsFromArgs(operation, args),
@@ -358,7 +403,7 @@ function buildRetrievalMetadata(
   const resultEntries = Array.isArray(result?.results) ? result.results : []
   const parentOperation = resolveNestedRetrievalParent(runtime)
   const nestedDepth = resolveNestedRetrievalDepth(runtime)
-  const cacheMetadata = resolveCacheMetadata(result)
+  const cacheMetadata = resolveCacheMetadata(result, cacheOverrides)
   const normalizedChildOperations = (Array.isArray(childOperations) ? childOperations : [])
     .map(normalizeChildOperationTraceEntry)
     .filter(Boolean)
@@ -459,7 +504,42 @@ export async function runRetrievalOperation(operation, args, runtime = {}) {
 
   try {
     maybeShortCircuitFetchCooldown(operation, args, startedAt)
+    const cachedResult =
+      runtimeWithTrace?.disableRetrievalResultCache === true
+        ? null
+        : readRetrievalResultCache(operation, args)
+    if (cachedResult) {
+      const memoizedResult = cloneJsonValue(cachedResult)
+      const retrieval = buildRetrievalMetadata(
+        operation,
+        args,
+        memoizedResult,
+        runtimeWithTrace,
+        [],
+        Date.now(),
+        {
+          cacheHit: true,
+          cacheLayer: 'runtime-memory',
+        },
+      )
+      const finalMemoizedResult = {
+        ...memoizedResult,
+        retrieval,
+      }
+
+      if (retrieval.parentOperation) {
+        const summary = buildRetrievalTraceSummary(operation, finalMemoizedResult, retrieval)
+        if (summary) {
+          retrievalTrace.push(summary)
+        }
+      }
+
+      return finalMemoizedResult
+    }
     const result = await dispatchRetrievalOperation(operation, args, runtimeWithTrace)
+    if (runtimeWithTrace?.disableRetrievalResultCache !== true) {
+      writeRetrievalResultCache(operation, args, result)
+    }
     const domains = unique([
       ...extractDomainsFromArgs(operation, args),
       ...extractDomainsFromResult(operation, result),

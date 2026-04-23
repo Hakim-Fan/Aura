@@ -182,7 +182,7 @@ function parsePatch(patchText) {
         hunks.push(hunk)
       }
 
-      if (hunks.length === 0) {
+      if (hunks.length === 0 && !moveTo) {
         throw new Error(`Update File patch for ${relativePath} must include at least one hunk.`)
       }
 
@@ -311,7 +311,10 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
 
   const absolutePath = resolveWorkspacePath(rootPath, operation.path)
   const oldContent = await fs.readFile(absolutePath, 'utf8')
-  const newContent = applyUpdateHunksToContent(oldContent, operation)
+  const newContent =
+    Array.isArray(operation.hunks) && operation.hunks.length > 0
+      ? applyUpdateHunksToContent(oldContent, operation)
+      : oldContent
 
   if (operation.moveTo) {
     const destinationPath = resolveWorkspacePath(rootPath, operation.moveTo)
