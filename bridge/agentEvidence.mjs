@@ -15,9 +15,9 @@ const READ_EFFECT_TOOLS = new Set([
 
 const WRITE_EFFECT_TOOLS = new Set([
   'write_file',
+  'apply_patch',
   'edit_file',
   'multi_edit_file',
-  'todo_write',
   'aura_enable_skill',
   'aura_enable_plugin',
   'aura_import_skill',
@@ -64,11 +64,65 @@ function parseStructuredOutput(output) {
   }
 }
 
+function isArtifactRecord(value) {
+  return (
+    value &&
+    typeof value === 'object' &&
+    typeof value.path === 'string' &&
+    (
+      Object.prototype.hasOwnProperty.call(value, 'verified') ||
+      Object.prototype.hasOwnProperty.call(value, 'exists') ||
+      Object.prototype.hasOwnProperty.call(value, 'readBackOk') ||
+      Object.prototype.hasOwnProperty.call(value, 'sha256') ||
+      Object.prototype.hasOwnProperty.call(value, 'removed')
+    )
+  )
+}
+
+function extractArtifactRecords(structuredOutput) {
+  if (!structuredOutput || typeof structuredOutput !== 'object') {
+    return []
+  }
+
+  return [
+    isArtifactRecord(structuredOutput) ? structuredOutput : null,
+    isArtifactRecord(structuredOutput.verification) ? structuredOutput.verification : null,
+    ...(Array.isArray(structuredOutput.files) ? structuredOutput.files.filter(isArtifactRecord) : []),
+    ...(Array.isArray(structuredOutput.results)
+      ? structuredOutput.results.filter(isArtifactRecord)
+      : []),
+  ].filter(Boolean)
+}
+
+function summarizeArtifactVerification(structuredOutput) {
+  const artifacts = extractArtifactRecords(structuredOutput)
+
+  return {
+    verifiedCount: artifacts.filter(artifact => artifact.verified === true).length,
+    hasPresentArtifact: artifacts.some(artifact => artifact.exists === true),
+    hasReadBack: artifacts.some(artifact => artifact.readBackOk === true),
+    hasHash: artifacts.some(
+      artifact => typeof artifact.sha256 === 'string' && artifact.sha256.trim(),
+    ),
+    paths: Array.from(
+      new Set(
+        artifacts
+          .map(artifact => artifact.path)
+          .filter(pathValue => typeof pathValue === 'string' && pathValue.trim()),
+      ),
+    ),
+  }
+}
+
 function detectEffectTypes(event) {
   const name = normalizeToolName(event?.name)
 
   if (!name) {
     return []
+  }
+
+  if (name === 'todo_write') {
+    return ['plan']
   }
 
   if (READ_EFFECT_TOOLS.has(name)) {
@@ -107,6 +161,7 @@ function collectProducedEvidence(event, effectTypes) {
   const name = normalizeToolName(event?.name)
   const denied = isDeniedToolEvent(event)
   const structuredOutput = parseStructuredOutput(event?.output)
+  const artifactVerification = summarizeArtifactVerification(structuredOutput)
 
   if (denied) {
     producedEvidence.push('user_denied')
@@ -116,6 +171,18 @@ function collectProducedEvidence(event, effectTypes) {
   if (event?.status === 'success') {
     if (effectTypes.includes('write')) {
       producedEvidence.push('file_mutation')
+      if (artifactVerification.verifiedCount > 0) {
+        producedEvidence.push('file_verified')
+      }
+      if (artifactVerification.hasPresentArtifact) {
+        producedEvidence.push('artifact_present')
+      }
+      if (artifactVerification.hasReadBack) {
+        producedEvidence.push('artifact_read_back')
+      }
+      if (artifactVerification.hasHash) {
+        producedEvidence.push('artifact_hash_recorded')
+      }
     }
 
     if (name === 'run_shell') {
@@ -172,6 +239,10 @@ function collectProducedEvidence(event, effectTypes) {
 }
 
 function inferVerificationLevel(event, effectTypes, producedEvidence) {
+  if (producedEvidence.includes('file_verified')) {
+    return 'verified'
+  }
+
   if (producedEvidence.includes('test_pass')) {
     return 'verified'
   }
@@ -197,6 +268,8 @@ function inferVerificationLevel(event, effectTypes, producedEvidence) {
 
 export function collectEvidenceFromToolEvents(toolEvents = []) {
   const records = []
+  const artifactPaths = new Set()
+  let verifiedArtifactCount = 0
 
   for (const event of Array.isArray(toolEvents) ? toolEvents : []) {
     const effectTypes = detectEffectTypes(event)
@@ -207,6 +280,11 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     const producedEvidence = collectProducedEvidence(event, effectTypes)
     const denied = isDeniedToolEvent(event)
     const verificationLevel = inferVerificationLevel(event, effectTypes, producedEvidence)
+    const artifactVerification = summarizeArtifactVerification(parseStructuredOutput(event?.output))
+    verifiedArtifactCount += artifactVerification.verifiedCount
+    for (const artifactPath of artifactVerification.paths) {
+      artifactPaths.add(artifactPath)
+    }
     records.push({
       toolName: normalizeToolName(event.name),
       source: event.source || 'builtin',
@@ -228,6 +306,18 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     ),
     hasWriteEffect: records.some(record => record.effectTypes.includes('write')),
     hasBrowserEffect: records.some(record => record.effectTypes.includes('browser')),
+    hasFileVerification: verifiedArtifactCount > 0,
+    verifiedArtifactCount,
+    artifactPaths: Array.from(artifactPaths),
+    hasSuccessfulCommand: records.some(
+      record =>
+        record.toolName === 'run_shell' &&
+        record.status === 'success' &&
+        record.producedEvidence.includes('command_exit_0'),
+    ),
+    hasSuccessfulBrowserAction: records.some(
+      record => record.status === 'success' && record.effectTypes.includes('browser'),
+    ),
     hasVerifiedEvidence: records.some(record => record.verificationLevel === 'verified'),
     hasApprovalBlock: records.some(record => record.status === 'denied'),
     hasCapabilityBlock: false,
@@ -263,7 +353,23 @@ export function deriveCompletionState(routeState, evidenceSummary, runtimeBlocks
     return 'failed_after_execution'
   }
 
-  if (!evidenceSummary.hasVerifiedEvidence) {
+  if (
+    evidenceSummary.hasWriteEffect &&
+    !evidenceSummary.hasFileVerification &&
+    !evidenceSummary.hasVerifiedEvidence
+  ) {
+    return 'executed_unverified'
+  }
+
+  if (
+    !evidenceSummary.hasVerifiedEvidence &&
+    !evidenceSummary.hasFileVerification &&
+    !evidenceSummary.hasSuccessfulBrowserAction &&
+    !(
+      evidenceSummary.hasSuccessfulCommand &&
+      evidenceSummary.hasWriteEffect !== true
+    )
+  ) {
     return 'executed_unverified'
   }
 

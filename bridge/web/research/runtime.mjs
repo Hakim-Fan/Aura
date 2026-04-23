@@ -633,6 +633,22 @@ function getProviderContentFallbackThreshold(errorInfo, resolved) {
   return 400
 }
 
+function resolveNestedRetrievalInvoker(runtime, operation) {
+  if (typeof runtime?.runNestedRetrievalOperation === 'function') {
+    return args => runtime.runNestedRetrievalOperation(operation, args)
+  }
+
+  if (operation === 'web_search') {
+    return args => runWebSearch(args, runtime)
+  }
+
+  if (operation === 'web_fetch') {
+    return args => runWebFetch(args, runtime)
+  }
+
+  throw new Error(`Unsupported nested retrieval operation: ${operation}`)
+}
+
 function buildProviderContentResult(item, citationIndex, maxChars, status = 'provider_content') {
   const providerContent = clipText(item?.content || item?.snippet, maxChars)
   const sourceAssessment = buildSearchSourceAssessment(item, providerContent)
@@ -667,7 +683,8 @@ function buildProviderContentResult(item, citationIndex, maxChars, status = 'pro
 }
 
 async function buildFetchedResult(item, citationIndex, maxChars, runtime, args) {
-  const fetchResult = await runWebFetch(
+  const runFetch = resolveNestedRetrievalInvoker(runtime, 'web_fetch')
+  const fetchResult = await runFetch(
     {
       url: item.url,
       mode: args.fetchMode || 'article',
@@ -721,13 +738,14 @@ export async function runWebResearch(args, runtime = {}) {
   }
 
   const startedAt = Date.now()
+  const runSearch = resolveNestedRetrievalInvoker(runtime, 'web_search')
   const seededSearchResult =
     args?.__seedSearchResult && typeof args.__seedSearchResult === 'object'
       ? args.__seedSearchResult
       : null
   const searchResult =
     seededSearchResult ||
-    (await runWebSearch(
+    (await runSearch(
       {
         ...args,
         limit: resolved.searchLimit,

@@ -147,3 +147,21 @@ export function writePersistentCache(namespace, key, value, ttlMs, options = {})
     // Best-effort cache persistence only.
   }
 }
+
+export function deletePersistentCacheEntry(namespace, key, options = {}) {
+  const store = loadStore(namespace, options.maxEntries)
+  const cacheKey = String(key || '')
+  if (!cacheKey || !Object.prototype.hasOwnProperty.call(store.entries, cacheKey)) {
+    return false
+  }
+
+  delete store.entries[cacheKey]
+
+  try {
+    persistStore(store)
+  } catch {
+    // Best-effort cache persistence only.
+  }
+
+  return true
+}

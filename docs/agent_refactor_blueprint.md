@@ -335,17 +335,17 @@ flowchart TD
 
 ## 5. 目标能力矩阵
 
-| 能力域 | 当前状态 | 目标状态 |
-| --- | --- | --- |
-| 意图理解 | 语义分类 + 关键词补丁 | 语义分类 + 硬信号，去除大部分二次关键词判断 |
-| 工具暴露 | route 先裁工具 | ToolRegistry 按能力构造工具集 |
-| 工具发现 | 无 deferred discovery | 支持 `tool_search` 按需发现工具 |
-| 插件 / MCP | 平铺混入工具列表 | direct / deferred / discoverable 分层 |
-| 文件写入验收 | 仅记 `file_mutation` | `file_verified`、read-back、hash、bytes |
-| 文件编辑 | 精确字符串替换 | 补丁式编辑为主，精确替换为辅 |
-| 完成态控制 | prompt 约束为主 | runtime completion gate 为主 |
-| 浏览器能力 | 已简化，但路由仍较硬 | Lightpanda lookup 与系统浏览器交互彻底分层 |
-| 性能 | 分类、筛选、执行多次重复 | 减少前置判断和失败重试，缓存工具索引 |
+| 能力域       | 当前状态                 | 目标状态                                    |
+| ------------ | ------------------------ | ------------------------------------------- |
+| 意图理解     | 语义分类 + 关键词补丁    | 语义分类 + 硬信号，去除大部分二次关键词判断 |
+| 工具暴露     | route 先裁工具           | ToolRegistry 按能力构造工具集               |
+| 工具发现     | 无 deferred discovery    | 支持 `tool_search` 按需发现工具             |
+| 插件 / MCP   | 平铺混入工具列表         | direct / deferred / discoverable 分层       |
+| 文件写入验收 | 仅记 `file_mutation`     | `file_verified`、read-back、hash、bytes     |
+| 文件编辑     | 精确字符串替换           | 补丁式编辑为主，精确替换为辅                |
+| 完成态控制   | prompt 约束为主          | runtime completion gate 为主                |
+| 浏览器能力   | 已简化，但路由仍较硬     | Lightpanda lookup 与系统浏览器交互彻底分层  |
+| 性能         | 分类、筛选、执行多次重复 | 减少前置判断和失败重试，缓存工具索引        |
 
 ---
 
@@ -918,3 +918,14 @@ flowchart TD
 6. 精简 `agentRouting` 与 `capabilitySelector`
 
 这六步做完，Aura Agent 的底层能力会和现在是一个级别差异，而不是小修小补。
+
+这轮后我会把完成度更新成：
+
+Phase 1 完成态与写文件可靠性：100%
+Phase 2 apply_patch 与编辑主路径升级：95%
+Phase 3 ToolRegistry / ToolRouter：96%
+Phase 4 retrievalRuntime：100%
+Phase 5 tool_search + deferred tools：95%
+Phase 6 route 精简与 selector 降级：92%
+Phase 7 性能优化与缓存：91%
+如果按整体蓝图落地度来估，我会把现在提到 96%-97%。现在剩下的已经基本不是“主干没搭好”，而是最后的收尾和严格口径下的打磨。预先存在的 pnpm-lock.yaml 修改我没有动。

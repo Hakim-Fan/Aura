@@ -183,158 +183,6 @@ function detectLiteralUrlEditIntent(text) {
   )
 }
 
-const EXECUTION_KEYWORDS = [
-  'install',
-  'configure',
-  'setup',
-  'set up',
-  'download',
-  'create',
-  'update',
-  'modify',
-  'edit',
-  'write',
-  'fix',
-  'enable',
-  'disable',
-  'remove',
-  'delete',
-  'add',
-  'run',
-  'repair',
-  '安装',
-  '配置',
-  '接入',
-  '下载',
-  '创建',
-  '修改',
-  '编辑',
-  '写入',
-  '修复',
-  '启用',
-  '关闭',
-  '删除',
-  '增加',
-  '运行',
-  '新增',
-  '改成',
-  '改为',
-  '替换成',
-  '替换为',
-]
-
-const DIAGNOSIS_KEYWORDS = [
-  'why',
-  'how',
-  'explain',
-  'analyze',
-  'analysis',
-  'diagnose',
-  'debug',
-  'review',
-  'check',
-  'verify',
-  'error',
-  'bug',
-  'failure',
-  'stack trace',
-  'what happened',
-  '为什么',
-  '怎么',
-  '解释',
-  '分析',
-  '排查',
-  '定位',
-  '检查',
-  '验证',
-  '报错',
-  '错误',
-  '异常',
-  '问题',
-  '原因',
-  '看看',
-]
-
-const INFORMATIONAL_KEYWORDS = [
-  '我想知道',
-  '想知道',
-  '请问',
-  '是否可以',
-  '可不可以',
-  '能不能',
-  '能否',
-  '是不是',
-  '有没有',
-  '是什么',
-  '什么意思',
-  '怎么理解',
-  'why ',
-  'what is ',
-  'can i ',
-  'could i ',
-  'whether ',
-]
-
-const EXTERNAL_FACT_KEYWORDS = [
-  'latest',
-  'current',
-  'today',
-  'news',
-  'search',
-  'search the web',
-  'web search',
-  'documentation',
-  'docs',
-  'document',
-  'article',
-  'articles',
-  'source',
-  'sources',
-  'research',
-  'finance',
-  'earnings',
-  'market',
-  'investor relations',
-  'stock market',
-  'bullish',
-  'bearish',
-  'price',
-  'stock',
-  'quote',
-  'release note',
-  'changelog',
-  'official docs',
-  'official documentation',
-  '官方文档',
-  '官网',
-  '最新',
-  '当前',
-  '今天',
-  '新闻',
-  '搜索',
-  '搜一下',
-  '查一下',
-  '资料',
-  '文档',
-  '文章来源',
-  '来源',
-  '研究',
-  '股票',
-  '股市',
-  '财报',
-  '公告',
-  '研报',
-  '利好',
-  '利空',
-  '港股',
-  '美股',
-  '价格',
-  '股价',
-  '行情',
-  '版本发布',
-  '更新日志',
-]
-
 const WEB_INTERACTION_KEYWORDS = [
   'login',
   'sign in',
@@ -584,54 +432,6 @@ const WORKSPACE_KEYWORDS = [
   '错误',
   'bug',
 ]
-
-const CAPABILITY_ADMIN_KEYWORDS = [
-  'skill',
-  'plugin',
-  'mcp',
-  'capability',
-  '技能',
-  '插件',
-  '能力',
-]
-
-const READONLY_BUILTIN_TOOLS = new Set([
-  'list_files',
-  'glob_files',
-  'read_file',
-  'search_code',
-  'todo_write',
-  'aura_list_capabilities',
-  'aura_read_skill',
-])
-
-const WRITE_BUILTIN_TOOLS = new Set([
-  'write_file',
-  'edit_file',
-  'multi_edit_file',
-  'run_shell',
-])
-
-const AURA_MUTATION_TOOLS = new Set([
-  'aura_enable_skill',
-  'aura_enable_plugin',
-  'aura_import_skill',
-  'aura_import_plugin',
-  'aura_upsert_mcp_server',
-  'aura_remove_mcp_server',
-])
-
-const WEB_LOOKUP_TOOLS = new Set([
-  'web_research',
-  'web_search',
-  'web_fetch',
-])
-
-const BROWSER_LOOKUP_TOOLS = new Set([])
-
-const BROWSER_INTERACTIVE_ONLY_TOOLS = new Set([
-  'system_browser_open',
-])
 
 const SEARCH_BUDGET_BY_TIER = {
   none: 0,
@@ -1333,23 +1133,6 @@ function finalizeResearchRouteOutput(normalizedOutput, attemptSignature, searchR
   }
 }
 
-function shouldAutoUpgradeSearchToResearch(normalizedOutput, routeState, searchRuntime) {
-  if (!normalizedOutput || typeof normalizedOutput !== 'object') {
-    return false
-  }
-  if (normalizedOutput.searchStopped === true || normalizedOutput.noResults === true) {
-    return false
-  }
-  if (routeState?.capabilityTier !== 'web-lookup') {
-    return false
-  }
-  if (Array.isArray(searchRuntime?.fetches) && searchRuntime.fetches.length > 0) {
-    return false
-  }
-
-  return normalizedOutput?.searchAssessment?.recommendedNextAction === 'upgrade_to_web_research'
-}
-
 function hasStrongReadCandidates(searchRuntime, queryKey = '') {
   const recommendations = buildRecommendedFetchResults(searchRuntime, 3, queryKey)
   if (recommendations.length === 0) {
@@ -1639,7 +1422,9 @@ function buildRouteStateFromSignals({
     answerMode,
     capabilityTier,
     researchMode,
+    needsExternalFacts,
     webInteractionRequired,
+    workspaceRelated,
     responseStyle,
     taskComplexity,
     planDepth,
@@ -1690,8 +1475,6 @@ export function deriveHardSignals(messages) {
       hasContextualPublicUrl: visiblePublicUrlCount > 0,
     }),
     publicWebUrlReference: publicUrlsInConversation.length > 0,
-    explicitWorkspaceWrite:
-      hasAny(intent, EXECUTION_KEYWORDS) && hasAny(text, WORKSPACE_KEYWORDS),
     explicitSystemBrowserRequest: hasAny(text, SYSTEM_BROWSER_REQUEST_KEYWORDS),
     forceOrchestrated: hasAny(intent, FORCE_ORCHESTRATED_KEYWORDS),
   }
@@ -1704,11 +1487,8 @@ export function applyHardSignalIntentOverrides(classification, hardSignals = {})
 
   const explicitWebLookupRead = hardSignals.explicitWebLookupRead === true
   const explicitWebInteraction = hardSignals.explicitWebInteraction === true
-  const explicitWorkspaceWrite = hardSignals.explicitWorkspaceWrite === true
   const explicitSystemBrowserRequest = hardSignals.explicitSystemBrowserRequest === true
 
-  const workspaceRelated =
-    classification.workspaceRelated === true || explicitWorkspaceWrite
   const webInteractionRequired =
     explicitWebInteraction ||
     (classification.webInteractionRequired === true && explicitWebLookupRead !== true)
@@ -1717,13 +1497,9 @@ export function applyHardSignalIntentOverrides(classification, hardSignals = {})
 
   return {
     ...classification,
-    answerMode:
-      webInteractionRequired || explicitWorkspaceWrite
-        ? 'execute'
-        : classification.answerMode,
+    answerMode: webInteractionRequired ? 'execute' : classification.answerMode,
     needsExternalFacts,
     webInteractionRequired,
-    workspaceRelated,
     systemBrowserRequested:
       classification.systemBrowserRequested === true || explicitSystemBrowserRequest,
   }
@@ -1752,10 +1528,9 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
   const webInteractionRequired =
     normalizedClassification.webInteractionRequired === true ||
     hardSignals.explicitWebInteraction === true
-  const workspaceRelated =
-    normalizedClassification.workspaceRelated === true || hardSignals.explicitWorkspaceWrite === true
+  const workspaceRelated = normalizedClassification.workspaceRelated === true
 
-  if (webInteractionRequired || hardSignals.explicitWorkspaceWrite === true) {
+  if (webInteractionRequired) {
     answerMode = 'execute'
   }
 
@@ -1776,36 +1551,44 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
   })
 }
 
+const FALLBACK_WORKSPACE_PATTERN =
+  /(?:\b(?:workspace|repo|repository|project|code|file|files|folder|directory|git|commit|branch|diff|status|test|config)\b|代码|文件|目录|仓库|项目|分支|提交|测试|配置|(?:^|[\s`"'(])(?:\.{0,2}\/[^\s"'`]+|[a-z0-9_-]+\.(?:[a-z0-9]{1,8}))(?:$|[\s`"'):,]))/iu
+
+const FALLBACK_CAPABILITY_ADMIN_PATTERN =
+  /\b(?:skill|plugin|mcp|capability)\b|技能|插件|能力/u
+
+function latestUserHasFileContext(messages) {
+  const latestUser = [...messages].reverse().find(message => message.role === 'user')
+  return Array.isArray(latestUser?.parts)
+    ? latestUser.parts.some(part => part.type === 'file')
+    : false
+}
+
 export function inferRouteStateFromKeywords(messages, settings = {}) {
   const text = buildConversationText(messages)
-  const intent = latestUserIntent(messages)
+  const rawIntent = latestUserRawIntent(messages)
   const hardSignals = deriveHardSignals(messages)
-  const asksInformational = hasAny(intent, INFORMATIONAL_KEYWORDS)
-  const asksDiagnosis =
-    hasAny(text, DIAGNOSIS_KEYWORDS) || (asksInformational && hasAny(text, WORKSPACE_KEYWORDS))
-  const asksExecution =
-    hasAny(intent, EXECUTION_KEYWORDS) &&
-    !asksInformational &&
-    !hasAny(intent, ['怎么', 'why', 'how', '原因', '解释', '分析', '看看', 'review', 'check'])
   const explicitWebInteraction = hardSignals.explicitWebInteraction === true
-  const explicitSystemBrowserRequest = hasAny(text, SYSTEM_BROWSER_REQUEST_KEYWORDS)
+  const explicitSystemBrowserRequest = hardSignals.explicitSystemBrowserRequest === true
   const needsExternalFacts =
-    hasAny(text, EXTERNAL_FACT_KEYWORDS) || hardSignals.explicitWebLookupRead === true
-  const workspaceRelated = hasAny(text, WORKSPACE_KEYWORDS)
-  const isCapabilityAdminTask = hasAny(text, CAPABILITY_ADMIN_KEYWORDS)
+    hardSignals.explicitWebLookupRead === true ||
+    hardSignals.publicWebUrlReference === true
+  const workspaceRelated =
+    latestUserHasFileContext(messages) ||
+    FALLBACK_WORKSPACE_PATTERN.test(rawIntent)
+  const isCapabilityAdminTask = FALLBACK_CAPABILITY_ADMIN_PATTERN.test(text)
 
-  const answerMode = explicitWebInteraction
-    ? 'execute'
-    : asksExecution
+  const answerMode =
+    explicitWebInteraction || isCapabilityAdminTask
       ? 'execute'
-      : asksDiagnosis
+      : workspaceRelated
         ? 'diagnose'
         : 'advise'
   return buildRouteStateFromSignals({
     answerMode,
     needsExternalFacts,
-    webInteractionRequired: explicitWebInteraction,
-    workspaceRelated: workspaceRelated || answerMode === 'execute',
+    webInteractionRequired: explicitWebInteraction || explicitSystemBrowserRequest,
+    workspaceRelated,
     isCapabilityAdminTask,
     explicitSystemBrowserRequest,
     researchMode: latestUserResearchMode(messages),
@@ -1860,120 +1643,6 @@ export function selectAgentStrategy(classification, hardSignals = {}, options = 
   }
 
   return { chain, reason }
-}
-
-function allowReadonlyPluginLikeTool(tool, routeState) {
-  return tool.source === 'plugin' || tool.source === 'mcp'
-    ? !tool.approvalCategory && !routeState.explicitSystemBrowserRequest
-    : true
-}
-
-function isBuiltinReadonlyTool(tool) {
-  return tool.source === 'builtin' && READONLY_BUILTIN_TOOLS.has(tool.name)
-}
-
-function isBuiltinWriteTool(tool) {
-  return tool.source === 'builtin' && WRITE_BUILTIN_TOOLS.has(tool.name)
-}
-
-function isAuraMutationTool(tool) {
-  return tool.source === 'builtin' && AURA_MUTATION_TOOLS.has(tool.name)
-}
-
-function isBrowserLookupTool(tool) {
-  return tool.source === 'builtin' && BROWSER_LOOKUP_TOOLS.has(tool.name)
-}
-
-function isWebLookupTool(tool) {
-  return tool.source === 'builtin' && WEB_LOOKUP_TOOLS.has(tool.name)
-}
-
-function isBrowserInteractiveOnlyTool(tool) {
-  return tool.source === 'builtin' && BROWSER_INTERACTIVE_ONLY_TOOLS.has(tool.name)
-}
-
-function isComputerTool(tool) {
-  return tool.source === 'builtin' && tool.name.startsWith('computer_')
-}
-
-function isSystemBrowserTool(tool) {
-  return tool.source === 'builtin' && tool.name === 'system_browser_open'
-}
-
-export function filterToolsForRouteState(tools, routeState) {
-  if (!Array.isArray(tools) || tools.length === 0) {
-    return []
-  }
-
-  return tools.filter(tool => {
-    if (!tool || typeof tool !== 'object') {
-      return false
-    }
-
-    if (routeState.capabilityTier === 'none') {
-      return false
-    }
-
-    if (isComputerTool(tool)) {
-      return false
-    }
-
-    if (routeState.capabilityTier === 'local-readonly') {
-      if (isBrowserLookupTool(tool) || isBrowserInteractiveOnlyTool(tool) || isBuiltinWriteTool(tool)) {
-        return false
-      }
-      if (isAuraMutationTool(tool) && !routeState.isCapabilityAdminTask) {
-        return false
-      }
-      return isBuiltinReadonlyTool(tool) || allowReadonlyPluginLikeTool(tool, routeState)
-    }
-
-    if (routeState.capabilityTier === 'local-write') {
-      if (isBrowserLookupTool(tool) || isBrowserInteractiveOnlyTool(tool)) {
-        return false
-      }
-      if (isAuraMutationTool(tool) && !routeState.isCapabilityAdminTask) {
-        return false
-      }
-      if (tool.source === 'builtin') {
-        return isBuiltinReadonlyTool(tool) || isBuiltinWriteTool(tool) || isAuraMutationTool(tool)
-      }
-      return allowReadonlyPluginLikeTool(tool, routeState)
-    }
-
-    if (routeState.capabilityTier === 'web-lookup') {
-      if (isBrowserInteractiveOnlyTool(tool)) {
-        return false
-      }
-      if (isBuiltinWriteTool(tool)) {
-        return false
-      }
-      if (isAuraMutationTool(tool) && !routeState.isCapabilityAdminTask) {
-        return false
-      }
-      return (
-        isBuiltinReadonlyTool(tool) ||
-        isWebLookupTool(tool) ||
-        allowReadonlyPluginLikeTool(tool, routeState)
-      )
-    }
-
-    if (routeState.capabilityTier === 'browser-interactive') {
-      if (isAuraMutationTool(tool) && !routeState.isCapabilityAdminTask) {
-        return false
-      }
-      return (
-        isBuiltinReadonlyTool(tool) ||
-        isWebLookupTool(tool) ||
-        isBrowserInteractiveOnlyTool(tool) ||
-        isComputerTool(tool) ||
-        isSystemBrowserTool(tool) ||
-        allowReadonlyPluginLikeTool(tool, routeState)
-      )
-    }
-
-    return false
-  })
 }
 
 export function getRouteEscalationTargets(routeState, options = {}) {
@@ -2076,24 +1745,7 @@ export function applyRouteToolBudgets(tools, routeState) {
             tool?.name !== 'web_research',
         )
       : tools
-  const shouldPreferResearchFirst =
-    routeState?.capabilityTier === 'web-lookup' &&
-    routeState?.responseStyle === 'research-structured' &&
-    mountedTools.some(tool => tool?.name === 'web_research') &&
-    Array.isArray(searchRuntime.attempts) &&
-    searchRuntime.attempts.length === 0 &&
-    Array.isArray(searchRuntime.fetches) &&
-    searchRuntime.fetches.length === 0
-  const routedMountedTools = shouldPreferResearchFirst
-    ? mountedTools.filter(tool => tool?.name !== 'web_search')
-    : mountedTools
-  const rawToolByName = new Map(
-    routedMountedTools
-      .filter(tool => tool?.name)
-      .map(tool => [tool.name, tool]),
-  )
-
-  return routedMountedTools.map(tool => {
+  return mountedTools.map(tool => {
     if (tool?.name === 'web_fetch') {
       return {
         ...tool,
@@ -2211,44 +1863,11 @@ export function applyRouteToolBudgets(tools, routeState) {
         budgets.searchesRemaining -= 1
         const output = await tool.run(args, runtime)
         const normalizedOutput = output && typeof output === 'object' ? output : output
-        const finalizedOutput = finalizeSearchRouteOutput(
+        return finalizeSearchRouteOutput(
           normalizedOutput,
           attemptSignature,
           searchRuntime,
         )
-
-        const rawResearchTool = rawToolByName.get('web_research')
-        if (
-          rawResearchTool &&
-          typeof rawResearchTool.run === 'function' &&
-          shouldAutoUpgradeSearchToResearch(finalizedOutput, routeState, searchRuntime)
-        ) {
-          const researchOutput = await rawResearchTool.run(
-            {
-              query:
-                typeof args?.query === 'string' ? args.query : finalizedOutput?.query || '',
-              domains: Array.isArray(args?.domains) ? args.domains : finalizedOutput?.domains,
-              depth: routeState?.responseStyle === 'research-structured' ? 'deep' : 'auto',
-              __seedSearchResult: finalizedOutput,
-            },
-            runtime,
-          )
-          const finalizedResearchOutput = finalizeResearchRouteOutput(
-            researchOutput && typeof researchOutput === 'object' ? researchOutput : researchOutput,
-            attemptSignature,
-            searchRuntime,
-          )
-          if (finalizedResearchOutput && typeof finalizedResearchOutput === 'object') {
-            return {
-              ...finalizedResearchOutput,
-              autoUpgradedFrom: 'web_search',
-              initialSearchAssessment: finalizedOutput?.searchAssessment,
-            }
-          }
-          return finalizedResearchOutput
-        }
-
-        return finalizedOutput
       },
     }
   })

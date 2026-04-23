@@ -15,6 +15,31 @@ function asTextArray(value: unknown) {
     : []
 }
 
+function asBoolean(value: unknown) {
+  return value === true
+}
+
+function asNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function readRetrievalMeta(output: Record<string, unknown>) {
+  return isRecord(output.retrieval) ? output.retrieval : null
+}
+
+function formatRetrievalOperation(value: string) {
+  switch (value) {
+    case 'web_search':
+      return 'search'
+    case 'web_fetch':
+      return 'fetch'
+    case 'web_research':
+      return 'research'
+    default:
+      return value
+  }
+}
+
 function summarizeUrl(value: string) {
   try {
     const parsed = new URL(value)
@@ -53,6 +78,10 @@ export function WebSearchEventCard({
   const basedOnPreviousEvidence = output.basedOnPreviousEvidence === true
   const stopSummary = asText(output.summary)
   const stopAction = asText(output.suggestedAction)
+  const retrieval = readRetrievalMeta(output)
+  const cacheRecord = isRecord(output.cache) ? output.cache : null
+  const cacheLayer = asText(cacheRecord?.layer) || asText(retrieval?.cacheLayer)
+  const cacheHit = asBoolean(cacheRecord?.hit) || asBoolean(retrieval?.cacheHit)
   const recommendedResults = Array.isArray(output.recommendedResults)
     ? output.recommendedResults.filter(isRecord).slice(0, 3)
     : []
@@ -85,6 +114,7 @@ export function WebSearchEventCard({
           label={searchStopped && total === 0 && recommendedResults.length > 0 ? 'Suggested' : 'Results'}
           value={searchStopped && total === 0 && recommendedResults.length > 0 ? recommendedResults.length : total}
         />
+        {cacheHit ? <MetaPill label="Cache" value={cacheLayer || 'hit'} /> : null}
         {tookMs > 0 ? <MetaPill label="Time" value={`${tookMs}ms`} /> : null}
       </div>
 
@@ -234,6 +264,41 @@ function researchStatusMeta(status: string) {
   }
 }
 
+function fetchAttemptStatusMeta(status: string) {
+  switch (status) {
+    case 'success':
+      return {
+        label: 'success',
+        className: 'bg-emerald-50 text-emerald-700',
+      }
+    case 'cached':
+      return {
+        label: 'cache',
+        className: 'bg-sky-50 text-sky-700',
+      }
+    case 'blocked':
+      return {
+        label: 'blocked',
+        className: 'bg-red-50 text-red-600',
+      }
+    case 'disabled':
+      return {
+        label: 'disabled',
+        className: 'bg-slate-100 text-slate-600',
+      }
+    case 'error':
+      return {
+        label: 'error',
+        className: 'bg-amber-50 text-amber-700',
+      }
+    default:
+      return {
+        label: status || 'attempt',
+        className: 'bg-gray-100 text-gray-600',
+      }
+  }
+}
+
 export function WebResearchEventCard({
   event,
   output,
@@ -254,6 +319,10 @@ export function WebResearchEventCard({
   const crossSourceInsights = isRecord(output.crossSourceInsights)
     ? output.crossSourceInsights
     : null
+  const retrieval = readRetrievalMeta(output)
+  const childOperations = Array.isArray(retrieval?.childOperations)
+    ? retrieval.childOperations.filter(isRecord).slice(0, 6)
+    : []
   const results = Array.isArray(output.results)
     ? output.results.filter(isRecord).slice(0, 6)
     : []
@@ -268,8 +337,58 @@ export function WebResearchEventCard({
         <MetaPill label="Fetched" value={fetchedTotal} />
         <MetaPill label="Provider content" value={usedSearchContentTotal} />
         <MetaPill label="Domains" value={sourceDiversity || undefined} />
+        <MetaPill label="Trace" value={childOperations.length > 0 ? childOperations.length : undefined} />
         {tookMs > 0 ? <MetaPill label="Time" value={`${tookMs}ms`} /> : null}
       </div>
+
+      {childOperations.length > 0 ? (
+        <div className="rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/70 px-3 py-2">
+          <div className="mb-2 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+            Retrieval Trace
+          </div>
+          <div className="flex flex-col gap-2">
+            {childOperations.map((entry, index) => {
+              const operation = formatRetrievalOperation(asText(entry.operation))
+              const backend = asText(entry.backend)
+              const cacheHit = asBoolean(entry.cacheHit)
+              const cacheLayer = asText(entry.cacheLayer)
+              const sourceCount = asNumber(entry.sourceCount)
+              const traceTookMs = asNumber(entry.tookMs)
+              const domains = asTextArray(entry.domains)
+
+              return (
+                <div
+                  key={`trace-${operation}-${backend}-${index}`}
+                  className="rounded-lg border border-white/80 bg-white/85 px-2.5 py-2"
+                >
+                  <div className="flex flex-wrap gap-1.5">
+                    <MetaPill label="Op" value={operation || undefined} />
+                    <MetaPill label="Backend" value={backend || undefined} />
+                    <MetaPill label="Cache" value={cacheHit ? cacheLayer || 'hit' : undefined} />
+                    <MetaPill
+                      label="Sources"
+                      value={sourceCount !== undefined ? `${sourceCount}` : undefined}
+                    />
+                    <MetaPill
+                      label="Time"
+                      value={
+                        traceTookMs !== undefined && traceTookMs > 0
+                          ? `${traceTookMs}ms`
+                          : undefined
+                      }
+                    />
+                  </div>
+                  {domains.length > 0 ? (
+                    <div className="mt-2 text-[11px] text-[var(--text-secondary)]">
+                      {domains.join(' / ')}
+                    </div>
+                  ) : null}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
 
       {crossSourceInsights ? (
         <div className="rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/70 px-3 py-2">
@@ -436,6 +555,13 @@ export function WebFetchEventCard({
   const crossSourceInsights = isRecord(output.crossSourceInsights)
     ? output.crossSourceInsights
     : null
+  const retrieval = readRetrievalMeta(output)
+  const cacheRecord = isRecord(output.cache) ? output.cache : null
+  const cacheHit = asBoolean(cacheRecord?.hit) || asBoolean(retrieval?.cacheHit)
+  const cacheLayer = asText(cacheRecord?.layer) || asText(retrieval?.cacheLayer)
+  const attemptedProviders = Array.isArray(output.attemptedProviders)
+    ? output.attemptedProviders.filter(isRecord).slice(0, 6)
+    : []
   const evidenceBlocks = Array.isArray(output.evidenceBlocks)
     ? output.evidenceBlocks.filter(isRecord).slice(0, 4)
     : []
@@ -449,6 +575,8 @@ export function WebFetchEventCard({
         <MetaPill label="Site" value={site || summarizeUrl(url)} />
         <MetaPill label="Provider" value={provider || 'web'} />
         <MetaPill label="Format" value={contentFormat || 'article'} />
+        <MetaPill label="Attempts" value={attemptedProviders.length || undefined} />
+        {cacheHit ? <MetaPill label="Cache" value={cacheLayer || 'hit'} /> : null}
         {tookMs > 0 ? <MetaPill label="Time" value={`${tookMs}ms`} /> : null}
       </div>
 
@@ -496,6 +624,47 @@ export function WebFetchEventCard({
             {riskFlags.map(flag => (
               <MetaPill key={flag} label="Risk" value={flag} />
             ))}
+          </div>
+        ) : null}
+        {attemptedProviders.length > 0 ? (
+          <div className="mt-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.03)] px-3 py-2">
+            <div className="mb-2 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+              Fetch Path
+            </div>
+            <div className="flex flex-col gap-2">
+              {attemptedProviders.map((entry, index) => {
+                const attemptProvider = asText(entry.provider)
+                const attemptReason = asText(entry.reason)
+                const attemptSource = asText(entry.source)
+                const attemptError = asText(entry.error)
+                const attemptStatus = fetchAttemptStatusMeta(asText(entry.status))
+                const attemptCacheHit = asBoolean(entry.cacheHit)
+
+                return (
+                  <div
+                    key={`fetch-attempt-${attemptProvider}-${attemptReason}-${index}`}
+                    className="rounded-lg border border-white/80 bg-white/85 px-2.5 py-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <MetaPill label="Provider" value={attemptProvider || undefined} />
+                      <MetaPill label="Reason" value={attemptReason || undefined} />
+                      <MetaPill label="State" value={attemptSource || undefined} />
+                      {attemptCacheHit ? <MetaPill label="Cache" value="hit" /> : null}
+                      <span
+                        className={`inline-flex items-center rounded-full px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] ${attemptStatus.className}`}
+                      >
+                        {attemptStatus.label}
+                      </span>
+                    </div>
+                    {attemptError ? (
+                      <div className="mt-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                        {attemptError}
+                      </div>
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
           </div>
         ) : null}
         {crossSourceInsights ? (

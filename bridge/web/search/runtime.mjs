@@ -5,7 +5,12 @@ import {
   readPersistentCacheEntry,
   writePersistentCache,
 } from '../shared/persistentCache.mjs'
-import { resolveWebSearchProviderOrder } from './providerRegistry.mjs'
+import {
+  getWebSearchProviderAvailability,
+  rememberWebSearchProviderFailure,
+  rememberWebSearchProviderSuccess,
+  resolveWebSearchProviderOrder,
+} from './providerRegistry.mjs'
 
 const SEARCH_CACHE = new Map()
 const SEARCH_CACHE_NAMESPACE = 'search'
@@ -615,7 +620,7 @@ export async function runWebSearch(args, runtime = {}) {
       suggestedAction: '请改用 provider "auto"、"tavily"、"brave" 或 "duckduckgo"。',
     })
   }
-  const providerOrder = resolveWebSearchProviderOrder(settings, args.provider)
+  const providerOrder = resolveWebSearchProviderOrder(settings, args.provider, runtime)
   if (providerOrder.length === 0) {
     throw createStructuredError('网页搜索失败，没有可用的搜索 provider。', {
       source: 'tool',
@@ -668,6 +673,21 @@ export async function runWebSearch(args, runtime = {}) {
         attempt = cached.value
         cacheLayer = cached.layer
       } else {
+        const availability = getWebSearchProviderAvailability(runtime, provider.id)
+        if (availability.blocked) {
+          providerAttempts.push({
+            provider: provider.id,
+            providerQuery: candidateQuery,
+            skipped: true,
+            blocked: true,
+            blockedSource: availability.source || undefined,
+            error:
+              availability.entry?.code || availability.entry?.category || 'provider-blocked',
+            rawTotal: 0,
+            filteredTotal: 0,
+          })
+          continue
+        }
         try {
           attempt = await provider.search(
             {
@@ -681,7 +701,9 @@ export async function runWebSearch(args, runtime = {}) {
             runtime,
           )
           writeSearchCacheEntry(cacheKey, attempt, cacheTtlMs)
+          rememberWebSearchProviderSuccess(runtime, provider.id)
         } catch (error) {
+          rememberWebSearchProviderFailure(runtime, provider.id, error)
           providerAttempts.push({
             provider: provider.id,
             providerQuery: candidateQuery,
@@ -727,6 +749,10 @@ export async function runWebSearch(args, runtime = {}) {
         activeProvider = provider.id
         activeQuery = candidateQuery
         activeCacheLayer = cacheLayer
+      }
+
+      if (cacheLayer !== 'none') {
+        rememberWebSearchProviderSuccess(runtime, provider.id)
       }
     }
   }

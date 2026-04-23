@@ -30,6 +30,12 @@ import {
   resolveJinaProviderAccess,
 } from './providers/jina.mjs'
 import { extractReadableContent } from './extraction/readability.mjs'
+import {
+  getWebFetchProviderAvailability,
+  rememberWebFetchProviderFailure,
+  rememberWebFetchProviderSuccess,
+  resolveWebFetchProviderHealthScore,
+} from './providerRegistry.mjs'
 
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000
 const DEFAULT_FETCH_MAX_CHARS = 20_000
@@ -622,6 +628,81 @@ function writeFetchCacheEntry(cacheKey, value, ttlMs) {
   })
 }
 
+function recordFetchProviderAttempt(attemptedProviders, entry = {}) {
+  if (!Array.isArray(attemptedProviders)) {
+    return
+  }
+
+  attemptedProviders.push({
+    provider:
+      typeof entry.provider === 'string' && entry.provider.trim()
+        ? entry.provider.trim()
+        : 'unknown',
+    reason: typeof entry.reason === 'string' ? entry.reason : '',
+    status: typeof entry.status === 'string' ? entry.status : 'attempted',
+    blocked: entry.blocked === true,
+    cacheHit: entry.cacheHit === true,
+    source: typeof entry.source === 'string' ? entry.source : '',
+    error: typeof entry.error === 'string' ? entry.error : '',
+  })
+}
+
+function attachFetchResultMeta(result, attemptedProviders, cache = null) {
+  return {
+    ...result,
+    attemptedProviders:
+      Array.isArray(attemptedProviders) && attemptedProviders.length > 0
+        ? attemptedProviders.map(entry => ({ ...entry }))
+        : undefined,
+    ...(cache ? { cache } : {}),
+  }
+}
+
+function resolveFetchFallbackCandidates(runtime = {}, settings = {}, reason = '') {
+  const lightpandaId = getLightpandaProviderId()
+  const lightpandaAvailability = getWebFetchProviderAvailability(runtime, lightpandaId, {
+    enabled: isLightpandaEnabled(settings),
+  })
+  const jinaAvailability = getJinaProviderAvailability(runtime, settings)
+  const preferredOrder =
+    reason === 'unsupported-content'
+      ? {
+        [JINA_FETCH_PROVIDER.id]: 0,
+        [lightpandaId]: 1,
+      }
+      : {
+        [lightpandaId]: 0,
+        [JINA_FETCH_PROVIDER.id]: 1,
+      }
+
+  return [
+    {
+      id: lightpandaId,
+      kind: 'lightpanda',
+      label: 'Lightpanda',
+      availability: lightpandaAvailability,
+    },
+    {
+      id: JINA_FETCH_PROVIDER.id,
+      kind: 'jina',
+      label: JINA_FETCH_PROVIDER.name,
+      availability: jinaAvailability,
+    },
+  ].sort((left, right) => {
+    if (left.availability.usable !== right.availability.usable) {
+      return left.availability.usable ? -1 : 1
+    }
+    const now = Date.now()
+    const scoreDelta =
+      resolveWebFetchProviderHealthScore(right.availability, now) -
+      resolveWebFetchProviderHealthScore(left.availability, now)
+    if (scoreDelta !== 0) {
+      return scoreDelta
+    }
+    return (preferredOrder[left.id] ?? 99) - (preferredOrder[right.id] ?? 99)
+  })
+}
+
 async function tryLightpandaFallback({
   normalizedUrl,
   finalUrl,
@@ -631,9 +712,35 @@ async function tryLightpandaFallback({
   cacheKey,
   cacheTtlMs,
   runtime,
+  reason = '',
+  attemptedProviders,
+  availability = null,
 }) {
-  if (!isLightpandaEnabled(runtime.settings || {})) {
-    return null
+  const providerId = getLightpandaProviderId()
+  const resolvedAvailability =
+    availability ||
+    getWebFetchProviderAvailability(runtime, providerId, {
+      enabled: isLightpandaEnabled(runtime.settings || {}),
+    })
+  if (!resolvedAvailability.usable) {
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider: providerId,
+      reason,
+      status: resolvedAvailability.blocked ? 'blocked' : 'disabled',
+      blocked: resolvedAvailability.blocked,
+      source: resolvedAvailability.source || '',
+      error:
+        resolvedAvailability.entry?.code ||
+        (resolvedAvailability.blocked
+          ? 'WEB_FETCH_PROVIDER_BLOCKED'
+          : 'WEB_FETCH_PROVIDER_NOT_CONFIGURED'),
+    })
+    return {
+      result: null,
+      error: null,
+      skipped: true,
+      blocked: resolvedAvailability.blocked,
+    }
   }
 
   try {
@@ -657,17 +764,27 @@ async function tryLightpandaFallback({
       tookMs: Date.now() - startedAt,
     }
     writeFetchCacheEntry(cacheKey, result, cacheTtlMs)
+    rememberWebFetchProviderSuccess(runtime, providerId)
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider: providerId,
+      reason,
+      status: 'success',
+    })
     return {
-      result: {
-        ...result,
-        cache: {
-          hit: false,
-          layer: 'miss',
-        },
-      },
+      result: attachFetchResultMeta(result, attemptedProviders, {
+        hit: false,
+        layer: 'miss',
+      }),
       error: null,
     }
   } catch (error) {
+    rememberWebFetchProviderFailure(runtime, providerId, error)
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider: providerId,
+      reason,
+      status: 'error',
+      error: summarizeFetchFallbackError(error, 'Lightpanda 未能返回可用内容。'),
+    })
     return {
       result: null,
       error,
@@ -686,10 +803,31 @@ async function tryJinaFallback({
   cacheTtlMs,
   runtime,
   fetchSettings,
+  reason = '',
+  attemptedProviders,
+  availability = null,
 }) {
-  const availability = getJinaProviderAvailability(runtime, runtime.settings || {})
-  if (!availability.usable && !availability.blocked) {
-    return null
+  const resolvedAvailability =
+    availability || getJinaProviderAvailability(runtime, runtime.settings || {})
+  if (!resolvedAvailability.usable) {
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider: JINA_FETCH_PROVIDER.id,
+      reason,
+      status: resolvedAvailability.blocked ? 'blocked' : 'disabled',
+      blocked: resolvedAvailability.blocked,
+      source: resolvedAvailability.source || '',
+      error:
+        resolvedAvailability.entry?.code ||
+        (resolvedAvailability.blocked
+          ? 'WEB_FETCH_PROVIDER_BLOCKED'
+          : 'JINA_FETCH_NOT_ENABLED'),
+    })
+    return {
+      result: null,
+      error: null,
+      skipped: true,
+      blocked: resolvedAvailability.blocked,
+    }
   }
 
   try {
@@ -709,18 +847,27 @@ async function tryJinaFallback({
       tookMs: Date.now() - startedAt,
     }
     writeFetchCacheEntry(cacheKey, result, cacheTtlMs)
+    rememberWebFetchProviderSuccess(runtime, JINA_FETCH_PROVIDER.id)
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider: JINA_FETCH_PROVIDER.id,
+      reason,
+      status: 'success',
+    })
     return {
-      result: {
-        ...result,
-        cache: {
-          hit: false,
-          layer: 'miss',
-        },
-      },
+      result: attachFetchResultMeta(result, attemptedProviders, {
+        hit: false,
+        layer: 'miss',
+      }),
       error: null,
     }
   } catch (error) {
-    rememberJinaFailure(runtime, error, runtime.settings || {})
+    rememberJinaFailure(runtime, error)
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider: JINA_FETCH_PROVIDER.id,
+      reason,
+      status: 'error',
+      error: summarizeFetchFallbackError(error, 'Jina Reader 未能返回可用内容。'),
+    })
     return {
       result: null,
       error,
@@ -759,6 +906,8 @@ function buildFetchConnectivityError({
         'Lightpanda 未能返回可用内容。',
       )}`,
     )
+  } else if (lightpandaFallback?.blocked) {
+    details.push('Lightpanda fallback: 当前任务中已暂时停用。')
   } else if (!isLightpandaEnabled(settings)) {
     details.push('Lightpanda fallback: 当前未启用。')
   }
@@ -770,6 +919,8 @@ function buildFetchConnectivityError({
         'Jina Reader 未能返回可用内容。',
       )}`,
     )
+  } else if (jinaFallback?.blocked) {
+    details.push('Jina Reader fallback: 当前任务中已暂时停用。')
   } else if (!availability.usable && !availability.blocked) {
     details.push('Jina Reader fallback: 当前未启用或没有可用鉴权方式。')
   }
@@ -783,6 +934,90 @@ function buildFetchConnectivityError({
       '请检查当前网络和代理是否可用；如果目标站点更依赖浏览器环境，建议启用 Lightpanda / Jina Reader，或显式要求打开系统浏览器。',
     retryable: true,
   })
+}
+
+async function tryFetchFallbacks({
+  normalizedUrl,
+  finalUrl,
+  mode,
+  maxChars,
+  title,
+  startedAt,
+  cacheKey,
+  cacheTtlMs,
+  runtime,
+  fetchSettings,
+  attemptedProviders,
+  reason = '',
+  allowLightpanda = true,
+  allowJina = true,
+}) {
+  const settings = runtime.settings || {}
+  const candidates = resolveFetchFallbackCandidates(runtime, settings, reason).filter(
+    candidate =>
+      (candidate.kind !== 'lightpanda' || allowLightpanda) &&
+      (candidate.kind !== 'jina' || allowJina),
+  )
+  const outcomes = {
+    lightpandaFallback: null,
+    jinaFallback: null,
+  }
+
+  for (const candidate of candidates) {
+    if (candidate.kind === 'lightpanda') {
+      const outcome = await tryLightpandaFallback({
+        normalizedUrl,
+        finalUrl,
+        mode,
+        maxChars,
+        startedAt,
+        cacheKey,
+        cacheTtlMs,
+        runtime,
+        reason,
+        attemptedProviders,
+        availability: candidate.availability,
+      })
+      outcomes.lightpandaFallback = outcome
+      if (outcome?.result) {
+        return {
+          result: outcome.result,
+          ...outcomes,
+        }
+      }
+      continue
+    }
+
+    if (candidate.kind === 'jina') {
+      const outcome = await tryJinaFallback({
+        normalizedUrl,
+        finalUrl,
+        mode,
+        maxChars,
+        title,
+        startedAt,
+        cacheKey,
+        cacheTtlMs,
+        runtime,
+        fetchSettings,
+        reason,
+        attemptedProviders,
+        availability: candidate.availability,
+      })
+      outcomes.jinaFallback = outcome
+      if (outcome?.result) {
+        return {
+          result: outcome.result,
+          ...outcomes,
+        }
+      }
+    }
+  }
+
+  return {
+    result: null,
+    ...outcomes,
+  }
 }
 
 export async function runWebFetch(args, runtime = {}) {
@@ -844,6 +1079,7 @@ export async function runWebFetch(args, runtime = {}) {
   const maxChars = Math.max(400, Math.min(fetchSettings.maxCharsCap, Number(args.maxChars) || fetchSettings.maxCharsCap))
   const cacheTtlMs = resolveFetchCacheTtlMs(settings)
   const startedAt = Date.now()
+  const attemptedProviders = []
   const cacheKey = normalizeCacheKey(
     JSON.stringify({
       url: normalizedUrl,
@@ -851,7 +1087,7 @@ export async function runWebFetch(args, runtime = {}) {
       mode,
       maxChars,
       readability: fetchSettings.readability,
-      jina: buildCloudFetchCacheHint(runtime, jinaAccess),
+      jina: buildCloudFetchCacheHint(jinaAccess),
       lightpanda: isLightpandaEnabled(settings),
     }),
   )
@@ -867,14 +1103,24 @@ export async function runWebFetch(args, runtime = {}) {
 
   const cached = readFetchCacheEntry(cacheKey)
   if (cached) {
-    return {
+    const cachedProvider =
+      typeof cached.value?.provider === 'string' && cached.value.provider.trim()
+        ? cached.value.provider.trim()
+        : provider
+    rememberWebFetchProviderSuccess(runtime, cachedProvider)
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider: cachedProvider,
+      reason: 'cache-hit',
+      status: 'cached',
+      cacheHit: true,
+    })
+    return attachFetchResultMeta({
       ...cached.value,
       tookMs: Date.now() - startedAt,
-      cache: {
-        hit: true,
-        layer: cached.layer,
-      },
-    }
+    }, attemptedProviders, {
+      hit: true,
+      layer: cached.layer,
+    })
   }
 
   let response
@@ -894,21 +1140,14 @@ export async function runWebFetch(args, runtime = {}) {
       },
     )
   } catch (directError) {
-    const lightpandaFallback = await tryLightpandaFallback({
-      normalizedUrl,
-      finalUrl: normalizedUrl,
-      mode,
-      maxChars,
-      startedAt,
-      cacheKey,
-      cacheTtlMs,
-      runtime,
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider,
+      reason: 'connectivity',
+      status: 'error',
+      error: summarizeFetchFallbackError(directError, '连接目标页面失败。'),
     })
-    if (lightpandaFallback?.result) {
-      return lightpandaFallback.result
-    }
-
-    const jinaFallback = await tryJinaFallback({
+    rememberWebFetchProviderFailure(runtime, provider, directError)
+    const fallbackOutcome = await tryFetchFallbacks({
       normalizedUrl,
       finalUrl: normalizedUrl,
       mode,
@@ -919,37 +1158,31 @@ export async function runWebFetch(args, runtime = {}) {
       cacheTtlMs,
       runtime,
       fetchSettings,
+      attemptedProviders,
+      reason: 'connectivity',
     })
-    if (jinaFallback?.result) {
-      return jinaFallback.result
+    if (fallbackOutcome.result) {
+      return fallbackOutcome.result
     }
 
     throw buildFetchConnectivityError({
       normalizedUrl,
       directError,
-      lightpandaFallback,
-      jinaFallback,
+      lightpandaFallback: fallbackOutcome.lightpandaFallback,
+      jinaFallback: fallbackOutcome.jinaFallback,
       runtime,
       settings,
     })
   }
 
   if ([401, 403, 429].includes(response.status)) {
-    const lightpandaFallback = await tryLightpandaFallback({
-      normalizedUrl,
-      finalUrl: response.url || normalizedUrl,
-      mode,
-      maxChars,
-      startedAt,
-      cacheKey,
-      cacheTtlMs,
-      runtime,
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider,
+      reason: 'auth-wall',
+      status: 'error',
+      error: `HTTP ${response.status}`,
     })
-    if (lightpandaFallback?.result) {
-      return lightpandaFallback.result
-    }
-
-    const jinaFallback = await tryJinaFallback({
+    const fallbackOutcome = await tryFetchFallbacks({
       normalizedUrl,
       finalUrl: response.url || normalizedUrl,
       mode,
@@ -960,9 +1193,11 @@ export async function runWebFetch(args, runtime = {}) {
       cacheTtlMs,
       runtime,
       fetchSettings,
+      attemptedProviders,
+      reason: 'auth-wall',
     })
-    if (jinaFallback?.result) {
-      return jinaFallback.result
+    if (fallbackOutcome.result) {
+      return fallbackOutcome.result
     }
 
     throw createStructuredError('网页抓取被目标站点拦截，可能需要登录、验证或浏览器环境。', {
@@ -975,6 +1210,12 @@ export async function runWebFetch(args, runtime = {}) {
     })
   }
   if (!response.ok) {
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider,
+      reason: 'http-response',
+      status: 'error',
+      error: `HTTP ${response.status}`,
+    })
     throw createStructuredError('网页抓取失败，目标页面返回了错误状态。', {
       source: 'tool',
       category: 'network',
@@ -994,7 +1235,13 @@ export async function runWebFetch(args, runtime = {}) {
     unsupportedContentType &&
     JINA_FETCH_PROVIDER.shouldUse({ unsupportedContentType: true })
   ) {
-    const jinaFallback = await tryJinaFallback({
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider,
+      reason: 'unsupported-content',
+      status: 'error',
+      error: contentType || 'unsupported-content-type',
+    })
+    const fallbackOutcome = await tryFetchFallbacks({
       normalizedUrl,
       finalUrl,
       mode,
@@ -1005,12 +1252,15 @@ export async function runWebFetch(args, runtime = {}) {
       cacheTtlMs,
       runtime,
       fetchSettings,
+      attemptedProviders,
+      reason: 'unsupported-content',
+      allowLightpanda: false,
     })
-    if (jinaFallback?.result) {
-      return jinaFallback.result
+    if (fallbackOutcome.result) {
+      return fallbackOutcome.result
     }
-    if (jinaFallback?.error) {
-      throw jinaFallback.error
+    if (fallbackOutcome.jinaFallback?.error) {
+      throw fallbackOutcome.jinaFallback.error
     }
   }
   ensureSupportedFetchContentType(contentType)
@@ -1019,24 +1269,17 @@ export async function runWebFetch(args, runtime = {}) {
   const isHtml =
     contentType.toLowerCase().includes('text/html') ||
     contentType.toLowerCase().includes('application/xhtml+xml')
+  const html = isHtml ? text : ''
 
   const browserOnly = isHtml && looksLikeBrowserOnlyPage(text, finalUrl)
   if (browserOnly) {
-    const lightpandaFallback = await tryLightpandaFallback({
-      normalizedUrl,
-      finalUrl,
-      mode,
-      maxChars,
-      startedAt,
-      cacheKey,
-      cacheTtlMs,
-      runtime,
+    recordFetchProviderAttempt(attemptedProviders, {
+      provider,
+      reason: 'browser-required',
+      status: 'error',
+      error: 'WEB_FETCH_PAGE_REQUIRES_BROWSER',
     })
-    if (lightpandaFallback?.result) {
-      return lightpandaFallback.result
-    }
-
-    const jinaFallback = await tryJinaFallback({
+    const fallbackOutcome = await tryFetchFallbacks({
       normalizedUrl,
       finalUrl,
       mode,
@@ -1047,9 +1290,11 @@ export async function runWebFetch(args, runtime = {}) {
       cacheTtlMs,
       runtime,
       fetchSettings,
+      attemptedProviders,
+      reason: 'browser-required',
     })
-    if (jinaFallback?.result) {
-      return jinaFallback.result
+    if (fallbackOutcome.result) {
+      return fallbackOutcome.result
     }
 
     throw createStructuredError('网页抓取检测到该页面需要浏览器交互后才能继续。', {
@@ -1061,7 +1306,6 @@ export async function runWebFetch(args, runtime = {}) {
     })
   }
 
-  const html = isHtml ? text : ''
   const extractionMode = mode === 'summary' ? 'text' : 'markdown'
   const readabilityResult =
     isHtml && fetchSettings.readability
@@ -1080,21 +1324,7 @@ export async function runWebFetch(args, runtime = {}) {
       localContentThin,
     })
   ) {
-    const lightpandaFallback = await tryLightpandaFallback({
-      normalizedUrl,
-      finalUrl,
-      mode,
-      maxChars,
-      startedAt,
-      cacheKey,
-      cacheTtlMs,
-      runtime,
-    })
-    if (lightpandaFallback?.result) {
-      return lightpandaFallback.result
-    }
-
-    const jinaFallback = await tryJinaFallback({
+    const fallbackOutcome = await tryFetchFallbacks({
       normalizedUrl,
       finalUrl,
       mode,
@@ -1105,9 +1335,11 @@ export async function runWebFetch(args, runtime = {}) {
       cacheTtlMs,
       runtime,
       fetchSettings,
+      attemptedProviders,
+      reason: 'local-content-thin',
     })
-    if (jinaFallback?.result) {
-      return jinaFallback.result
+    if (fallbackOutcome.result) {
+      return fallbackOutcome.result
     }
   }
 
@@ -1127,11 +1359,14 @@ export async function runWebFetch(args, runtime = {}) {
     tookMs: Date.now() - startedAt,
   }
   writeFetchCacheEntry(cacheKey, result, cacheTtlMs)
-  return {
-    ...result,
-    cache: {
-      hit: false,
-      layer: 'miss',
-    },
-  }
+  rememberWebFetchProviderSuccess(runtime, provider)
+  recordFetchProviderAttempt(attemptedProviders, {
+    provider,
+    reason: 'direct-fetch',
+    status: 'success',
+  })
+  return attachFetchResultMeta(result, attemptedProviders, {
+    hit: false,
+    layer: 'miss',
+  })
 }

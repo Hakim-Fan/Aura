@@ -1,10 +1,3 @@
-function describeLightpandaAvailability(settings) {
-  if (settings?.browser?.lightpanda?.enabled === true) {
-    return 'enabled'
-  }
-  return 'disabled'
-}
-
 function buildCurrentDateContext() {
   const now = new Date()
   const timezone =
@@ -49,8 +42,10 @@ function buildReasoningInstruction(settings) {
   return reasoningInstructions[settings.reasoningEffort] || reasoningInstructions.medium
 }
 
-export function buildCapabilityExposureNote(snapshot, routeState) {
-  const lines = ['Only task-relevant optional capabilities are exposed for this turn.']
+export function buildCapabilityExposureNote(snapshot, routeState, toolAvailability = {}) {
+  const lines = [
+    'Mounted direct tools follow runtime safety boundaries. They are ordered by likely relevance, but currently mounted tools remain callable when relevant.',
+  ]
 
   if (routeState) {
     lines.push(
@@ -73,13 +68,30 @@ export function buildCapabilityExposureNote(snapshot, routeState) {
     .join(', ')
 
   if (items) {
-    lines.push(`Selected optional capabilities: ${items}.`)
+    lines.push(`Mounted optional capabilities: ${items}.`)
+  }
+
+  const deferredCount =
+    typeof toolAvailability.deferredToolCount === 'number' &&
+    Number.isFinite(toolAvailability.deferredToolCount)
+      ? Math.max(0, Math.round(toolAvailability.deferredToolCount))
+      : 0
+  const discoverableCount =
+    typeof toolAvailability.discoverableToolCount === 'number' &&
+    Number.isFinite(toolAvailability.discoverableToolCount)
+      ? Math.max(0, Math.round(toolAvailability.discoverableToolCount))
+      : deferredCount
+
+  if (deferredCount > 0) {
+    lines.push(
+      `Additional deferred plugin/MCP tools are available via tool_search (${deferredCount} hidden tools, ${discoverableCount} currently discoverable in search). Search first, then call the loaded tool directly once it appears in the turn.`,
+    )
   }
 
   if (snapshot?.mcpServers?.length) {
     const names = snapshot.mcpServers.map(server => server.name).filter(Boolean).join(', ')
     lines.push(
-      `Selected MCP servers for this turn: ${names}. Their tools are already mounted in the tool list for this turn, so call them directly when relevant instead of saying MCP must be invoked by an external client.`,
+      `Mounted MCP servers for this turn: ${names}. Their tools are already in the tool list, so call them directly when relevant instead of describing them as external-only capabilities.`,
     )
   }
 
@@ -93,6 +105,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
     buildCurrentDateContext(),
     'Answer directly when your current knowledge or the mounted local context is sufficient.',
     'Use only the currently mounted tools when they materially reduce uncertainty or let you act directly on the user request.',
+    'If tool_search is mounted, use it to discover deferred plugin or MCP capabilities before claiming a needed tool does not exist.',
     'Do not claim that something is fixed, installed, configured, created, or completed unless the current run produced direct evidence.',
     'Do not access paths outside the configured workspace root.',
     'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
@@ -101,6 +114,11 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
   ]
 
   if (routeState) {
+    const mixedRetrievalAndWorkspaceExecution =
+      routeState.needsExternalFacts === true &&
+      routeState.workspaceRelated === true &&
+      routeState.answerMode === 'execute'
+
     sections.push(
       [
         `Current answer mode: ${routeState.answerMode}.`,
@@ -148,10 +166,26 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       sections.push('Only readonly workspace tools are mounted for this turn. Diagnose or explain first; do not imply that files were changed.')
     } else if (routeState.capabilityTier === 'local-write') {
       sections.push('Workspace read and write tools are mounted for this turn. Keep changes focused and verify before claiming completion.')
+      sections.push(
+        'For code changes, prefer apply_patch as the main editing path. Use write_file mainly for new files or full-document rewrites, and keep edit_file / multi_edit_file as exact-match fallbacks.',
+      )
+      sections.push(
+        'A high-quality local editing loop is: locate with search_code or glob_files, inspect with read_file, patch with apply_patch, then do targeted verification before the final answer.',
+      )
     } else if (routeState.capabilityTier === 'web-lookup') {
-      sections.push('Web lookup tools are mounted only for external facts and current information. Prefer local context first, then use the web only when necessary.')
+      sections.push(
+        mixedRetrievalAndWorkspaceExecution
+          ? 'This turn mixes external fact gathering with local workspace execution. Retrieval tools and workspace write tools may both be mounted. Gather just enough outside evidence, then return to concrete repo changes.'
+          : 'Web retrieval tools are mounted for external facts and current information. Prefer local context first, then use the web only when necessary.',
+      )
       sections.push(
         'Use staged retrieval like mature commercial assistants: start with web_search for straightforward fact lookup or quick source discovery, then escalate to web_research only when the search result says the evidence is still thin, conflicting, or clearly needs deeper reading. Use web_fetch when you already know the exact URL that needs closer inspection.',
+      )
+      sections.push(
+        'web_search, web_research, and web_fetch may be mounted together. Choose the right retrieval tool directly for the job instead of assuming the runtime will auto-upgrade one into another.',
+      )
+      sections.push(
+        'Treat retrieval backends as runtime internals. Work through web_search, web_fetch, and web_research as stable tools, and do not narrate provider selection details to the user unless a backend-specific failure materially affects the task.',
       )
       sections.push(
         'For source selection, prefer high-signal domains when relevant: official docs for technical references, reputable finance sites for market data, and established news outlets for current events.',
@@ -185,7 +219,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
           : 'Do not burn searches on minor query rewrites. After two discovery searches without switching to reading or web_research synthesis, stop and move to source analysis or a bounded answer.',
       )
       sections.push(
-        'Ordinary research does not escalate into browser interaction automatically. Stay within web_search, web_research, web_fetch, and when available the Lightpanda-backed fetch path unless the user explicitly asked to operate a browser.',
+        'Ordinary research does not escalate into browser interaction automatically. Stay within web_search, web_research, and web_fetch unless the user explicitly asked to operate a browser.',
       )
       sections.push(
         'When you stop searching, present it as a user-facing evidence boundary, not an internal budget boundary.',
@@ -205,21 +239,13 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
     }
   }
 
-  if (
-    routeState?.capabilityTier === 'web-lookup' ||
-    routeState?.capabilityTier === 'browser-interactive'
-  ) {
+  if (routeState?.capabilityTier === 'browser-interactive') {
     sections.push(
-      `Lightpanda lookup path: ${describeLightpandaAvailability(settings)}.`,
+      'Open the site with system_browser_open when the user needs to log in, solve CAPTCHA, grant consent, submit forms, or otherwise interact manually.',
     )
-    if (routeState.capabilityTier === 'browser-interactive') {
-      sections.push(
-        'Open the site with system_browser_open when the user needs to log in, solve CAPTCHA, grant consent, submit forms, or otherwise interact manually.',
-      )
-      sections.push(
-        'If computer_* tools are mounted, use them only after opening the system browser and only when they materially help the requested interaction.',
-      )
-    }
+    sections.push(
+      'If computer_* tools are mounted, use them only after opening the system browser and only when they materially help the requested interaction.',
+    )
   }
 
   if (skillPrompt.trim()) {

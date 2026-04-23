@@ -22,7 +22,8 @@ export function createWebTools(context = {}) {
     tools.push({
       source: 'builtin',
       name: 'web_research',
-      description: 'Deeper multi-source web research that searches and automatically fetches/extracts top results in one step when quick search evidence is not enough.',
+      description:
+        'Deeper multi-source web research that searches and automatically fetches or extracts top results in one step when quick search evidence is not enough. The retrieval runtime chooses the underlying search and fetch backends internally.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -79,7 +80,8 @@ export function createWebTools(context = {}) {
     tools.push({
       source: 'builtin',
       name: 'web_search',
-      description: 'Fast first-pass web lookup for recent information, docs, and articles. It is best for lightweight discovery and can trigger deeper research when search evidence is too thin.',
+      description:
+        'Fast first-pass web lookup for recent information, docs, and articles. It is best for lightweight discovery, and the retrieval runtime chooses the underlying search backend unless you override the provider.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -142,7 +144,8 @@ export function createWebTools(context = {}) {
     tools.push({
       source: 'builtin',
       name: 'web_fetch',
-      description: 'Fetch a webpage over HTTP and extract its main content, summary, or metadata without opening a browser.',
+      description:
+        'Fetch a webpage over HTTP and extract its main content, summary, or metadata without opening a browser. The retrieval runtime chooses the best local fetch backend internally.',
       inputSchema: {
         type: 'object',
         properties: {

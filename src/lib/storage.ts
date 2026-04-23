@@ -436,11 +436,19 @@ function normalizeEvidenceSummary(value: unknown): ExecutionEvidenceSummary | un
               ? record.producedEvidence.filter(
                   (entry): entry is NonNullable<typeof record.producedEvidence>[number] =>
                     entry === 'file_mutation' ||
+                    entry === 'file_verified' ||
+                    entry === 'artifact_present' ||
+                    entry === 'artifact_read_back' ||
+                    entry === 'artifact_hash_recorded' ||
                     entry === 'command_exit_0' ||
                     entry === 'command_output' ||
                     entry === 'test_pass' ||
                     entry === 'test_fail' ||
                     entry === 'page_state' ||
+                    entry === 'web_search_result' ||
+                    entry === 'web_research_result' ||
+                    entry === 'web_fetch_content' ||
+                    entry === 'web_fetch_summary' ||
                     entry === 'search_result' ||
                     entry === 'user_denied',
                 )
@@ -462,6 +470,19 @@ function normalizeEvidenceSummary(value: unknown): ExecutionEvidenceSummary | un
     hasAnyExecution: summary.hasAnyExecution === true,
     hasWriteEffect: summary.hasWriteEffect === true,
     hasBrowserEffect: summary.hasBrowserEffect === true,
+    hasFileVerification: summary.hasFileVerification === true,
+    verifiedArtifactCount:
+      typeof summary.verifiedArtifactCount === 'number' &&
+      Number.isFinite(summary.verifiedArtifactCount)
+        ? Math.max(0, Math.round(summary.verifiedArtifactCount))
+        : 0,
+    artifactPaths: Array.isArray(summary.artifactPaths)
+      ? summary.artifactPaths.filter(
+          (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
+        )
+      : [],
+    hasSuccessfulCommand: summary.hasSuccessfulCommand === true,
+    hasSuccessfulBrowserAction: summary.hasSuccessfulBrowserAction === true,
     hasVerifiedEvidence: summary.hasVerifiedEvidence === true,
     hasApprovalBlock: summary.hasApprovalBlock === true,
     hasCapabilityBlock: summary.hasCapabilityBlock === true,

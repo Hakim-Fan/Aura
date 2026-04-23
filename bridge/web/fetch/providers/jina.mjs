@@ -3,20 +3,15 @@ import { guardedFetch, readResponseText } from '../../net/guardedFetch.mjs'
 import { collapseWhitespace } from '../extraction/basicHtml.mjs'
 import {
   buildCloudFetchHeaders,
-  getCloudFetchProviderAvailability,
-  markCloudFetchProviderBlocked,
   resolveCloudFetchProviderAccess,
 } from './cloudAccess.mjs'
+import {
+  getWebFetchProviderAvailability,
+  rememberWebFetchProviderFailure,
+} from '../providerRegistry.mjs'
 
 const JINA_READER_PREFIX = 'https://r.jina.ai/'
 const JINA_MIN_INTERVAL_MS = 1_500
-const JINA_RUNTIME_BLOCK_CODES = new Set([
-  'JINA_FETCH_RATE_LIMITED',
-  'JINA_FETCH_QUOTA_EXCEEDED',
-  'JINA_FETCH_ANONYMOUS_FORBIDDEN',
-  'JINA_FETCH_AUTH_FAILED',
-  'JINA_FETCH_UNAVAILABLE',
-])
 
 export const JINA_FETCH_PROVIDER_DESCRIPTOR = {
   id: 'jina-reader',
@@ -74,7 +69,9 @@ export function getJinaProviderAvailability(runtime = {}, settings = {}) {
   const access = resolveJinaProviderAccess(settings)
   return {
     access,
-    ...getCloudFetchProviderAvailability(runtime, access),
+    ...getWebFetchProviderAvailability(runtime, JINA_FETCH_PROVIDER_DESCRIPTOR.id, {
+      enabled: access.usable,
+    }),
   }
 }
 
@@ -167,17 +164,8 @@ function buildJinaFailure(response, url, access) {
   })
 }
 
-export function rememberJinaFailure(runtime = {}, error, settings = {}) {
-  const code = error?.errorInfo?.code || error?.code || ''
-  if (!JINA_RUNTIME_BLOCK_CODES.has(code)) {
-    return null
-  }
-
-  return markCloudFetchProviderBlocked(runtime, resolveJinaProviderAccess(settings), {
-    code,
-    summary: error?.errorInfo?.summary || error?.message || 'Jina Reader 当前不可用',
-    detail: error?.errorInfo?.detail || error?.rawMessage || '',
-  })
+export function rememberJinaFailure(runtime = {}, error) {
+  return rememberWebFetchProviderFailure(runtime, JINA_FETCH_PROVIDER_DESCRIPTOR.id, error)
 }
 
 export function createJinaFetchProvider() {
@@ -189,19 +177,14 @@ export function createJinaFetchProvider() {
       const availability = getJinaProviderAvailability(runtime, runtime.settings || {})
       if (!availability.usable) {
         if (availability.blocked) {
-          const blockedCode = availability.blocked.code || 'JINA_FETCH_PROVIDER_BLOCKED'
-          const blockedCategory =
-            blockedCode === 'JINA_FETCH_AUTH_FAILED'
-              ? 'authentication'
-              : blockedCode === 'JINA_FETCH_UNAVAILABLE'
-                ? 'unavailable'
-                : 'rate_limit'
+          const blockedCode = availability.entry?.code || 'JINA_FETCH_PROVIDER_BLOCKED'
+          const blockedCategory = availability.entry?.category || 'execution_failed'
           throw createStructuredError('Jina Reader 在当前任务中已被停用。', {
             source: 'tool',
             category: blockedCategory,
             code: blockedCode,
             detail:
-              availability.blocked.detail ||
+              availability.entry?.detail ||
               'Jina Reader previously failed in a way that indicates it should not be retried for this task.',
             suggestedAction: '请改用本地抓取、搜索摘要，或在后续任务中配置 API Key 后重试。',
             retryable: false,

@@ -242,6 +242,10 @@ export type EvidenceRecord = {
   effectTypes: Array<'read' | 'write' | 'execute' | 'browser' | 'plan'>
   producedEvidence: Array<
     | 'file_mutation'
+    | 'file_verified'
+    | 'artifact_present'
+    | 'artifact_read_back'
+    | 'artifact_hash_recorded'
     | 'command_exit_0'
     | 'command_output'
     | 'test_pass'
@@ -263,6 +267,11 @@ export type ExecutionEvidenceSummary = {
   hasAnyExecution: boolean
   hasWriteEffect: boolean
   hasBrowserEffect: boolean
+  hasFileVerification: boolean
+  verifiedArtifactCount: number
+  artifactPaths: string[]
+  hasSuccessfulCommand: boolean
+  hasSuccessfulBrowserAction: boolean
   hasVerifiedEvidence: boolean
   hasApprovalBlock: boolean
   hasCapabilityBlock: boolean

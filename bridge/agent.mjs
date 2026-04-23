@@ -11,13 +11,12 @@ import {
   applyRouteToolBudgets,
   deriveHardSignals,
   escalateRouteState,
-  filterToolsForRouteState,
   getRouteEscalationTargets,
   inferRouteState,
   selectAgentStrategy,
 } from './agentRouting.mjs'
 import { buildSkillPrompt, loadPluginTools, loadSkillCatalog } from './extensions.mjs'
-import { classifyIntent } from './intentClassifier.mjs'
+import { resolveIntentClassification } from './intentClassifier.mjs'
 import { connectMcpTools } from './mcp.mjs'
 import {
   finalizeGoogleAnswer,
@@ -38,6 +37,9 @@ import {
   deriveCompletionState,
   enforceEvidencePolicy,
 } from './agentEvidence.mjs'
+import { applyCompletionGate } from './completionGate.mjs'
+import { createToolRegistry } from './toolRegistry.mjs'
+import { createToolRouter } from './toolRouter.mjs'
 import {
   ORCHESTRATED_AGENT_AVAILABLE,
   runOrchestratedAgent,
@@ -236,6 +238,8 @@ function buildRouteDecisionSnapshot({
   tierHistory,
   stopReason,
   classification,
+  classificationSource,
+  classificationReason,
   strategy,
 }) {
   return {
@@ -259,6 +263,8 @@ function buildRouteDecisionSnapshot({
           confidence: classification.confidence,
         }
       : undefined,
+    classificationSource: classificationSource || undefined,
+    classificationReason: classificationReason || undefined,
     answerMode: routeState.answerMode,
     capabilityTier: routeState.capabilityTier,
     budgets: {
@@ -544,20 +550,59 @@ function normalizeFinalAnswer(message) {
   return (message || '').trim()
 }
 
-function shouldRunFinalization(result) {
+function hasTerminalPunctuation(value) {
+  return /[。！？.!?]["')\]]*\s*$/u.test(String(value || '').trim())
+}
+
+function looksLikeStructuredUserAnswer(value) {
+  const normalized = normalizeFinalAnswer(value)
+  if (!normalized) {
+    return false
+  }
+
+  if (/\n[-*]\s/u.test(normalized) || /\n\d+\.\s/u.test(normalized)) {
+    return true
+  }
+
+  const sentenceCount = (normalized.match(/[。！？.!?]+/gu) || []).length
+  return sentenceCount >= 2 || hasTerminalPunctuation(normalized)
+}
+
+function shouldRunFinalization(result, recentToolEvents, routeState) {
   const finalMessage = normalizeFinalAnswer(result.message)
   const providerReasoning = extractProviderReasoning(result.reasoning || [])
-  const hasToolContext = (result.toolEvents || []).length > 0
+  const hasToolContext = Array.isArray(recentToolEvents) && recentToolEvents.length > 0
   if (!hasToolContext) {
     return false
   }
   if (!finalMessage || finalMessage === '模型没有返回文本内容。') {
     return true
   }
-  if (finalMessage.length >= 120) {
+
+  if (
+    routeState?.responseStyle === 'research-structured' &&
+    finalMessage.length < 140
+  ) {
+    return true
+  }
+
+  if (routeState?.answerMode === 'execute' && finalMessage.length < 90) {
+    return true
+  }
+
+  if (finalMessage.length >= 140 && looksLikeStructuredUserAnswer(finalMessage)) {
     return false
   }
-  return providerReasoning.length > 200 && !/[。！？!?\n]/u.test(finalMessage.slice(60))
+
+  if (finalMessage.length >= 110 && hasTerminalPunctuation(finalMessage)) {
+    return false
+  }
+
+  return (
+    providerReasoning.length > 200 &&
+    finalMessage.length < 120 &&
+    !looksLikeStructuredUserAnswer(finalMessage)
+  )
 }
 
 async function runProviderTurn({
@@ -571,6 +616,7 @@ async function runProviderTurn({
   taskTracker,
   currentTaskId,
 }) {
+  const startingToolEventCount = toolEvents.length
   const providerHooks = {
     ...hooks,
     settings,
@@ -591,8 +637,9 @@ async function runProviderTurn({
       hooks: providerHooks,
     })
     const resolvedMessages = result.messages || messages
+    const recentToolEvents = toolEvents.slice(startingToolEventCount)
 
-    if (shouldRunFinalization(result)) {
+    if (shouldRunFinalization(result, recentToolEvents, routeState)) {
       try {
         const completionContext = buildCompletionContext(routeState, toolEvents)
         hooks?.onPhaseChange?.('finalizing')
@@ -600,7 +647,7 @@ async function runProviderTurn({
           settings,
           systemPrompt,
           messages: resolvedMessages,
-          toolEvents,
+          toolEvents: recentToolEvents,
           reasoningText: extractProviderReasoning(result.reasoning || []),
           draftMessage: result.message,
           completionState: completionContext.completionState,
@@ -637,8 +684,9 @@ async function runProviderTurn({
       hooks: providerHooks,
     })
     const resolvedMessages = result.messages || messages
+    const recentToolEvents = toolEvents.slice(startingToolEventCount)
 
-    if (shouldRunFinalization(result)) {
+    if (shouldRunFinalization(result, recentToolEvents, routeState)) {
       try {
         const completionContext = buildCompletionContext(routeState, toolEvents)
         hooks?.onPhaseChange?.('finalizing')
@@ -646,7 +694,7 @@ async function runProviderTurn({
           settings,
           systemPrompt,
           messages: resolvedMessages,
-          toolEvents,
+          toolEvents: recentToolEvents,
           reasoningText: extractProviderReasoning(result.reasoning || []),
           draftMessage: result.message,
           completionState: completionContext.completionState,
@@ -862,6 +910,7 @@ export async function runRouteFirstAgent(request) {
     runtime.taskTracker || createTaskTracker(hooks, summarizeMessages(messages))
   const currentTaskId = runtime.currentTaskId || taskTracker.rootId
   taskTracker.setStatus(currentTaskId, 'running')
+  const hardSignals = deriveHardSignals(messages)
 
   const builtinTools = createBuiltinTools(context)
   const advancedTools = createAdvancedTools({
@@ -876,8 +925,11 @@ export async function runRouteFirstAgent(request) {
     }),
     taskTracker,
   })
-  const [classification, skillCatalog, pluginTools, mcp] = await Promise.all([
-    classifyIntent(messages, settings).catch(() => null),
+  const [classificationResult, skillCatalog, pluginTools, mcp] = await Promise.all([
+    resolveIntentClassification(messages, settings, {
+      hardSignals,
+      settings,
+    }).catch(() => null),
     loadSkillCatalog(appRoot, capabilities?.skills || settings.enabledSkillIds || []),
     loadPluginTools(
       appRoot,
@@ -886,13 +938,13 @@ export async function runRouteFirstAgent(request) {
     ),
     connectMcpTools(capabilities?.mcpServers || settings.mcpServers || []),
   ])
-  const availableTools = [
-    ...builtinTools,
-    ...advancedTools,
-    ...pluginTools,
-    ...mcp.tools,
-  ]
-  const hardSignals = deriveHardSignals(messages)
+  const toolRegistry = createToolRegistry({
+    builtinTools,
+    advancedTools,
+    pluginTools,
+    mcpTools: mcp.tools,
+  })
+  const classification = classificationResult?.classification || null
   const normalizedClassification = classification
     ? applyHardSignalIntentOverrides(classification, hardSignals)
     : null
@@ -918,6 +970,8 @@ export async function runRouteFirstAgent(request) {
   let lastRouteDecision = {
     strategyDecision: strategy,
     intentClassification: normalizedClassification || undefined,
+    classificationSource: classificationResult?.source || undefined,
+    classificationReason: classificationResult?.reason || undefined,
     answerMode: routeState.answerMode,
     capabilityTier: routeState.capabilityTier,
     budgets: {
@@ -943,8 +997,9 @@ export async function runRouteFirstAgent(request) {
         availableEscalations,
       }
       const effectiveRunSettings = buildEffectiveRunSettings(settings, promptRouteState)
+      const toolRouter = createToolRouter(toolRegistry, routeState)
       const routedTools = applyRouteToolBudgets(
-        filterToolsForRouteState(availableTools, routeState),
+        toolRouter.modelVisibleTools,
         routeState,
       )
       const selectedCapabilities = selectTurnCapabilities({
@@ -960,6 +1015,10 @@ export async function runRouteFirstAgent(request) {
       const exposureNote = buildAgentCapabilityExposureNote(
         selectedCapabilities.capabilitySnapshot,
         promptRouteState,
+        {
+          deferredToolCount: toolRouter.deferredTools.length,
+          discoverableToolCount: toolRouter.discoverableToolCount,
+        },
       )
       lastSystemPrompt = appendCarryoverContextToPrompt(
         appendRouteNotesToPrompt(
@@ -988,6 +1047,8 @@ export async function runRouteFirstAgent(request) {
         availableEscalations,
         tierHistory: [...routeHistory.map(entry => entry.capabilityTier), routeState.capabilityTier],
         classification: normalizedClassification,
+        classificationSource: classificationResult?.source,
+        classificationReason: classificationResult?.reason,
         strategy,
       })
       const turnToolEventStart = toolEvents.length
@@ -1070,6 +1131,7 @@ export async function runRouteFirstAgent(request) {
 
       const runtimeBlocks = buildRuntimeBlocks(routeStopReason)
       result = enforceEvidencePolicy(result, toolEvents, promptRouteState, runtimeBlocks)
+      result = applyCompletionGate(result, promptRouteState)
 
       routeHistory.push(turnSummary)
       lastRouteDecision = buildRouteDecisionSnapshot({
@@ -1080,6 +1142,8 @@ export async function runRouteFirstAgent(request) {
         availableEscalations,
         tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),
         classification: normalizedClassification,
+        classificationSource: classificationResult?.source,
+        classificationReason: classificationResult?.reason,
         strategy,
         stopReason:
           routeStopReason ||
@@ -1194,13 +1258,18 @@ export async function runRouteFirstAgent(request) {
               })
 
         if (recovered.message.trim()) {
-          const recoveredResult = enforceEvidencePolicy(
+          let recoveredResult = enforceEvidencePolicy(
             recovered,
             toolEvents,
             routeState,
             buildRuntimeBlocks(lastRouteDecision?.stopReason),
           )
-          const summaryReasoning = summarizeReasoning(messages, toolEvents, recovered.message)
+          recoveredResult = applyCompletionGate(recoveredResult, routeState)
+          const summaryReasoning = summarizeReasoning(
+            messages,
+            toolEvents,
+            recoveredResult.message,
+          )
           hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
             blockId: summaryReasoning[0].id,
             kind: summaryReasoning[0].kind,
@@ -1234,13 +1303,18 @@ export async function runRouteFirstAgent(request) {
         normalized,
         partialMessage,
       )
-      const fallbackResult = enforceEvidencePolicy(
+      let fallbackResult = enforceEvidencePolicy(
         { message: fallbackMessage },
         toolEvents,
         routeState,
         buildRuntimeBlocks(lastRouteDecision?.stopReason),
       )
-      const summaryReasoning = summarizeReasoning(messages, toolEvents, fallbackMessage)
+      fallbackResult = applyCompletionGate(fallbackResult, routeState)
+      const summaryReasoning = summarizeReasoning(
+        messages,
+        toolEvents,
+        fallbackResult.message,
+      )
       hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
         blockId: summaryReasoning[0].id,
         kind: summaryReasoning[0].kind,

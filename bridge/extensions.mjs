@@ -2,7 +2,19 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { createStructuredError } from './runtimeErrors.mjs'
+import { readCache, normalizeCacheKey, writeCache } from './web/shared/cache.mjs'
+import {
+  readPersistentCacheEntry,
+  writePersistentCache,
+} from './web/shared/persistentCache.mjs'
 import { stringifyOutput } from './utils.mjs'
+
+const PLUGIN_METADATA_CACHE = new Map()
+const PLUGIN_METADATA_NAMESPACE = 'plugin-tools'
+const PLUGIN_METADATA_CACHE_MAX_ENTRIES = 128
+const PLUGIN_METADATA_TTL_MS = 15 * 60_000
+const PLUGIN_RUNTIME_CACHE = new Map()
 
 function resolveAuraHome() {
   return path.join(os.homedir(), '.aura')
@@ -236,6 +248,274 @@ function summarizeSkillContent(skillId, content) {
   }
 }
 
+function buildPluginLoadError(pluginId, filePath, error) {
+  return createStructuredError(`插件“${pluginId}”加载失败。`, {
+    source: 'plugin',
+    category: 'execution_failed',
+    code:
+      error && typeof error === 'object' && typeof error.code === 'string'
+        ? error.code
+        : 'PLUGIN_LOAD_FAILED',
+    detail: [
+      `Plugin id: ${pluginId}`,
+      `Entry path: ${filePath}`,
+      error instanceof Error ? error.stack || error.message : String(error),
+    ]
+      .filter(Boolean)
+      .join('\n'),
+    suggestedAction: '请检查插件入口文件是否存在、导出格式是否正确，以及插件代码是否能在当前环境下正常加载。',
+  })
+}
+
+function buildPluginToolLookupError(pluginId, toolName, filePath) {
+  return createStructuredError(`插件工具“${pluginId}/${toolName}”当前不可用。`, {
+    source: 'plugin',
+    category: 'not_found',
+    code: 'PLUGIN_TOOL_NOT_FOUND',
+    detail: [
+      `Plugin id: ${pluginId}`,
+      `Tool name: ${toolName}`,
+      `Entry path: ${filePath}`,
+    ].join('\n'),
+    suggestedAction: '请检查插件是否仍然导出了这个工具，或重新加载插件后再试。',
+  })
+}
+
+function sanitizePluginSchema(schema) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+    return {
+      type: 'object',
+      properties: {},
+    }
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(schema))
+  } catch {
+    return {
+      type: 'object',
+      properties: {},
+    }
+  }
+}
+
+function resolvePluginExport(module) {
+  return module?.plugin || module?.default?.plugin || module?.default
+}
+
+function normalizePluginToolMetadata(tool) {
+  const localName = typeof tool?.name === 'string' ? tool.name.trim() : ''
+  if (!localName) {
+    return null
+  }
+
+  return {
+    localName,
+    aliases: Array.isArray(tool?.aliases)
+      ? tool.aliases.filter(entry => typeof entry === 'string' && entry.trim())
+      : [],
+    approvalCategory:
+      tool?.approvalCategory === 'shell' ||
+      tool?.approvalCategory === 'file_write' ||
+      tool?.approvalCategory === 'computer_use'
+        ? tool.approvalCategory
+        : undefined,
+    description:
+      typeof tool?.description === 'string' && tool.description.trim()
+        ? tool.description.trim()
+        : localName,
+    inputSchema: sanitizePluginSchema(tool?.inputSchema),
+  }
+}
+
+function normalizePluginMetadata(plugin, fallbackPluginId) {
+  const pluginId =
+    typeof plugin?.id === 'string' && plugin.id.trim()
+      ? plugin.id.trim()
+      : String(fallbackPluginId || '').trim()
+  if (!pluginId) {
+    return null
+  }
+
+  const tools = Array.isArray(plugin?.tools)
+    ? plugin.tools.map(normalizePluginToolMetadata).filter(Boolean)
+    : []
+  if (tools.length === 0) {
+    return null
+  }
+
+  return {
+    id: pluginId,
+    name:
+      typeof plugin?.name === 'string' && plugin.name.trim()
+        ? plugin.name.trim()
+        : prettifyIdentifier(pluginId),
+    description:
+      typeof plugin?.description === 'string' ? plugin.description.trim() : '',
+    tools,
+  }
+}
+
+function normalizeCachedPluginMetadata(value, fallbackPluginId) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+
+  return normalizePluginMetadata(
+    {
+      id: value.id || fallbackPluginId,
+      name: value.name,
+      description: value.description,
+      tools: Array.isArray(value.tools)
+        ? value.tools.map(tool => ({
+            name: tool?.localName,
+            aliases: tool?.aliases,
+            approvalCategory: tool?.approvalCategory,
+            description: tool?.description,
+            inputSchema: tool?.inputSchema,
+          }))
+        : [],
+    },
+    fallbackPluginId,
+  )
+}
+
+async function statPluginEntry(filePath) {
+  try {
+    const stat = await fs.stat(filePath)
+    return {
+      size: Number(stat.size) || 0,
+      mtimeMs: Math.round(Number(stat.mtimeMs) || 0),
+    }
+  } catch {
+    return null
+  }
+}
+
+function buildPluginVersionToken(filePath, stat) {
+  return `${filePath}:${stat?.size || 0}:${stat?.mtimeMs || 0}`
+}
+
+function buildPluginMetadataCacheKey(pluginId, filePath, versionToken) {
+  return normalizeCacheKey(
+    JSON.stringify({
+      pluginId,
+      filePath,
+      versionToken,
+    }),
+  )
+}
+
+function readPluginMetadataCache(cacheKey) {
+  const inMemory = readCache(PLUGIN_METADATA_CACHE, cacheKey)
+  if (inMemory) {
+    return {
+      value: inMemory,
+      layer: 'memory',
+    }
+  }
+
+  const persisted = readPersistentCacheEntry(PLUGIN_METADATA_NAMESPACE, cacheKey, {
+    maxEntries: PLUGIN_METADATA_CACHE_MAX_ENTRIES,
+  })
+  if (!persisted) {
+    return null
+  }
+
+  writeCache(
+    PLUGIN_METADATA_CACHE,
+    cacheKey,
+    persisted.value,
+    Math.max(1, persisted.expiresAt - Date.now()),
+  )
+  return {
+    value: persisted.value,
+    layer: 'persistent',
+  }
+}
+
+function writePluginMetadataCache(cacheKey, value, ttlMs = PLUGIN_METADATA_TTL_MS) {
+  writeCache(PLUGIN_METADATA_CACHE, cacheKey, value, ttlMs)
+  writePersistentCache(PLUGIN_METADATA_NAMESPACE, cacheKey, value, ttlMs, {
+    maxEntries: PLUGIN_METADATA_CACHE_MAX_ENTRIES,
+  })
+}
+
+async function importPluginRuntime(filePath, versionToken, pluginId) {
+  const runtimeKey = `${filePath}::${versionToken}`
+  const cached = PLUGIN_RUNTIME_CACHE.get(runtimeKey)
+  if (cached) {
+    return cached
+  }
+
+  const loadPromise = (async () => {
+    try {
+      const moduleUrl = new URL(pathToFileURL(filePath).href)
+      moduleUrl.searchParams.set('v', versionToken)
+      const module = await import(moduleUrl.href)
+      const plugin = resolvePluginExport(module)
+      const normalized = normalizePluginMetadata(plugin, pluginId)
+      if (!normalized) {
+        throw new Error('Plugin did not export a valid tool definition set.')
+      }
+
+      const toolMap = new Map()
+      for (const tool of Array.isArray(plugin?.tools) ? plugin.tools : []) {
+        if (typeof tool?.name === 'string' && tool.name.trim()) {
+          toolMap.set(tool.name.trim(), tool)
+        }
+      }
+
+      return {
+        plugin: normalized,
+        toolMap,
+      }
+    } catch (error) {
+      throw buildPluginLoadError(pluginId, filePath, error)
+    }
+  })()
+
+  PLUGIN_RUNTIME_CACHE.set(runtimeKey, loadPromise)
+  return loadPromise
+}
+
+function buildPluginToolsFromMetadata(pluginMetadata, filePath, versionToken, context) {
+  async function getPluginRuntime() {
+    return importPluginRuntime(filePath, versionToken, pluginMetadata.id)
+  }
+
+  return pluginMetadata.tools.map(toolMetadata => ({
+    source: 'plugin',
+    capabilityId: pluginMetadata.id,
+    capabilityName: pluginMetadata.name,
+    capabilityDescription: pluginMetadata.description || '',
+    name: `plugin__${pluginMetadata.id}__${toolMetadata.localName}`,
+    aliases: toolMetadata.aliases,
+    approvalCategory: toolMetadata.approvalCategory,
+    description: `[Plugin:${pluginMetadata.name}] ${toolMetadata.description}`,
+    inputSchema: toolMetadata.inputSchema,
+    async run(args, runtime = {}) {
+      const pluginRuntime = await getPluginRuntime()
+      const tool = pluginRuntime.toolMap.get(toolMetadata.localName)
+      if (!tool || typeof tool.handler !== 'function') {
+        throw buildPluginToolLookupError(
+          pluginMetadata.id,
+          toolMetadata.localName,
+          filePath,
+        )
+      }
+
+      const result = await tool.handler({
+        args,
+        context,
+        signal: runtime.signal,
+        throwIfAborted: runtime.throwIfAborted,
+      })
+      return stringifyOutput(result)
+    },
+  }))
+}
+
 async function resolveSkillFilePath(appRoot, entry) {
   const skillId = typeof entry === 'string' ? entry : entry?.id
   const explicitPath = typeof entry === 'object' ? entry?.promptPath : ''
@@ -325,41 +605,33 @@ export async function loadPluginTools(appRoot, enabledPlugins, context) {
     if (!filePath) {
       continue
     }
-    let module
-    try {
-      module = await import(pathToFileURL(filePath).href)
-    } catch (error) {
-      console.warn(`[Aura] Failed to load plugin "${pluginId}" from ${filePath}:`, error)
-      continue
+    const fileStat = await statPluginEntry(filePath)
+    const versionToken = buildPluginVersionToken(filePath, fileStat)
+    const cacheKey = buildPluginMetadataCacheKey(pluginId, filePath, versionToken)
+
+    let pluginMetadata = normalizeCachedPluginMetadata(
+      readPluginMetadataCache(cacheKey)?.value,
+      pluginId,
+    )
+    if (!pluginMetadata) {
+      let pluginRuntime
+      try {
+        pluginRuntime = await importPluginRuntime(filePath, versionToken, pluginId)
+      } catch (error) {
+        console.warn(`[Aura] Failed to load plugin "${pluginId}" from ${filePath}:`, error)
+        continue
+      }
+      pluginMetadata = pluginRuntime.plugin
+      writePluginMetadataCache(cacheKey, pluginMetadata)
     }
-    const plugin = module.plugin || module.default?.plugin || module.default
-    if (!plugin?.tools?.length) {
+
+    if (!pluginMetadata?.tools?.length) {
       continue
     }
 
-    for (const tool of plugin.tools) {
-      tools.push({
-        source: 'plugin',
-        capabilityId: plugin.id,
-        capabilityName: plugin.name,
-        capabilityDescription: plugin.description || '',
-        name: `plugin__${plugin.id}__${tool.name}`,
-        description: `[Plugin:${plugin.name}] ${tool.description}`,
-        inputSchema: tool.inputSchema ?? {
-          type: 'object',
-          properties: {},
-        },
-        async run(args, runtime = {}) {
-          const result = await tool.handler({
-            args,
-            context,
-            signal: runtime.signal,
-            throwIfAborted: runtime.throwIfAborted,
-          })
-          return stringifyOutput(result)
-        },
-      })
-    }
+    tools.push(
+      ...buildPluginToolsFromMetadata(pluginMetadata, filePath, versionToken, context),
+    )
   }
 
   return tools

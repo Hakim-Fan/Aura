@@ -1,3 +1,4 @@
+import { deriveHardSignals } from './agentRouting.mjs'
 import { guardedFetch } from './web/net/guardedFetch.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
 
@@ -8,6 +9,26 @@ const ANSWER_MODES = new Set(['advise', 'diagnose', 'execute'])
 const COMPLEXITY_LEVELS = new Set(['low', 'medium', 'high'])
 const PLAN_DEPTHS = new Set(['single_step', 'multi_step', 'long_horizon'])
 const CONFIDENCE_LEVELS = new Set(['low', 'medium', 'high'])
+const PATH_REFERENCE_PATTERN =
+  /(?:^|[\s`"'(])(?:\.{0,2}\/[^\s`"'():,]+|[a-z0-9_./-]+\.[a-z0-9]{1,8})(?=$|[\s`"'),:])/giu
+const WORKSPACE_HINT_PATTERN =
+  /\b(?:workspace|repo|repository|project|code|file|files|folder|directory|git|commit|branch|diff|status|test|config|stack trace|log)\b|工作区|仓库|项目|代码|文件|目录|提交|分支|测试|配置|日志|报错|错误/iu
+const LOCAL_WRITE_HINT_PATTERN =
+  /\b(?:write|create|add|update|edit|modify|fix|implement|refactor|rewrite|rename|remove|delete|patch)\b|写入|创建|新增|更新|编辑|修改|修复|实现|重构|重写|重命名|删除|补丁/iu
+const LOCAL_DIAGNOSE_HINT_PATTERN =
+  /\b(?:review|debug|diagnose|analyze|check|verify|inspect|explain|why)\b|审查|调试|排查|诊断|分析|检查|验证|查看|解释|为什么/iu
+const LOCAL_READ_HINT_PATTERN =
+  /\b(?:read|open|show|summarize|describe)\b|读取|打开|查看|总结|概述|说明/iu
+const CAPABILITY_ADMIN_HINT_PATTERN =
+  /\b(?:skill|plugin|mcp|capability)\b|技能|插件|能力/iu
+const CAPABILITY_ADMIN_ACTION_PATTERN =
+  /\b(?:enable|disable|import|install|remove|uninstall|configure|edit|update|manage)\b|启用|禁用|导入|安装|移除|卸载|配置|编辑|更新|管理/iu
+const EXTERNAL_FACT_HINT_PATTERN =
+  /\b(?:latest|current|today|news|price|official|online|website|article|source|sources|public web)\b|最新|当前|今天|新闻|价格|官网|在线|网站|文章|来源/iu
+const MULTI_STEP_HINT_PATTERN =
+  /\b(?:and then|then|after that|step by step|multiple|several|workflow|end-to-end|across files|across the repo|phase|phases)\b|然后|接着|分步骤|多步|多个|跨文件|整个仓库|阶段|流程/iu
+const LONG_HORIZON_HINT_PATTERN =
+  /\b(?:automation|autonomous|planner|controller|orchestrated|long horizon|cross system)\b|自动化|自主执行|规划器|编排|长链路|跨系统/iu
 
 function resolveIntentClassifierSettings(settings) {
   const profiles = Array.isArray(settings?.providerProfiles)
@@ -48,6 +69,94 @@ function normalizeText(value) {
   return String(value || '')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+function normalizeFastPathText(value) {
+  return normalizeText(value).toLowerCase()
+}
+
+function collectMessageText(message) {
+  const parts = Array.isArray(message?.parts)
+    ? message.parts
+        .map(part => {
+          if (part.type === 'text') {
+            return part.text || ''
+          }
+          if (part.type === 'image' || part.type === 'file') {
+            return [part.name, part.path].filter(Boolean).join(' ')
+          }
+          return ''
+        })
+        .filter(Boolean)
+        .join('\n')
+    : ''
+
+  return [message?.content, parts].filter(Boolean).join('\n')
+}
+
+function getRecentConversationMessages(messages) {
+  return Array.isArray(messages)
+    ? messages
+        .filter(message => message?.role === 'user' || message?.role === 'assistant')
+        .slice(-MAX_CLASSIFIER_MESSAGES)
+    : []
+}
+
+function getLatestUserMessage(messages) {
+  return [...(Array.isArray(messages) ? messages : [])]
+    .reverse()
+    .find(message => message?.role === 'user')
+}
+
+function countPathReferences(text) {
+  const matches = String(text || '').match(PATH_REFERENCE_PATTERN) || []
+  return new Set(
+    matches
+      .map(match => match.trim().replace(/^[`"'(]+|[`"'):,]+$/gu, ''))
+      .filter(Boolean),
+  ).size
+}
+
+function countLatestUserFileParts(message) {
+  return Array.isArray(message?.parts)
+    ? message.parts.filter(part => part?.type === 'file').length
+    : 0
+}
+
+function resolveFastPathPlanningHints({
+  rawIntent,
+  normalizedIntent,
+  pathReferenceCount,
+  fileAttachmentCount,
+}) {
+  if (
+    LONG_HORIZON_HINT_PATTERN.test(normalizedIntent) ||
+    pathReferenceCount + fileAttachmentCount >= 4
+  ) {
+    return {
+      taskComplexity: 'high',
+      planDepth: 'long_horizon',
+      confidence: 'medium',
+    }
+  }
+
+  if (
+    MULTI_STEP_HINT_PATTERN.test(normalizedIntent) ||
+    pathReferenceCount + fileAttachmentCount >= 2 ||
+    String(rawIntent || '').split(/\r?\n/u).filter(Boolean).length >= 3
+  ) {
+    return {
+      taskComplexity: 'medium',
+      planDepth: 'multi_step',
+      confidence: 'high',
+    }
+  }
+
+  return {
+    taskComplexity: 'low',
+    planDepth: 'single_step',
+    confidence: 'high',
+  }
 }
 
 function flattenOpenAiMessageContent(content) {
@@ -248,6 +357,253 @@ export function parseAndValidateClassification(rawValue) {
   return classification
 }
 
+function buildFastPathClassification(base) {
+  return parseAndValidateClassification(base)
+}
+
+function resolveWorkspaceAnswerMode(normalizedIntent, fileAttachmentCount, pathReferenceCount) {
+  if (LOCAL_WRITE_HINT_PATTERN.test(normalizedIntent)) {
+    return 'execute'
+  }
+
+  if (LOCAL_DIAGNOSE_HINT_PATTERN.test(normalizedIntent)) {
+    return 'diagnose'
+  }
+
+  if (
+    LOCAL_READ_HINT_PATTERN.test(normalizedIntent) ||
+    fileAttachmentCount > 0 ||
+    pathReferenceCount > 0
+  ) {
+    return 'advise'
+  }
+
+  return null
+}
+
+function resolveExternalAnswerMode(normalizedIntent) {
+  if (LOCAL_DIAGNOSE_HINT_PATTERN.test(normalizedIntent)) {
+    return 'diagnose'
+  }
+
+  if (LOCAL_READ_HINT_PATTERN.test(normalizedIntent)) {
+    return 'advise'
+  }
+
+  return 'advise'
+}
+
+function inferFallbackClassification(messages, options = {}) {
+  const hardSignals = options.hardSignals || deriveHardSignals(messages)
+  const latestUserMessage = getLatestUserMessage(messages)
+  const rawIntent = collectMessageText(latestUserMessage)
+  const normalizedIntent = normalizeFastPathText(rawIntent)
+  const fileAttachmentCount = countLatestUserFileParts(latestUserMessage)
+  const pathReferenceCount = countPathReferences(rawIntent)
+  const workspaceSignal =
+    fileAttachmentCount > 0 ||
+    pathReferenceCount > 0 ||
+    WORKSPACE_HINT_PATTERN.test(normalizedIntent)
+  const planningHints = resolveFastPathPlanningHints({
+    rawIntent,
+    normalizedIntent,
+    pathReferenceCount,
+    fileAttachmentCount,
+  })
+  const needsExternalFacts =
+    hardSignals?.explicitWebLookupRead === true ||
+    hardSignals?.publicWebUrlReference === true ||
+    EXTERNAL_FACT_HINT_PATTERN.test(normalizedIntent)
+  const capabilityAdminRequested =
+    CAPABILITY_ADMIN_HINT_PATTERN.test(normalizedIntent) &&
+    CAPABILITY_ADMIN_ACTION_PATTERN.test(normalizedIntent)
+  const workspaceAnswerMode = workspaceSignal
+    ? resolveWorkspaceAnswerMode(normalizedIntent, fileAttachmentCount, pathReferenceCount)
+    : null
+
+  let answerMode = 'advise'
+  let webInteractionRequired = false
+  let workspaceRelated = workspaceSignal
+  let isCapabilityAdmin = false
+  let systemBrowserRequested = false
+  let confidence = 'low'
+  let reason = 'generic-default'
+
+  if (hardSignals?.explicitWebInteraction === true) {
+    answerMode = 'execute'
+    webInteractionRequired = true
+    systemBrowserRequested = hardSignals?.explicitSystemBrowserRequest === true
+    confidence = 'medium'
+    reason = 'explicit-browser-interaction'
+  } else if (capabilityAdminRequested) {
+    answerMode = 'execute'
+    isCapabilityAdmin = true
+    workspaceRelated = false
+    confidence = 'medium'
+    reason = 'capability-admin'
+  } else if (workspaceAnswerMode) {
+    answerMode = workspaceAnswerMode
+    confidence = needsExternalFacts ? 'medium' : 'low'
+    reason =
+      needsExternalFacts === true
+        ? `workspace-${workspaceAnswerMode}-with-external-facts`
+        : `workspace-${workspaceAnswerMode}`
+  } else if (needsExternalFacts) {
+    answerMode = resolveExternalAnswerMode(normalizedIntent)
+    workspaceRelated = workspaceSignal
+    confidence = 'low'
+    reason = 'external-facts'
+  }
+
+  return {
+    classification: buildFastPathClassification({
+      answerMode,
+      needsExternalFacts,
+      webInteractionRequired,
+      workspaceRelated,
+      isCapabilityAdmin,
+      systemBrowserRequested,
+      taskComplexity: planningHints.taskComplexity,
+      planDepth: planningHints.planDepth,
+      confidence,
+    }),
+    source: 'fallback',
+    reason,
+  }
+}
+
+export function inferDeterministicClassification(messages, options = {}) {
+  if (options.settings?.disableIntentFastPath === true) {
+    return null
+  }
+
+  const hardSignals = options.hardSignals || deriveHardSignals(messages)
+  const latestUserMessage = getLatestUserMessage(messages)
+  const rawIntent = collectMessageText(latestUserMessage)
+  const normalizedIntent = normalizeFastPathText(rawIntent)
+  const fileAttachmentCount = countLatestUserFileParts(latestUserMessage)
+  const pathReferenceCount = countPathReferences(rawIntent)
+  const workspaceSignal =
+    fileAttachmentCount > 0 ||
+    pathReferenceCount > 0 ||
+    WORKSPACE_HINT_PATTERN.test(normalizedIntent)
+  const planningHints = resolveFastPathPlanningHints({
+    rawIntent,
+    normalizedIntent,
+    pathReferenceCount,
+    fileAttachmentCount,
+  })
+  const hasExternalFactHint =
+    hardSignals?.explicitWebLookupRead === true ||
+    hardSignals?.publicWebUrlReference === true ||
+    EXTERNAL_FACT_HINT_PATTERN.test(normalizedIntent)
+  const capabilityAdminRequested =
+    CAPABILITY_ADMIN_HINT_PATTERN.test(normalizedIntent) &&
+    CAPABILITY_ADMIN_ACTION_PATTERN.test(normalizedIntent)
+  const workspaceAnswerMode = workspaceSignal
+    ? resolveWorkspaceAnswerMode(normalizedIntent, fileAttachmentCount, pathReferenceCount)
+    : null
+  const externalAnswerMode = resolveExternalAnswerMode(normalizedIntent)
+
+  if (hardSignals?.explicitWebInteraction === true) {
+    return {
+      classification: buildFastPathClassification({
+        answerMode: 'execute',
+        needsExternalFacts: hasExternalFactHint,
+        webInteractionRequired: true,
+        workspaceRelated: workspaceSignal,
+        isCapabilityAdmin: false,
+        systemBrowserRequested: hardSignals?.explicitSystemBrowserRequest === true,
+        taskComplexity: planningHints.taskComplexity,
+        planDepth: planningHints.planDepth,
+        confidence: 'high',
+      }),
+      source: 'fast-path',
+      reason: 'explicit-browser-interaction',
+    }
+  }
+
+  if (capabilityAdminRequested && hardSignals?.explicitWebLookupRead !== true) {
+    return {
+      classification: buildFastPathClassification({
+        answerMode: 'execute',
+        needsExternalFacts: false,
+        webInteractionRequired: false,
+        workspaceRelated: false,
+        isCapabilityAdmin: true,
+        systemBrowserRequested: false,
+        taskComplexity: planningHints.taskComplexity,
+        planDepth: planningHints.planDepth,
+        confidence: 'high',
+      }),
+      source: 'fast-path',
+      reason: 'capability-admin',
+    }
+  }
+
+  if (workspaceSignal === true && capabilityAdminRequested !== true) {
+    if (workspaceAnswerMode && hasExternalFactHint === true) {
+      return {
+        classification: buildFastPathClassification({
+          answerMode: workspaceAnswerMode,
+          needsExternalFacts: true,
+          webInteractionRequired: false,
+          workspaceRelated: true,
+          isCapabilityAdmin: false,
+          systemBrowserRequested: false,
+          taskComplexity: planningHints.taskComplexity,
+          planDepth: planningHints.planDepth,
+          confidence: 'high',
+        }),
+        source: 'fast-path',
+        reason: `obvious-${workspaceAnswerMode}-with-external-facts`,
+      }
+    }
+
+    if (workspaceAnswerMode && hasExternalFactHint !== true) {
+      return {
+        classification: buildFastPathClassification({
+          answerMode: workspaceAnswerMode,
+          needsExternalFacts: false,
+          webInteractionRequired: false,
+          workspaceRelated: true,
+          isCapabilityAdmin: false,
+          systemBrowserRequested: false,
+          taskComplexity: planningHints.taskComplexity,
+          planDepth: planningHints.planDepth,
+          confidence: planningHints.confidence,
+        }),
+        source: 'fast-path',
+        reason: `obvious-local-${workspaceAnswerMode}`,
+      }
+    }
+  }
+
+  if (
+    hasExternalFactHint === true &&
+    workspaceSignal !== true &&
+    capabilityAdminRequested !== true
+  ) {
+    return {
+      classification: buildFastPathClassification({
+        answerMode: externalAnswerMode,
+        needsExternalFacts: true,
+        webInteractionRequired: false,
+        workspaceRelated: false,
+        isCapabilityAdmin: false,
+        systemBrowserRequested: false,
+        taskComplexity: planningHints.taskComplexity,
+        planDepth: planningHints.planDepth,
+        confidence: 'high',
+      }),
+      source: 'fast-path',
+      reason: 'obvious-external-facts',
+    }
+  }
+
+  return null
+}
+
 async function classifyWithOpenAiCompatible(settings, messages) {
   const classifierSettings = resolveIntentClassifierSettings(settings)
   const apiBase = normalizeBaseUrl(classifierSettings.baseUrl, 'https://api.openai.com/v1')
@@ -327,9 +683,7 @@ export async function classifyIntent(messages, settings) {
     throw new Error('Missing provider API key for intent classification.')
   }
 
-  const recentMessages = Array.isArray(messages)
-    ? messages.filter(message => message?.role === 'user' || message?.role === 'assistant').slice(-MAX_CLASSIFIER_MESSAGES)
-    : []
+  const recentMessages = getRecentConversationMessages(messages)
 
   if (recentMessages.length === 0) {
     throw new Error('No conversation messages available for intent classification.')
@@ -341,4 +695,21 @@ export async function classifyIntent(messages, settings) {
       : await classifyWithOpenAiCompatible(settings, recentMessages)
 
   return parseAndValidateClassification(rawText)
+}
+
+export async function resolveIntentClassification(messages, settings, options = {}) {
+  const fastPath = inferDeterministicClassification(messages, options)
+  if (fastPath) {
+    return fastPath
+  }
+
+  try {
+    return {
+      classification: await classifyIntent(messages, settings),
+      source: 'model',
+      reason: 'model-classifier',
+    }
+  } catch {
+    return inferFallbackClassification(messages, options)
+  }
 }

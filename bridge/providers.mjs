@@ -1133,7 +1133,8 @@ export async function runOpenAiCompatibleAgent({
   hooks,
 }) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
-  const registry = new Map(tools.map(tool => [tool.name, tool]))
+  const activeTools = [...tools]
+  const registry = new Map(activeTools.map(tool => [tool.name, tool]))
   const conversationMessages = [...messages]
   const transcript = toOpenAiTranscript(systemPrompt, conversationMessages)
   let latestUsage
@@ -1164,7 +1165,7 @@ export async function runOpenAiCompatibleAgent({
             body: JSON.stringify({
               model: settings.model,
               messages: transcript,
-              tools: openAiToolDefs(tools),
+              tools: openAiToolDefs(activeTools),
               tool_choice: 'auto',
               stream: true,
               ...(settings.provider === 'openai'
@@ -1354,6 +1355,15 @@ export async function runOpenAiCompatibleAgent({
           ? await invokeTool(tool, args, toolEvents, {
               ...hooks,
               timelineOrder: toolOrder,
+              registerDynamicTools(nextTools) {
+                for (const nextTool of Array.isArray(nextTools) ? nextTools : []) {
+                  if (!nextTool?.name || registry.has(nextTool.name)) {
+                    continue
+                  }
+                  registry.set(nextTool.name, nextTool)
+                  activeTools.push(nextTool)
+                }
+              },
             })
           : `Tool not found: ${toolCall.function.name}`
 
@@ -1410,7 +1420,8 @@ export async function runGoogleAgent({
     settings.baseUrl,
     'https://generativelanguage.googleapis.com/v1beta',
   )
-  const registry = new Map(tools.map(tool => [tool.name, tool]))
+  const activeTools = [...tools]
+  const registry = new Map(activeTools.map(tool => [tool.name, tool]))
   const conversationMessages = [...messages]
   const transcript = toGeminiContents(conversationMessages)
   let latestUsage
@@ -1443,7 +1454,7 @@ export async function runGoogleAgent({
                 parts: [{ text: systemPrompt }],
               },
               contents: transcript,
-              tools: geminiToolDefs(tools),
+              tools: geminiToolDefs(activeTools),
             }),
           },
           {
@@ -1627,6 +1638,15 @@ export async function runGoogleAgent({
           ? await invokeTool(tool, entry.args || {}, toolEvents, {
               ...hooks,
               timelineOrder: toolOrder,
+              registerDynamicTools(nextTools) {
+                for (const nextTool of Array.isArray(nextTools) ? nextTools : []) {
+                  if (!nextTool?.name || registry.has(nextTool.name)) {
+                    continue
+                  }
+                  registry.set(nextTool.name, nextTool)
+                  activeTools.push(nextTool)
+                }
+              },
             })
           : `Tool not found: ${entry.name}`
 

@@ -16,25 +16,6 @@ function unique(values) {
   return Array.from(new Set(values.filter(Boolean)))
 }
 
-function splitIntoKeywords(value) {
-  const normalized = normalizeText(value)
-  if (!normalized) {
-    return []
-  }
-
-  const phrases = normalized
-    .split(/[\n,.;:!?/|]+/u)
-    .map(entry => entry.trim())
-    .filter(entry => entry.length >= 2)
-
-  const words = normalized
-    .split(/[^a-z0-9\u4e00-\u9fff]+/u)
-    .map(entry => entry.trim())
-    .filter(entry => entry.length >= 2)
-
-  return unique([...phrases, ...words]).slice(0, 48)
-}
-
 function countMatches(text, keywords) {
   let score = 0
 
@@ -52,6 +33,10 @@ function countMatches(text, keywords) {
 
 function hasAny(text, patterns) {
   return patterns.some(pattern => text.includes(pattern))
+}
+
+function containsUrlLikeText(text) {
+  return /(?:https?:\/\/|www\.)\S+/iu.test(String(text || ''))
 }
 
 function buildConversationText(messages) {
@@ -220,28 +205,25 @@ function inferLocalTaskSignals(text) {
 }
 
 function inferTaskSignalsFromClassification(classification, text) {
-  const localSignals = inferLocalTaskSignals(text)
-
   if (!classification || typeof classification !== 'object') {
-    return localSignals
+    return inferLocalTaskSignals(text)
   }
 
   return {
-    ...localSignals,
     isEditingTask:
-      localSignals.isEditingTask ||
-      (classification.answerMode === 'execute' && classification.workspaceRelated === true),
+      classification.answerMode === 'execute' && classification.workspaceRelated === true,
     isReviewTask:
-      localSignals.isReviewTask ||
-      (classification.answerMode === 'diagnose' && classification.workspaceRelated === true),
-    isBrowserTask:
-      localSignals.isBrowserTask ||
+      classification.answerMode === 'diagnose' && classification.workspaceRelated === true,
+    isStructureTask: hasAny(text, ['structure', 'tree', 'snapshot', '目录', '结构']),
+    isGitTask: hasAny(text, ['git', 'commit', 'branch', 'diff', 'status', '提交', '分支']),
+    isDesktopTask:
       classification.webInteractionRequired === true ||
       classification.systemBrowserRequested === true,
-    isResearchTask:
-      localSignals.isResearchTask || classification.needsExternalFacts === true,
+    isBrowserTask:
+      classification.webInteractionRequired === true ||
+      classification.systemBrowserRequested === true,
+    isResearchTask: classification.needsExternalFacts === true,
     isComplexTask:
-      localSignals.isComplexTask ||
       classification.taskComplexity === 'high' ||
       classification.planDepth === 'multi_step' ||
       classification.planDepth === 'long_horizon',
@@ -283,169 +265,6 @@ function scoreSkill(skill, context) {
   return score
 }
 
-function describeBuiltinGroup(tool) {
-  if (tool.name === 'spawn_subagent') {
-    return {
-      id: 'advanced:multi-agent',
-      kind: 'advanced',
-      name: 'Multi-Agent Delegation',
-      description: tool.description,
-      keywords: ['subagent', 'delegate', 'parallel', 'worker'],
-      defaultSelected: false,
-    }
-  }
-
-  if (tool.name.startsWith('computer_')) {
-    return {
-      id: 'advanced:computer-use',
-      kind: 'advanced',
-      name: 'Computer Use',
-      description: tool.description,
-      keywords: ['desktop', 'screen', 'window', 'click', 'type', 'app'],
-      defaultSelected: false,
-    }
-  }
-
-  if (tool.name === 'system_browser_open') {
-    return {
-      id: 'advanced:browser-interaction',
-      kind: 'advanced',
-      name: 'Browser Interaction',
-      description: tool.description,
-      keywords: ['browser', 'website', 'url', 'open', 'login', 'tab', '网页', '浏览器'],
-      defaultSelected: false,
-    }
-  }
-
-  return {
-    id: 'builtin:core',
-    kind: 'builtin',
-    name: 'Core Workspace Tools',
-    description: 'Essential workspace inspection, editing, and shell execution tools.',
-    keywords: ['workspace', 'files', 'read', 'write', 'shell', 'search'],
-    defaultSelected: true,
-  }
-}
-
-function getToolGroup(tool) {
-  if (tool.source === 'plugin') {
-    return {
-      id: `plugin:${tool.capabilityId || tool.name}`,
-      kind: 'plugin',
-      name: tool.capabilityName || tool.capabilityId || tool.name,
-      description: tool.capabilityDescription || tool.description || '',
-      keywords: unique([
-        tool.capabilityId,
-        tool.capabilityName,
-        tool.capabilityDescription,
-        tool.name,
-        tool.description,
-      ]),
-      defaultSelected: false,
-    }
-  }
-
-  if (tool.source === 'mcp') {
-    return {
-      id: `mcp:${tool.capabilityId || tool.name}`,
-      kind: 'mcp',
-      name: tool.capabilityName || tool.capabilityId || tool.name,
-      description: tool.capabilityDescription || tool.description || '',
-      keywords: unique([
-        tool.capabilityId,
-        tool.capabilityName,
-        tool.capabilityDescription,
-        tool.name,
-        tool.description,
-      ]),
-      defaultSelected: false,
-    }
-  }
-
-  return describeBuiltinGroup(tool)
-}
-
-function buildToolGroups(tools) {
-  const groups = new Map()
-
-  for (const tool of tools) {
-    const group = getToolGroup(tool)
-    const current =
-      groups.get(group.id) || {
-        ...group,
-        tools: [],
-      }
-    current.tools.push(tool)
-    current.description =
-      current.description ||
-      tool.capabilityDescription ||
-      tool.description ||
-      current.description
-    current.keywords = unique([
-      ...(current.keywords || []),
-      tool.name,
-      tool.description,
-      tool.capabilityName,
-      tool.capabilityDescription,
-    ])
-    groups.set(group.id, current)
-  }
-
-  return Array.from(groups.values())
-}
-
-function scoreToolGroup(group, context) {
-  if (group.defaultSelected) {
-    return 100
-  }
-
-  let score = countMatches(context.text, group.keywords || [])
-  const normalizedKeywords = normalizeText((group.keywords || []).join(' '))
-  const looksLikeSearchCapability =
-    normalizedKeywords.includes('search') ||
-    normalizedKeywords.includes('duckduckgo') ||
-    normalizedKeywords.includes('web') ||
-    normalizedKeywords.includes('browse') ||
-    normalizedKeywords.includes('query') ||
-    normalizedKeywords.includes('fetch') ||
-    normalizedKeywords.includes('news') ||
-    normalizedKeywords.includes('price') ||
-    normalizedKeywords.includes('文档') ||
-    normalizedKeywords.includes('搜索') ||
-    normalizedKeywords.includes('查询')
-
-  if (group.kind === 'advanced') {
-    if (group.id === 'advanced:multi-agent' && context.signals.isComplexTask) {
-      score += 5
-    }
-    if (group.id === 'advanced:computer-use' && context.signals.isDesktopTask) {
-      score += 6
-    }
-    if (group.id === 'advanced:browser-interaction' && context.signals.isBrowserTask) {
-      score += 8
-    }
-    if (
-      group.id === 'advanced:browser-interaction' &&
-      context.routeState?.capabilityTier === 'browser-interactive'
-    ) {
-      score += 8
-    }
-  }
-
-  if (group.kind === 'mcp' && context.signals.isResearchTask && looksLikeSearchCapability) {
-    score += 10
-  }
-
-  if (group.kind === 'plugin' && group.id.includes('workspace-inspector') && context.signals.isStructureTask) {
-    score += 4
-  }
-  if (group.kind === 'plugin' && group.id.includes('git-helper') && context.signals.isGitTask) {
-    score += 6
-  }
-
-  return score
-}
-
 function buildToolSelectionKeys(tool) {
   return unique([
     tool.name,
@@ -453,22 +272,142 @@ function buildToolSelectionKeys(tool) {
   ]).map(entry => normalizeIdentifier(entry))
 }
 
-function pickAllowedTools(selectedSkills, tools) {
-  const wanted = new Set(
+function buildAllowedToolKeySet(selectedSkills) {
+  return new Set(
     selectedSkills.flatMap(skill =>
       (Array.isArray(skill.allowedTools) ? skill.allowedTools : []).map(entry =>
         normalizeIdentifier(entry),
       ),
     ),
   )
+}
 
-  if (wanted.size === 0) {
-    return []
+const CORE_WORKSPACE_TOOLS = new Set([
+  'list_files',
+  'glob_files',
+  'read_file',
+  'search_code',
+  'todo_write',
+])
+
+const LOCAL_EXECUTION_TOOLS = new Set([
+  'apply_patch',
+  'write_file',
+  'edit_file',
+  'multi_edit_file',
+  'run_shell',
+])
+
+const WEB_RETRIEVAL_TOOLS = new Set([
+  'web_search',
+  'web_fetch',
+  'web_research',
+])
+
+const DISCOVERY_TOOLS = new Set([
+  'tool_search',
+])
+
+function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
+  let score = 0
+
+  if (tool.source === 'builtin') {
+    score += 40
+  } else if (tool.source === 'plugin' || tool.source === 'mcp') {
+    score += 16
   }
 
-  return tools.filter(tool =>
-    buildToolSelectionKeys(tool).some(key => wanted.has(key)),
-  )
+  if (CORE_WORKSPACE_TOOLS.has(tool.name)) {
+    score += 35
+  }
+
+  if (DISCOVERY_TOOLS.has(tool.name)) {
+    score += 18
+  }
+
+  if (context.routeState?.isCapabilityAdminTask === true && tool.name.startsWith('aura_')) {
+    score += 70
+  }
+
+  if (context.signals.isEditingTask) {
+    if (tool.name === 'apply_patch') {
+      score += 90
+    } else if (LOCAL_EXECUTION_TOOLS.has(tool.name)) {
+      score += 50
+    } else if (tool.name === 'read_file' || tool.name === 'search_code' || tool.name === 'glob_files') {
+      score += 40
+    }
+  }
+
+  if (context.signals.isReviewTask) {
+    if (tool.name === 'read_file' || tool.name === 'search_code') {
+      score += 45
+    } else if (tool.name === 'run_shell') {
+      score += 18
+    }
+  }
+
+  if (context.signals.isResearchTask && WEB_RETRIEVAL_TOOLS.has(tool.name)) {
+    score += 80
+
+    if (
+      context.routeState?.responseStyle === 'research-structured' &&
+      tool.name === 'web_research'
+    ) {
+      score += 24
+    } else if (tool.name === 'web_search') {
+      score += 10
+    }
+
+    if (containsUrlLikeText(context.text) && tool.name === 'web_fetch') {
+      score += 22
+    }
+  }
+
+  if (context.signals.isBrowserTask) {
+    if (tool.name === 'system_browser_open') {
+      score += 70
+    }
+    if (tool.name.startsWith('computer_')) {
+      score += 60
+    }
+  }
+
+  if (context.signals.isComplexTask && tool.name === 'spawn_subagent') {
+    score += 40
+  }
+
+  if (tool.source === 'plugin' || tool.source === 'mcp') {
+    const capabilityTerms = unique([
+      tool.capabilityId,
+      tool.capabilityName,
+      tool.name,
+      ...(Array.isArray(tool.aliases) ? tool.aliases : []),
+    ])
+    score += Math.min(24, countMatches(context.text, capabilityTerms) * 2)
+  } else {
+    const directToolTerms = [tool.name, ...(Array.isArray(tool.aliases) ? tool.aliases : [])]
+    score += Math.min(18, countMatches(context.text, directToolTerms) * 2)
+  }
+
+  const explicitlyAllowed = buildToolSelectionKeys(tool).some(key => allowedToolKeys.has(key))
+  if (explicitlyAllowed) {
+    score += 28
+  }
+
+  return {
+    tool,
+    score,
+    originalIndex,
+  }
+}
+
+function rankToolsByRelevance(tools, context, selectedSkills) {
+  const allowedToolKeys = buildAllowedToolKeySet(selectedSkills)
+  return tools
+    .map((tool, index) => scoreToolOrdering(tool, context, allowedToolKeys, index))
+    .sort((left, right) => right.score - left.score || left.originalIndex - right.originalIndex)
+    .map(entry => entry.tool)
 }
 
 function buildCapabilitySnapshot({ workspaceRoot, resolvedAt, selectedSkills, selectedTools }) {
@@ -532,28 +471,16 @@ export function selectTurnCapabilities({
     .slice(0, 4)
     .map(entry => entry.skill)
 
-  const selectedGroupIds = new Set()
-  const groups = buildToolGroups(tools)
-
-  for (const group of groups) {
-    const score = scoreToolGroup(group, context)
-    if (group.defaultSelected || score > 0) {
-      selectedGroupIds.add(group.id)
-    }
-  }
-
-  const selectedTools = tools.filter(tool => selectedGroupIds.has(getToolGroup(tool).id))
-  const allowedTools = pickAllowedTools(selectedSkills, tools)
-  const mergedTools = unique([...selectedTools, ...allowedTools])
+  const orderedTools = rankToolsByRelevance(tools, context, selectedSkills)
 
   return {
     selectedSkills,
-    selectedTools: mergedTools,
+    selectedTools: orderedTools,
     capabilitySnapshot: buildCapabilitySnapshot({
       workspaceRoot: runtimeCapabilities?.workspaceRoot || '',
       resolvedAt: Date.now(),
       selectedSkills,
-      selectedTools: mergedTools,
+      selectedTools: orderedTools,
     }),
   }
 }

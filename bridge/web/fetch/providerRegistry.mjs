@@ -3,49 +3,43 @@ import {
   rememberSessionProviderFailure,
   rememberSessionProviderSuccess,
 } from '../../retrievalProviders/sessionHealth.mjs'
-import { createBraveSearchProvider } from './providers/brave.mjs'
-import { createDuckDuckGoSearchProvider } from './providers/duckduckgo.mjs'
-import { createTavilySearchProvider } from './providers/tavily.mjs'
 
-const SEARCH_PROVIDER_SESSION_SCOPE = 'web-search'
-const SEARCH_PROVIDER_SUCCESS_MEMORY_MS = 30 * 60_000
-const ALL_SEARCH_PROVIDERS = [
-  createTavilySearchProvider(),
-  createBraveSearchProvider(),
-  createDuckDuckGoSearchProvider(),
-]
-const SEARCH_PROVIDER_COOLDOWN_MS = {
+const FETCH_PROVIDER_SESSION_SCOPE = 'web-fetch'
+const FETCH_PROVIDER_SUCCESS_MEMORY_MS = 30 * 60_000
+const FETCH_PROVIDER_COOLDOWN_MS = {
   authentication: 15 * 60_000,
   rate_limit: 2 * 60_000,
   unavailable: 90_000,
   timeout: 60_000,
   network: 45_000,
   unsupported: 5 * 60_000,
+  execution_failed: 60_000,
 }
-const SEARCH_PROVIDER_CATEGORY_PENALTY = {
+const FETCH_PROVIDER_CATEGORY_PENALTY = {
   authentication: 140,
   rate_limit: 95,
   unavailable: 65,
   timeout: 45,
   network: 35,
   unsupported: 110,
+  execution_failed: 40,
 }
 
-function getWebSearchRuntimeState(runtime = {}) {
-  if (!runtime.__webSearchState || typeof runtime.__webSearchState !== 'object') {
-    runtime.__webSearchState = {
+function getWebFetchRuntimeState(runtime = {}) {
+  if (!runtime.__webFetchState || typeof runtime.__webFetchState !== 'object') {
+    runtime.__webFetchState = {
       providers: {},
     }
   }
 
   if (
-    !runtime.__webSearchState.providers ||
-    typeof runtime.__webSearchState.providers !== 'object'
+    !runtime.__webFetchState.providers ||
+    typeof runtime.__webFetchState.providers !== 'object'
   ) {
-    runtime.__webSearchState.providers = {}
+    runtime.__webFetchState.providers = {}
   }
 
-  return runtime.__webSearchState
+  return runtime.__webFetchState
 }
 
 function normalizeProviderFailure(error) {
@@ -67,7 +61,7 @@ function normalizeProviderFailure(error) {
         ? error.message.trim()
         : typeof error === 'string' && error.trim()
           ? error.trim()
-          : 'Search provider failed'
+          : 'Fetch provider failed'
   const detail =
     typeof errorInfo?.detail === 'string' && errorInfo.detail.trim()
       ? errorInfo.detail.trim()
@@ -89,7 +83,7 @@ function normalizeProviderFailure(error) {
   ) {
     return {
       category: 'authentication',
-      code: code || 'WEB_SEARCH_PROVIDER_AUTH_FAILED',
+      code: code || 'WEB_FETCH_PROVIDER_AUTH_FAILED',
       summary,
       detail,
     }
@@ -106,7 +100,7 @@ function normalizeProviderFailure(error) {
   ) {
     return {
       category: 'rate_limit',
-      code: code || 'WEB_SEARCH_PROVIDER_RATE_LIMITED',
+      code: code || 'WEB_FETCH_PROVIDER_RATE_LIMITED',
       summary,
       detail,
     }
@@ -120,7 +114,7 @@ function normalizeProviderFailure(error) {
   ) {
     return {
       category: 'timeout',
-      code: code || 'WEB_SEARCH_PROVIDER_TIMEOUT',
+      code: code || 'WEB_FETCH_PROVIDER_TIMEOUT',
       summary,
       detail,
     }
@@ -135,35 +129,52 @@ function normalizeProviderFailure(error) {
   ) {
     return {
       category: 'unavailable',
-      code: code || 'WEB_SEARCH_PROVIDER_UNAVAILABLE',
+      code: code || 'WEB_FETCH_PROVIDER_UNAVAILABLE',
       summary,
       detail,
     }
   }
 
-  if (message.includes('not configured') || message.includes('not supported')) {
+  if (
+    code.includes('DISABLED') ||
+    code.includes('NOT_ENABLED') ||
+    code.includes('EMPTY_CONTENT') ||
+    code.includes('UNSUPPORTED') ||
+    code.includes('REQUIRES_BROWSER') ||
+    message.includes('not enabled') ||
+    message.includes('not configured')
+  ) {
     return {
       category: 'unsupported',
-      code: code || 'WEB_SEARCH_PROVIDER_NOT_CONFIGURED',
+      code: code || 'WEB_FETCH_PROVIDER_NOT_CONFIGURED',
+      summary,
+      detail,
+    }
+  }
+
+  if (status >= 500 || code.includes('NETWORK')) {
+    return {
+      category: 'network',
+      code: code || 'WEB_FETCH_PROVIDER_FAILED',
       summary,
       detail,
     }
   }
 
   return {
-    category: 'network',
-    code: code || 'WEB_SEARCH_PROVIDER_FAILED',
+    category: 'execution_failed',
+    code: code || 'WEB_FETCH_PROVIDER_FAILED',
     summary,
     detail,
   }
 }
 
 function resolveProviderCooldownMs(category = '') {
-  return SEARCH_PROVIDER_COOLDOWN_MS[category] || 45_000
+  return FETCH_PROVIDER_COOLDOWN_MS[category] || 45_000
 }
 
 function resolveProviderHealthExpiresAt(blockedUntil, now = Date.now()) {
-  return Math.max(blockedUntil, now + SEARCH_PROVIDER_SUCCESS_MEMORY_MS)
+  return Math.max(blockedUntil, now + FETCH_PROVIDER_SUCCESS_MEMORY_MS)
 }
 
 function readRuntimeProviderEntry(runtime = {}, providerId = '') {
@@ -172,7 +183,7 @@ function readRuntimeProviderEntry(runtime = {}, providerId = '') {
     return null
   }
 
-  const state = getWebSearchRuntimeState(runtime)
+  const state = getWebFetchRuntimeState(runtime)
   const entry = state.providers[normalizedId]
   if (!entry || typeof entry !== 'object') {
     return null
@@ -217,26 +228,22 @@ function pickDominantProviderEntry(runtimeEntry, sessionEntry) {
 function readProviderEntry(runtime = {}, providerId = '') {
   return pickDominantProviderEntry(
     readRuntimeProviderEntry(runtime, providerId),
-    readSessionProviderHealth(SEARCH_PROVIDER_SESSION_SCOPE, providerId),
+    readSessionProviderHealth(FETCH_PROVIDER_SESSION_SCOPE, providerId),
   )
 }
 
-export function listWebSearchProviders() {
-  return ALL_SEARCH_PROVIDERS.slice()
-}
-
-function resolveProviderHealthScore(availability, baselineIndex = 0, now = Date.now()) {
+export function resolveWebFetchProviderHealthScore(availability, now = Date.now()) {
   if (!availability || typeof availability !== 'object') {
-    return -baselineIndex
+    return 0
   }
 
   if (availability.blocked) {
-    return -10_000 - baselineIndex
+    return -10_000
   }
 
   const entry = availability.entry
   if (!entry || typeof entry !== 'object') {
-    return -baselineIndex
+    return 0
   }
 
   let score = 0
@@ -251,7 +258,7 @@ function resolveProviderHealthScore(availability, baselineIndex = 0, now = Date.
   }
 
   if (lastFailureAt > 0 && lastFailureAt >= lastSuccessAt) {
-    score -= SEARCH_PROVIDER_CATEGORY_PENALTY[category] || 30
+    score -= FETCH_PROVIDER_CATEGORY_PENALTY[category] || 30
     score -= consecutiveFailures * 8
     score -= Math.min(25, Math.round((now - lastFailureAt) / 60_000))
   }
@@ -260,25 +267,34 @@ function resolveProviderHealthScore(availability, baselineIndex = 0, now = Date.
     score += 5
   }
 
-  return score - baselineIndex
+  return score
 }
 
-export function getWebSearchProviderAvailability(runtime = {}, providerId = '') {
+export function getWebFetchProviderAvailability(
+  runtime = {},
+  providerId = '',
+  options = {},
+) {
   const entry = readProviderEntry(runtime, providerId)
+  const enabled = options.enabled !== false
+  const blocked = Boolean(entry && (Number(entry.blockedUntil) || 0) > Date.now())
+
   return {
-    blocked: Boolean(entry && (Number(entry.blockedUntil) || 0) > Date.now()),
+    enabled,
+    blocked,
+    usable: enabled && !blocked,
     entry,
     source: entry?.source || '',
   }
 }
 
-export function rememberWebSearchProviderFailure(runtime = {}, providerId = '', error) {
+export function rememberWebFetchProviderFailure(runtime = {}, providerId = '', error) {
   const normalizedId = String(providerId || '').trim()
   if (!normalizedId) {
     return null
   }
 
-  const state = getWebSearchRuntimeState(runtime)
+  const state = getWebFetchRuntimeState(runtime)
   const previous = readProviderEntry(runtime, normalizedId)
   const failure = normalizeProviderFailure(error)
   const now = Date.now()
@@ -299,7 +315,7 @@ export function rememberWebSearchProviderFailure(runtime = {}, providerId = '', 
     consecutiveFailures,
   }
   rememberSessionProviderFailure(
-    SEARCH_PROVIDER_SESSION_SCOPE,
+    FETCH_PROVIDER_SESSION_SCOPE,
     normalizedId,
     state.providers[normalizedId],
   )
@@ -309,17 +325,17 @@ export function rememberWebSearchProviderFailure(runtime = {}, providerId = '', 
   }
 }
 
-export function rememberWebSearchProviderSuccess(runtime = {}, providerId = '') {
+export function rememberWebFetchProviderSuccess(runtime = {}, providerId = '') {
   const normalizedId = String(providerId || '').trim()
   if (!normalizedId) {
     return null
   }
 
-  const state = getWebSearchRuntimeState(runtime)
+  const state = getWebFetchRuntimeState(runtime)
   const now = Date.now()
   state.providers[normalizedId] = {
     blockedUntil: 0,
-    healthExpiresAt: now + SEARCH_PROVIDER_SUCCESS_MEMORY_MS,
+    healthExpiresAt: now + FETCH_PROVIDER_SUCCESS_MEMORY_MS,
     category: '',
     code: '',
     summary: '',
@@ -329,57 +345,13 @@ export function rememberWebSearchProviderSuccess(runtime = {}, providerId = '') 
     consecutiveFailures: 0,
   }
   rememberSessionProviderSuccess(
-    SEARCH_PROVIDER_SESSION_SCOPE,
+    FETCH_PROVIDER_SESSION_SCOPE,
     normalizedId,
     state.providers[normalizedId],
-    SEARCH_PROVIDER_SUCCESS_MEMORY_MS,
+    FETCH_PROVIDER_SUCCESS_MEMORY_MS,
   )
   return {
     ...state.providers[normalizedId],
     source: 'runtime',
   }
-}
-
-export function resolveWebSearchProviderOrder(settings, explicitProvider = '', runtime = {}) {
-  const normalizedExplicit = String(explicitProvider || '').trim()
-  const configuredProvider = String(settings?.web?.search?.provider || 'auto').trim()
-
-  if (normalizedExplicit && normalizedExplicit !== 'auto') {
-    return ALL_SEARCH_PROVIDERS.filter(provider => provider.id === normalizedExplicit)
-  }
-
-  if (configuredProvider && configuredProvider !== 'auto') {
-    const configured = ALL_SEARCH_PROVIDERS.find(provider => provider.id === configuredProvider)
-    return configured ? [configured] : []
-  }
-
-  const tavily = ALL_SEARCH_PROVIDERS.find(provider => provider.id === 'tavily')
-  const brave = ALL_SEARCH_PROVIDERS.find(provider => provider.id === 'brave')
-  const ddg = ALL_SEARCH_PROVIDERS.find(provider => provider.id === 'duckduckgo')
-  const ordered = [tavily, brave, ddg].filter(Boolean)
-  const baseline = [
-    ...ordered.filter(provider => provider.isConfigured(settings)),
-    ...ordered.filter(provider => !provider.isConfigured(settings)),
-  ]
-
-  return baseline
-    .map((provider, index) => ({
-      provider,
-      index,
-      availability: getWebSearchProviderAvailability(runtime, provider.id),
-    }))
-    .sort((left, right) => {
-      if (left.availability.blocked !== right.availability.blocked) {
-        return left.availability.blocked ? 1 : -1
-      }
-      const now = Date.now()
-      const scoreDelta =
-        resolveProviderHealthScore(right.availability, right.index, now) -
-        resolveProviderHealthScore(left.availability, left.index, now)
-      if (scoreDelta !== 0) {
-        return scoreDelta
-      }
-      return left.index - right.index
-    })
-    .map(entry => entry.provider)
 }

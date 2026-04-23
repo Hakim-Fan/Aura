@@ -13,6 +13,8 @@ import {
 } from './utils.mjs'
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 import { createWebTools } from './webTools.mjs'
+import { applyPatchInWorkspace } from './editing/applyPatchTool.mjs'
+import { verifyWorkspaceTextMutation } from './editing/fileVerification.mjs'
 
 const execFileAsync = promisify(execFile)
 const ALWAYS_ON_SKILL_IDS = new Set([
@@ -502,6 +504,18 @@ async function globWorkspace(pattern, target, cwd) {
   return truncate(matched.join('\n') || 'No matches found')
 }
 
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath)
+    return true
+  } catch (error) {
+    if (error && typeof error === 'object' && error.code === 'ENOENT') {
+      return false
+    }
+    throw error
+  }
+}
+
 async function replaceExactTextInFile(target, oldText, newText, options = {}) {
   if (!oldText) {
     throw new Error('oldText must not be empty.')
@@ -542,6 +556,7 @@ async function replaceExactTextInFile(target, oldText, newText, options = {}) {
     replacedCount,
     beforeLength: content.length,
     afterLength: nextContent.length,
+    nextContent,
   }
 }
 
@@ -925,11 +940,34 @@ export function createBuiltinTools(context) {
     },
     {
       source: 'builtin',
+      name: 'apply_patch',
+      aliases: ['patch'],
+      approvalCategory: 'file_write',
+      description:
+        'Apply a structured multi-file patch inside the workspace. Prefer this for modifying existing files. Pass a single patch string that starts with "*** Begin Patch" and ends with "*** End Patch".',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          patch: {
+            type: 'string',
+            description:
+              'Structured patch text using "*** Begin Patch", "*** Update File:", "*** Add File:", "*** Delete File:", "@@" hunks, and "*** End Patch".',
+          },
+        },
+        required: ['patch'],
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        return applyPatchInWorkspace(context.cwd, args.patch, runtime)
+      },
+    },
+    {
+      source: 'builtin',
       name: 'write_file',
       aliases: ['write', 'writefile'],
       approvalCategory: 'file_write',
       description:
-        'Write a text file inside the workspace. Overwrites the file if it already exists.',
+        'Write a text file inside the workspace. Best for new files or full-document rewrites.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -947,9 +985,17 @@ export function createBuiltinTools(context) {
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path)
+        const existedBefore = await pathExists(target)
         await fs.mkdir(path.dirname(target), { recursive: true })
         await fs.writeFile(target, args.content, 'utf8')
-        return `Wrote ${args.content.length} characters to ${target}`
+        const verification = await verifyWorkspaceTextMutation(target, {
+          existedBefore,
+          expectedContent: args.content,
+        })
+        return {
+          operation: 'write_file',
+          ...verification,
+        }
       },
     },
     {
@@ -958,7 +1004,7 @@ export function createBuiltinTools(context) {
       aliases: ['edit', 'replace'],
       approvalCategory: 'file_write',
       description:
-        'Edit a file by replacing an exact text block. Prefer this over rewriting the whole file.',
+        'Edit a file by replacing an exact text block. Use this as a fallback when apply_patch would be overkill.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -992,10 +1038,18 @@ export function createBuiltinTools(context) {
           replaceAll: args.replaceAll,
           expectedReplacements: args.expectedReplacements,
         })
-        return stringifyOutput({
-          path: target,
-          ...result,
+        const verification = await verifyWorkspaceTextMutation(target, {
+          existedBefore: true,
+          expectedContent: result.nextContent,
         })
+        return {
+          operation: 'edit_file',
+          path: target,
+          replacedCount: result.replacedCount,
+          beforeLength: result.beforeLength,
+          afterLength: result.afterLength,
+          ...verification,
+        }
       },
     },
     {
@@ -1004,7 +1058,7 @@ export function createBuiltinTools(context) {
       aliases: ['multiedit', 'editmany'],
       approvalCategory: 'file_write',
       description:
-        'Apply multiple exact text replacements to one file in sequence.',
+        'Apply multiple exact text replacements to one file in sequence. Use this only when apply_patch is unnecessary and several exact replacements are clearer.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1037,20 +1091,32 @@ export function createBuiltinTools(context) {
         }
 
         const applied = []
+        let finalContent = null
         for (const edit of args.edits) {
           runtime.throwIfAborted?.()
           const result = await replaceExactTextInFile(target, edit.oldText, edit.newText, {
             replaceAll: edit.replaceAll,
             expectedReplacements: edit.expectedReplacements,
           })
-          applied.push(result)
+          finalContent = result.nextContent
+          applied.push({
+            replacedCount: result.replacedCount,
+            beforeLength: result.beforeLength,
+            afterLength: result.afterLength,
+          })
         }
 
-        return stringifyOutput({
+        const verification = await verifyWorkspaceTextMutation(target, {
+          existedBefore: true,
+          expectedContent: finalContent,
+        })
+        return {
+          operation: 'multi_edit_file',
           path: target,
           editsApplied: applied.length,
           results: applied,
-        })
+          ...verification,
+        }
       },
     },
     {
@@ -1615,6 +1681,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
               status: 'running',
               output: stringifyOutput(nextOutput),
             })
+          },
+          registerTools(nextTools) {
+            hooks.registerDynamicTools?.(nextTools)
           },
         }),
       ),
