@@ -39,6 +39,54 @@ function containsUrlLikeText(text) {
   return /(?:https?:\/\/|www\.)\S+/iu.test(String(text || ''))
 }
 
+function containsWorkspacePathLikeText(text) {
+  return /(?:^|\s)(?:\.{0,2}\/)?[a-z0-9_./-]+\.[a-z0-9]{1,8}(?=$|\s)/iu.test(
+    String(text || ''),
+  )
+}
+
+function inferFileCreationTask(text) {
+  const normalized = String(text || '')
+  const hasCreationVerb = hasAny(normalized, [
+    'create file',
+    'new file',
+    'new doc',
+    'new document',
+    'write file',
+    'write to',
+    'save to',
+    'save as',
+    'generate file',
+    'generate document',
+    'generate markdown',
+    '新建文件',
+    '新建文档',
+    '写成',
+    '写到',
+    '写入',
+    '保存到',
+    '生成文件',
+    '生成文档',
+    '落成文档',
+  ])
+  const hasArtifactCue =
+    containsWorkspacePathLikeText(normalized) ||
+    hasAny(normalized, [
+      'readme',
+      'markdown',
+      'document',
+      'doc',
+      'config file',
+      'file',
+      '文档',
+      '文件',
+      '配置文件',
+      '路径',
+    ])
+
+  return hasCreationVerb && hasArtifactCue
+}
+
 function buildConversationText(messages) {
   return normalizeText(
     messages
@@ -201,6 +249,7 @@ function inferLocalTaskSignals(text) {
       '子 agent',
       '多步骤',
     ]),
+    isFileCreationTask: inferFileCreationTask(text),
   }
 }
 
@@ -223,6 +272,10 @@ function inferTaskSignalsFromClassification(classification, text) {
       classification.webInteractionRequired === true ||
       classification.systemBrowserRequested === true,
     isResearchTask: classification.needsExternalFacts === true,
+    isFileCreationTask:
+      classification.answerMode === 'execute' &&
+      classification.workspaceRelated === true &&
+      inferFileCreationTask(text),
     isComplexTask:
       classification.taskComplexity === 'high' ||
       classification.planDepth === 'multi_step' ||
@@ -305,6 +358,15 @@ const LONG_SESSION_EXECUTION_TOOLS = new Set([
   'write_stdin',
 ])
 
+const EXACT_REPLACEMENT_FALLBACK_TOOLS = new Set([
+  'edit_file',
+  'multi_edit_file',
+])
+
+const SHORT_SHELL_TOOLS = new Set([
+  'run_shell',
+])
+
 const WEB_RETRIEVAL_TOOLS = new Set([
   'web_search',
   'web_fetch',
@@ -328,6 +390,7 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
   const isBrowserInteraction =
     context.routeState?.webInteractionRequired === true ||
     context.routeState?.explicitSystemBrowserRequest === true
+  const prefersFileCreation = context.signals.isFileCreationTask === true
 
   if (tool.source === 'builtin') {
     score += 40
@@ -348,12 +411,20 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
   }
 
   if (isWorkspaceExecute) {
-    if (tool.name === 'apply_patch') {
-      score += 110
+    if (tool.name === 'write_file' && prefersFileCreation) {
+      score += 132
+    } else if (tool.name === 'apply_patch') {
+      score += prefersFileCreation ? 84 : 110
+    } else if (tool.name === 'write_file') {
+      score += 42
     } else if (LONG_SESSION_EXECUTION_TOOLS.has(tool.name)) {
-      score += 74
+      score += 76
+    } else if (EXACT_REPLACEMENT_FALLBACK_TOOLS.has(tool.name)) {
+      score += 22
+    } else if (SHORT_SHELL_TOOLS.has(tool.name)) {
+      score += 10
     } else if (LOCAL_EXECUTION_TOOLS.has(tool.name)) {
-      score += 65
+      score += 38
     } else if (
       tool.name === 'read_file' ||
       tool.name === 'search_code' ||
@@ -362,12 +433,20 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
       score += 45
     }
   } else if (context.signals.isEditingTask) {
-    if (tool.name === 'apply_patch') {
-      score += 90
+    if (tool.name === 'write_file' && prefersFileCreation) {
+      score += 118
+    } else if (tool.name === 'apply_patch') {
+      score += prefersFileCreation ? 72 : 90
+    } else if (tool.name === 'write_file') {
+      score += 34
     } else if (LONG_SESSION_EXECUTION_TOOLS.has(tool.name)) {
-      score += 58
+      score += 60
+    } else if (EXACT_REPLACEMENT_FALLBACK_TOOLS.has(tool.name)) {
+      score += 18
+    } else if (SHORT_SHELL_TOOLS.has(tool.name)) {
+      score += 8
     } else if (LOCAL_EXECUTION_TOOLS.has(tool.name)) {
-      score += 50
+      score += 30
     } else if (tool.name === 'read_file' || tool.name === 'search_code' || tool.name === 'glob_files') {
       score += 40
     }
@@ -381,7 +460,7 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
     } else if (tool.name === 'exec_command' || tool.name === 'write_stdin') {
       score += 24
     } else if (tool.name === 'run_shell') {
-      score += 16
+      score += 14
     }
   } else if (context.signals.isReviewTask) {
     if (tool.name === 'read_file' || tool.name === 'search_code') {
@@ -389,7 +468,7 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
     } else if (tool.name === 'exec_command' || tool.name === 'write_stdin') {
       score += 22
     } else if (tool.name === 'run_shell') {
-      score += 18
+      score += 16
     }
   }
 

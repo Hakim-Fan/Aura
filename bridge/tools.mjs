@@ -15,7 +15,11 @@ import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mj
 import { createWebTools } from './webTools.mjs'
 import { applyPatchInWorkspace } from './editing/applyPatchTool.mjs'
 import { parseApplyPatchShellCommand } from './editing/applyPatchShell.mjs'
-import { verifyWorkspaceTextMutation } from './editing/fileVerification.mjs'
+import {
+  applyEditFileMutation,
+  applyMultiEditFileMutation,
+  applyWriteFileMutation,
+} from './editing/textMutationRuntime.mjs'
 import { createUnifiedExecRuntime } from './editing/unifiedExecRuntime.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -578,62 +582,6 @@ async function globWorkspace(pattern, target, cwd) {
   return truncate(matched.join('\n') || 'No matches found')
 }
 
-async function pathExists(targetPath) {
-  try {
-    await fs.access(targetPath)
-    return true
-  } catch (error) {
-    if (error && typeof error === 'object' && error.code === 'ENOENT') {
-      return false
-    }
-    throw error
-  }
-}
-
-async function replaceExactTextInFile(target, oldText, newText, options = {}) {
-  if (!oldText) {
-    throw new Error('oldText must not be empty.')
-  }
-
-  const content = await fs.readFile(target, 'utf8')
-  const occurrences = content.split(oldText).length - 1
-  if (occurrences === 0) {
-    throw new Error('oldText was not found in the target file.')
-  }
-
-  const replaceAll = options.replaceAll === true
-  const expectedReplacements =
-    typeof options.expectedReplacements === 'number' && Number.isFinite(options.expectedReplacements)
-      ? Math.max(1, Math.round(options.expectedReplacements))
-      : replaceAll
-        ? occurrences
-        : 1
-
-  if (occurrences < expectedReplacements) {
-    throw new Error(
-      `Expected at least ${expectedReplacements} matching occurrence(s), but found ${occurrences}.`,
-    )
-  }
-
-  let replacedCount = 0
-  let nextContent
-  if (replaceAll) {
-    replacedCount = occurrences
-    nextContent = content.split(oldText).join(newText)
-  } else {
-    replacedCount = 1
-    nextContent = content.replace(oldText, newText)
-  }
-
-  await fs.writeFile(target, nextContent, 'utf8')
-  return {
-    replacedCount,
-    beforeLength: content.length,
-    afterLength: nextContent.length,
-    nextContent,
-  }
-}
-
 function resolveUserSuppliedPath(cwd, targetPath) {
   if (typeof targetPath !== 'string' || !targetPath.trim()) {
     throw new Error('sourcePath must not be empty.')
@@ -1062,17 +1010,7 @@ export function createBuiltinTools(context) {
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path)
-        const existedBefore = await pathExists(target)
-        await fs.mkdir(path.dirname(target), { recursive: true })
-        await fs.writeFile(target, args.content, 'utf8')
-        const verification = await verifyWorkspaceTextMutation(target, {
-          existedBefore,
-          expectedContent: args.content,
-        })
-        return {
-          operation: 'write_file',
-          ...verification,
-        }
+        return applyWriteFileMutation(target, args.content, runtime)
       },
     },
     {
@@ -1111,22 +1049,16 @@ export function createBuiltinTools(context) {
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path)
-        const result = await replaceExactTextInFile(target, args.oldText, args.newText, {
-          replaceAll: args.replaceAll,
-          expectedReplacements: args.expectedReplacements,
-        })
-        const verification = await verifyWorkspaceTextMutation(target, {
-          existedBefore: true,
-          expectedContent: result.nextContent,
-        })
-        return {
-          operation: 'edit_file',
-          path: target,
-          replacedCount: result.replacedCount,
-          beforeLength: result.beforeLength,
-          afterLength: result.afterLength,
-          ...verification,
-        }
+        return applyEditFileMutation(
+          target,
+          args.oldText,
+          args.newText,
+          {
+            replaceAll: args.replaceAll,
+            expectedReplacements: args.expectedReplacements,
+          },
+          runtime,
+        )
       },
     },
     {
@@ -1163,37 +1095,7 @@ export function createBuiltinTools(context) {
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path)
-        if (!Array.isArray(args.edits) || args.edits.length === 0) {
-          throw new Error('edits must contain at least one replacement.')
-        }
-
-        const applied = []
-        let finalContent = null
-        for (const edit of args.edits) {
-          runtime.throwIfAborted?.()
-          const result = await replaceExactTextInFile(target, edit.oldText, edit.newText, {
-            replaceAll: edit.replaceAll,
-            expectedReplacements: edit.expectedReplacements,
-          })
-          finalContent = result.nextContent
-          applied.push({
-            replacedCount: result.replacedCount,
-            beforeLength: result.beforeLength,
-            afterLength: result.afterLength,
-          })
-        }
-
-        const verification = await verifyWorkspaceTextMutation(target, {
-          existedBefore: true,
-          expectedContent: finalContent,
-        })
-        return {
-          operation: 'multi_edit_file',
-          path: target,
-          editsApplied: applied.length,
-          results: applied,
-          ...verification,
-        }
+        return applyMultiEditFileMutation(target, args.edits, runtime)
       },
     },
     {
