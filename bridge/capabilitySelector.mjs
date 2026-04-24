@@ -1,338 +1,27 @@
-function normalizeText(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[`#>*_[\](){}]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function normalizeIdentifier(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fff]+/gu, '')
-}
-
-function unique(values) {
-  return Array.from(new Set(values.filter(Boolean)))
-}
-
-function countMatches(text, keywords) {
-  let score = 0
-
-  for (const keyword of keywords) {
-    if (!keyword || keyword.length < 2) {
-      continue
-    }
-    if (text.includes(keyword)) {
-      score += keyword.length >= 8 ? 3 : 1
-    }
-  }
-
-  return score
-}
-
-function hasAny(text, patterns) {
-  return patterns.some(pattern => text.includes(pattern))
-}
-
-function containsUrlLikeText(text) {
-  return /(?:https?:\/\/|www\.)\S+/iu.test(String(text || ''))
-}
-
-function containsWorkspacePathLikeText(text) {
-  return /(?:^|\s)(?:\.{0,2}\/)?[a-z0-9_./-]+\.[a-z0-9]{1,8}(?=$|\s)/iu.test(
-    String(text || ''),
-  )
-}
-
-function inferFileCreationTask(text) {
-  const normalized = String(text || '')
-  const hasCreationVerb = hasAny(normalized, [
-    'create file',
-    'new file',
-    'new doc',
-    'new document',
-    'write file',
-    'write to',
-    'save to',
-    'save as',
-    'generate file',
-    'generate document',
-    'generate markdown',
-    '新建文件',
-    '新建文档',
-    '写成',
-    '写到',
-    '写入',
-    '保存到',
-    '生成文件',
-    '生成文档',
-    '落成文档',
-  ])
-  const hasArtifactCue =
-    containsWorkspacePathLikeText(normalized) ||
-    hasAny(normalized, [
-      'readme',
-      'markdown',
-      'document',
-      'doc',
-      'config file',
-      'file',
-      '文档',
-      '文件',
-      '配置文件',
-      '路径',
-    ])
-
-  return hasCreationVerb && hasArtifactCue
-}
-
-function buildConversationText(messages) {
-  return normalizeText(
-    messages
-      .slice(-8)
-      .map(message => {
-        const parts = Array.isArray(message.parts)
-          ? message.parts
-              .map(part => {
-                if (part.type === 'text') {
-                  return part.text || ''
-                }
-                if (part.type === 'image' || part.type === 'file') {
-                  return [part.name, part.path].filter(Boolean).join(' ')
-                }
-                return ''
-              })
-              .join('\n')
-          : ''
-
-        return [message.content, parts].filter(Boolean).join('\n')
-      })
-      .join('\n'),
-  )
-}
-
-function inferLocalTaskSignals(text) {
-  return {
-    isEditingTask: hasAny(text, [
-      'fix',
-      'bug',
-      'error',
-      'implement',
-      'feature',
-      'refactor',
-      'rewrite',
-      'update',
-      'optimize',
-      'repair',
-      '修改',
-      '改造',
-      '实现',
-      '修复',
-      '重构',
-      '优化',
-      '新增',
-      '补',
-    ]),
-    isReviewTask: hasAny(text, [
-      'review',
-      'regression',
-      'verify',
-      'validation',
-      'test',
-      'check',
-      '审查',
-      '检查',
-      '验证',
-      '回归',
-      '测试',
-    ]),
-    isStructureTask: hasAny(text, [
-      'workspace',
-      'repo',
-      'repository',
-      'structure',
-      'tree',
-      'snapshot',
-      '目录',
-      '结构',
-      '项目',
-      '工作区',
-      '仓库',
-    ]),
-    isGitTask: hasAny(text, [
-      'git',
-      'commit',
-      'branch',
-      'diff',
-      'status',
-      'rebase',
-      'merge',
-      '提交',
-      '分支',
-      '变更',
-    ]),
-    isDesktopTask: hasAny(text, [
-      'desktop',
-      'window',
-      'screen',
-      'screenshot',
-      'click',
-      'type into',
-      '打开应用',
-      '桌面',
-      '窗口',
-      '截图',
-      '点击',
-      '输入',
-      'mac',
-      'app',
-    ]),
-    isBrowserTask: hasAny(text, [
-      'chrome',
-      'browser',
-      'tab',
-      'page',
-      'website',
-      'url',
-      '网页',
-      '浏览器',
-      '标签页',
-      '页面',
-      '网址',
-    ]),
-    isResearchTask: hasAny(text, [
-      'search',
-      'lookup',
-      'find',
-      'query',
-      'latest',
-      'current',
-      'today',
-      'news',
-      'price',
-      'stock',
-      'quote',
-      'documentation',
-      'docs',
-      '查询',
-      '搜索',
-      '查一下',
-      '查找',
-      '最新',
-      '当前',
-      '今天',
-      '新闻',
-      '价格',
-      '股价',
-      '行情',
-      '资料',
-      '文档',
-      '股票',
-      '财报',
-      '公告',
-      '利好',
-      '利空',
-      '研报',
-      '港股',
-      '美股',
-    ]),
-    isComplexTask: hasAny(text, [
-      'complex',
-      'parallel',
-      'delegate',
-      'subagent',
-      'multi-step',
-      '复杂',
-      '并行',
-      '委派',
-      '子 agent',
-      '多步骤',
-    ]),
-    isFileCreationTask: inferFileCreationTask(text),
-  }
-}
-
-function inferTaskSignalsFromClassification(classification, text) {
-  if (!classification || typeof classification !== 'object') {
-    return inferLocalTaskSignals(text)
-  }
+function buildSemanticSignals({ classification, routeState }) {
+  const answerMode = routeState?.answerMode || classification?.answerMode || 'advise'
+  const workspaceRelated =
+    routeState?.workspaceRelated === true || classification?.workspaceRelated === true
+  const needsExternalFacts =
+    routeState?.needsExternalFacts === true || classification?.needsExternalFacts === true
+  const browserInteraction =
+    routeState?.webInteractionRequired === true ||
+    routeState?.explicitSystemBrowserRequest === true ||
+    classification?.webInteractionRequired === true ||
+    classification?.systemBrowserRequested === true
+  const isComplexTask =
+    classification?.taskComplexity === 'high' ||
+    classification?.planDepth === 'multi_step' ||
+    classification?.planDepth === 'long_horizon'
 
   return {
-    isEditingTask:
-      classification.answerMode === 'execute' && classification.workspaceRelated === true,
-    isReviewTask:
-      classification.answerMode === 'diagnose' && classification.workspaceRelated === true,
-    isStructureTask: hasAny(text, ['structure', 'tree', 'snapshot', '目录', '结构']),
-    isGitTask: hasAny(text, ['git', 'commit', 'branch', 'diff', 'status', '提交', '分支']),
-    isDesktopTask:
-      classification.webInteractionRequired === true ||
-      classification.systemBrowserRequested === true,
-    isBrowserTask:
-      classification.webInteractionRequired === true ||
-      classification.systemBrowserRequested === true,
-    isResearchTask: classification.needsExternalFacts === true,
-    isFileCreationTask:
-      classification.answerMode === 'execute' &&
-      classification.workspaceRelated === true &&
-      inferFileCreationTask(text),
-    isComplexTask:
-      classification.taskComplexity === 'high' ||
-      classification.planDepth === 'multi_step' ||
-      classification.planDepth === 'long_horizon',
+    isEditingTask: answerMode === 'execute' && workspaceRelated,
+    isReviewTask: answerMode === 'diagnose' && workspaceRelated,
+    isDesktopTask: browserInteraction,
+    isBrowserTask: browserInteraction,
+    isResearchTask: needsExternalFacts,
+    isComplexTask,
   }
-}
-
-function buildSkillSearchTerms(skill) {
-  return unique([
-    skill.id,
-    skill.name,
-    skill.summary,
-    ...(skill.keywords || []),
-  ])
-}
-
-function scoreSkill(skill, context) {
-  let score = countMatches(context.text, buildSkillSearchTerms(skill))
-
-  if (context.text.includes(normalizeText(skill.id))) {
-    score += 6
-  }
-  if (context.text.includes(normalizeText(skill.name))) {
-    score += 6
-  }
-
-  if (skill.id === 'repair-planner' && context.signals.isEditingTask) {
-    score += 5
-  }
-  if (skill.id === 'repo-reviewer' && (context.signals.isReviewTask || context.signals.isEditingTask)) {
-    score += 4
-  }
-  if (skill.id === 'desktop-operator' && context.signals.isDesktopTask) {
-    score += 5
-  }
-  if (skill.id === 'web-research' && context.signals.isResearchTask) {
-    score += 5
-  }
-
-  return score
-}
-
-function buildToolSelectionKeys(tool) {
-  return unique([
-    tool.name,
-    ...(Array.isArray(tool.aliases) ? tool.aliases : []),
-  ]).map(entry => normalizeIdentifier(entry))
-}
-
-function buildAllowedToolKeySet(selectedSkills) {
-  return new Set(
-    selectedSkills.flatMap(skill =>
-      (Array.isArray(skill.allowedTools) ? skill.allowedTools : []).map(entry =>
-        normalizeIdentifier(entry),
-      ),
-    ),
-  )
 }
 
 const CORE_WORKSPACE_TOOLS = new Set([
@@ -377,9 +66,8 @@ const DISCOVERY_TOOLS = new Set([
   'tool_search',
 ])
 
-function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
+function scoreToolOrdering(tool, context, originalIndex) {
   let score = 0
-  const hasRouteSemantics = Boolean(context.routeState)
   const isWorkspaceExecute =
     context.routeState?.answerMode === 'execute' &&
     context.routeState?.workspaceRelated === true
@@ -390,7 +78,6 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
   const isBrowserInteraction =
     context.routeState?.webInteractionRequired === true ||
     context.routeState?.explicitSystemBrowserRequest === true
-  const prefersFileCreation = context.signals.isFileCreationTask === true
 
   if (tool.source === 'builtin') {
     score += 40
@@ -411,10 +98,8 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
   }
 
   if (isWorkspaceExecute) {
-    if (tool.name === 'write_file' && prefersFileCreation) {
-      score += 132
-    } else if (tool.name === 'apply_patch') {
-      score += prefersFileCreation ? 84 : 110
+    if (tool.name === 'apply_patch') {
+      score += 110
     } else if (tool.name === 'write_file') {
       score += 42
     } else if (LONG_SESSION_EXECUTION_TOOLS.has(tool.name)) {
@@ -433,10 +118,8 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
       score += 45
     }
   } else if (context.signals.isEditingTask) {
-    if (tool.name === 'write_file' && prefersFileCreation) {
-      score += 118
-    } else if (tool.name === 'apply_patch') {
-      score += prefersFileCreation ? 72 : 90
+    if (tool.name === 'apply_patch') {
+      score += 90
     } else if (tool.name === 'write_file') {
       score += 34
     } else if (LONG_SESSION_EXECUTION_TOOLS.has(tool.name)) {
@@ -483,10 +166,6 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
     } else if (tool.name === 'web_search') {
       score += 8
     }
-
-    if (containsUrlLikeText(context.text) && tool.name === 'web_fetch') {
-      score += 24
-    }
   } else if (context.signals.isResearchTask && WEB_RETRIEVAL_TOOLS.has(tool.name)) {
     score += 80
 
@@ -497,10 +176,6 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
       score += 24
     } else if (tool.name === 'web_search') {
       score += 10
-    }
-
-    if (containsUrlLikeText(context.text) && tool.name === 'web_fetch') {
-      score += 22
     }
   }
 
@@ -524,24 +199,6 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
     score += 40
   }
 
-  if (tool.source === 'plugin' || tool.source === 'mcp') {
-    const capabilityTerms = unique([
-      tool.capabilityId,
-      tool.capabilityName,
-      tool.name,
-      ...(Array.isArray(tool.aliases) ? tool.aliases : []),
-    ])
-    score += Math.min(24, countMatches(context.text, capabilityTerms) * 2)
-  } else if (!hasRouteSemantics) {
-    const directToolTerms = [tool.name, ...(Array.isArray(tool.aliases) ? tool.aliases : [])]
-    score += Math.min(18, countMatches(context.text, directToolTerms) * 2)
-  }
-
-  const explicitlyAllowed = buildToolSelectionKeys(tool).some(key => allowedToolKeys.has(key))
-  if (explicitlyAllowed) {
-    score += 28
-  }
-
   return {
     tool,
     score,
@@ -549,10 +206,9 @@ function scoreToolOrdering(tool, context, allowedToolKeys, originalIndex) {
   }
 }
 
-function rankToolsByRelevance(tools, context, selectedSkills) {
-  const allowedToolKeys = buildAllowedToolKeySet(selectedSkills)
+function rankToolsByRelevance(tools, context) {
   return tools
-    .map((tool, index) => scoreToolOrdering(tool, context, allowedToolKeys, index))
+    .map((tool, index) => scoreToolOrdering(tool, context, index))
     .sort((left, right) => right.score - left.score || left.originalIndex - right.originalIndex)
     .map(entry => entry.tool)
 }
@@ -601,24 +257,16 @@ export function selectTurnCapabilities({
   classification,
   routeState,
 }) {
-  const text = buildConversationText(messages)
   const context = {
-    text,
-    signals: inferTaskSignalsFromClassification(classification, text),
+    signals: buildSemanticSignals({ classification, routeState }),
     routeState,
   }
 
-  const selectedSkills = skillEntries
-    .map(skill => ({
-      skill,
-      score: scoreSkill(skill, context),
-    }))
-    .filter(entry => entry.score > 0)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, 4)
-    .map(entry => entry.skill)
+  const selectedSkills = Array.isArray(skillEntries)
+    ? skillEntries.filter(skill => skill && typeof skill === 'object')
+    : []
 
-  const orderedTools = rankToolsByRelevance(tools, context, selectedSkills)
+  const orderedTools = rankToolsByRelevance(tools, context)
 
   return {
     selectedSkills,

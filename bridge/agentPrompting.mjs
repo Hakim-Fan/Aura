@@ -46,6 +46,7 @@ function deriveCapabilityProfile(routeState) {
   const answerMode = routeState?.answerMode || 'advise'
   const workspaceRelated = routeState?.workspaceRelated === true
   const needsExternalFacts = routeState?.needsExternalFacts === true
+  const webRetrievalAvailable = routeState?.webRetrievalAvailable !== false
   const webInteractionRequired = routeState?.webInteractionRequired === true
   const explicitSystemBrowserRequest =
     routeState?.explicitSystemBrowserRequest === true
@@ -55,11 +56,12 @@ function deriveCapabilityProfile(routeState) {
     hasReadonlyWorkspaceTools: true,
     hasWorkspaceWriteTools:
       (answerMode === 'execute' && workspaceRelated) || isCapabilityAdminTask,
-    hasWebRetrievalTools: needsExternalFacts,
+    hasWebRetrievalTools: webRetrievalAvailable,
     hasInteractiveBrowserTools:
       webInteractionRequired || explicitSystemBrowserRequest,
     hasCapabilityAdminTools: isCapabilityAdminTask,
     mixedRetrievalAndWorkspaceExecution:
+      webRetrievalAvailable === true &&
       needsExternalFacts === true &&
       workspaceRelated === true &&
       answerMode === 'execute',
@@ -68,7 +70,7 @@ function deriveCapabilityProfile(routeState) {
 
 export function buildCapabilityExposureNote(snapshot, routeState, toolAvailability = {}) {
   const lines = [
-    'Mounted direct tools follow runtime safety boundaries. They are ordered by likely relevance, but currently mounted tools remain callable when relevant.',
+    'Mounted direct tools follow runtime safety boundaries. The mounted tool list is the source of truth for this turn\'s capabilities, and mounted tools remain callable when relevant even if they are not ranked first.',
   ]
 
   if (routeState) {
@@ -85,6 +87,15 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
     lines.push(
       `Current answer mode: ${routeState.answerMode}. Active capability profile: ${enabledModes || 'safe local reads only'}.`,
     )
+    if (routeState.needsExternalFacts === true) {
+      lines.push(
+        'If web retrieval tools are mounted in the tool list, use them to ground current external facts instead of answering from memory alone.',
+      )
+    } else {
+      lines.push(
+        'Web retrieval tools may still be mounted as optional tools on this turn. If they appear in the tool list, use them when local context or current knowledge is insufficient instead of assuming they are blocked by prior classification.',
+      )
+    }
     if (Array.isArray(routeState.availableEscalations) && routeState.availableEscalations.length > 0) {
       lines.push(
         `Additional runtime escalations remain possible if the current capability profile is genuinely insufficient: ${routeState.availableEscalations.join(', ')}.`,
@@ -125,7 +136,7 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
 
   if (deferredCount > 0 || discoverableOnlyCount > 0) {
     lines.push(
-      `Additional deferred plugin/MCP tools are available via tool_search (${deferredCount} hidden loadable tools, ${discoverableCount} currently discoverable in search, ${discoverableOnlyCount} requiring activation or enablement before direct use). Search first, then call the loaded tool directly once it appears in the turn.`,
+      `tool_search can inspect the current tool catalog, including mounted tools plus deferred or discoverable plugin/MCP tools (${deferredCount} hidden loadable tools, ${discoverableCount} currently discoverable in search, ${discoverableOnlyCount} requiring activation or enablement before direct use). Search first, then call the direct or newly loaded tool that best fits the job.`,
     )
   }
 
@@ -141,12 +152,13 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
 
 export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote, routeState) {
   const sections = [
-    'You are Aura, a local-first desktop coding agent.',
+    'You are Aura, a runtime-governed tool-using agent for workspace work, web retrieval, and browser tasks within mounted capabilities.',
     `The active workspace is: ${settings.cwd}`,
     buildCurrentDateContext(),
     'Answer directly when your current knowledge or the mounted local context is sufficient.',
     'Use only the currently mounted tools when they materially reduce uncertainty or let you act directly on the user request.',
-    'If tool_search is mounted, use it to discover deferred plugin or MCP capabilities before claiming a needed tool does not exist.',
+    'Treat the mounted tool list as the source of truth for what you can do in this turn. Do not describe yourself as local-only when web or browser tools are mounted.',
+    'If tool_search is mounted, use it to inspect the available tool catalog before claiming a needed capability does not exist.',
     'Do not claim that something is fixed, installed, configured, created, or completed unless the current run produced direct evidence.',
     'Do not access paths outside the configured workspace root.',
     'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
@@ -163,9 +175,9 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
         capabilityProfile.hasInteractiveBrowserTools
           ? 'Interactive browser tools: enabled when explicitly required.'
           : 'Interactive browser tools: not active unless the task explicitly requires them.',
-        capabilityProfile.hasWebRetrievalTools
-          ? 'Web retrieval tools: active.'
-          : 'Web retrieval tools: inactive unless external facts are clearly needed.',
+        routeState.needsExternalFacts === true
+          ? 'If web retrieval tools are mounted in the tool list, use them for this turn because the task depends on current external facts.'
+          : 'If web retrieval tools are mounted in the tool list, they remain optional but usable. Do not wait for classifier hints before using them when local context or current knowledge is insufficient.',
         capabilityProfile.hasWorkspaceWriteTools
           ? 'Workspace write tools: active.'
           : 'Workspace write tools: inactive for this turn.',
@@ -302,10 +314,10 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
   }
 
   if (skillPrompt.trim()) {
-    sections.push('Selected skill summaries:\n' + skillPrompt)
+    sections.push('Enabled skill summaries:\n' + skillPrompt)
     if (routeState) {
       sections.push(
-        'If one of these selected skills is relevant and you need exact instructions, use aura_read_skill only when it is actually mounted for this turn.',
+        'These are enabled skills, not preselected instructions. Decide yourself whether any skill is relevant, and use aura_read_skill only if you need the full contents of a specific skill.',
       )
     }
   }

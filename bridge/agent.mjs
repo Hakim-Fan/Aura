@@ -21,7 +21,6 @@ import {
   loadSkillCatalog,
 } from './extensions.mjs'
 import {
-  peekDeterministicIntentClassification,
   resolveIntentClassification,
 } from './intentClassifier.mjs'
 import { loadMcpToolInventory } from './mcp.mjs'
@@ -45,6 +44,7 @@ import {
   enforceEvidencePolicy,
 } from './agentEvidence.mjs'
 import { applyCompletionGate } from './completionGate.mjs'
+import { evaluateRuntimeCapabilityContract } from './runtimeCapabilityContract.mjs'
 import { createToolRegistry } from './toolRegistry.mjs'
 import { createToolRouter } from './toolRouter.mjs'
 import {
@@ -216,17 +216,7 @@ function buildEffectiveRunSettings(settings, routeState) {
 }
 
 function shouldLoadRuntimeCapabilityLayers(routeState) {
-  if (!routeState || typeof routeState !== 'object') {
-    return true
-  }
-
-  return (
-    routeState.workspaceRelated === true ||
-    routeState.needsExternalFacts === true ||
-    routeState.webInteractionRequired === true ||
-    routeState.explicitSystemBrowserRequest === true ||
-    routeState.isCapabilityAdminTask === true
-  )
+  return true
 }
 
 function buildCompletionContext(routeState, toolEvents, runtimeBlocks = {}) {
@@ -321,47 +311,6 @@ function buildRouteDecisionSnapshot({
 }
 
 function inferRouteEscalationFromMessage(message, availableEscalations) {
-  if (!Array.isArray(availableEscalations) || availableEscalations.length === 0) {
-    return null
-  }
-
-  const normalized = normalizeFinalAnswer(message).toLowerCase()
-  if (
-    !normalized ||
-    !/(need|would need|require|lack|cannot|can't|unable|需要|缺少|无法|不能|没法)/u.test(
-      normalized,
-    )
-  ) {
-    return null
-  }
-
-  if (
-    availableEscalations.includes('browser-interactive') &&
-    /(browser|website|page|login|captcha|click|form|网页|浏览器|页面|登录|点击|表单|验证码)/u.test(
-      normalized,
-    )
-  ) {
-    return 'browser-interactive'
-  }
-
-  if (
-    availableEscalations.includes('web-lookup') &&
-    /(latest|current|today|official docs|official documentation|docs|documentation|news|sources|web|online|最新|当前|今天|官网|官方文档|文档|资料|新闻|来源|联网)/u.test(
-      normalized,
-    )
-  ) {
-    return 'web-lookup'
-  }
-
-  if (
-    availableEscalations.includes('local-write') &&
-    /(write access|edit|modify|change files|run command|write to|修改文件|写入|改动|执行命令|运行命令)/u.test(
-      normalized,
-    )
-  ) {
-    return 'local-write'
-  }
-
   return null
 }
 
@@ -973,25 +922,13 @@ export async function runRouteFirstAgent(request) {
   const currentTaskId = runtime.currentTaskId || taskTracker.rootId
   taskTracker.setStatus(currentTaskId, 'running')
   const hardSignals = deriveHardSignals(messages)
-  const deterministicClassificationResult = peekDeterministicIntentClassification(
-    messages,
-    {
-      hardSignals,
-      settings,
-    },
-  )
-  const deterministicClassification = deterministicClassificationResult?.classification || null
-  const initialNormalizedClassification = deterministicClassification
-    ? applyHardSignalIntentOverrides(deterministicClassification, hardSignals)
-    : null
+  const initialNormalizedClassification = null
   const initialRouteState = inferRouteState(messages, {
     classification: initialNormalizedClassification,
     hardSignals,
     settings,
   })
-  const shouldLoadCapabilityLayers = deterministicClassificationResult
-    ? shouldLoadRuntimeCapabilityLayers(initialRouteState)
-    : true
+  const shouldLoadCapabilityLayers = shouldLoadRuntimeCapabilityLayers(initialRouteState)
 
   const builtinTools = createBuiltinTools(context)
   const advancedTools = createAdvancedTools({
@@ -1007,12 +944,10 @@ export async function runRouteFirstAgent(request) {
     taskTracker,
   })
   const [classificationResult, skillCatalog, pluginInventory, mcpInventory] = await Promise.all([
-    deterministicClassificationResult
-      ? Promise.resolve(deterministicClassificationResult)
-      : resolveIntentClassification(messages, settings, {
-          hardSignals,
-          settings,
-        }).catch(() => null),
+    resolveIntentClassification(messages, settings, {
+      hardSignals,
+      settings,
+    }).catch(() => null),
     shouldLoadCapabilityLayers
       ? loadSkillCatalog(appRoot, capabilities?.skills || settings.enabledSkillIds || [])
       : Promise.resolve([]),
@@ -1060,17 +995,17 @@ export async function runRouteFirstAgent(request) {
     return runOrchestratedAgent(request)
   }
 
-  let routeState =
-    deterministicClassificationResult && initialNormalizedClassification
-      ? initialRouteState
-      : inferRouteState(messages, {
-          classification: normalizedClassification,
-          hardSignals,
-          settings,
-        })
+  let routeState = normalizedClassification
+    ? inferRouteState(messages, {
+        classification: normalizedClassification,
+        hardSignals,
+        settings,
+      })
+    : initialRouteState
   const visitedTiers = new Set([routeState.capabilityTier])
   const routeNotes = []
   const routeHistory = []
+  let routeEscalationCount = 0
   let lastSelectedCapabilities = null
   let lastSystemPrompt = ''
   let lastRouteDecision = {
@@ -1089,7 +1024,7 @@ export async function runRouteFirstAgent(request) {
       ? [...routeState.allowEscalationTo]
       : [],
     availableEscalations: [],
-    escalationCount: 0,
+    escalationCount: routeEscalationCount,
     tierHistory: [routeState.capabilityTier],
   }
 
@@ -1150,7 +1085,7 @@ export async function runRouteFirstAgent(request) {
         routeState: promptRouteState,
         selectedCapabilities,
         selectedTools: selectedCapabilities.selectedTools,
-        escalationCount: routeNotes.length,
+        escalationCount: routeEscalationCount,
         availableEscalations,
         tierHistory: [...routeHistory.map(entry => entry.capabilityTier), routeState.capabilityTier],
         classification: normalizedClassification,
@@ -1193,6 +1128,7 @@ export async function runRouteFirstAgent(request) {
               toolEvents: toolEvents.slice(turnToolEventStart),
             }),
           )
+          routeEscalationCount += 1
           routeState = nextRouteState
           visitedTiers.add(routeState.capabilityTier)
           taskTracker.setStatus(
@@ -1207,6 +1143,26 @@ export async function runRouteFirstAgent(request) {
       }
 
       let result = turnResult.result
+      const capabilityContract = evaluateRuntimeCapabilityContract({
+        routeState: promptRouteState,
+        selectedTools: selectedCapabilities.selectedTools,
+        toolEvents,
+        message: result.message,
+      })
+
+      if (capabilityContract) {
+        if (routeNotes.at(-1) !== capabilityContract.note) {
+          routeNotes.push(capabilityContract.note)
+        }
+        taskTracker.setStatus(
+          currentTaskId,
+          'running',
+          capabilityContract.retrySummary,
+        )
+        hooks?.onPhaseChange?.('preparing')
+        continue
+      }
+
       const desiredEscalation = inferRouteEscalationFromMessage(
         result.message,
         routeState.allowEscalationTo,
@@ -1245,7 +1201,7 @@ export async function runRouteFirstAgent(request) {
         routeState: promptRouteState,
         selectedCapabilities,
         selectedTools: selectedCapabilities.selectedTools,
-        escalationCount: routeNotes.length,
+        escalationCount: routeEscalationCount,
         availableEscalations,
         tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),
         classification: normalizedClassification,
@@ -1275,6 +1231,7 @@ export async function runRouteFirstAgent(request) {
             toolEvents: toolEvents.slice(turnToolEventStart),
           }),
         )
+        routeEscalationCount += 1
         routeState = nextRouteState
         visitedTiers.add(routeState.capabilityTier)
         taskTracker.setStatus(

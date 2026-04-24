@@ -1,19 +1,5 @@
 import { createStructuredError } from './runtimeErrors.mjs'
 
-function normalizeText(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[`#>*_[\](){}]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function hasAny(text, patterns) {
-  return patterns.some(pattern => text.includes(pattern))
-}
-
-const PUBLIC_HTTP_URL_PATTERN = /\bhttps?:\/\/[^\s<>"')\]}]+/giu
-
 function collectMessageText(message) {
   const parts = Array.isArray(message?.parts)
     ? message.parts
@@ -32,419 +18,26 @@ function collectMessageText(message) {
   return [message?.content, parts].filter(Boolean).join('\n')
 }
 
-function buildConversationText(messages) {
-  return normalizeText(buildConversationRawText(messages))
-}
-
-function buildConversationRawText(messages) {
-  return messages
-    .slice(-8)
-    .map(message => collectMessageText(message))
-    .filter(Boolean)
-    .join('\n')
-}
-
-function latestUserIntent(messages) {
-  return normalizeText(latestUserRawIntent(messages))
-}
-
-function latestUserRawIntent(messages) {
-  const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')
-  return latestUserMessage ? collectMessageText(latestUserMessage) : ''
-}
-
 function latestUserResearchMode(messages) {
   return [...messages].reverse().find(message => message.role === 'user')?.researchMode === 'deep'
     ? 'deep'
     : 'auto'
 }
 
-function isLikelyLocalHostname(hostname) {
-  const normalized = String(hostname || '').trim().toLowerCase()
-  if (!normalized) {
-    return true
-  }
-  if (
-    normalized === 'localhost' ||
-    normalized === '0.0.0.0' ||
-    normalized === '127.0.0.1' ||
-    normalized === '::1'
-  ) {
-    return true
-  }
-  if (/^127\./u.test(normalized) || /^10\./u.test(normalized) || /^192\.168\./u.test(normalized)) {
-    return true
-  }
-  const match = normalized.match(/^172\.(\d{1,3})\./u)
-  if (match) {
-    const segment = Number(match[1])
-    if (segment >= 16 && segment <= 31) {
-      return true
-    }
-  }
-  return false
-}
-
-function extractPublicHttpUrls(text) {
-  const seen = new Set()
-  const matches = String(text || '').match(PUBLIC_HTTP_URL_PATTERN) || []
-
-  return matches
-    .map(match => match.replace(/[),.;!?]+$/u, ''))
-    .filter(candidate => {
-      try {
-        const url = new URL(candidate)
-        if (!['http:', 'https:'].includes(url.protocol)) {
-          return false
-        }
-        const hostname = String(url.hostname || '').trim().toLowerCase()
-        if (!hostname || isLikelyLocalHostname(hostname)) {
-          return false
-        }
-        if (seen.has(candidate)) {
-          return false
-        }
-        seen.add(candidate)
-        return true
-      } catch {
-        return false
-      }
-    })
-}
-
-function stripPublicHttpUrls(text) {
-  return String(text || '').replace(PUBLIC_HTTP_URL_PATTERN, ' ')
-}
-
-function detectExplicitWebInteraction(text) {
-  const normalized = normalizeText(text)
-  if (!normalized) {
-    return false
-  }
-
-  if (hasAny(normalized, WEB_INTERACTION_KEYWORDS)) {
-    return true
-  }
-
-  return hasAny(normalized, BROWSER_SURFACE_KEYWORDS) && hasAny(normalized, BROWSER_ACTION_KEYWORDS)
-}
-
-function detectExplicitWebLookupRead(text, options = {}) {
-  const raw = String(text || '')
-  const normalized = normalizeText(raw)
-  const publicUrlCount = Math.max(0, Number(options.publicUrlCount) || 0)
-  const hasContextualPublicUrl = options.hasContextualPublicUrl === true
-  if (!normalized && publicUrlCount <= 0 && hasContextualPublicUrl !== true) {
-    return false
-  }
-  if (detectExplicitWebInteraction(raw)) {
-    return false
-  }
-  if (detectLiteralUrlEditIntent(raw)) {
-    return false
-  }
-
-  const mentionsContentReference = hasAny(normalized, WEB_CONTENT_REFERENCE_KEYWORDS)
-  const mentionsReadAction = hasAny(normalized, WEB_READ_ACTION_KEYWORDS)
-  const mentionsDeicticReference = hasAny(normalized, WEB_DEICTIC_REFERENCE_KEYWORDS)
-  const textWithoutUrls = normalizeText(stripPublicHttpUrls(raw))
-  const urlOnly = publicUrlCount > 0 && !textWithoutUrls
-
-  if (urlOnly) {
-    return true
-  }
-
-  if (
-    mentionsReadAction &&
-    (
-      mentionsContentReference ||
-      publicUrlCount > 0 ||
-      (hasContextualPublicUrl && mentionsDeicticReference)
-    )
-  ) {
-    return true
-  }
-
-  return mentionsContentReference && (publicUrlCount > 0 || hasContextualPublicUrl)
-}
-
-function detectLiteralUrlEditIntent(text) {
-  const normalized = normalizeText(text)
-  if (!normalized) {
-    return false
-  }
-
-  return (
-    hasAny(normalized, URL_LITERAL_EDIT_KEYWORDS) &&
-    (
-      hasAny(normalized, URL_LITERAL_CONTEXT_KEYWORDS) ||
-      hasAny(normalized, WORKSPACE_KEYWORDS)
-    )
-  )
-}
-
-const WEB_INTERACTION_KEYWORDS = [
-  'login',
-  'sign in',
-  'captcha',
-  'click',
-  'type',
-  'fill',
-  'submit',
-  'scroll',
-  'drag',
-  'select',
-  'consent',
-  'form',
-  '登录',
-  '点击',
-  '输入',
-  '填写',
-  '提交',
-  '滚动',
-  '拖动',
-  '选择',
-  '表单',
-  '验证码',
-]
-
-const BROWSER_SURFACE_KEYWORDS = [
-  'chrome',
-  'browser',
-  'tab',
-  'browser window',
-  'chrome window',
-  'system browser',
-  'frontmost browser',
-  'frontmost chrome',
-  '浏览器',
-  '标签页',
-  '浏览器窗口',
-]
-
-const BROWSER_ACTION_KEYWORDS = [
-  'open',
-  'navigate',
-  'visit',
-  'go to',
-  'switch tab',
-  'take over',
-  'activate',
-  'bring to front',
-  'new tab',
-  '打开',
-  '访问',
-  '进入',
-  '切换标签',
-  '接管',
-  '激活',
-]
-
-const WEB_CONTENT_REFERENCE_KEYWORDS = [
-  'link',
-  'url',
-  'page',
-  'webpage',
-  'website',
-  'article',
-  'articles',
-  'post',
-  'blog',
-  'blog post',
-  'column',
-  'doc',
-  'docs',
-  'documentation',
-  'source',
-  'sources',
-  '链接',
-  '网址',
-  '页面',
-  '网页',
-  '网站',
-  '文章',
-  '专栏',
-  '帖子',
-  '博文',
-  '文档',
-  '资料',
-  '来源',
-]
-
-const WEB_READ_ACTION_KEYWORDS = [
-  'read',
-  'summarize',
-  'summary',
-  'analyze',
-  'analysis',
-  'inspect',
-  'review',
-  'check',
-  'extract',
-  'fetch',
-  'look at',
-  'take a look',
-  'go through',
-  '帮我看',
-  '看看',
-  '看下',
-  '看一下',
-  '读一下',
-  '读取',
-  '总结',
-  '概括',
-  '分析',
-  '解读',
-  '提取',
-  '抓取',
-  '梳理',
-]
-
-const WEB_DEICTIC_REFERENCE_KEYWORDS = [
-  'this',
-  'that',
-  'this one',
-  'that one',
-  'it',
-  'these',
-  'those',
-  'this page',
-  'this link',
-  'this article',
-  '上面这个',
-  '这个',
-  '那个',
-  '它',
-  '这篇',
-  '那篇',
-  '这个链接',
-  '这个网址',
-  '这个页面',
-  '这篇文章',
-]
-
-const URL_LITERAL_EDIT_KEYWORDS = [
-  'replace',
-  'swap',
-  'change to',
-  'set to',
-  'point to',
-  '改成',
-  '改为',
-  '替换成',
-  '替换为',
-  '设为',
-  '指向',
-]
-
-const URL_LITERAL_CONTEXT_KEYWORDS = [
-  'config',
-  'setting',
-  'settings',
-  'env',
-  'environment variable',
-  'variable',
-  'field',
-  'parameter',
-  'api url',
-  'base url',
-  'endpoint',
-  'callback url',
-  'redirect url',
-  '配置',
-  '设置',
-  '环境变量',
-  '变量',
-  '字段',
-  '参数',
-  '接口地址',
-  '回调地址',
-  '重定向地址',
-]
-
-const SYSTEM_BROWSER_REQUEST_KEYWORDS = [
-  'system browser',
-  'google chrome',
-  'system chrome',
-  'frontmost browser',
-  'frontmost chrome',
-  'browser window',
-  'chrome window',
-  '系统浏览器',
-  '系统 chrome',
-  '系统chrome',
-  '谷歌浏览器',
-  '当前浏览器',
-  '当前 chrome',
-  '当前chrome',
-  '浏览器窗口',
-  'chrome 窗口',
-  'chrome窗口',
-]
-
-const FORCE_ORCHESTRATED_KEYWORDS = [
-  'orchestrated',
-  'planner-controller-reviewer',
-  'plan then execute then verify',
-  'multi-stage automation',
-  'cross-system workflow',
-  'long-horizon',
-  '多阶段自动化',
-  '分阶段执行',
-  '先规划再执行再验收',
-  '跨系统流程',
-  '长链路自动化',
-]
-
-const WORKSPACE_KEYWORDS = [
-  'workspace',
-  'repo',
-  'repository',
-  'project',
-  'code',
-  'file',
-  'files',
-  'folder',
-  'directory',
-  'git',
-  'commit',
-  'branch',
-  'diff',
-  'status',
-  'rebase',
-  'merge',
-  'build',
-  'test',
-  'config',
-  'stack trace',
-  '代码',
-  '文件',
-  '目录',
-  '仓库',
-  '项目',
-  '提交',
-  '分支',
-  '构建',
-  '测试',
-  '配置',
-  '日志',
-  '报错',
-  '错误',
-  'bug',
-]
-
 const SEARCH_BUDGET_BY_TIER = {
-  none: 0,
-  'local-readonly': 0,
-  'local-write': 0,
+  // Keep a small opportunistic budget on local-first turns so mounted
+  // retrieval tools stay usable even when external lookup was not preclassified.
+  none: 2,
+  'local-readonly': 2,
+  'local-write': 2,
   'web-lookup': 5,
   'browser-interactive': 2,
 }
 
 const DEEP_RESEARCH_SEARCH_BUDGET_BY_TIER = {
-  none: 0,
-  'local-readonly': 0,
-  'local-write': 0,
+  none: 3,
+  'local-readonly': 3,
+  'local-write': 3,
   'web-lookup': 8,
   'browser-interactive': 4,
 }
@@ -1422,6 +1015,7 @@ function buildRouteStateFromSignals({
     answerMode,
     capabilityTier,
     researchMode,
+    webRetrievalAvailable: true,
     needsExternalFacts,
     webInteractionRequired,
     workspaceRelated,
@@ -1456,27 +1050,12 @@ function buildRouteStateFromSignals({
 }
 
 export function deriveHardSignals(messages) {
-  const text = buildConversationText(messages)
-  const intent = latestUserIntent(messages)
-  const rawText = buildConversationRawText(messages)
-  const rawIntent = latestUserRawIntent(messages)
-  const publicUrlsInConversation = extractPublicHttpUrls(rawText)
-  const publicUrlsInIntent = extractPublicHttpUrls(rawIntent)
-  const visiblePublicUrlCount = Math.max(
-    publicUrlsInIntent.length,
-    publicUrlsInConversation.length,
-  )
-  const explicitWebInteraction = detectExplicitWebInteraction(rawIntent)
-
   return {
-    explicitWebInteraction,
-    explicitWebLookupRead: detectExplicitWebLookupRead(rawIntent, {
-      publicUrlCount: publicUrlsInIntent.length,
-      hasContextualPublicUrl: visiblePublicUrlCount > 0,
-    }),
-    publicWebUrlReference: publicUrlsInConversation.length > 0,
-    explicitSystemBrowserRequest: hasAny(text, SYSTEM_BROWSER_REQUEST_KEYWORDS),
-    forceOrchestrated: hasAny(intent, FORCE_ORCHESTRATED_KEYWORDS),
+    explicitWebInteraction: false,
+    explicitWebLookupRead: false,
+    publicWebUrlReference: false,
+    explicitSystemBrowserRequest: false,
+    forceOrchestrated: false,
   }
 }
 
@@ -1551,12 +1130,6 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
   })
 }
 
-const FALLBACK_WORKSPACE_PATTERN =
-  /(?:\b(?:workspace|repo|repository|project|code|file|files|folder|directory|git|commit|branch|diff|status|test|config)\b|代码|文件|目录|仓库|项目|分支|提交|测试|配置|(?:^|[\s`"'(])(?:\.{0,2}\/[^\s"'`]+|[a-z0-9_-]+\.(?:[a-z0-9]{1,8}))(?:$|[\s`"'):,]))/iu
-
-const FALLBACK_CAPABILITY_ADMIN_PATTERN =
-  /\b(?:skill|plugin|mcp|capability)\b|技能|插件|能力/u
-
 function latestUserHasFileContext(messages) {
   const latestUser = [...messages].reverse().find(message => message.role === 'user')
   return Array.isArray(latestUser?.parts)
@@ -1565,32 +1138,15 @@ function latestUserHasFileContext(messages) {
 }
 
 export function inferRouteStateFromKeywords(messages, settings = {}) {
-  const text = buildConversationText(messages)
-  const rawIntent = latestUserRawIntent(messages)
-  const hardSignals = deriveHardSignals(messages)
-  const explicitWebInteraction = hardSignals.explicitWebInteraction === true
-  const explicitSystemBrowserRequest = hardSignals.explicitSystemBrowserRequest === true
-  const needsExternalFacts =
-    hardSignals.explicitWebLookupRead === true ||
-    hardSignals.publicWebUrlReference === true
-  const workspaceRelated =
-    latestUserHasFileContext(messages) ||
-    FALLBACK_WORKSPACE_PATTERN.test(rawIntent)
-  const isCapabilityAdminTask = FALLBACK_CAPABILITY_ADMIN_PATTERN.test(text)
-
-  const answerMode =
-    explicitWebInteraction || isCapabilityAdminTask
-      ? 'execute'
-      : workspaceRelated
-        ? 'diagnose'
-        : 'advise'
+  const workspaceRelated = latestUserHasFileContext(messages)
+  const answerMode = workspaceRelated ? 'diagnose' : 'advise'
   return buildRouteStateFromSignals({
     answerMode,
-    needsExternalFacts,
-    webInteractionRequired: explicitWebInteraction || explicitSystemBrowserRequest,
+    needsExternalFacts: false,
+    webInteractionRequired: false,
     workspaceRelated,
-    isCapabilityAdminTask,
-    explicitSystemBrowserRequest,
+    isCapabilityAdminTask: false,
+    explicitSystemBrowserRequest: false,
     researchMode: latestUserResearchMode(messages),
   })
 }

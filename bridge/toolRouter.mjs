@@ -4,7 +4,6 @@ function buildCapabilityPolicy(routeState) {
   const capabilityTier = routeState?.capabilityTier || 'none'
   const answerMode = routeState?.answerMode || 'advise'
   const workspaceRelated = routeState?.workspaceRelated === true
-  const needsExternalFacts = routeState?.needsExternalFacts === true
   const webInteractionRequired = routeState?.webInteractionRequired === true
   const explicitSystemBrowserRequest =
     routeState?.explicitSystemBrowserRequest === true
@@ -16,7 +15,7 @@ function buildCapabilityPolicy(routeState) {
     allowReadonly: true,
     allowWrite:
       (answerMode === 'execute' && workspaceRelated) || isCapabilityAdminTask,
-    allowWeb: needsExternalFacts,
+    allowWeb: routeState?.webRetrievalAvailable !== false,
     allowBrowser: webInteractionRequired || explicitSystemBrowserRequest,
     allowComputer: webInteractionRequired || explicitSystemBrowserRequest,
     allowCapabilityAdmin: isCapabilityAdminTask,
@@ -78,16 +77,19 @@ export function createToolRouter(registry, routeState) {
   const discoverableOnlyEntries = registry.discoverableOnlyEntries.filter(entry =>
     isAllowedByPolicy(entry, policy),
   )
-  const searchCatalogEntries = [
-    ...deferredEntries,
-    ...discoverableOnlyEntries.filter(
-      entry => !deferredEntries.some(deferredEntry => deferredEntry.key === entry.key),
-    ),
-  ]
+  const searchCatalogEntries = Array.from(
+    new Map(
+      [
+        ...modelVisibleEntries,
+        ...deferredEntries,
+        ...discoverableOnlyEntries,
+      ].map(entry => [entry.key, entry]),
+    ).values(),
+  )
   const loadedDeferredToolKeys = new Set()
 
   function isSearchableEntry(entry) {
-    return Boolean(entry) && !loadedDeferredToolKeys.has(entry.key)
+    return Boolean(entry)
   }
 
   function canLoadEntry(entry) {

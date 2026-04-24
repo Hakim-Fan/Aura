@@ -391,14 +391,14 @@ export function createToolSearchTool({
     source: 'builtin',
     name: 'tool_search',
     description:
-      'Search deferred or discoverable plugin and MCP tools by capability name, description, or tool name. Loadable matches can be mounted into the current turn; discoverable-only matches return activation guidance.',
+      'Search the current tool catalog by capability name, description, or tool name. Results may include already mounted direct tools, loadable deferred plugin or MCP tools, and discoverable-only capabilities that still require activation.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
           description:
-            'What capability or tool you are looking for, for example "git helper", "browser automation", or "search docs".',
+            'What capability or tool you are looking for, for example "apply patch", "git helper", "browser automation", or "search docs".',
         },
         maxResults: {
           type: 'number',
@@ -426,27 +426,36 @@ export function createToolSearchTool({
       if (matches.length === 0) {
         return {
           query,
+          directToolNames: [],
           loadedToolKeys: [],
           loadedToolNames: [],
+          activationRequiredCount: 0,
           noResults: true,
           results: [],
         }
       }
 
+      const directEntries = matches
+        .map(match => match.entry)
+        .filter(entry => entry?.availability === 'mounted')
       const loadableEntries = matches
         .map(match => match.entry)
         .filter(entry =>
           typeof canLoadEntry === 'function' ? canLoadEntry(entry) === true : true,
         )
+      const activationRequiredEntries = matches
+        .map(match => match.entry)
+        .filter(entry => entry?.availability === 'activation_required')
       const loadedTools = loadEntries(loadableEntries)
       runtime.registerTools?.(loadedTools)
 
       return {
         query,
         noResults: false,
+        directToolNames: directEntries.map(entry => entry.callName || entry.name),
         loadedToolKeys: loadedTools.map(tool => tool.toolKey || tool.name),
         loadedToolNames: loadedTools.map(tool => tool.name),
-        activationRequiredCount: Math.max(0, matches.length - loadableEntries.length),
+        activationRequiredCount: activationRequiredEntries.length,
         results: matches.map(summarizeMatch),
       }
     },

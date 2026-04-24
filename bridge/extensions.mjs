@@ -755,9 +755,6 @@ export function buildSkillPrompt(skillEntries) {
   return skillEntries
     .map(skill => {
       const details = [skill.description || skill.summary]
-      if (Array.isArray(skill.allowedTools) && skill.allowedTools.length > 0) {
-        details.push(`preferred tools: ${skill.allowedTools.join(', ')}`)
-      }
       details.push('read the full skill file only if you decide to use it.')
       return `- ${skill.name}: ${details.filter(Boolean).join('; ')}`
     })

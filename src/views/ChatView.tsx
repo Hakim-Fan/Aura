@@ -1,7 +1,6 @@
 import {
   forwardRef,
   memo,
-  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -877,8 +876,8 @@ type ExecutionDigestPreview = {
   tone?: 'default' | 'error'
 }
 
-const EXECUTION_DIGEST_BATCH_DELAY_MS = 900
-const EXECUTION_DIGEST_MIN_BATCH_CHARS = 48
+const EXECUTION_DIGEST_ENTRY_LIMIT = 80
+const EXECUTION_DIGEST_AUTO_SCROLL_THRESHOLD_PX = 24
 
 function isSameExecutionDigestPreview(
   left: ExecutionDigestPreview | null,
@@ -909,6 +908,36 @@ function isExecutionDigestPreviewRefinement(
   }
 
   return nextText.startsWith(previousText) || (previousText.length >= 18 && nextText.includes(previousText))
+}
+
+function appendExecutionDigestPreview(
+  entries: ExecutionDigestPreview[],
+  nextPreview: ExecutionDigestPreview | null,
+) {
+  if (!nextPreview) {
+    return
+  }
+
+  const lastEntry = entries.at(-1)
+  if (lastEntry && isSameExecutionDigestPreview(lastEntry, nextPreview)) {
+    return
+  }
+  if (lastEntry && isExecutionDigestPreviewRefinement(lastEntry, nextPreview)) {
+    entries[entries.length - 1] = nextPreview
+    return
+  }
+
+  entries.push(nextPreview)
+  if (entries.length > EXECUTION_DIGEST_ENTRY_LIMIT) {
+    entries.splice(0, entries.length - EXECUTION_DIGEST_ENTRY_LIMIT)
+  }
+}
+
+function isExecutionDigestNearBottom(viewport: HTMLDivElement) {
+  return (
+    viewport.scrollHeight - (viewport.scrollTop + viewport.clientHeight) <
+    EXECUTION_DIGEST_AUTO_SCROLL_THRESHOLD_PX
+  )
 }
 
 function phaseOutputLabel(output: MessagePhaseOutput) {
@@ -979,171 +1008,110 @@ function findLatestTaskSummary(nodes: TaskNode[]) {
   return latestSummary
 }
 
-function buildExecutionDigestPreview(options: {
-  executionTimeline: ExecutionTimelineItem[]
-  taskNodes: TaskNode[]
-  messageError?: string
-  failureSummary?: string
-}) {
-  const { executionTimeline, taskNodes, messageError, failureSummary } = options
-
-  for (let index = executionTimeline.length - 1; index >= 0; index -= 1) {
-    const item = executionTimeline[index]
-
-    if (item.kind === 'event') {
-      const event = item.event
-      if (isAwaitingApprovalEvent(event) || isSearchControllerDecisionEvent(event)) {
-        continue
-      }
-
-      const rawText =
-        event.status === 'error'
-          ? event.errorInfo?.summary || event.error || event.output || event.summary || event.title
-          : event.kind === 'shell'
-            ? event.output || event.summary || event.input || event.title
-            : event.summary || event.output || event.input || event.title
-      const text = extractTailPreview(rawText)
-
-      if (text) {
-        return {
-          label: event.status === 'error' ? '执行异常' : event.title || '最新进展',
-          text,
-          tone: event.status === 'error' ? 'error' : 'default',
-        } satisfies ExecutionDigestPreview
-      }
+function buildExecutionDigestPreviewForTimelineItem(
+  item: ExecutionTimelineItem,
+): ExecutionDigestPreview | null {
+  if (item.kind === 'event') {
+    const event = item.event
+    if (isAwaitingApprovalEvent(event) || isSearchControllerDecisionEvent(event)) {
+      return null
     }
 
-    if (item.kind === 'phase_output') {
-      const text = extractTailPreview(item.output.content)
-      if (text) {
-        return {
-          label: phaseOutputLabel(item.output),
-          text,
-        } satisfies ExecutionDigestPreview
-      }
+    const rawText =
+      event.status === 'error'
+        ? event.errorInfo?.summary || event.error || event.output || event.summary || event.title
+        : event.kind === 'shell'
+          ? event.output || event.summary || event.input || event.title
+          : event.summary || event.output || event.input || event.title
+    const text = extractTailPreview(rawText)
+
+    if (!text) {
+      return null
     }
 
-    if (item.kind === 'reasoning') {
-      const text = extractTailPreview(item.entry.content)
-      if (text) {
-        return {
-          label: item.entry.kind === 'summary' ? '执行摘要' : '执行进展',
-          text,
-        } satisfies ExecutionDigestPreview
-      }
-    }
-  }
-
-  if (failureSummary) {
     return {
-      label: '执行异常',
-      text: extractTailPreview(failureSummary),
-      tone: 'error',
+      label: event.status === 'error' ? '执行异常' : event.title || '最新进展',
+      text,
+      tone: event.status === 'error' ? 'error' : 'default',
     } satisfies ExecutionDigestPreview
   }
 
-  const taskSummary = extractTailPreview(findLatestTaskSummary(taskNodes))
-  if (taskSummary) {
+  if (item.kind === 'phase_output') {
+    const text = extractTailPreview(item.output.content)
+    if (!text) {
+      return null
+    }
+
     return {
-      label: '执行计划',
-      text: taskSummary,
+      label: phaseOutputLabel(item.output),
+      text,
     } satisfies ExecutionDigestPreview
   }
 
-  if (messageError) {
+  if (item.kind === 'reasoning') {
+    const text = extractTailPreview(item.entry.content)
+    if (!text) {
+      return null
+    }
+
     return {
-      label: '执行异常',
-      text: extractTailPreview(messageError),
-      tone: 'error',
+      label: item.entry.kind === 'summary' ? '执行摘要' : '执行进展',
+      text,
     } satisfies ExecutionDigestPreview
   }
 
   return null
 }
 
-function ExecutionDigestLog({ preview }: { preview: ExecutionDigestPreview }) {
-  const [entries, setEntries] = useState<ExecutionDigestPreview[]>([preview])
+function buildExecutionDigestEntries(options: {
+  executionTimeline: ExecutionTimelineItem[]
+  taskNodes: TaskNode[]
+  messageError?: string
+  failureSummary?: string
+}) {
+  const { executionTimeline, taskNodes, messageError, failureSummary } = options
+  const entries: ExecutionDigestPreview[] = []
+
+  for (const item of executionTimeline) {
+    appendExecutionDigestPreview(entries, buildExecutionDigestPreviewForTimelineItem(item))
+  }
+
+  if (entries.length > 0) {
+    return entries
+  }
+
+  if (failureSummary) {
+    return [{
+      label: '执行异常',
+      text: extractTailPreview(failureSummary),
+      tone: 'error',
+    } satisfies ExecutionDigestPreview]
+  }
+
+  const taskSummary = extractTailPreview(findLatestTaskSummary(taskNodes))
+  if (taskSummary) {
+    return [{
+      label: '执行计划',
+      text: taskSummary,
+    } satisfies ExecutionDigestPreview]
+  }
+
+  if (messageError) {
+    return [{
+      label: '执行异常',
+      text: extractTailPreview(messageError),
+      tone: 'error',
+    } satisfies ExecutionDigestPreview]
+  }
+
+  return []
+}
+
+function ExecutionDigestLog({ entries }: { entries: ExecutionDigestPreview[] }) {
   const [expanded, setExpanded] = useState(false)
   const [hasOverflow, setHasOverflow] = useState(false)
-  const queuedPreviewRef = useRef<ExecutionDigestPreview | null>(null)
-  const flushTimerRef = useRef<number | null>(null)
-  const lastCommitAtRef = useRef(Date.now())
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true)
   const viewportRef = useRef<HTMLDivElement>(null)
-
-  const clearTimers = useCallback(() => {
-    if (flushTimerRef.current !== null) {
-      window.clearTimeout(flushTimerRef.current)
-      flushTimerRef.current = null
-    }
-  }, [])
-
-  const appendPreview = useCallback(
-    (nextPreview: ExecutionDigestPreview) => {
-      clearTimers()
-      queuedPreviewRef.current = null
-      setEntries(current => {
-        const lastEntry = current.at(-1)
-        if (lastEntry && isSameExecutionDigestPreview(lastEntry, nextPreview)) {
-          return current
-        }
-        if (lastEntry && isExecutionDigestPreviewRefinement(lastEntry, nextPreview)) {
-          return [...current.slice(0, -1), nextPreview]
-        }
-        const next = [...current, nextPreview]
-        return next.slice(-80)
-      })
-      lastCommitAtRef.current = Date.now()
-    },
-    [clearTimers],
-  )
-
-  useEffect(() => {
-    if (entries.length === 0) {
-      setEntries([preview])
-      lastCommitAtRef.current = Date.now()
-      return
-    }
-
-    const lastEntry = entries.at(-1)
-    if (lastEntry && isSameExecutionDigestPreview(lastEntry, preview)) {
-      return
-    }
-
-    const labelChanged = lastEntry?.label !== preview.label
-    const toneChanged = (lastEntry?.tone || 'default') !== (preview.tone || 'default')
-    const currentLineCount = (lastEntry?.text || '').split('\n').filter(Boolean).length
-    const nextLineCount = preview.text.split('\n').filter(Boolean).length
-    const deltaChars = Math.abs(preview.text.length - (lastEntry?.text.length || 0))
-    const elapsed = Date.now() - lastCommitAtRef.current
-    const shouldCommitImmediately =
-      labelChanged ||
-      toneChanged ||
-      nextLineCount !== currentLineCount ||
-      deltaChars >= EXECUTION_DIGEST_MIN_BATCH_CHARS ||
-      elapsed >= EXECUTION_DIGEST_BATCH_DELAY_MS
-
-    if (shouldCommitImmediately) {
-      appendPreview(preview)
-      return
-    }
-
-    queuedPreviewRef.current = preview
-    if (flushTimerRef.current !== null) {
-      window.clearTimeout(flushTimerRef.current)
-    }
-    flushTimerRef.current = window.setTimeout(() => {
-      if (queuedPreviewRef.current) {
-        appendPreview(queuedPreviewRef.current)
-      }
-      flushTimerRef.current = null
-    }, Math.max(120, EXECUTION_DIGEST_BATCH_DELAY_MS - elapsed))
-  }, [appendPreview, entries, preview])
-
-  useEffect(() => {
-    return () => {
-      clearTimers()
-    }
-  }, [clearTimers])
 
   useEffect(() => {
     const viewport = viewportRef.current
@@ -1162,18 +1130,33 @@ function ExecutionDigestLog({ preview }: { preview: ExecutionDigestPreview }) {
   }, [entries, expanded])
 
   useEffect(() => {
+    if (!viewportRef.current || !autoScrollEnabled) {
+      return
+    }
+    viewportRef.current.scrollTop = viewportRef.current.scrollHeight
+  }, [autoScrollEnabled, entries, expanded])
+
+  const canToggle = hasOverflow || expanded
+  const showJumpToLatest = !expanded && !autoScrollEnabled && hasOverflow
+
+  function scrollToLatest() {
     if (!viewportRef.current) {
       return
     }
     viewportRef.current.scrollTop = viewportRef.current.scrollHeight
-  }, [entries, expanded])
-
-  const canToggle = hasOverflow || expanded
+    setAutoScrollEnabled(true)
+  }
 
   return (
     <div className="execution-digest-log">
       <div
         ref={viewportRef}
+        onScroll={event => {
+          const nextAutoScrollEnabled = isExecutionDigestNearBottom(event.currentTarget)
+          setAutoScrollEnabled(current =>
+            current === nextAutoScrollEnabled ? current : nextAutoScrollEnabled,
+          )
+        }}
         className={`execution-digest-log__viewport custom-scrollbar ${
           expanded ? 'execution-digest-log__viewport--expanded' : ''
         } ${!expanded && hasOverflow ? 'execution-digest-log__viewport--masked' : ''}${
@@ -1192,16 +1175,31 @@ function ExecutionDigestLog({ preview }: { preview: ExecutionDigestPreview }) {
           </div>
         ))}
       </div>
-      {canToggle ? (
-        <button
-          type="button"
-          className="execution-digest-log__toggle"
-          onClick={() => setExpanded(current => !current)}
-          title={expanded ? '收起' : '展开'}
-          aria-label={expanded ? '收起' : '展开'}
-        >
-          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-        </button>
+      {showJumpToLatest || canToggle ? (
+        <div className="mt-1 flex items-center justify-center gap-1.5">
+          {showJumpToLatest ? (
+            <button
+              type="button"
+              className="execution-digest-log__toggle"
+              onClick={scrollToLatest}
+              title="回到最新"
+              aria-label="回到最新"
+            >
+              <ArrowDown size={14} />
+            </button>
+          ) : null}
+          {canToggle ? (
+            <button
+              type="button"
+              className="execution-digest-log__toggle"
+              onClick={() => setExpanded(current => !current)}
+              title={expanded ? '收起' : '展开'}
+              aria-label={expanded ? '收起' : '展开'}
+            >
+              {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+          ) : null}
+        </div>
       ) : null}
     </div>
   )
@@ -1209,10 +1207,10 @@ function ExecutionDigestLog({ preview }: { preview: ExecutionDigestPreview }) {
 
 function ExecutionDigest({
   activity,
-  preview,
+  entries,
 }: {
   activity?: ChatMessage['activity']
-  preview: ExecutionDigestPreview | null
+  entries: ExecutionDigestPreview[]
 }) {
   const meta = [
     // activity?.toolCount ? `${activity.toolCount} 个工具` : null,
@@ -1234,8 +1232,8 @@ function ExecutionDigest({
         </div>
       ) : null}
 
-      {preview ? (
-        <ExecutionDigestLog preview={preview} />
+      {entries.length > 0 ? (
+        <ExecutionDigestLog entries={entries} />
       ) : null}
     </section>
   )
@@ -2382,7 +2380,7 @@ function AssistantMessageCard({
     item => !(isExecutionEventItem(item) && isAwaitingApprovalEvent(item.event)),
   )
   const latestReasoningId = displayReasoning.at(-1)?.id || ''
-  const executionDigestPreview = buildExecutionDigestPreview({
+  const executionDigestEntries = buildExecutionDigestEntries({
     executionTimeline: nonApprovalTimeline,
     taskNodes: visibleSteps,
     messageError: message.error,
@@ -2395,7 +2393,7 @@ function AssistantMessageCard({
   const shouldShowCompactDigest =
     activity?.expanded === true &&
     !showDetailedExecutionDetails &&
-    Boolean(executionDigestPreview)
+    executionDigestEntries.length > 0
   const shouldShowApprovalEvents = approvalEvents.length > 0
   const shouldSuppressStreamingAnswerBody =
     isStreaming &&
@@ -2595,7 +2593,7 @@ function AssistantMessageCard({
           {shouldShowCompactDigest ? (
             <ExecutionDigest
               activity={activity}
-              preview={executionDigestPreview}
+              entries={executionDigestEntries}
             />
           ) : null}
 

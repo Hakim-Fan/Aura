@@ -10,7 +10,7 @@ function buildTool(name, aliases = []) {
   }
 }
 
-test('selectTurnCapabilities prefers write_file for explicit file creation requests', () => {
+test('selectTurnCapabilities keeps execute-tool ordering stable without file-creation keyword routing', () => {
   const tools = [
     buildTool('apply_patch', ['patch']),
     buildTool('write_file', ['write']),
@@ -40,9 +40,9 @@ test('selectTurnCapabilities prefers write_file for explicit file creation reque
     },
   })
 
-  assert.equal(result.selectedTools[0].name, 'write_file')
+  assert.equal(result.selectedTools[0].name, 'apply_patch')
   assert.ok(
-    result.selectedTools.findIndex(tool => tool.name === 'apply_patch') <
+    result.selectedTools.findIndex(tool => tool.name === 'write_file') <
       result.selectedTools.findIndex(tool => tool.name === 'edit_file'),
   )
 })
@@ -87,5 +87,85 @@ test('selectTurnCapabilities prefers apply_patch and long-lived exec tools for c
   assert.ok(
     result.selectedTools.findIndex(tool => tool.name === 'apply_patch') <
       result.selectedTools.findIndex(tool => tool.name === 'edit_file'),
+  )
+})
+
+test('selectTurnCapabilities prioritizes web tools from route semantics without keyword scoring', () => {
+  const tools = [
+    buildTool('read_file', ['read']),
+    buildTool('web_fetch', ['fetch']),
+    buildTool('web_research', ['research']),
+    buildTool('web_search', ['search']),
+  ]
+
+  const result = selectTurnCapabilities({
+    messages: [
+      {
+        content: '请处理这个问题',
+      },
+    ],
+    runtimeCapabilities: { workspaceRoot: '/tmp/workspace' },
+    skillEntries: [],
+    tools,
+    classification: {
+      answerMode: 'advise',
+      workspaceRelated: false,
+      needsExternalFacts: true,
+      webInteractionRequired: false,
+      systemBrowserRequested: false,
+      taskComplexity: 'low',
+      planDepth: 'single_step',
+    },
+    routeState: {
+      answerMode: 'advise',
+      workspaceRelated: false,
+      needsExternalFacts: true,
+      webInteractionRequired: false,
+      explicitSystemBrowserRequest: false,
+    },
+  })
+
+  assert.equal(result.selectedTools[0].name, 'web_search')
+  assert.ok(
+    result.selectedTools.findIndex(tool => tool.name === 'web_search') <
+      result.selectedTools.findIndex(tool => tool.name === 'read_file'),
+  )
+})
+
+test('selectTurnCapabilities exposes all enabled skills instead of prefiltering by text match', () => {
+  const result = selectTurnCapabilities({
+    messages: [
+      {
+        content: '请处理这个问题',
+      },
+    ],
+    runtimeCapabilities: { workspaceRoot: '/tmp/workspace' },
+    skillEntries: [
+      {
+        id: 'skill-a',
+        name: 'Skill A',
+      },
+      {
+        id: 'skill-b',
+        name: 'Skill B',
+      },
+    ],
+    tools: [buildTool('read_file')],
+    classification: {
+      answerMode: 'advise',
+      workspaceRelated: false,
+      needsExternalFacts: false,
+      webInteractionRequired: false,
+      systemBrowserRequested: false,
+    },
+    routeState: {
+      answerMode: 'advise',
+      workspaceRelated: false,
+    },
+  })
+
+  assert.deepEqual(
+    result.selectedSkills.map(skill => skill.id),
+    ['skill-a', 'skill-b'],
   )
 })
