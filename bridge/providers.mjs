@@ -601,8 +601,11 @@ function dedupeInlineToolCalls(existingCalls, nextCalls) {
 }
 
 export const __testInternals = {
+  buildProviderRetryInfo,
   dedupeInlineToolCalls,
   extractInlineToolCalls,
+  getProviderFailureRecoveryMaxRetries,
+  getProviderRetryDelayMs,
   mergeStreamedField,
   mergeOpenAiToolCalls,
   parseToolArguments,
@@ -783,6 +786,7 @@ function wait(ms) {
 const PROVIDER_CONNECT_TIMEOUT_MS = 45_000
 const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 90_000
 const PROVIDER_FINALIZATION_TIMEOUT_MS = 60_000
+const PROVIDER_RETRY_DELAYS_MS = [0, 1_200, 3_000, 7_000, 15_000]
 
 function providerRetryStageLabel(stage) {
   switch (stage) {
@@ -800,12 +804,19 @@ function getProviderFailureRecoveryMaxRetries(settings) {
     return 0
   }
 
-  const configured = Number(settings?.providerFailureRecoveryMaxAttempts)
-  if (!Number.isFinite(configured)) {
-    return 3
-  }
+  return PROVIDER_RETRY_DELAYS_MS.length
+}
 
-  return Math.max(0, Math.min(5, Math.round(configured)))
+function getProviderRetryDelayMs(retryNumber) {
+  const normalizedRetryNumber =
+    typeof retryNumber === 'number' && Number.isFinite(retryNumber)
+      ? Math.max(1, Math.round(retryNumber))
+      : 1
+  const index = Math.min(
+    PROVIDER_RETRY_DELAYS_MS.length - 1,
+    normalizedRetryNumber - 1,
+  )
+  return PROVIDER_RETRY_DELAYS_MS[index] || 0
 }
 
 function buildProviderRetryInfo(retryCount, maxRetries, extras = {}) {
@@ -814,7 +825,7 @@ function buildProviderRetryInfo(retryCount, maxRetries, extras = {}) {
   }
 
   const stage = extras.stage || 'response'
-  return {
+  const retryInfo = {
     attemptedRetries: retryCount,
     configuredMaxRetries: maxRetries,
     configuredMaxAttempts: maxRetries + 1,
@@ -822,6 +833,27 @@ function buildProviderRetryInfo(retryCount, maxRetries, extras = {}) {
     stageLabel: extras.stageLabel || providerRetryStageLabel(stage),
     recovered: extras.recovered === true,
   }
+
+  if (typeof extras.inProgress === 'boolean') {
+    retryInfo.inProgress = extras.inProgress
+  }
+  if (
+    typeof extras.nextRetryDelayMs === 'number' &&
+    Number.isFinite(extras.nextRetryDelayMs)
+  ) {
+    retryInfo.nextRetryDelayMs = Math.max(0, Math.round(extras.nextRetryDelayMs))
+  }
+  if (
+    typeof extras.nextAttemptNumber === 'number' &&
+    Number.isFinite(extras.nextAttemptNumber)
+  ) {
+    retryInfo.nextAttemptNumber = Math.max(1, Math.round(extras.nextAttemptNumber))
+  }
+  if (typeof extras.lastErrorSummary === 'string' && extras.lastErrorSummary.trim()) {
+    retryInfo.lastErrorSummary = extras.lastErrorSummary.trim()
+  }
+
+  return retryInfo
 }
 
 function mergeProviderRetryInfo(...entries) {
@@ -909,6 +941,21 @@ function extractProviderRetryInfo(value) {
         : undefined,
     stageLabel: typeof retryInfo.stageLabel === 'string' ? retryInfo.stageLabel : undefined,
     recovered: retryInfo.recovered === true,
+    inProgress: retryInfo.inProgress === true,
+    nextRetryDelayMs:
+      typeof retryInfo.nextRetryDelayMs === 'number' &&
+      Number.isFinite(retryInfo.nextRetryDelayMs)
+        ? Math.max(0, Math.round(retryInfo.nextRetryDelayMs))
+        : undefined,
+    nextAttemptNumber:
+      typeof retryInfo.nextAttemptNumber === 'number' &&
+      Number.isFinite(retryInfo.nextAttemptNumber)
+        ? Math.max(1, Math.round(retryInfo.nextAttemptNumber))
+        : undefined,
+    lastErrorSummary:
+      typeof retryInfo.lastErrorSummary === 'string'
+        ? retryInfo.lastErrorSummary
+        : undefined,
   }
 }
 
@@ -966,7 +1013,25 @@ function attachProviderRetryInfo(error, retryInfo) {
   return target
 }
 
-async function runProviderOperationWithRetry(operation, { messages, maxRetries = 3, baseDelayMs = 800 }) {
+function summarizeRetryError(error) {
+  if (typeof error?.errorInfo?.summary === 'string' && error.errorInfo.summary.trim()) {
+    return error.errorInfo.summary.trim()
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim()
+  }
+  return String(error || '').trim()
+}
+
+async function runProviderOperationWithRetry(
+  operation,
+  {
+    messages,
+    maxRetries = PROVIDER_RETRY_DELAYS_MS.length,
+    stage = 'response',
+    hooks,
+  } = {},
+) {
   let lastError
   let bestPartialState = null
   let retryCount = 0
@@ -992,7 +1057,10 @@ async function runProviderOperationWithRetry(operation, { messages, maxRetries =
       normalized = attachPartialProviderState(normalized, bestPartialState)
       normalized = attachProviderRetryInfo(
         normalized,
-        buildProviderRetryInfo(retryCount, maxRetries),
+        buildProviderRetryInfo(retryCount, maxRetries, {
+          stage,
+          lastErrorSummary: summarizeRetryError(normalized),
+        }),
       )
       lastError = normalized
 
@@ -1000,8 +1068,21 @@ async function runProviderOperationWithRetry(operation, { messages, maxRetries =
         throw normalized
       }
 
-      retryCount += 1
-      await wait(baseDelayMs * attempt)
+      const nextRetryCount = retryCount + 1
+      const nextRetryDelayMs = getProviderRetryDelayMs(nextRetryCount)
+      hooks?.onRetryProgress?.(
+        buildProviderRetryInfo(nextRetryCount, maxRetries, {
+          stage,
+          inProgress: true,
+          nextRetryDelayMs,
+          nextAttemptNumber: attempt + 1,
+          lastErrorSummary: summarizeRetryError(normalized),
+        }),
+      )
+      retryCount = nextRetryCount
+      if (nextRetryDelayMs > 0) {
+        await wait(nextRetryDelayMs)
+      }
     }
   }
 
@@ -1110,6 +1191,7 @@ export async function finalizeOpenAiCompatibleAnswer({
   deliveryPolicy = completionState ? buildDeliveryPolicy(completionState) : undefined,
   responseStyle,
   stage = 'finalization',
+  hooks,
 }) {
   const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
   const attemptResult = await runProviderOperationWithRetry(async () => {
@@ -1174,6 +1256,8 @@ export async function finalizeOpenAiCompatibleAnswer({
   }, {
     messages,
     maxRetries,
+    stage,
+    hooks,
   })
   return {
     message: attemptResult.value,
@@ -1194,6 +1278,7 @@ export async function finalizeGoogleAnswer({
   deliveryPolicy = completionState ? buildDeliveryPolicy(completionState) : undefined,
   responseStyle,
   stage = 'finalization',
+  hooks,
 }) {
   const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
   const attemptResult = await runProviderOperationWithRetry(async () => {
@@ -1263,6 +1348,8 @@ export async function finalizeGoogleAnswer({
   }, {
     messages,
     maxRetries,
+    stage,
+    hooks,
   })
   return {
     message: attemptResult.value,
@@ -1443,6 +1530,8 @@ export async function runOpenAiCompatibleAgent({
       }, {
         messages: conversationMessages,
         maxRetries,
+        stage: 'response',
+        hooks,
       })
       const stepResult = attemptResult.value
       providerRetryCount += attemptResult.retryCount
@@ -1719,6 +1808,8 @@ export async function runGoogleAgent({
       }, {
         messages: conversationMessages,
         maxRetries,
+        stage: 'response',
+        hooks,
       })
       const stepResult = attemptResult.value
       providerRetryCount += attemptResult.retryCount

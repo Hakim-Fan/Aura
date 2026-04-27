@@ -2,8 +2,6 @@ import { createToolSearchTool } from './toolDiscovery.mjs'
 
 function buildCapabilityPolicy(routeState) {
   const capabilityTier = routeState?.capabilityTier || 'none'
-  const answerMode = routeState?.answerMode || 'advise'
-  const workspaceRelated = routeState?.workspaceRelated === true
   const webInteractionRequired = routeState?.webInteractionRequired === true
   const explicitSystemBrowserRequest =
     routeState?.explicitSystemBrowserRequest === true
@@ -11,10 +9,8 @@ function buildCapabilityPolicy(routeState) {
 
   return {
     capabilityTier,
-    answerMode,
     allowReadonly: true,
-    allowWrite:
-      (answerMode === 'execute' && workspaceRelated) || isCapabilityAdminTask,
+    allowWrite: true,
     allowWeb: routeState?.webRetrievalAvailable !== false,
     allowBrowser: webInteractionRequired || explicitSystemBrowserRequest,
     allowComputer: webInteractionRequired || explicitSystemBrowserRequest,

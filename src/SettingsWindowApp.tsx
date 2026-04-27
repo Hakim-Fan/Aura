@@ -1680,31 +1680,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 <div className="flex flex-col">
                   <strong>模型失败时自动恢复</strong>
                   <span className="muted">
-                    当 Provider 在工具调用后中断、超时或断流时，自动重试并尽量基于已完成步骤补出最终回答。
+                    当 Provider 在工具调用后中断、超时或断流时，按固定策略自动重试，并尽量基于已完成步骤补出最终回答。
                   </span>
                 </div>
               </label>
             </div>
-            <label className="settings-number-field mt-3">
-              <span>自动恢复重试次数</span>
-              <input
-                type="number"
-                min={1}
-                max={5}
-                step={1}
-                value={draftSettings.providerFailureRecoveryMaxAttempts}
-                disabled={!draftSettings.enableProviderFailureRecovery}
-                onChange={event =>
-                  handleSettingsChange(
-                    'providerFailureRecoveryMaxAttempts',
-                    Math.max(1, Math.min(5, Number(event.target.value) || 1)),
-                  )
-                }
-              />
-            </label>
             <div className="provider-note mt-3">
               <p>开启后，Aura 会优先把瞬时模型故障当成可恢复问题处理，而不是立刻结束整轮任务。</p>
-              <p>次数越高越激进，通常能多扛住几次断流或超时，但也会增加等待时间和 token 成本。</p>
+              <p>固定策略最多自动重试 5 次：先立即重试，再依次等待 1.2 秒、3 秒、7 秒和 15 秒。</p>
+              <p>聊天页会实时显示当前已经重试到第几次，以及下一次重试前还会等待多久。</p>
             </div>
           </section>
 

@@ -34,6 +34,28 @@ test('createToolRouter keeps web retrieval tools visible on local-first turns', 
   assert.ok(visibleToolNames.includes('web_fetch'))
 })
 
+test('createToolRouter keeps local write tools visible even on advise turns', () => {
+  const registry = createToolRegistry({
+    builtinTools: [
+      buildTool('read_file'),
+      buildTool('apply_patch'),
+      buildTool('write_file'),
+      buildTool('exec_command'),
+    ],
+  })
+
+  const router = createToolRouter(registry, {
+    answerMode: 'advise',
+    workspaceRelated: false,
+  })
+
+  const visibleToolNames = router.modelVisibleTools.map(tool => tool.name)
+
+  assert.ok(visibleToolNames.includes('apply_patch'))
+  assert.ok(visibleToolNames.includes('write_file'))
+  assert.ok(visibleToolNames.includes('exec_command'))
+})
+
 test('tool_search can find already-mounted direct tools', async () => {
   const registry = createToolRegistry({
     builtinTools: [

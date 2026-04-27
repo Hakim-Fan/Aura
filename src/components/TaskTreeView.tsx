@@ -12,6 +12,8 @@ function statusLabel(status?: string) {
       return '执行中'
     case 'awaiting_approval':
       return '待审批'
+    case 'awaiting_user_input':
+      return '待回复'
     case 'completed':
       return '已完成'
     case 'failed':
@@ -26,6 +28,7 @@ function StatusIcon({ status }: { status?: string }) {
     case 'running':
       return <Clock3 size={15} />
     case 'awaiting_approval':
+    case 'awaiting_user_input':
       return <PauseCircle size={15} />
     case 'completed':
       return <CheckCircle2 size={15} />

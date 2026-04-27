@@ -365,6 +365,37 @@ function createRouteEscalationTool(routeState, availableEscalations) {
   }
 }
 
+function summarizeMountedToolAvailability(tools = []) {
+  const names = new Set(
+    (Array.isArray(tools) ? tools : []).map(tool => tool?.name).filter(Boolean),
+  )
+
+  return {
+    hasReadonlyWorkspaceTools:
+      names.has('list_files') ||
+      names.has('glob_files') ||
+      names.has('read_file') ||
+      names.has('search_code'),
+    hasWorkspaceWriteTools:
+      names.has('apply_patch') ||
+      names.has('write_file') ||
+      names.has('edit_file') ||
+      names.has('multi_edit_file') ||
+      names.has('exec_command') ||
+      names.has('write_stdin') ||
+      names.has('run_shell'),
+    hasWebRetrievalTools:
+      names.has('web_search') ||
+      names.has('web_fetch') ||
+      names.has('web_research'),
+    hasInteractiveBrowserTools:
+      names.has('system_browser_open') ||
+      [...names].some(name => name.startsWith('computer_')),
+    hasCapabilityAdminTools:
+      [...names].some(name => name.startsWith('aura_')),
+  }
+}
+
 function summarizeMessages(messages) {
   const latestUser =
     [...messages].reverse().find(message => message.role === 'user')?.content || 'Agent task'
@@ -471,6 +502,21 @@ function extractProviderRetryInfo(value) {
         : undefined,
     stageLabel: typeof retryInfo.stageLabel === 'string' ? retryInfo.stageLabel : undefined,
     recovered: retryInfo.recovered === true,
+    inProgress: retryInfo.inProgress === true,
+    nextRetryDelayMs:
+      typeof retryInfo.nextRetryDelayMs === 'number' &&
+      Number.isFinite(retryInfo.nextRetryDelayMs)
+        ? Math.max(0, Math.round(retryInfo.nextRetryDelayMs))
+        : undefined,
+    nextAttemptNumber:
+      typeof retryInfo.nextAttemptNumber === 'number' &&
+      Number.isFinite(retryInfo.nextAttemptNumber)
+        ? Math.max(1, Math.round(retryInfo.nextAttemptNumber))
+        : undefined,
+    lastErrorSummary:
+      typeof retryInfo.lastErrorSummary === 'string'
+        ? retryInfo.lastErrorSummary
+        : undefined,
   }
 }
 
@@ -667,6 +713,7 @@ async function runProviderTurn({
           deliveryPolicy: completionContext.deliveryPolicy,
           responseStyle: routeState?.responseStyle,
           stage: 'finalization',
+          hooks: providerHooks,
         })
         if (finalized.message.trim()) {
           result = {
@@ -714,6 +761,7 @@ async function runProviderTurn({
           deliveryPolicy: completionContext.deliveryPolicy,
           responseStyle: routeState?.responseStyle,
           stage: 'finalization',
+          hooks: providerHooks,
         })
         if (finalized.message.trim()) {
           result = {
@@ -1054,6 +1102,9 @@ export async function runRouteFirstAgent(request) {
         classification: normalizedClassification,
         routeState,
       })
+      const mountedToolAvailability = summarizeMountedToolAvailability(
+        selectedCapabilities.selectedTools,
+      )
       lastSelectedCapabilities = selectedCapabilities
       const skillPrompt = buildSkillPrompt(selectedCapabilities.selectedSkills)
       const exposureNote = buildAgentCapabilityExposureNote(
@@ -1063,6 +1114,7 @@ export async function runRouteFirstAgent(request) {
           deferredToolCount: toolRouter.deferredTools.length,
           discoverableToolCount: toolRouter.discoverableToolCount,
           discoverableOnlyToolCount: toolRouter.discoverableOnlyToolCount,
+          ...mountedToolAvailability,
         },
       )
       lastSystemPrompt = appendCarryoverContextToPrompt(
@@ -1072,6 +1124,7 @@ export async function runRouteFirstAgent(request) {
             skillPrompt,
             exposureNote,
             promptRouteState,
+            mountedToolAvailability,
           ),
           routeNotes,
         ),
@@ -1310,6 +1363,7 @@ export async function runRouteFirstAgent(request) {
                 deliveryPolicy: recoveryCompletionContext.deliveryPolicy,
                 responseStyle: routeState?.responseStyle,
                 stage: 'recovery',
+                hooks,
               })
             : await finalizeOpenAiCompatibleAnswer({
                 settings: buildEffectiveRunSettings(settings, routeState),
@@ -1322,6 +1376,7 @@ export async function runRouteFirstAgent(request) {
                 deliveryPolicy: recoveryCompletionContext.deliveryPolicy,
                 responseStyle: routeState?.responseStyle,
                 stage: 'recovery',
+                hooks,
               })
 
         if (recovered.message.trim()) {

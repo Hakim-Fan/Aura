@@ -615,6 +615,22 @@ function buildSnapshotMessageEvents(snapshot: AgentTaskSnapshot): MessageEvent[]
         },
       ]
       : []),
+    ...(snapshot.pendingUserInput
+      ? [
+        {
+          id: snapshot.pendingUserInput.id,
+          kind: 'user_input' as const,
+          title: '等待你的确认',
+          summary: snapshot.pendingUserInput.question,
+          order:
+            (snapshot.toolEvents
+              .map(event => event.order || 0)
+              .reduce((max, value) => Math.max(max, value), 0) || 0) + 2,
+          status: 'awaiting_user_input' as const,
+          input: snapshot.pendingUserInput.context,
+        },
+      ]
+      : []),
   ]
 }
 
@@ -1302,7 +1318,8 @@ export function MainWindowApp() {
   const isRunning =
     agentTask?.status === 'queued' ||
     agentTask?.status === 'running' ||
-    agentTask?.status === 'awaiting_approval'
+    agentTask?.status === 'awaiting_approval' ||
+    agentTask?.status === 'awaiting_user_input'
 
   const displayedToolEvents =
     agentTask ? agentTask.toolEvents : activeSession?.toolEvents || []
@@ -2696,7 +2713,8 @@ export function MainWindowApp() {
                 currentVariant.activity &&
                   (currentVariant.activity.status === 'running' ||
                     currentVariant.activity.status === 'queued' ||
-                    currentVariant.activity.status === 'awaiting_approval')
+                    currentVariant.activity.status === 'awaiting_approval' ||
+                    currentVariant.activity.status === 'awaiting_user_input')
                   ? {
                     ...currentVariant,
                     activity: {
@@ -2834,13 +2852,14 @@ export function MainWindowApp() {
     await respondToApproval(agentTask.id, decision)
     setAgentTasksBySession(current => ({
       ...current,
-      [activeSession.id]: current[activeSession.id]
-        ? {
-          ...current[activeSession.id],
-          status: 'running',
-          pendingApproval: undefined,
-        }
-        : current[activeSession.id],
+        [activeSession.id]: current[activeSession.id]
+          ? {
+            ...current[activeSession.id],
+            status: 'running',
+            pendingApproval: undefined,
+            pendingUserInput: undefined,
+          }
+          : current[activeSession.id],
     }))
   }
 

@@ -272,6 +272,8 @@ function activityStatusLabel(status?: string) {
       return '思考中'
     case 'awaiting_approval':
       return '等待审批'
+    case 'awaiting_user_input':
+      return '等待回复'
     case 'completed':
       return '已完成'
     case 'failed':
@@ -298,6 +300,8 @@ function activityPhaseLabel(phase?: AgentExecutionPhase, stalled = false) {
       return `恢复回答${suffix}`
     case 'awaiting_approval':
       return '等待审批'
+    case 'awaiting_user_input':
+      return '等待你回复'
     default:
       return stalled ? '执行较慢' : ''
   }
@@ -319,6 +323,19 @@ function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], withLimit = true
       : retryInfo.stage === 'finalization'
         ? '补充整理'
         : '主回答')
+
+  if (retryInfo.inProgress) {
+    const delayMs =
+      typeof retryInfo.nextRetryDelayMs === 'number' &&
+      Number.isFinite(retryInfo.nextRetryDelayMs)
+        ? Math.max(0, retryInfo.nextRetryDelayMs)
+        : 0
+    const delayLabel =
+      delayMs <= 0 ? '立即重试' : `${formatDuration(delayMs)} 后再次尝试`
+    return withLimit
+      ? `${stageLabel}重试中 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次，${delayLabel}`
+      : `${stageLabel}重试中 ${retryInfo.attemptedRetries} 次`
+  }
 
   return withLimit
     ? `${stageLabel}已自动重试 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次`
@@ -455,6 +472,8 @@ function eventKindLabel(event: MessageEvent) {
       return '技能'
     case 'approval':
       return '审批'
+    case 'user_input':
+      return '确认'
     case 'subagent':
       return '子 Agent'
     default:
@@ -468,6 +487,8 @@ function eventStatusLabel(status: MessageEvent['status']) {
       return '执行中'
     case 'awaiting_approval':
       return '待审批'
+    case 'awaiting_user_input':
+      return '待回复'
     case 'error':
       return '失败'
     default:
@@ -950,8 +971,11 @@ function isExecutionEventItem(
   return item.kind === 'event'
 }
 
-function isAwaitingApprovalEvent(event: MessageEvent) {
-  return event.kind === 'approval' && event.status === 'awaiting_approval'
+function isAwaitingUserResponseEvent(event: MessageEvent) {
+  return (
+    (event.kind === 'approval' && event.status === 'awaiting_approval') ||
+    (event.kind === 'user_input' && event.status === 'awaiting_user_input')
+  )
 }
 
 function stripMarkdownForPreview(value: string) {
@@ -1013,7 +1037,7 @@ function buildExecutionDigestPreviewForTimelineItem(
 ): ExecutionDigestPreview | null {
   if (item.kind === 'event') {
     const event = item.event
-    if (isAwaitingApprovalEvent(event) || isSearchControllerDecisionEvent(event)) {
+    if (isAwaitingUserResponseEvent(event) || isSearchControllerDecisionEvent(event)) {
       return null
     }
 
@@ -1409,6 +1433,8 @@ function MessageEventCard({
   const isShellLog = event.kind === 'shell'
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
   const isApproval = event.kind === 'approval' && event.status === 'awaiting_approval'
+  const isUserInputWait =
+    event.kind === 'user_input' && event.status === 'awaiting_user_input'
   const parsedOutput = parseJsonOutput(event.output)
   const toolName = typeof event.toolName === 'string' ? event.toolName : ''
   const isStructuredWebResearchEvent = toolName === 'web_research' && Boolean(parsedOutput)
@@ -1427,7 +1453,7 @@ function MessageEventCard({
       ? event.errorInfo?.suggestedAction
       : ''
 
-  if (!isApproval && isSearchControllerDecisionEvent && parsedOutput) {
+  if (!isApproval && !isUserInputWait && isSearchControllerDecisionEvent && parsedOutput) {
     return <SearchControllerDecisionCard output={parsedOutput} />
   }
 
@@ -1438,7 +1464,7 @@ function MessageEventCard({
           <span
             className={`text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded ${event.status === 'error'
               ? 'bg-red-50 text-red-500'
-              : event.status === 'awaiting_approval'
+              : event.status === 'awaiting_approval' || event.status === 'awaiting_user_input'
                 ? 'bg-amber-50 text-amber-600'
                 : 'bg-gray-100 text-gray-500'
               }`}
@@ -1462,7 +1488,7 @@ function MessageEventCard({
             <span
               className={`shrink-0 text-10px font-500 ${event.status === 'error'
                 ? 'cursor-help text-red-500'
-                : event.status === 'awaiting_approval'
+                : event.status === 'awaiting_approval' || event.status === 'awaiting_user_input'
                   ? 'text-amber-600'
                   : 'text-green-600'
                 }`}
@@ -1517,6 +1543,18 @@ function MessageEventCard({
           </div>
         </div>
       ) : null}
+      {isUserInputWait ? (
+        <div className="mt-2 rounded-xl border border-amber-200 bg-white p-3">
+          {event.input ? (
+            <p className="whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-secondary)]">
+              {event.input}
+            </p>
+          ) : null}
+          <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-12px leading-relaxed text-amber-700">
+            请直接在输入框回复，任务会沿着当前上下文继续，不会重新从头规划。
+          </div>
+        </div>
+      ) : null}
       {hasShellDetails ? (
         <div className="mt-2 rounded-xl border border-[rgba(15,23,42,0.06)] bg-[#f4f4f5] p-3">
           {event.input ? (
@@ -1540,7 +1578,7 @@ function MessageEventCard({
           ) : null}
         </div>
       ) : null}
-      {!isApproval && (!isShellLog || event.error) && (event.input || event.output || event.error) && (
+      {!isApproval && !isUserInputWait && (!isShellLog || event.error) && (event.input || event.output || event.error) && (
         <details className="mt-1.5 group" open={!isShellLog && event.status === 'error'}>
           <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-55">显示详细信息</summary>
           <div className="mt-2 flex flex-col gap-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3">
@@ -2281,7 +2319,8 @@ function AssistantMessageCard({
       activity.finishedAt ||
       (activity.status === 'running' ||
         activity.status === 'queued' ||
-        activity.status === 'awaiting_approval'
+        activity.status === 'awaiting_approval' ||
+        activity.status === 'awaiting_user_input'
         ? Date.now()
         : activity.startedAt)
     ) - activity.startedAt
@@ -2374,10 +2413,10 @@ function AssistantMessageCard({
   )
   const approvalEvents = executionTimeline.filter(
     (item): item is Extract<ExecutionTimelineItem, { kind: 'event' }> =>
-      isExecutionEventItem(item) && isAwaitingApprovalEvent(item.event),
+      isExecutionEventItem(item) && isAwaitingUserResponseEvent(item.event),
   )
   const nonApprovalTimeline = executionTimeline.filter(
-    item => !(isExecutionEventItem(item) && isAwaitingApprovalEvent(item.event)),
+    item => !(isExecutionEventItem(item) && isAwaitingUserResponseEvent(item.event)),
   )
   const latestReasoningId = displayReasoning.at(-1)?.id || ''
   const executionDigestEntries = buildExecutionDigestEntries({

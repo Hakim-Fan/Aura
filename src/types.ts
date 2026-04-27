@@ -22,9 +22,20 @@ export type ChatRole = 'user' | 'assistant'
 
 export type MessageStatus = 'pending' | 'streaming' | 'completed' | 'failed'
 
-export type MessageEventKind = 'tool' | 'shell' | 'skill' | 'approval' | 'subagent'
+export type MessageEventKind =
+  | 'tool'
+  | 'shell'
+  | 'skill'
+  | 'approval'
+  | 'user_input'
+  | 'subagent'
 
-export type MessageEventStatus = 'running' | 'success' | 'error' | 'awaiting_approval'
+export type MessageEventStatus =
+  | 'running'
+  | 'success'
+  | 'error'
+  | 'awaiting_approval'
+  | 'awaiting_user_input'
 
 export type RuntimeErrorCategory =
   | 'permission'
@@ -62,6 +73,10 @@ export type ProviderRetryInfo = {
   stage?: ProviderRetryStage
   stageLabel?: string
   recovered?: boolean
+  inProgress?: boolean
+  nextRetryDelayMs?: number
+  nextAttemptNumber?: number
+  lastErrorSummary?: string
 }
 
 export type AgentExecutionPhase =
@@ -72,6 +87,7 @@ export type AgentExecutionPhase =
   | 'finalizing'
   | 'recovering'
   | 'awaiting_approval'
+  | 'awaiting_user_input'
 
 export type AppendedInputStatus = 'queued' | 'consumed'
 
@@ -410,10 +426,18 @@ export type ApprovalRequest = {
   input?: string
 }
 
+export type UserInputRequest = {
+  id: string
+  question: string
+  context?: string
+  allowAttachments?: boolean
+}
+
 export type TaskStatus =
   | 'queued'
   | 'running'
   | 'awaiting_approval'
+  | 'awaiting_user_input'
   | 'completed'
   | 'failed'
 
@@ -610,6 +634,7 @@ export type AgentTaskSnapshot = {
   usage?: MessageUsage
   capabilitySnapshot?: CapabilityUsageSnapshot
   pendingApproval?: ApprovalRequest
+  pendingUserInput?: UserInputRequest
   appendedInputs?: AppendedInput[]
   error?: string
   errorInfo?: RuntimeErrorInfo

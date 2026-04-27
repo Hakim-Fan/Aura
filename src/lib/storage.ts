@@ -198,7 +198,7 @@ export const defaultSettings: AgentSettings = {
   reasoningEffort: 'medium',
   showDetailedExecutionDetails: false,
   enableProviderFailureRecovery: true,
-  providerFailureRecoveryMaxAttempts: 3,
+  providerFailureRecoveryMaxAttempts: 5,
   enableMultiAgent: true,
   enableComputerUse: true,
   autoApproveShell: false,
@@ -338,6 +338,10 @@ function normalizeProviderRetryInfo(value: unknown) {
     stage?: unknown
     stageLabel?: unknown
     recovered?: unknown
+    inProgress?: unknown
+    nextRetryDelayMs?: unknown
+    nextAttemptNumber?: unknown
+    lastErrorSummary?: unknown
   }
   const configuredMaxRetries =
     typeof retryInfo.configuredMaxRetries === 'number' && Number.isFinite(retryInfo.configuredMaxRetries)
@@ -376,6 +380,21 @@ function normalizeProviderRetryInfo(value: unknown) {
     stage,
     stageLabel: typeof retryInfo.stageLabel === 'string' ? retryInfo.stageLabel : undefined,
     recovered: retryInfo.recovered === true,
+    inProgress: retryInfo.inProgress === true,
+    nextRetryDelayMs:
+      typeof retryInfo.nextRetryDelayMs === 'number' &&
+      Number.isFinite(retryInfo.nextRetryDelayMs)
+        ? Math.max(0, Math.round(retryInfo.nextRetryDelayMs))
+        : undefined,
+    nextAttemptNumber:
+      typeof retryInfo.nextAttemptNumber === 'number' &&
+      Number.isFinite(retryInfo.nextAttemptNumber)
+        ? Math.max(1, Math.round(retryInfo.nextAttemptNumber))
+        : undefined,
+    lastErrorSummary:
+      typeof retryInfo.lastErrorSummary === 'string'
+        ? retryInfo.lastErrorSummary
+        : undefined,
   }
 }
 
@@ -1800,7 +1819,8 @@ function sessionHasPendingPersistence(session: PersistedSessionRecord) {
       hasRunningStatus(activeVariant?.status) ||
       activityStatus === 'queued' ||
       activityStatus === 'running' ||
-      activityStatus === 'awaiting_approval'
+      activityStatus === 'awaiting_approval' ||
+      activityStatus === 'awaiting_user_input'
     )
   })
 }

@@ -56,6 +56,8 @@ struct AgentTaskSnapshot {
     stalled: Option<bool>,
     #[serde(rename = "pendingApproval")]
     pending_approval: Option<serde_json::Value>,
+    #[serde(rename = "pendingUserInput")]
+    pending_user_input: Option<serde_json::Value>,
     error: Option<String>,
     #[serde(rename = "errorInfo")]
     error_info: Option<serde_json::Value>,
@@ -1776,6 +1778,7 @@ fn spawn_agent_task<R: Runtime>(
         last_progress_at: None,
         stalled: Some(false),
         pending_approval: None,
+        pending_user_input: None,
         error: None,
         error_info: None,
         error_code: None,
@@ -1853,6 +1856,9 @@ fn spawn_agent_task<R: Runtime>(
                 Some("usage") => with_snapshot(&stdout_snapshot, |current| {
                     current.usage = extract_object(event.get("usage"));
                 }),
+                Some("retry_progress") => with_snapshot(&stdout_snapshot, |current| {
+                    current.retry_info = extract_object(event.get("retryInfo"));
+                }),
                 Some("tool_event") => with_snapshot(&stdout_snapshot, |current| {
                     if let Some(tool_event) = event.get("event") {
                         merge_tool_event(current, tool_event);
@@ -1881,6 +1887,13 @@ fn spawn_agent_task<R: Runtime>(
                     current.status = "awaiting_approval".into();
                     current.phase = Some("awaiting_approval".into());
                     current.pending_approval = event.get("request").cloned();
+                    current.pending_user_input = None;
+                }),
+                Some("user_input_required") => with_snapshot(&stdout_snapshot, |current| {
+                    current.status = "awaiting_user_input".into();
+                    current.phase = Some("awaiting_user_input".into());
+                    current.pending_approval = None;
+                    current.pending_user_input = event.get("request").cloned();
                 }),
                 Some("app_action_request") => {
                     let request_id = event
@@ -1927,6 +1940,7 @@ fn spawn_agent_task<R: Runtime>(
                 Some("completed") => with_snapshot(&stdout_snapshot, |current| {
                     current.status = "completed".into();
                     current.pending_approval = None;
+                    current.pending_user_input = None;
                     if let Some(result) = event.get("result") {
                         let next_message = result
                             .get("message")
@@ -1968,6 +1982,7 @@ fn spawn_agent_task<R: Runtime>(
                 Some("failed") => with_snapshot(&stdout_snapshot, |current| {
                     current.status = "failed".into();
                     current.pending_approval = None;
+                    current.pending_user_input = None;
                     current.error = event
                         .get("message")
                         .and_then(|value| value.as_str())
@@ -2010,7 +2025,11 @@ fn spawn_agent_task<R: Runtime>(
         std::thread::sleep(std::time::Duration::from_millis(100));
         let collected_stderr = stderr_buffer.lock().unwrap_or_else(|e| e.into_inner()).clone();
         with_snapshot(&stdout_snapshot, |current| {
-            if current.status == "running" || current.status == "queued" || current.status == "awaiting_approval" {
+            if current.status == "running"
+                || current.status == "queued"
+                || current.status == "awaiting_approval"
+                || current.status == "awaiting_user_input"
+            {
                 current.status = "failed".into();
                 let stderr_message = collected_stderr.trim().to_string();
                 current.error = Some(if stderr_message.is_empty() {
@@ -2220,6 +2239,11 @@ fn append_input_to_agent_task(
             .snapshot
             .lock()
             .map_err(|_| "Failed to lock task snapshot.".to_string())?;
+        if snapshot.pending_user_input.is_some() {
+            snapshot.status = "running".into();
+            snapshot.phase = Some("preparing".into());
+            snapshot.pending_user_input = None;
+        }
         snapshot.appended_inputs.push(serde_json::json!({
             "id": input.get("id").and_then(|value| value.as_str()).unwrap_or_default(),
             "content": input.get("content").and_then(|value| value.as_str()).unwrap_or_default(),
@@ -2313,6 +2337,7 @@ fn abort_agent_task(state: State<'_, AgentTaskStore>, task_id: String) -> Result
         if snapshot.status == "running"
             || snapshot.status == "queued"
             || snapshot.status == "awaiting_approval"
+            || snapshot.status == "awaiting_user_input"
         {
             snapshot.status = "failed".into();
             snapshot.error = Some("任务已被用户强行终止。".into());

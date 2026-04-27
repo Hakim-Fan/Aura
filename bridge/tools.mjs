@@ -1160,6 +1160,60 @@ export function createBuiltinTools(context) {
     },
     {
       source: 'builtin',
+      name: 'request_user_input',
+      aliases: ['ask_user', 'request_confirmation'],
+      description:
+        'Pause the current run and ask the user for a needed confirmation, missing decision, or extra local context before continuing.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          question: {
+            type: 'string',
+            description: 'The concrete question or confirmation request to show the user.',
+          },
+          context: {
+            type: 'string',
+            description: 'Optional short context explaining why the extra input is needed.',
+          },
+          allowAttachments: {
+            type: 'boolean',
+            description: 'Whether the user may respond with attachments as part of the follow-up.',
+          },
+        },
+        required: ['question'],
+      },
+      internalOnly: true,
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        if (typeof runtime.requestUserInput !== 'function') {
+          throw createStructuredError('当前运行时不支持请求用户补充输入。', {
+            source: 'tool',
+            category: 'unsupported',
+            code: 'REQUEST_USER_INPUT_UNAVAILABLE',
+            suggestedAction:
+              '请直接在最终回答里说明还缺什么信息，或切换到支持交互续跑的运行时。',
+          })
+        }
+
+        const response = await runtime.requestUserInput({
+          id: `user-input-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          question: typeof args.question === 'string' ? args.question : '',
+          context: typeof args.context === 'string' ? args.context : '',
+          allowAttachments: args.allowAttachments !== false,
+        })
+
+        return stringifyOutput({
+          status: 'received',
+          queuedAsNextUserTurn: true,
+          attachmentCount:
+            response && typeof response === 'object' && Number.isFinite(response.attachmentCount)
+              ? response.attachmentCount
+              : 0,
+        })
+      },
+    },
+    {
+      source: 'builtin',
       name: 'exec_command',
       aliases: ['exec', 'shell_session', 'command_session'],
       approvalCategory: 'shell',
@@ -1672,6 +1726,24 @@ function isAutoApproved(tool, settings) {
   }
 }
 
+async function resolveApprovalSettings(hooks = {}) {
+  if (typeof hooks.appControl === 'function') {
+    try {
+      const liveSettings = await hooks.appControl('get_settings', {})
+      if (liveSettings && typeof liveSettings === 'object') {
+        return {
+          ...(hooks.settings || {}),
+          ...liveSettings,
+        }
+      }
+    } catch {
+      // Fall back to the task-start settings snapshot if live settings are unavailable.
+    }
+  }
+
+  return hooks.settings || {}
+}
+
 function emitToolEvent(event, toolEvents, hooks) {
   const index = toolEvents.findIndex(entry => entry.id === event.id)
   if (index >= 0) {
@@ -1730,7 +1802,11 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     )
   }
 
-  if (effectiveTool.approvalCategory && !isAutoApproved(effectiveTool, hooks.settings || {})) {
+  const approvalSettings = effectiveTool.approvalCategory
+    ? await resolveApprovalSettings(hooks)
+    : hooks.settings || {}
+
+  if (effectiveTool.approvalCategory && !isAutoApproved(effectiveTool, approvalSettings)) {
     const decision = await hooks.requestApproval?.({
       id: eventId,
       category: effectiveTool.approvalCategory,
@@ -1791,6 +1867,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
           },
           registerTools(nextTools) {
             hooks.registerDynamicTools?.(nextTools)
+          },
+          requestUserInput(request) {
+            return hooks.requestUserInput?.(request)
           },
         }),
       ),

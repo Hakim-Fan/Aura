@@ -42,28 +42,39 @@ function buildReasoningInstruction(settings) {
   return reasoningInstructions[settings.reasoningEffort] || reasoningInstructions.medium
 }
 
-function deriveCapabilityProfile(routeState) {
+function deriveCapabilityProfile(routeState, toolAvailability = {}) {
   const answerMode = routeState?.answerMode || 'advise'
-  const workspaceRelated = routeState?.workspaceRelated === true
   const needsExternalFacts = routeState?.needsExternalFacts === true
   const webRetrievalAvailable = routeState?.webRetrievalAvailable !== false
   const webInteractionRequired = routeState?.webInteractionRequired === true
   const explicitSystemBrowserRequest =
     routeState?.explicitSystemBrowserRequest === true
   const isCapabilityAdminTask = routeState?.isCapabilityAdminTask === true
+  const mountedReadonly =
+    toolAvailability.hasReadonlyWorkspaceTools !== false
+  const mountedWrite =
+    toolAvailability.hasWorkspaceWriteTools === true
+  const mountedWeb =
+    toolAvailability.hasWebRetrievalTools === true ||
+    webRetrievalAvailable
+  const mountedBrowser =
+    toolAvailability.hasInteractiveBrowserTools === true ||
+    webInteractionRequired ||
+    explicitSystemBrowserRequest
+  const mountedAdmin =
+    toolAvailability.hasCapabilityAdminTools === true ||
+    isCapabilityAdminTask
 
   return {
-    hasReadonlyWorkspaceTools: true,
-    hasWorkspaceWriteTools:
-      (answerMode === 'execute' && workspaceRelated) || isCapabilityAdminTask,
-    hasWebRetrievalTools: webRetrievalAvailable,
-    hasInteractiveBrowserTools:
-      webInteractionRequired || explicitSystemBrowserRequest,
-    hasCapabilityAdminTools: isCapabilityAdminTask,
+    hasReadonlyWorkspaceTools: mountedReadonly,
+    hasWorkspaceWriteTools: mountedWrite || mountedAdmin,
+    hasWebRetrievalTools: mountedWeb,
+    hasInteractiveBrowserTools: mountedBrowser,
+    hasCapabilityAdminTools: mountedAdmin,
     mixedRetrievalAndWorkspaceExecution:
-      webRetrievalAvailable === true &&
+      mountedWeb === true &&
       needsExternalFacts === true &&
-      workspaceRelated === true &&
+      (mountedWrite === true || mountedAdmin === true) &&
       answerMode === 'execute',
   }
 }
@@ -74,7 +85,7 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
   ]
 
   if (routeState) {
-    const capabilityProfile = deriveCapabilityProfile(routeState)
+    const capabilityProfile = deriveCapabilityProfile(routeState, toolAvailability)
     const enabledModes = [
       capabilityProfile.hasReadonlyWorkspaceTools ? 'safe local reads' : null,
       capabilityProfile.hasWorkspaceWriteTools ? 'workspace writes' : null,
@@ -150,7 +161,13 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
   return lines.join('\n')
 }
 
-export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote, routeState) {
+export function buildRouteFirstSystemPrompt(
+  settings,
+  skillPrompt,
+  exposureNote,
+  routeState,
+  toolAvailability = {},
+) {
   const sections = [
     'You are Aura, a runtime-governed tool-using agent for workspace work, web retrieval, and browser tasks within mounted capabilities.',
     `The active workspace is: ${settings.cwd}`,
@@ -167,7 +184,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
   ]
 
   if (routeState) {
-    const capabilityProfile = deriveCapabilityProfile(routeState)
+    const capabilityProfile = deriveCapabilityProfile(routeState, toolAvailability)
 
     sections.push(
       [
@@ -179,8 +196,8 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
           ? 'If web retrieval tools are mounted in the tool list, use them for this turn because the task depends on current external facts.'
           : 'If web retrieval tools are mounted in the tool list, they remain optional but usable. Do not wait for classifier hints before using them when local context or current knowledge is insufficient.',
         capabilityProfile.hasWorkspaceWriteTools
-          ? 'Workspace write tools: active.'
-          : 'Workspace write tools: inactive for this turn.',
+          ? 'Workspace write tools: mounted when available in the tool list. Use them when the user is asking for concrete local changes, and treat route mode as planning guidance rather than a hard prohibition.'
+          : 'Workspace write tools are not mounted for this turn.',
         routeState.researchMode === 'deep'
           ? 'Research mode: deep.'
           : 'Research mode: auto.',
@@ -214,12 +231,15 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
       )
     } else {
       sections.push(
-        'The user primarily needs advice or diagnosis. Prefer explaining the issue and a concrete next step over pretending the task has already been executed.',
+        'The user primarily needs advice or diagnosis. Prefer explaining the issue and a concrete next step over pretending the task has already been executed. If mounted write tools are available and the user explicitly asked for concrete local changes, you may still execute instead of refusing purely because of route mode.',
       )
     }
 
     sections.push(
       'Safe local inspection tools may be mounted even on advice-heavy turns. Use them when they materially reduce uncertainty, but do not imply that files were changed unless write evidence exists.',
+    )
+    sections.push(
+      'If you truly need the user to confirm a risky change or provide a missing local decision, call request_user_input. Do not hide the question only inside reasoning text.',
     )
 
     if (capabilityProfile.hasWorkspaceWriteTools) {
@@ -304,7 +324,7 @@ export function buildRouteFirstSystemPrompt(settings, skillPrompt, exposureNote,
     }
   }
 
-  if (deriveCapabilityProfile(routeState).hasInteractiveBrowserTools) {
+  if (deriveCapabilityProfile(routeState, toolAvailability).hasInteractiveBrowserTools) {
     sections.push(
       'Open the site with system_browser_open when the user needs to log in, solve CAPTCHA, grant consent, submit forms, or otherwise interact manually.',
     )

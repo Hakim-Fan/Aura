@@ -95,6 +95,7 @@ const PHASE_STALL_TIMEOUTS_MS = {
   finalizing: 60_000,
   recovering: 60_000,
   awaiting_approval: Number.POSITIVE_INFINITY,
+  awaiting_user_input: Number.POSITIVE_INFINITY,
 }
 
 function createExecutionMonitor() {
@@ -154,10 +155,12 @@ function createExecutionMonitor() {
 }
 
 let pendingApprovalResolve = null
+let pendingUserInputResolve = null
 const pendingAppActionRequests = new Map()
 let started = false
 const appendedInputs = []
 let currentStepAbortController = null
+let activeExecutionMonitor = null
 
 function emitAppendedInputs() {
   emit({
@@ -239,6 +242,18 @@ rl.on('line', (line) => {
       status: 'queued',
       researchMode: input.researchMode === 'deep' ? 'deep' : 'auto',
     })
+    if (pendingUserInputResolve) {
+      activeExecutionMonitor?.setPhase('preparing')
+      pendingUserInputResolve({
+        status: 'received',
+        content:
+          typeof input.content === 'string' ? input.content : '',
+        attachmentCount: Array.isArray(input.attachments)
+          ? input.attachments.length
+          : 0,
+      })
+      pendingUserInputResolve = null
+    }
     emitAppendedInputs()
     return
   }
@@ -262,6 +277,7 @@ rl.on('line', (line) => {
   started = true
   emit({ type: 'started' })
   const executionMonitor = createExecutionMonitor()
+  activeExecutionMonitor = executionMonitor
   executionMonitor.start()
   const emitTextDelta = createDeltaEmitter('text_delta')
   const emitReasoningDelta = createDeltaEmitter('reasoning_delta')
@@ -287,6 +303,10 @@ rl.on('line', (line) => {
       executionMonitor.markProgress()
       emit({ type: 'usage', usage })
     },
+    onRetryProgress(retryInfo) {
+      executionMonitor.markProgress()
+      emit({ type: 'retry_progress', retryInfo })
+    },
     onToolEvent(event) {
       executionMonitor.markProgress()
       emit({ type: 'tool_event', event })
@@ -306,6 +326,13 @@ rl.on('line', (line) => {
       emit({ type: 'approval_required', request })
       return new Promise((resolve) => {
         pendingApprovalResolve = resolve
+      })
+    },
+    requestUserInput(request) {
+      executionMonitor.setPhase('awaiting_user_input', { markProgress: false })
+      emit({ type: 'user_input_required', request })
+      return new Promise((resolve) => {
+        pendingUserInputResolve = resolve
       })
     },
     appControl(action, payload = {}) {
@@ -359,6 +386,7 @@ rl.on('line', (line) => {
   })
     .then((result) => {
       executionMonitor.stop()
+      activeExecutionMonitor = null
       emit({
         type: 'completed',
         result,
@@ -366,6 +394,7 @@ rl.on('line', (line) => {
     })
     .catch((error) => {
       executionMonitor.stop()
+      activeExecutionMonitor = null
       emit({
         type: 'failed',
         message: error instanceof Error ? error.message : String(error),
