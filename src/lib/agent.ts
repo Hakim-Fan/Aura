@@ -222,15 +222,31 @@ function buildCarryoverWebContext(messages: ChatMessage[]): string | undefined {
   )
 }
 
+function mergeCarryoverContext(...sections: Array<string | undefined>): string | undefined {
+  const normalized = sections
+    .map(section => (typeof section === 'string' ? section.trim() : ''))
+    .filter(Boolean)
+
+  if (normalized.length === 0) {
+    return undefined
+  }
+
+  return normalized.join('\n\n')
+}
+
 export async function startAgentTask(
   settings: AgentSettings,
   messages: ChatMessage[],
   capabilities?: ResolvedAgentCapabilities,
+  extraCarryoverContext?: string,
 ): Promise<string> {
   const payload = {
     settings,
     capabilities,
-    carryoverContext: buildCarryoverWebContext(messages),
+    carryoverContext: mergeCarryoverContext(
+      buildCarryoverWebContext(messages),
+      extraCarryoverContext,
+    ),
     messages: messages.map(message => ({
       role: message.role as ChatRole,
       content: message.content,

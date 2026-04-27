@@ -565,7 +565,10 @@ function shouldRunFinalization(
   const hasToolContext = Array.isArray(recentToolEvents) && recentToolEvents.length > 0
   const completionState = completionContext?.completionState || result?.completionState
   if (!hasToolContext) {
-    return false
+    return (
+      providerReasoning.length >= 140 &&
+      (!finalMessage || finalMessage === '模型没有返回文本内容。')
+    )
   }
   if (!finalMessage || finalMessage === '模型没有返回文本内容。') {
     return true

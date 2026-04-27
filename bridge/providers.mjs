@@ -398,9 +398,16 @@ function parseToolArguments(rawArgs) {
   try {
     return JSON.parse(rawArgs)
   } catch (error) {
-    throw new Error(
-      `Tool arguments are not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-    )
+    const detail = error instanceof Error ? error.message : String(error)
+    const preview = rawArgs.length > 1200 ? `${rawArgs.slice(0, 1200)}...` : rawArgs
+    throw createClassifiedError('模型返回了无法解析的工具参数。', {
+      source: 'provider',
+      category: 'invalid_input',
+      code: 'INVALID_TOOL_ARGUMENTS_JSON',
+      rawMessage: `Tool arguments are not valid JSON: ${detail}\n\n${preview}`,
+      suggestedAction:
+        '当前模型 / 兼容接口返回的工具参数格式不稳定。请重试，或切换到工具调用兼容性更好的模型 / Provider。',
+    })
   }
 }
 
@@ -453,11 +460,152 @@ function mergeOpenAiToolCalls(existingCalls, deltaCalls) {
       )
     }
     if (deltaCall.function?.arguments) {
-      current.function.arguments += deltaCall.function.arguments
+      current.function.arguments = mergeStreamedField(
+        current.function.arguments,
+        deltaCall.function.arguments,
+      )
     }
 
     existingCalls[index] = current
   }
+}
+
+function camelCaseKey(value) {
+  return String(value || '').replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())
+}
+
+function normalizeInlineToolArgsValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(normalizeInlineToolArgsValue)
+  }
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      camelCaseKey(key),
+      normalizeInlineToolArgsValue(entry),
+    ]),
+  )
+}
+
+function normalizeInlineToolName(rawName) {
+  const normalized = String(rawName || '').trim()
+  if (!normalized) {
+    return ''
+  }
+
+  return normalized
+    .replace(/^functions\./, '')
+    .replace(/:\d+$/, '')
+    .trim()
+}
+
+function normalizeInlineToolArgs(toolName, args) {
+  const normalized =
+    args && typeof args === 'object' && !Array.isArray(args)
+      ? { ...normalizeInlineToolArgsValue(args) }
+      : args
+
+  if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) {
+    return normalized
+  }
+
+  if (!normalized.path && typeof normalized.filePath === 'string') {
+    normalized.path = normalized.filePath
+  }
+  if (!normalized.workdir && typeof normalized.cwd === 'string') {
+    normalized.workdir = normalized.cwd
+  }
+
+  if (toolName === 'exec_command' && !normalized.cmd && typeof normalized.command === 'string') {
+    normalized.cmd = normalized.command
+  }
+  if (toolName === 'run_shell' && !normalized.command && typeof normalized.cmd === 'string') {
+    normalized.command = normalized.cmd
+  }
+
+  return normalized
+}
+
+function extractInlineToolCalls(text, startIndex = 0) {
+  const normalizedText = typeof text === 'string' ? text : ''
+  if (!normalizedText.includes('<|tool_calls_section_begin|>')) {
+    return {
+      text: normalizedText,
+      toolCalls: [],
+    }
+  }
+
+  const toolCalls = []
+  const cleanedText = normalizedText
+    .replace(
+      /<\|tool_calls_section_begin\|>([\s\S]*?)<\|tool_calls_section_end\|>/gu,
+      (_, sectionBody) => {
+        const callPattern =
+          /<\|tool_call_begin\|>\s*([^\s<]+)\s*<\|tool_call_argument_begin\|>\s*([\s\S]*?)\s*<\|tool_call_end\|>/gu
+
+        for (const match of sectionBody.matchAll(callPattern)) {
+          const rawName = typeof match[1] === 'string' ? match[1].trim() : ''
+          const toolName = normalizeInlineToolName(rawName)
+          if (!toolName) {
+            continue
+          }
+
+          const rawArguments = typeof match[2] === 'string' ? match[2].trim() : '{}'
+          let normalizedArguments = rawArguments
+
+          try {
+            const parsedArgs = JSON.parse(rawArguments)
+            normalizedArguments = JSON.stringify(
+              normalizeInlineToolArgs(toolName, parsedArgs),
+            )
+          } catch {
+            normalizedArguments = rawArguments
+          }
+
+          toolCalls.push({
+            index: startIndex + toolCalls.length,
+            id: `inline-tool-call-${startIndex + toolCalls.length}`,
+            type: 'function',
+            function: {
+              name: toolName,
+              arguments: normalizedArguments,
+            },
+          })
+        }
+
+        return ''
+      },
+    )
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+
+  return {
+    text: cleanedText,
+    toolCalls,
+  }
+}
+
+function dedupeInlineToolCalls(existingCalls, nextCalls) {
+  return (nextCalls || []).filter(nextCall => {
+    const nextName = nextCall?.function?.name || ''
+    const nextArguments = nextCall?.function?.arguments || ''
+    return !existingCalls.some(
+      existingCall =>
+        (existingCall?.function?.name || '') === nextName &&
+        (existingCall?.function?.arguments || '') === nextArguments,
+    )
+  })
+}
+
+export const __testInternals = {
+  dedupeInlineToolCalls,
+  extractInlineToolCalls,
+  mergeStreamedField,
+  mergeOpenAiToolCalls,
+  parseToolArguments,
 }
 
 function pushUsage(hooks, usage) {
@@ -1266,6 +1414,26 @@ export async function runOpenAiCompatibleAgent({
         })
 
         streamParser.flush()
+        const inlineReasoningToolCalls = extractInlineToolCalls(
+          phaseReasoning,
+          toolCalls.length,
+        )
+        phaseReasoning = inlineReasoningToolCalls.text
+        mergeOpenAiToolCalls(
+          toolCalls,
+          dedupeInlineToolCalls(toolCalls, inlineReasoningToolCalls.toolCalls),
+        )
+
+        const inlineContentToolCalls = extractInlineToolCalls(
+          content,
+          toolCalls.length,
+        )
+        content = inlineContentToolCalls.text
+        mergeOpenAiToolCalls(
+          toolCalls,
+          dedupeInlineToolCalls(toolCalls, inlineContentToolCalls.toolCalls),
+        )
+
         return {
           content,
           phaseReasoning,

@@ -80,7 +80,14 @@ function classifyError({ code, status, rawMessage }) {
   const normalizedMessage = (rawMessage || '').toLowerCase()
 
   if (normalizedCode === 'ENOENT') {
-    return 'missing_dependency'
+    if (
+      normalizedMessage.includes('spawn ') ||
+      normalizedMessage.includes('command not found') ||
+      normalizedMessage.includes('executable file not found')
+    ) {
+      return 'missing_dependency'
+    }
+    return 'not_found'
   }
   if (normalizedCode === 'EACCES' || normalizedCode === 'EPERM') {
     return 'permission'

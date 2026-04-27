@@ -732,6 +732,66 @@ function summarizeAppendedInputForTimeline(input: AppendedInput, maxLength = 180
     : normalized
 }
 
+function normalizeCarryoverLine(value: string, maxLength = 220) {
+  const normalized = (value || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return ''
+  }
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`
+    : normalized
+}
+
+function buildVariantCarryoverContext(variant: ChatMessageVariant) {
+  const lines = [
+    'Carryover evidence from the interrupted in-progress answer is available below.',
+    'Reuse it before rereading the same files or repeating the same inspection steps unless fresh verification is clearly necessary.',
+  ]
+
+  const recentSuccessfulEvents = (variant.events || [])
+    .filter(event => event.status === 'success')
+    .filter(event => !isArchivedExecutionId(event.id))
+    .slice(-6)
+
+  if (recentSuccessfulEvents.length > 0) {
+    lines.push('Recent successful steps:')
+    for (const event of recentSuccessfulEvents) {
+      const summary = normalizeCarryoverLine(
+        event.summary || event.output || event.input || event.title,
+        240,
+      )
+      lines.push(`- ${event.title || event.toolName || 'step'}${summary ? `: ${summary}` : ''}`)
+    }
+  }
+
+  const recentPhaseOutputs = (variant.phaseOutputs || [])
+    .filter(output => !isArchivedExecutionId(output.id))
+    .slice(-3)
+    .map(output => normalizeCarryoverLine(output.content, 260))
+    .filter(Boolean)
+
+  if (recentPhaseOutputs.length > 0) {
+    lines.push('Latest intermediate outputs:')
+    for (const output of recentPhaseOutputs) {
+      lines.push(`- ${output}`)
+    }
+  }
+
+  const latestReasoning = [...(variant.reasoning || [])]
+    .reverse()
+    .find(entry => entry.kind === 'provider' && !isArchivedExecutionId(entry.id))
+
+  const reasoningSummary = latestReasoning
+    ? normalizeCarryoverLine(latestReasoning.content, 320)
+    : ''
+
+  if (reasoningSummary) {
+    lines.push(`Latest model reasoning snapshot: ${reasoningSummary}`)
+  }
+
+  return lines.length > 2 ? lines.join('\n') : ''
+}
+
 function buildAppendedInputPhaseOutput(input: AppendedInput, order?: number): MessagePhaseOutput {
   const attachmentCount = Array.isArray(input.attachments) ? input.attachments.length : 0
   const lines = [
@@ -2390,6 +2450,7 @@ export function MainWindowApp() {
         runtimeSettings,
         [...conversationBeforeAssistant, ...replayInputs],
         resolvedCapabilities.runtime,
+        buildVariantCarryoverContext(currentAssistantVariant),
       )
 
       setRunningTasksBySession(current => ({
