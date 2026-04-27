@@ -609,6 +609,7 @@ export const __testInternals = {
   mergeStreamedField,
   mergeOpenAiToolCalls,
   parseToolArguments,
+  runProviderOperationWithRetry,
 }
 
 function pushUsage(hooks, usage) {
@@ -800,10 +801,6 @@ function providerRetryStageLabel(stage) {
 }
 
 function getProviderFailureRecoveryMaxRetries(settings) {
-  if (settings?.enableProviderFailureRecovery === false) {
-    return 0
-  }
-
   return PROVIDER_RETRY_DELAYS_MS.length
 }
 
@@ -1046,6 +1043,14 @@ async function runProviderOperationWithRetry(
 
     try {
       const value = await operation(attemptState, attempt)
+      if (retryCount > 0) {
+        hooks?.onRetryProgress?.(
+          buildProviderRetryInfo(retryCount, maxRetries, {
+            stage,
+            lastErrorSummary: summarizeRetryError(lastError),
+          }),
+        )
+      }
       return {
         value,
         retryCount,

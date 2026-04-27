@@ -315,7 +315,9 @@ function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], withLimit = true
   const configuredMaxRetries =
     typeof retryInfo.configuredMaxRetries === 'number'
       ? retryInfo.configuredMaxRetries
-      : Math.max(0, retryInfo.configuredMaxAttempts - 1)
+      : typeof retryInfo.configuredMaxAttempts === 'number'
+        ? Math.max(0, retryInfo.configuredMaxAttempts - 1)
+        : undefined
   const stageLabel =
     retryInfo.stageLabel ||
     (retryInfo.stage === 'recovery'
@@ -323,6 +325,11 @@ function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], withLimit = true
       : retryInfo.stage === 'finalization'
         ? '补充整理'
         : '主回答')
+  const showBoundedLimit =
+    typeof configuredMaxRetries === 'number' &&
+    Number.isFinite(configuredMaxRetries) &&
+    configuredMaxRetries > 0 &&
+    retryInfo.attemptedRetries <= configuredMaxRetries
 
   if (retryInfo.inProgress) {
     const delayMs =
@@ -332,13 +339,15 @@ function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], withLimit = true
         : 0
     const delayLabel =
       delayMs <= 0 ? '立即重试' : `${formatDuration(delayMs)} 后再次尝试`
-    return withLimit
+    return withLimit && showBoundedLimit
       ? `${stageLabel}重试中 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次，${delayLabel}`
-      : `${stageLabel}重试中 ${retryInfo.attemptedRetries} 次`
+      : `${stageLabel}重试中 ${retryInfo.attemptedRetries} 次，${delayLabel}`
   }
 
   return withLimit
-    ? `${stageLabel}已自动重试 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次`
+    ? showBoundedLimit
+      ? `${stageLabel}已自动重试 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次`
+      : `${stageLabel}已自动重试 ${retryInfo.attemptedRetries} 次`
     : `${stageLabel}重试 ${retryInfo.attemptedRetries} 次`
 }
 

@@ -1667,28 +1667,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
-            <div className="section-title">失败恢复</div>
-            <div className="toggle-stack">
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.enableProviderFailureRecovery}
-                  onChange={event =>
-                    handleSettingsChange('enableProviderFailureRecovery', event.target.checked)
-                  }
-                  type="checkbox"
-                />
-                <div className="flex flex-col">
-                  <strong>模型失败时自动恢复</strong>
-                  <span className="muted">
-                    当 Provider 在工具调用后中断、超时或断流时，按固定策略自动重试，并尽量基于已完成步骤补出最终回答。
-                  </span>
-                </div>
-              </label>
-            </div>
-            <div className="provider-note mt-3">
-              <p>开启后，Aura 会优先把瞬时模型故障当成可恢复问题处理，而不是立刻结束整轮任务。</p>
-              <p>固定策略最多自动重试 5 次：先立即重试，再依次等待 1.2 秒、3 秒、7 秒和 15 秒。</p>
-              <p>聊天页会实时显示当前已经重试到第几次，以及下一次重试前还会等待多久。</p>
+            <div className="section-title">失败恢复策略</div>
+            <div className="provider-note">
+              <p>Provider 出现瞬时故障时，Aura 会默认先恢复执行，不再单独配置开关或重试次数。</p>
+              <p>每次可重试的 Provider 请求最多自动重试 5 次：先立即重试，再依次等待 1.2 秒、3 秒、7 秒和 15 秒。</p>
+              <p>聊天页会实时显示当前已经重试到第几次，以及下一次重试前还会等待多久；如果 5 次后仍失败，再结束并展示错误。</p>
             </div>
           </section>
 

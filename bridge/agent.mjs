@@ -1337,11 +1337,7 @@ export async function runRouteFirstAgent(request) {
     const hasRecoveryContext =
       toolEvents.length > 0 || partialMessage.length > 0
 
-    if (
-      settings.enableProviderFailureRecovery !== false &&
-      normalized.source === 'provider' &&
-      hasRecoveryContext
-    ) {
+    if (normalized.source === 'provider' && hasRecoveryContext) {
       let recoveryRetryInfo
       const recoveryCompletionContext = buildCompletionContext(
         routeState,

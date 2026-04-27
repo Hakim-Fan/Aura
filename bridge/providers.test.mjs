@@ -9,6 +9,7 @@ const {
   getProviderRetryDelayMs,
   mergeOpenAiToolCalls,
   parseToolArguments,
+  runProviderOperationWithRetry,
 } = __testInternals
 
 test('mergeOpenAiToolCalls keeps append-only tool argument chunks parseable', () => {
@@ -100,7 +101,7 @@ test('extractInlineToolCalls converts codex-style raw tool markers into executab
   })
 })
 
-test('provider failure recovery uses a fixed five-retry policy when enabled', () => {
+test('provider failure recovery uses a fixed five-retry policy regardless of legacy settings', () => {
   assert.equal(
     getProviderFailureRecoveryMaxRetries({
       enableProviderFailureRecovery: true,
@@ -120,7 +121,7 @@ test('provider failure recovery uses a fixed five-retry policy when enabled', ()
       enableProviderFailureRecovery: false,
       providerFailureRecoveryMaxAttempts: 5,
     }),
-    0,
+    5,
   )
 })
 
@@ -155,4 +156,38 @@ test('buildProviderRetryInfo exposes live retry progress metadata', () => {
       lastErrorSummary: '模型服务请求失败。',
     },
   )
+})
+
+test('runProviderOperationWithRetry clears in-progress retry state after a successful retry', async () => {
+  const progressEvents = []
+  let attempts = 0
+
+  const result = await runProviderOperationWithRetry(
+    async () => {
+      attempts += 1
+      if (attempts === 1) {
+        throw new Error('network timeout')
+      }
+      return 'ok'
+    },
+    {
+      messages: [],
+      hooks: {
+        onRetryProgress(retryInfo) {
+          progressEvents.push(retryInfo)
+        },
+      },
+    },
+  )
+
+  assert.equal(result.value, 'ok')
+  assert.equal(result.retryCount, 1)
+  assert.equal(progressEvents.length, 2)
+  assert.equal(progressEvents[0]?.inProgress, true)
+  assert.equal(progressEvents[0]?.attemptedRetries, 1)
+  assert.equal(progressEvents[0]?.nextRetryDelayMs, 0)
+  assert.equal(progressEvents[0]?.nextAttemptNumber, 2)
+  assert.equal(progressEvents[1]?.inProgress, undefined)
+  assert.equal(progressEvents[1]?.attemptedRetries, 1)
+  assert.match(progressEvents[1]?.lastErrorSummary || '', /模型连接在生成过程中被中断/)
 })
