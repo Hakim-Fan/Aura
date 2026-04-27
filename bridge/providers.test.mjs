@@ -101,28 +101,8 @@ test('extractInlineToolCalls converts codex-style raw tool markers into executab
   })
 })
 
-test('provider failure recovery uses a fixed five-retry policy regardless of legacy settings', () => {
-  assert.equal(
-    getProviderFailureRecoveryMaxRetries({
-      enableProviderFailureRecovery: true,
-      providerFailureRecoveryMaxAttempts: 1,
-    }),
-    5,
-  )
-  assert.equal(
-    getProviderFailureRecoveryMaxRetries({
-      enableProviderFailureRecovery: true,
-      providerFailureRecoveryMaxAttempts: 99,
-    }),
-    5,
-  )
-  assert.equal(
-    getProviderFailureRecoveryMaxRetries({
-      enableProviderFailureRecovery: false,
-      providerFailureRecoveryMaxAttempts: 5,
-    }),
-    5,
-  )
+test('provider failure recovery uses a fixed five-retry policy', () => {
+  assert.equal(getProviderFailureRecoveryMaxRetries(), 5)
 })
 
 test('provider retry delays follow the fixed progressive backoff strategy', () => {

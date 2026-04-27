@@ -800,7 +800,7 @@ function providerRetryStageLabel(stage) {
   }
 }
 
-function getProviderFailureRecoveryMaxRetries(settings) {
+function getProviderFailureRecoveryMaxRetries() {
   return PROVIDER_RETRY_DELAYS_MS.length
 }
 
@@ -1198,7 +1198,7 @@ export async function finalizeOpenAiCompatibleAnswer({
   stage = 'finalization',
   hooks,
 }) {
-  const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
+  const maxRetries = getProviderFailureRecoveryMaxRetries()
   const attemptResult = await runProviderOperationWithRetry(async () => {
     const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
     const transcript = toOpenAiTranscript(systemPrompt, [
@@ -1285,7 +1285,7 @@ export async function finalizeGoogleAnswer({
   stage = 'finalization',
   hooks,
 }) {
-  const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
+  const maxRetries = getProviderFailureRecoveryMaxRetries()
   const attemptResult = await runProviderOperationWithRetry(async () => {
     const apiBase = normalizeBaseUrl(
       settings.baseUrl,
@@ -1383,7 +1383,7 @@ export async function runOpenAiCompatibleAgent({
   const providerReasoningBlocks = []
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
-  const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
+  const maxRetries = getProviderFailureRecoveryMaxRetries()
 
   try {
     for (let step = 0; step < loopConfig.maxIterations; step += 1) {
@@ -1692,7 +1692,7 @@ export async function runGoogleAgent({
   const providerReasoningBlocks = []
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
-  const maxRetries = getProviderFailureRecoveryMaxRetries(settings)
+  const maxRetries = getProviderFailureRecoveryMaxRetries()
 
   try {
     for (let step = 0; step < loopConfig.maxIterations; step += 1) {

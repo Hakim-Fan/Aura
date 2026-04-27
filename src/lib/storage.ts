@@ -197,8 +197,6 @@ export const defaultSettings: AgentSettings = {
   memoryMode: 'summary',
   reasoningEffort: 'medium',
   showDetailedExecutionDetails: false,
-  enableProviderFailureRecovery: true,
-  providerFailureRecoveryMaxAttempts: 5,
   enableMultiAgent: true,
   enableComputerUse: true,
   autoApproveShell: false,
@@ -1239,10 +1237,6 @@ function parseSettings(raw: string | null): AgentSettings {
       showDetailedExecutionDetails: normalizeDetailedExecutionSetting(
         parsed.showDetailedExecutionDetails,
       ),
-      enableProviderFailureRecovery: parsed.enableProviderFailureRecovery !== false,
-      providerFailureRecoveryMaxAttempts: normalizeProviderFailureRecoveryMaxAttempts(
-        parsed.providerFailureRecoveryMaxAttempts,
-      ),
       browser: normalizeBrowserSettings(parsed.browser),
       web: normalizeWebToolsSettings(parsed.web),
       mcpServers: normalizeMcpServers(parsed.mcpServers),
@@ -1286,13 +1280,6 @@ function normalizeMaxSteps(value: unknown) {
     return defaultSettings.maxSteps
   }
   return Math.max(1, Math.min(128, Math.round(value)))
-}
-
-function normalizeProviderFailureRecoveryMaxAttempts(value: unknown) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return defaultSettings.providerFailureRecoveryMaxAttempts
-  }
-  return Math.max(1, Math.min(5, Math.round(value)))
 }
 
 function normalizeProvider(
