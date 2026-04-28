@@ -84,6 +84,11 @@ function formatModelLabel(modelId: string) {
   return modelId.split('/').filter(Boolean).at(-1) || modelId
 }
 
+function normalizeManualModelId(profile: ProviderProfile, value: string) {
+  const modelId = value.trim()
+  return profile.provider === 'google' ? modelId.replace(/^models\//, '').trim() : modelId
+}
+
 type ProviderStatusState = {
   tone: 'success' | 'error'
   message: string
@@ -263,7 +268,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
         const latest = loadSettings()
         setSavedSettings(latest)
         setDraftSettings(cloneSettings(latest))
-        setSelectedProviderProfileId(latest.activeProviderProfileId)
+        setSelectedProviderProfileId(current =>
+          latest.providerProfiles.some(profile => profile.id === current)
+            ? current
+            : latest.activeProviderProfileId,
+        )
         void refreshLightpandaStatus(latest, { useAsBaseline: true, silent: true }).catch(() => {
           // Ignore background Lightpanda detection refresh errors.
         })
@@ -589,6 +598,104 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setSelectedProviderProfileId(remaining[0]?.id || '')
     setSaveState('idle')
     setProviderStatus(null)
+  }
+
+  function addProfileModel(profileId: string, rawModelId: string) {
+    const targetProfile = draftSettings.providerProfiles.find(profile => profile.id === profileId)
+    if (!targetProfile) {
+      return
+    }
+
+    const modelId = normalizeManualModelId(targetProfile, rawModelId)
+    if (!modelId) {
+      setProviderStatus({
+        tone: 'error',
+        message: '请输入模型 ID。',
+      })
+      return
+    }
+
+    setDraftSettings(current => {
+      const providerProfiles = current.providerProfiles.map(profile => {
+        if (profile.id !== profileId) {
+          return profile
+        }
+
+        const models = profile.models.some(model => model.id === modelId)
+          ? profile.models.map(model =>
+              model.id === modelId ? { ...model, enabled: true } : model,
+            )
+          : [{ id: modelId, enabled: true }, ...profile.models]
+
+        return {
+          ...profile,
+          models,
+          defaultModel: modelId,
+        }
+      })
+      const updatedProfile = providerProfiles.find(profile => profile.id === profileId)
+      const next = {
+        ...current,
+        providerProfiles,
+      }
+
+      if (updatedProfile && current.activeProviderProfileId === profileId) {
+        next.provider = updatedProfile.provider
+        next.apiKey = updatedProfile.apiKey
+        next.baseUrl = updatedProfile.baseUrl
+        next.model = modelId
+      }
+
+      return next
+    })
+    setSaveState('idle')
+    setProviderStatus({
+      tone: 'success',
+      message: `已添加并启用模型 ${formatModelLabel(modelId)}。`,
+    })
+  }
+
+  function removeProfileModel(profileId: string, modelId: string) {
+    setDraftSettings(current => {
+      const providerProfiles = current.providerProfiles.map(profile => {
+        if (profile.id !== profileId) {
+          return profile
+        }
+
+        const models = profile.models.filter(model => model.id !== modelId)
+        if (models.length === profile.models.length) {
+          return profile
+        }
+
+        const defaultModel =
+          profile.defaultModel !== modelId &&
+          models.some(model => model.enabled && model.id === profile.defaultModel)
+            ? profile.defaultModel
+            : models.find(model => model.enabled)?.id || ''
+
+        return {
+          ...profile,
+          models,
+          defaultModel,
+        }
+      })
+      const updatedProfile = providerProfiles.find(profile => profile.id === profileId)
+      const next = {
+        ...current,
+        providerProfiles,
+      }
+
+      if (updatedProfile && current.activeProviderProfileId === profileId && current.model === modelId) {
+        next.model = updatedProfile.defaultModel
+      }
+
+      return next
+    })
+    setSaveState('idle')
+    setProviderStatus({
+      tone: 'success',
+      message: `已移除模型 ${formatModelLabel(modelId)}。`,
+    })
   }
 
   function toggleProfileModel(profileId: string, modelId: string) {
@@ -1273,23 +1380,49 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setProviderStatus(null)
     try {
       const result = await fetchProviderModels(buildProviderRequestSettings(selectedProfile))
-      const existingById = new Map(selectedProfile.models.map(model => [model.id, model]))
-      updateProviderProfile(
-        selectedProfile.id,
-        'models',
-        result.models.map(model => {
-          const existing = existingById.get(model.id)
+      const fetchedIdsForStatus = new Set(result.models.map(model => model.id))
+      const preservedLocalModelCount = selectedProfile.models.filter(
+        model => !fetchedIdsForStatus.has(model.id),
+      ).length
+      setDraftSettings(current => ({
+        ...current,
+        providerProfiles: current.providerProfiles.map(profile => {
+          if (profile.id !== selectedProfile.id) {
+            return profile
+          }
+
+          const existingById = new Map(profile.models.map(model => [model.id, model]))
+          const fetchedIds = new Set(result.models.map(model => model.id))
+          const preservedLocalModels = profile.models.filter(model => !fetchedIds.has(model.id))
+          const fetchedModels = result.models.map(model => {
+            const existing = existingById.get(model.id)
+            return {
+              ...model,
+              enabled: existing?.enabled ?? false,
+              contextWindowTokens: model.contextWindowTokens || existing?.contextWindowTokens,
+              maxOutputTokens: model.maxOutputTokens || existing?.maxOutputTokens,
+            }
+          })
+          const models = [...preservedLocalModels, ...fetchedModels]
+          const nextDefaultModel =
+            models.some(model => model.enabled && model.id === profile.defaultModel)
+              ? profile.defaultModel
+              : models.find(model => model.enabled)?.id || ''
+
           return {
-            ...model,
-            enabled: existing?.enabled ?? false,
-            contextWindowTokens: model.contextWindowTokens || existing?.contextWindowTokens,
-            maxOutputTokens: model.maxOutputTokens || existing?.maxOutputTokens,
+            ...profile,
+            models,
+            defaultModel: nextDefaultModel,
           }
         }),
-      )
+      }))
+      setSaveState('idle')
       setProviderStatus({
         tone: 'success',
-        message: result.message,
+        message:
+          preservedLocalModelCount > 0
+            ? `${result.message} 已保留 ${preservedLocalModelCount} 个本地模型。`
+            : result.message,
       })
     } catch (caught) {
       setProviderStatus({
@@ -2710,6 +2843,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
             onCreateProfile={createProfile}
             onDeleteProfile={deleteProfile}
             onProfileChange={updateProviderProfile}
+            onAddModel={addProfileModel}
+            onRemoveModel={removeProfileModel}
             onToggleModel={toggleProfileModel}
             onTestConnection={() => void handleTestConnection()}
             onFetchModels={() => void handleFetchModels()}

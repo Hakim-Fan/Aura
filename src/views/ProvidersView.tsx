@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Check, CheckCircle2, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
+import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { AlertCircle, CheckCircle2, Eye, EyeOff, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
 import type { ProviderMode, ProviderProfile } from '../types'
 
 const providerOptions: Array<{
@@ -41,6 +41,8 @@ type Props = {
     key: K,
     value: ProviderProfile[K],
   ) => void
+  onAddModel: (profileId: string, modelId: string) => void
+  onRemoveModel: (profileId: string, modelId: string) => void
   onToggleModel: (profileId: string, modelId: string) => void
   onTestConnection: () => void
   onFetchModels: () => void
@@ -75,12 +77,16 @@ export function ProvidersView({
   onCreateProfile,
   onDeleteProfile,
   onProfileChange,
+  onAddModel,
+  onRemoveModel,
   onToggleModel,
   onTestConnection,
   onFetchModels,
 }: Props) {
   const activeProfile = profiles.find(profile => profile.id === activeProfileId) || profiles[0]
   const [modelQuery, setModelQuery] = useState('')
+  const [manualModelId, setManualModelId] = useState('')
+  const [apiKeyVisible, setApiKeyVisible] = useState(false)
 
   // Define a reusable minimal input class for UnoCSS
   const premiumInputClass = "w-full px-3.5 py-2.5 rounded-xl border border-black/8 bg-white focus:border-black/20 outline-none transition-all duration-200 font-500"
@@ -88,7 +94,20 @@ export function ProvidersView({
 
   useEffect(() => {
     setModelQuery('')
+    setManualModelId('')
+    setApiKeyVisible(false)
   }, [activeProfile?.id])
+
+  function submitManualModel(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const modelId = manualModelId.trim()
+    if (!modelId) {
+      return
+    }
+    onAddModel(activeProfile.id, modelId)
+    setManualModelId('')
+    setModelQuery('')
+  }
 
   const enabledModelCount = activeProfile?.models.filter(model => model.enabled).length || 0
   const filteredModels = useMemo(() => {
@@ -214,13 +233,24 @@ export function ProvidersView({
 
             <div className="form-row">
               <label className={labelClass}>API Key</label>
-              <input
-                className={`${premiumInputClass} font-mono !text-12px`}
-                value={activeProfile.apiKey}
-                onChange={event => onProfileChange(activeProfile.id, 'apiKey', event.target.value)}
-                placeholder="输入真实 API Key"
-                type="password"
-              />
+              <div className="provider-secret-field">
+                <input
+                  className={`${premiumInputClass} provider-secret-input font-mono !text-12px`}
+                  value={activeProfile.apiKey}
+                  onChange={event => onProfileChange(activeProfile.id, 'apiKey', event.target.value)}
+                  placeholder="输入真实 API Key"
+                  type={apiKeyVisible ? 'text' : 'password'}
+                />
+                <button
+                  className="provider-secret-toggle"
+                  type="button"
+                  onClick={() => setApiKeyVisible(current => !current)}
+                  title={apiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+                  aria-label={apiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+                >
+                  {apiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </div>
 
             <div className="form-row">
@@ -281,67 +311,97 @@ export function ProvidersView({
                 <span className="micro-pill">{enabledModelCount} / {activeProfile.models.length} 已启用</span>
               </div>
 
-              {activeProfile.models.length > 0 ? (
-                <div className="provider-models-body">
-                  <div className="provider-model-search">
-                    <Search size={14} />
-                    <input
-                      className="border-none bg-transparent flex-1 p-0 focus:outline-none focus:ring-0 text-13px"
-                      value={modelQuery}
-                      onChange={event => setModelQuery(event.target.value)}
-                      placeholder="搜索模型名称..."
-                      type="text"
-                    />
-                  </div>
+              <div className="provider-models-body">
+                <form className="provider-manual-model-form" onSubmit={submitManualModel}>
+                  <input
+                    value={manualModelId}
+                    onChange={event => setManualModelId(event.target.value)}
+                    placeholder={
+                      activeProfile.provider === 'google'
+                        ? '手动输入模型 ID，例如 gemini-2.5-pro'
+                        : '手动输入模型 ID，例如 gpt-4.1 / deepseek-chat'
+                    }
+                  />
+                  <button
+                    type="submit"
+                    disabled={!manualModelId.trim()}
+                    title="添加模型"
+                  >
+                    <Plus size={15} />
+                    <span>添加模型</span>
+                  </button>
+                </form>
 
-                  <div className="provider-models-scroll custom-scrollbar">
-                    {filteredModels.length > 0 ? (
-                      <div className="flex flex-col">
-                        {filteredModels.map(model => (
-                          <div key={model.id} className="dashboard-row modern !items-center">
-                            <div className="flex-1 min-w-0 pr-4">
-                              <strong className="truncate">{model.id.split('/').filter(Boolean).at(-1) || model.id}</strong>
-                              <span className="truncate block opacity-60 text-[11px]">{model.id}</span>
-                              {model.contextWindowTokens || model.maxOutputTokens ? (
-                                <div className="mt-1 flex flex-wrap gap-1.5">
-                                  {model.contextWindowTokens ? (
-                                    <span className="micro-pill">
-                                      上下文 {formatTokenCount(model.contextWindowTokens)}
-                                    </span>
-                                  ) : null}
-                                  {model.maxOutputTokens ? (
-                                    <span className="micro-pill">
-                                      输出 {formatTokenCount(model.maxOutputTokens)}
-                                    </span>
-                                  ) : null}
-                                </div>
-                              ) : null}
+                {activeProfile.models.length > 0 ? (
+                  <>
+                    <div className="provider-model-search">
+                      <Search size={14} />
+                      <input
+                        className="border-none bg-transparent flex-1 p-0 focus:outline-none focus:ring-0 text-13px"
+                        value={modelQuery}
+                        onChange={event => setModelQuery(event.target.value)}
+                        placeholder="搜索模型名称..."
+                        type="text"
+                      />
+                    </div>
+
+                    <div className="provider-models-scroll custom-scrollbar">
+                      {filteredModels.length > 0 ? (
+                        <div className="flex flex-col">
+                          {filteredModels.map(model => (
+                            <div key={model.id} className="dashboard-row modern !items-center">
+                              <div className="flex-1 min-w-0 pr-4">
+                                <strong className="truncate">{model.id.split('/').filter(Boolean).at(-1) || model.id}</strong>
+                                <span className="truncate block opacity-60 text-[11px]">{model.id}</span>
+                                {model.contextWindowTokens || model.maxOutputTokens ? (
+                                  <div className="mt-1 flex flex-wrap gap-1.5">
+                                    {model.contextWindowTokens ? (
+                                      <span className="micro-pill">
+                                        上下文 {formatTokenCount(model.contextWindowTokens)}
+                                      </span>
+                                    ) : null}
+                                    {model.maxOutputTokens ? (
+                                      <span className="micro-pill">
+                                        输出 {formatTokenCount(model.maxOutputTokens)}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  className={`w-9 h-5 rounded-full p-0.5 transition-colors duration-200 focus:outline-none ${model.enabled ? 'bg-[var(--bg-user-bubble)]' : 'bg-black/10'}`}
+                                  onClick={() => onToggleModel(activeProfile.id, model.id)}
+                                  title={model.enabled ? '停用模型' : '启用模型'}
+                                >
+                                  <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200 transform ${model.enabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                                </button>
+                                <button
+                                  className="model-remove-btn"
+                                  onClick={() => onRemoveModel(activeProfile.id, model.id)}
+                                  title="移除模型"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
                             </div>
-                            <div className="flex items-center">
-                              <button
-                                className={`w-9 h-5 rounded-full p-0.5 transition-colors duration-200 focus:outline-none ${model.enabled ? 'bg-[var(--bg-user-bubble)]' : 'bg-black/10'}`}
-                                onClick={() => onToggleModel(activeProfile.id, model.id)}
-                              >
-                                <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200 transform ${model.enabled ? 'translate-x-4' : 'translate-x-0'}`} />
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <article className="asset-card empty">
-                        <strong>没有匹配的模型</strong>
-                        <p>请尝试其他关键词。</p>
-                      </article>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <article className="asset-card empty">
-                  <strong>暂无模型数据</strong>
-                  <p>请先测试连通性并点击“获取模型列表”。</p>
-                </article>
-              )}
+                          ))}
+                        </div>
+                      ) : (
+                        <article className="asset-card empty">
+                          <strong>没有匹配的模型</strong>
+                          <p>请尝试其他关键词。</p>
+                        </article>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <article className="asset-card empty">
+                    <strong>暂无模型数据</strong>
+                    <p>请获取模型列表，或手动输入模型 ID。</p>
+                  </article>
+                )}
+              </div>
             </section>
           </div>
         </section>

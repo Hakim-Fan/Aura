@@ -1464,13 +1464,12 @@ function resolveActiveProfile(
       ? profiles.find(profile => profile.id === preferredProfileId && profile.enabled)
       : null
 
-  if (preferred && firstEnabledModelId(preferred)) {
+  if (preferred) {
     return preferred
   }
 
   return (
     profiles.find(profile => profile.enabled && firstEnabledModelId(profile)) ||
-    preferred ||
     profiles.find(profile => profile.enabled) ||
     profiles[0] ||
     null
