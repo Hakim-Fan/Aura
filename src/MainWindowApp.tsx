@@ -1594,10 +1594,6 @@ export function MainWindowApp() {
         }))
 
         if (snapshot.status === 'completed' || snapshot.status === 'failed') {
-          if (snapshot.status === 'failed') {
-            setError(snapshot.error || 'Agent 执行失败。')
-          }
-
           setSessions(current =>
             current
               .map(session =>

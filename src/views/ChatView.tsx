@@ -238,6 +238,104 @@ function parseJsonOutput(value?: string) {
   }
 }
 
+const ANSI_OSC_PATTERN = /\u001B\][\s\S]*?(?:\u0007|\u001B\\)/g
+const ANSI_CSI_PATTERN = /(?:\u001B\[|\u009B)[0-?]*[ -/]*[@-~]/g
+const ANSI_SINGLE_PATTERN = /\u001B[@-_]/g
+
+function sanitizeTerminalOutput(value?: string) {
+  const input = typeof value === 'string' ? value : ''
+  if (!input) {
+    return ''
+  }
+
+  const stripped = input
+    .replace(ANSI_OSC_PATTERN, '')
+    .replace(ANSI_CSI_PATTERN, '')
+    .replace(ANSI_SINGLE_PATTERN, '')
+    .replace(/\uFFFD/g, '')
+
+  const lines: string[] = []
+  let currentLine = ''
+
+  for (let index = 0; index < stripped.length; index += 1) {
+    const char = stripped[index]
+
+    if (char === '\r') {
+      currentLine = ''
+      continue
+    }
+
+    if (char === '\n') {
+      lines.push(currentLine)
+      currentLine = ''
+      continue
+    }
+
+    if (char === '\b') {
+      currentLine = currentLine.slice(0, -1)
+      continue
+    }
+
+    if (char === '\t') {
+      currentLine += '  '
+      continue
+    }
+
+    if (char < ' ' || char === '\u007F') {
+      continue
+    }
+
+    currentLine += char
+  }
+
+  if (currentLine) {
+    lines.push(currentLine)
+  }
+
+  return lines
+    .join('\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd()
+}
+
+function parseShellEventSnapshot(output?: string) {
+  const parsed = parseJsonOutput(output)
+  if (!parsed) {
+    return null
+  }
+
+  const hasShellShape =
+    typeof parsed.command === 'string' ||
+    typeof parsed.output === 'string' ||
+    typeof parsed.stdout === 'string' ||
+    typeof parsed.stderr === 'string' ||
+    typeof parsed.status === 'string' ||
+    typeof parsed.running === 'boolean'
+
+  if (!hasShellShape) {
+    return null
+  }
+
+  return {
+    command: typeof parsed.command === 'string' ? parsed.command : '',
+    status: typeof parsed.status === 'string' ? parsed.status : '',
+    running: parsed.running === true,
+    output: typeof parsed.output === 'string' ? parsed.output : '',
+    stdout: typeof parsed.stdout === 'string' ? parsed.stdout : '',
+    stderr: typeof parsed.stderr === 'string' ? parsed.stderr : '',
+    truncated: parsed.truncated === true,
+    wallTimeMs:
+      typeof parsed.wallTimeMs === 'number' && Number.isFinite(parsed.wallTimeMs)
+        ? parsed.wallTimeMs
+        : undefined,
+    exitCode:
+      typeof parsed.exitCode === 'number' && Number.isFinite(parsed.exitCode)
+        ? parsed.exitCode
+        : undefined,
+  }
+}
+
 function formatDuration(ms: number) {
   if (ms < 1000) {
     return `${ms} ms`
@@ -307,8 +405,8 @@ function activityPhaseLabel(phase?: AgentExecutionPhase, stalled = false) {
   }
 }
 
-function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], withLimit = true) {
-  if (!retryInfo || retryInfo.attemptedRetries <= 0) {
+function formatRetryLabel(retryInfo?: ChatMessage['retryInfo']) {
+  if (!retryInfo || retryInfo.attemptedRetries <= 0 || retryInfo.inProgress !== true) {
     return ''
   }
 
@@ -318,37 +416,79 @@ function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], withLimit = true
       : typeof retryInfo.configuredMaxAttempts === 'number'
         ? Math.max(0, retryInfo.configuredMaxAttempts - 1)
         : undefined
-  const stageLabel =
-    retryInfo.stageLabel ||
-    (retryInfo.stage === 'recovery'
-      ? '恢复回答'
-      : retryInfo.stage === 'finalization'
-        ? '补充整理'
-        : '主回答')
   const showBoundedLimit =
     typeof configuredMaxRetries === 'number' &&
     Number.isFinite(configuredMaxRetries) &&
     configuredMaxRetries > 0 &&
     retryInfo.attemptedRetries <= configuredMaxRetries
 
-  if (retryInfo.inProgress) {
-    const delayMs =
-      typeof retryInfo.nextRetryDelayMs === 'number' &&
-      Number.isFinite(retryInfo.nextRetryDelayMs)
-        ? Math.max(0, retryInfo.nextRetryDelayMs)
-        : 0
-    const delayLabel =
-      delayMs <= 0 ? '立即重试' : `${formatDuration(delayMs)} 后再次尝试`
-    return withLimit && showBoundedLimit
-      ? `${stageLabel}重试中 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次，${delayLabel}`
-      : `${stageLabel}重试中 ${retryInfo.attemptedRetries} 次，${delayLabel}`
+  return showBoundedLimit
+    ? `重试中 ${retryInfo.attemptedRetries}/${configuredMaxRetries}`
+    : `重试中 ${retryInfo.attemptedRetries}`
+}
+
+function RetryStatusDots() {
+  return (
+    <span className="retry-status-dots" aria-hidden="true">
+      <span className="retry-status-dot" />
+      <span className="retry-status-dot" />
+      <span className="retry-status-dot" />
+    </span>
+  )
+}
+
+type MessageStatusNoticeTone = 'error' | 'progress' | 'neutral'
+
+function messageStatusNoticeTone(tone: MessageStatusNoticeTone) {
+  switch (tone) {
+    case 'error':
+      return {
+        shell: 'border-red-100 bg-red-50 text-red-500',
+        detail: 'text-red-400/90',
+      }
+    case 'progress':
+      return {
+        shell:
+          'border-[rgba(79,123,116,0.14)] bg-[rgba(79,123,116,0.06)] text-[var(--accent-soft-strong)]',
+        detail: 'text-[rgba(79,123,116,0.82)]',
+      }
+    default:
+      return {
+        shell:
+          'border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] text-[var(--text-secondary)]',
+        detail: 'text-[var(--text-secondary)] opacity-80',
+      }
+  }
+}
+
+function MessageStatusNotice({
+  tone,
+  title,
+  detail,
+  animateDetail = false,
+}: {
+  tone: MessageStatusNoticeTone
+  title?: string
+  detail?: string
+  animateDetail?: boolean
+}) {
+  if (!title && !detail) {
+    return null
   }
 
-  return withLimit
-    ? showBoundedLimit
-      ? `${stageLabel}已自动重试 ${retryInfo.attemptedRetries}/${configuredMaxRetries} 次`
-      : `${stageLabel}已自动重试 ${retryInfo.attemptedRetries} 次`
-    : `${stageLabel}重试 ${retryInfo.attemptedRetries} 次`
+  const palette = messageStatusNoticeTone(tone)
+
+  return (
+    <div className={`rounded-xl border px-4 py-3 text-13px leading-relaxed ${palette.shell}`}>
+      {title ? <div className="font-600">{title}</div> : null}
+      {detail ? (
+        <div className={`${title ? 'mt-1 ' : ''}flex items-center gap-2 text-12px ${palette.detail}`}>
+          {animateDetail ? <RetryStatusDots /> : null}
+          <span>{detail}</span>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function routeAnswerModeLabel(answerMode?: RouteDecisionSnapshot['answerMode']) {
@@ -963,7 +1103,7 @@ function appendExecutionDigestPreview(
   }
 }
 
-function isExecutionDigestNearBottom(viewport: HTMLDivElement) {
+function isExecutionDigestNearBottom(viewport: HTMLElement) {
   return (
     viewport.scrollHeight - (viewport.scrollTop + viewport.clientHeight) <
     EXECUTION_DIGEST_AUTO_SCROLL_THRESHOLD_PX
@@ -1046,16 +1186,18 @@ function buildExecutionDigestPreviewForTimelineItem(
 ): ExecutionDigestPreview | null {
   if (item.kind === 'event') {
     const event = item.event
-    if (isAwaitingUserResponseEvent(event) || isSearchControllerDecisionEvent(event)) {
+    if (
+      isAwaitingUserResponseEvent(event) ||
+      isSearchControllerDecisionEvent(event) ||
+      event.status === 'error'
+    ) {
       return null
     }
 
     const rawText =
-      event.status === 'error'
-        ? event.errorInfo?.summary || event.error || event.output || event.summary || event.title
-        : event.kind === 'shell'
-          ? event.output || event.summary || event.input || event.title
-          : event.summary || event.output || event.input || event.title
+      event.kind === 'shell'
+        ? event.input || event.summary || sanitizeTerminalOutput(event.output) || event.title
+        : event.summary || event.output || event.input || event.title
     const text = extractTailPreview(rawText)
 
     if (!text) {
@@ -1063,9 +1205,8 @@ function buildExecutionDigestPreviewForTimelineItem(
     }
 
     return {
-      label: event.status === 'error' ? '执行异常' : event.title || '最新进展',
+      label: event.title || '最新进展',
       text,
-      tone: event.status === 'error' ? 'error' : 'default',
     } satisfies ExecutionDigestPreview
   }
 
@@ -1099,10 +1240,8 @@ function buildExecutionDigestPreviewForTimelineItem(
 function buildExecutionDigestEntries(options: {
   executionTimeline: ExecutionTimelineItem[]
   taskNodes: TaskNode[]
-  messageError?: string
-  failureSummary?: string
 }) {
-  const { executionTimeline, taskNodes, messageError, failureSummary } = options
+  const { executionTimeline, taskNodes } = options
   const entries: ExecutionDigestPreview[] = []
 
   for (const item of executionTimeline) {
@@ -1113,27 +1252,11 @@ function buildExecutionDigestEntries(options: {
     return entries
   }
 
-  if (failureSummary) {
-    return [{
-      label: '执行异常',
-      text: extractTailPreview(failureSummary),
-      tone: 'error',
-    } satisfies ExecutionDigestPreview]
-  }
-
   const taskSummary = extractTailPreview(findLatestTaskSummary(taskNodes))
   if (taskSummary) {
     return [{
       label: '执行计划',
       text: taskSummary,
-    } satisfies ExecutionDigestPreview]
-  }
-
-  if (messageError) {
-    return [{
-      label: '执行异常',
-      text: extractTailPreview(messageError),
-      tone: 'error',
     } satisfies ExecutionDigestPreview]
   }
 
@@ -1209,29 +1332,22 @@ function ExecutionDigestLog({ entries }: { entries: ExecutionDigestPreview[] }) 
         ))}
       </div>
       {showJumpToLatest || canToggle ? (
-        <div className="mt-1 flex items-center justify-center gap-1.5">
-          {showJumpToLatest ? (
-            <button
-              type="button"
-              className="execution-digest-log__toggle"
-              onClick={scrollToLatest}
-              title="回到最新"
-              aria-label="回到最新"
-            >
+        <div className="mt-1 flex items-center justify-center">
+          <button
+            type="button"
+            className="execution-digest-log__toggle"
+            onClick={showJumpToLatest ? scrollToLatest : () => setExpanded(current => !current)}
+            title={showJumpToLatest ? '回到最新' : expanded ? '收起' : '展开'}
+            aria-label={showJumpToLatest ? '回到最新' : expanded ? '收起' : '展开'}
+          >
+            {showJumpToLatest ? (
               <ArrowDown size={14} />
-            </button>
-          ) : null}
-          {canToggle ? (
-            <button
-              type="button"
-              className="execution-digest-log__toggle"
-              onClick={() => setExpanded(current => !current)}
-              title={expanded ? '收起' : '展开'}
-              aria-label={expanded ? '收起' : '展开'}
-            >
-              {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-            </button>
-          ) : null}
+            ) : expanded ? (
+              <ChevronUp size={14} />
+            ) : (
+              <ChevronDown size={14} />
+            )}
+          </button>
         </div>
       ) : null}
     </div>
@@ -1428,6 +1544,48 @@ function SearchControllerDecisionCard({
   )
 }
 
+function ShellOutputViewport({
+  content,
+  isLive,
+  tone = 'default',
+}: {
+  content: string
+  isLive: boolean
+  tone?: 'default' | 'error'
+}) {
+  const viewportRef = useRef<HTMLPreElement>(null)
+  const [autoFollow, setAutoFollow] = useState(true)
+
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport || !autoFollow) {
+      return
+    }
+    viewport.scrollTop = viewport.scrollHeight
+  }, [autoFollow, content])
+
+  useEffect(() => {
+    if (!isLive) {
+      setAutoFollow(false)
+    }
+  }, [isLive])
+
+  return (
+    <pre
+      ref={viewportRef}
+      onScroll={event => {
+        const nextAutoFollow = isExecutionDigestNearBottom(event.currentTarget)
+        setAutoFollow(current => (current === nextAutoFollow ? current : nextAutoFollow))
+      }}
+      className={`max-h-260px overflow-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-12px leading-6 custom-scrollbar ${
+        tone === 'error' ? 'text-red-600' : 'text-[#52525b]'
+      }`}
+    >
+      {content}
+    </pre>
+  )
+}
+
 function MessageEventCard({
   event,
   onHandleApproval,
@@ -1445,6 +1603,7 @@ function MessageEventCard({
   const isUserInputWait =
     event.kind === 'user_input' && event.status === 'awaiting_user_input'
   const parsedOutput = parseJsonOutput(event.output)
+  const parsedShellSnapshot = isShellLog ? parseShellEventSnapshot(event.output) : null
   const toolName = typeof event.toolName === 'string' ? event.toolName : ''
   const isStructuredWebResearchEvent = toolName === 'web_research' && Boolean(parsedOutput)
   const isStructuredWebSearchEvent = toolName === 'web_search' && Boolean(parsedOutput)
@@ -1461,6 +1620,34 @@ function MessageEventCard({
     event.status === 'error'
       ? event.errorInfo?.suggestedAction
       : ''
+  const shellCommand =
+    event.input ||
+    (parsedShellSnapshot?.command ? `$ ${parsedShellSnapshot.command}` : '')
+  const shellOutputText = sanitizeTerminalOutput(
+    parsedShellSnapshot
+      ? parsedShellSnapshot.output ||
+          [parsedShellSnapshot.stdout, parsedShellSnapshot.stderr].filter(Boolean).join('\n\n')
+      : event.output,
+  )
+  const shellErrorText = sanitizeTerminalOutput(event.error)
+  const shellDuration =
+    typeof parsedShellSnapshot?.wallTimeMs === 'number'
+      ? formatDuration(parsedShellSnapshot.wallTimeMs)
+      : ''
+  const shellStatusDetail = isShellLog
+    ? event.status === 'running'
+      ? `命令仍在执行${shellDuration ? ` · 已运行 ${shellDuration}` : ''}`
+      : event.status === 'success'
+        ? `命令已执行完成${shellDuration ? ` · 用时 ${shellDuration}` : ''}`
+        : `命令执行失败${shellDuration ? ` · 已运行 ${shellDuration}` : ''}${
+            typeof parsedShellSnapshot?.exitCode === 'number'
+              ? ` · 退出码 ${parsedShellSnapshot.exitCode}`
+              : ''
+          }`
+    : ''
+  const shellTruncationNote =
+    parsedShellSnapshot?.truncated === true ? '输出较长，仅保留了最近一部分。' : ''
+  const shouldShowGenericSummary = !isShellLog && Boolean(event.summary)
 
   if (!isApproval && !isUserInputWait && isSearchControllerDecisionEvent && parsedOutput) {
     return <SearchControllerDecisionCard output={parsedOutput} />
@@ -1517,7 +1704,9 @@ function MessageEventCard({
           ) : null}
         </div>
       </div>
-      <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
+      {shouldShowGenericSummary ? (
+        <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
+      ) : null}
       {!isApproval && isStructuredWebResearchEvent && parsedOutput ? (
         <WebResearchEventCard event={event} output={parsedOutput} />
       ) : null}
@@ -1566,28 +1755,56 @@ function MessageEventCard({
       ) : null}
       {hasShellDetails ? (
         <div className="mt-2 rounded-xl border border-[rgba(15,23,42,0.06)] bg-[#f4f4f5] p-3">
-          {event.input ? (
-            <div className="mb-2 font-[SFMono-Regular,Menlo,monospace] text-12px text-[var(--text-primary)]">
-              {event.input}
+          {shellStatusDetail ? (
+            <div className="mb-2 text-11px font-600 text-[var(--text-secondary)] opacity-80">
+              {shellStatusDetail}
             </div>
           ) : null}
-          {event.output ? (
-            <pre className="max-h-260px overflow-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-12px leading-6 text-[#52525b]">
-              {event.output}
-            </pre>
+          {shellCommand ? (
+            <div className="mb-2 rounded-lg border border-[rgba(15,23,42,0.06)] bg-white/80 px-3 py-2">
+              <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--text-secondary)] opacity-70">
+                命令
+              </div>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-12px leading-6 text-[var(--text-primary)] custom-scrollbar">
+                {shellCommand}
+              </pre>
+            </div>
+          ) : null}
+          {shellOutputText ? (
+            <div className="rounded-lg border border-[rgba(15,23,42,0.06)] bg-white/65 px-3 py-2">
+              <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--text-secondary)] opacity-70">
+                输出
+              </div>
+              <ShellOutputViewport
+                content={shellOutputText}
+                isLive={event.status === 'running'}
+              />
+            </div>
           ) : event.status === 'running' ? (
-            <div className="font-[SFMono-Regular,Menlo,monospace] text-12px text-[#71717a]">
+            <div className="rounded-lg border border-[rgba(15,23,42,0.06)] bg-white/65 px-3 py-2 font-[SFMono-Regular,Menlo,monospace] text-12px text-[#71717a]">
               正在等待命令输出...
             </div>
           ) : null}
-          {event.error ? (
-            <pre className="mt-2 max-h-180px overflow-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-12px leading-6 text-red-600">
-              {event.error}
-            </pre>
+          {shellTruncationNote ? (
+            <div className="mt-2 text-11px text-[var(--text-secondary)] opacity-70">
+              {shellTruncationNote}
+            </div>
+          ) : null}
+          {shellErrorText ? (
+            <div className="mt-2 rounded-lg border border-red-100 bg-red-50/75 px-3 py-2">
+              <div className="mb-1 text-10px font-700 uppercase tracking-wider text-red-500/80">
+                Error
+              </div>
+              <ShellOutputViewport
+                content={shellErrorText}
+                isLive={false}
+                tone="error"
+              />
+            </div>
           ) : null}
         </div>
       ) : null}
-      {!isApproval && !isUserInputWait && (!isShellLog || event.error) && (event.input || event.output || event.error) && (
+      {!isApproval && !isUserInputWait && !isShellLog && (event.input || event.output || event.error) && (
         <details className="mt-1.5 group" open={!isShellLog && event.status === 'error'}>
           <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-55">显示详细信息</summary>
           <div className="mt-2 flex flex-col gap-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3">
@@ -2352,11 +2569,7 @@ function AssistantMessageCard({
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.summary || summarizeFailureReason(message.error)
       : ''
-  const messageFailureAction =
-    activity?.status === 'failed' || message.error
-      ? message.errorInfo?.suggestedAction
-      : ''
-  const messageRetryDetail = formatRetryLabel(message.retryInfo, true)
+  const messageRetryDetail = formatRetryLabel(message.retryInfo)
   const phaseSummary = activityPhaseLabel(activity?.phase, activity?.stalled === true)
   const activitySummary = activity
     ? [
@@ -2369,7 +2582,6 @@ function AssistantMessageCard({
       .filter(Boolean)
       .join(' · ')
     : null
-  const retrySummary = formatRetryLabel(message.retryInfo, false)
   const routeSummary = buildRouteSummary(message.routeDecision)
   const routeTooltip = buildRouteTooltip(message.routeDecision)
   const shouldShowCompletionState =
@@ -2431,8 +2643,6 @@ function AssistantMessageCard({
   const executionDigestEntries = buildExecutionDigestEntries({
     executionTimeline: nonApprovalTimeline,
     taskNodes: visibleSteps,
-    messageError: message.error,
-    failureSummary: messageFailureSummary,
   })
   const shouldShowDetailedTimeline =
     activity?.expanded === true &&
@@ -2482,6 +2692,26 @@ function AssistantMessageCard({
   ].filter(group => group.items.length > 0)
   const shouldShowAnswer = Boolean(message.content)
   const canCopyAnswer = Boolean(message.content)
+  const fallbackStatusTitle = !isStreaming && !shouldShowAnswer
+    ? (message.events?.length || 0) > 0
+      ? '模型执行了操作，但没有生成最终总结回答。'
+      : providerReasoning.length > 0
+        ? '模型在思考中计划了后续动作，但没有成功形成最终回答。'
+        : '模型执行了操作，但没有生成最终总结回答。'
+    : ''
+  const retryFailureSummary =
+    typeof message.retryInfo?.lastErrorSummary === 'string' && message.retryInfo.lastErrorSummary.trim()
+      ? summarizeFailureReason(message.retryInfo.lastErrorSummary)
+      : ''
+  const statusNoticeTitle =
+    messageFailureSummary || fallbackStatusTitle || (message.retryInfo?.inProgress ? retryFailureSummary : '')
+  const statusNoticeTone: MessageStatusNoticeTone =
+    messageFailureSummary
+      ? 'error'
+      : message.retryInfo?.inProgress
+        ? 'progress'
+        : 'neutral'
+  const shouldShowStatusNotice = Boolean(statusNoticeTitle || messageRetryDetail)
 
   return (
     <article className="group relative flex flex-col gap-3">
@@ -2528,23 +2758,9 @@ function AssistantMessageCard({
                       {completionSummary}
                     </span>
                   ) : null}
-                  {retrySummary ? (
-                    <span className="text-[11px] text-[var(--text-secondary)] opacity-75">
-                      {retrySummary}
-                    </span>
-                  ) : null}
                   {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </button>
-                {messageFailureSummary ? (
-                  <div className="pointer-events-none absolute left-0 top-[calc(100%+8px)] z-20 w-80 rounded-xl border border-red-100 bg-white px-3 py-2 text-left text-12px leading-relaxed text-red-600 shadow-lg shadow-[rgba(15,23,42,0.12)] opacity-0 invisible translate-y-1 group-hover/activity:opacity-100 group-hover/activity:visible group-hover/activity:translate-y-0 transition-all duration-200">
-                    <div className="font-600">{messageFailureSummary}</div>
-                    {messageFailureAction ? (
-                      <div className="mt-1 text-[11px] leading-relaxed text-red-500/85">
-                        {messageFailureAction}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : hasUsedCapabilities ? (
+                {hasUsedCapabilities ? (
                   <div className="absolute left-0 top-full pt-2 z-30 w-max min-w-[14rem] max-w-[20rem] opacity-0 invisible -translate-y-1.5 group-hover/activity:opacity-100 group-hover/activity:visible group-hover/activity:translate-y-0 transition-all duration-200 ease-out origin-top-left">
                     <div className="relative rounded-[16px] border border-[rgba(15,23,42,0.08)] bg-white px-4 py-3.5 text-left shadow-[0_16px_40px_-8px_rgba(0,0,0,0.15)] ring-1 ring-black/[0.03]">
                       <svg className="absolute left-5 -top-[5.5px] text-white drop-shadow-[0_-1px_1px_rgba(15,23,42,0.06)]" width="12" height="6" viewBox="0 0 12 6" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
@@ -2651,13 +2867,28 @@ function AssistantMessageCard({
             </div>
           ) : null}
 
-          {message.error ? (
-            <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-2 text-13px text-red-500">
-              <div>{message.error}</div>
-              {messageRetryDetail ? (
-                <div className="mt-1 text-11px text-red-400/90">{messageRetryDetail}</div>
-              ) : null}
-            </div>
+          {shouldShowAnswer && !shouldSuppressStreamingAnswerBody ? (
+            isStreaming ? (
+              <StreamingMarkdownAnswer content={message.content} onCopyText={onCopyText} />
+            ) : (
+              <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
+            )
+          ) : isStreaming ? (
+            shouldSuppressStreamingAnswerBody || message.retryInfo?.inProgress === true ? null : (
+              <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
+                <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
+                {phaseSummary || '正在整理信息并生成最终回答...'}
+              </div>
+            )
+          ) : null}
+
+          {shouldShowStatusNotice ? (
+            <MessageStatusNotice
+              tone={statusNoticeTone}
+              title={statusNoticeTitle}
+              detail={messageRetryDetail}
+              animateDetail={message.retryInfo?.inProgress === true}
+            />
           ) : null}
 
           {appendedInputs.length > 0 ? (
@@ -2668,36 +2899,6 @@ function AssistantMessageCard({
               onForceExecute={onForceExecuteAppendedInput}
             />
           ) : null}
-
-          {shouldShowAnswer && !shouldSuppressStreamingAnswerBody ? (
-            isStreaming ? (
-              <StreamingMarkdownAnswer content={message.content} onCopyText={onCopyText} />
-            ) : (
-              <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
-            )
-          ) : !isStreaming ? (
-            <div className="rounded-xl border border-dashed border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-4 py-3 text-13px text-[var(--text-secondary)]">
-              <div>
-                {(message.events?.length || 0) > 0
-                  ? '模型执行了操作，但没有生成最终总结回答。'
-                  : providerReasoning.length > 0
-                    ? '模型在思考中计划了后续动作，但没有成功形成最终回答。'
-                    : '模型执行了操作，但没有生成最终总结回答。'}
-              </div>
-              {messageRetryDetail ? (
-                <div className="mt-1 text-11px text-[var(--text-secondary)] opacity-70">
-                  {messageRetryDetail}
-                </div>
-              ) : null}
-            </div>
-          ) : shouldSuppressStreamingAnswerBody ? null : (
-            <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
-              <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
-              {phaseSummary || '正在整理信息并生成最终回答...'}
-            </div>
-          )}
-
-
 
           <div className="flex items-center justify-end pt-1">
             <div className="flex items-center gap-2">
