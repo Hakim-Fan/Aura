@@ -941,7 +941,7 @@ export async function runRouteFirstAgent(request) {
     carryoverContext = '',
   } = request
   hooks?.onPhaseChange?.('preparing')
-  if (!settings?.apiKey?.trim()) {
+  if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
     throw createStructuredError('模型调用失败，当前缺少 API Key。', {
       source: 'provider',
       category: 'authentication',

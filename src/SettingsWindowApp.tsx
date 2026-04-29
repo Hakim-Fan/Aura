@@ -89,6 +89,16 @@ function normalizeManualModelId(profile: ProviderProfile, value: string) {
   return profile.provider === 'google' ? modelId.replace(/^models\//, '').trim() : modelId
 }
 
+function formatCaughtMessage(caught: unknown, fallback: string) {
+  if (caught instanceof Error && caught.message.trim()) {
+    return caught.message
+  }
+  if (typeof caught === 'string' && caught.trim()) {
+    return caught
+  }
+  return fallback
+}
+
 type ProviderStatusState = {
   tone: 'success' | 'error'
   message: string
@@ -1365,7 +1375,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
     } catch (caught) {
       setProviderStatus({
         tone: 'error',
-        message: caught instanceof Error ? caught.message : 'Provider 测试失败。',
+        message: formatCaughtMessage(caught, 'Provider 测试失败。'),
       })
     } finally {
       setIsTestingProvider(false)
@@ -1427,7 +1437,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
     } catch (caught) {
       setProviderStatus({
         tone: 'error',
-        message: caught instanceof Error ? caught.message : '模型拉取失败。',
+        message: formatCaughtMessage(caught, '模型拉取失败。'),
       })
     } finally {
       setIsFetchingModels(false)

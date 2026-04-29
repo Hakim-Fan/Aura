@@ -238,7 +238,11 @@ export function ProvidersView({
                   className={`${premiumInputClass} provider-secret-input font-mono !text-12px`}
                   value={activeProfile.apiKey}
                   onChange={event => onProfileChange(activeProfile.id, 'apiKey', event.target.value)}
-                  placeholder="输入真实 API Key"
+                  placeholder={
+                    activeProfile.provider === 'custom'
+                      ? '本地服务可留空；远程服务请输入 API Key'
+                      : '输入真实 API Key'
+                  }
                   type={apiKeyVisible ? 'text' : 'password'}
                 />
                 <button

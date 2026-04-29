@@ -7,9 +7,11 @@ const {
   extractInlineToolCalls,
   getProviderFailureRecoveryMaxRetries,
   getProviderRetryDelayMs,
+  hasWriteRepairAttemptSince,
   mergeOpenAiToolCalls,
   parseToolArguments,
   runProviderOperationWithRetry,
+  updateUnresolvedToolErrorForRepair,
 } = __testInternals
 
 test('mergeOpenAiToolCalls keeps append-only tool argument chunks parseable', () => {
@@ -170,4 +172,58 @@ test('runProviderOperationWithRetry clears in-progress retry state after a succe
   assert.equal(progressEvents[1]?.inProgress, undefined)
   assert.equal(progressEvents[1]?.attemptedRetries, 1)
   assert.match(progressEvents[1]?.lastErrorSummary || '', /模型连接在生成过程中被中断/)
+})
+
+test('tool-error repair state stays unresolved after read-only inspection', () => {
+  const events = [
+    {
+      name: 'apply_patch',
+      status: 'error',
+      errorInfo: {
+        category: 'patch_context_mismatch',
+      },
+    },
+  ]
+
+  let unresolved = updateUnresolvedToolErrorForRepair(events, 0, false)
+  assert.equal(unresolved, true)
+
+  events.push({
+    name: 'read_file',
+    status: 'success',
+  })
+  unresolved = updateUnresolvedToolErrorForRepair(events, 1, unresolved)
+  assert.equal(unresolved, true)
+
+  events.push({
+    name: 'replace_line_range',
+    status: 'success',
+  })
+  unresolved = updateUnresolvedToolErrorForRepair(events, 2, unresolved)
+  assert.equal(unresolved, false)
+})
+
+test('invalid edit parameters do not consume write repair attempts', () => {
+  const events = [
+    {
+      name: 'replace_line_range',
+      status: 'error',
+      errorInfo: {
+        category: 'invalid_input',
+        code: 'INVALID_LINE_RANGE',
+      },
+    },
+  ]
+
+  assert.equal(hasWriteRepairAttemptSince(events, 0), false)
+
+  events.push({
+    name: 'replace_line_range',
+    status: 'error',
+    errorInfo: {
+      category: 'text_context_mismatch',
+    },
+  })
+
+  assert.equal(hasWriteRepairAttemptSince(events, 1), true)
 })

@@ -16,6 +16,7 @@ use tauri::{Emitter, Manager, Runtime, State};
 use tauri_plugin_shell::ShellExt;
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+const APP_LOG_RETENTION_DAYS: u64 = 14;
 
 #[derive(Clone, Serialize, Default)]
 struct AgentTaskSnapshot {
@@ -872,6 +873,316 @@ fn current_timestamp_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year as i32, m as u32, d as u32)
+}
+
+fn utc_log_date(timestamp_ms: u64) -> String {
+    let days = (timestamp_ms / 86_400_000) as i64;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn utc_log_timestamp(timestamp_ms: u64) -> String {
+    let total_seconds = timestamp_ms / 1000;
+    let millis = timestamp_ms % 1000;
+    let seconds_of_day = total_seconds % 86_400;
+    let hour = seconds_of_day / 3600;
+    let minute = (seconds_of_day % 3600) / 60;
+    let second = seconds_of_day % 60;
+    format!(
+        "{}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z",
+        utc_log_date(timestamp_ms)
+    )
+}
+
+fn prune_old_app_logs(logs_dir: &Path, now_ms: u64) {
+    let Ok(entries) = fs::read_dir(logs_dir) else {
+        return;
+    };
+    let retention_ms = APP_LOG_RETENTION_DAYS * 86_400_000;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !file_name.starts_with("app-")
+            || (!file_name.ends_with(".log") && !file_name.ends_with(".jsonl"))
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = SystemTime::now().duration_since(modified) else {
+            continue;
+        };
+        if age.as_millis() as u64 > retention_ms && now_ms > retention_ms {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn truncate_log_value(value: String, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value;
+    }
+    let mut truncated = value.chars().take(limit).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn format_log_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".into(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => {
+            let trimmed = truncate_log_value(value.clone(), 240);
+            if trimmed.is_empty()
+                || trimmed
+                    .chars()
+                    .any(|character| {
+                        character.is_whitespace() || character == '"' || character == '\''
+                    })
+            {
+                serde_json::to_string(&trimmed).unwrap_or_else(|_| "\"\"".into())
+            } else {
+                trimmed
+            }
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            let serialized = serde_json::to_string(value).unwrap_or_else(|_| "null".into());
+            truncate_log_value(serialized, 400)
+        }
+    }
+}
+
+fn flatten_log_fields(
+    fields: &mut Vec<String>,
+    prefix: &str,
+    value: &serde_json::Value,
+    depth: usize,
+) {
+    if fields.len() >= 48 {
+        return;
+    }
+    match value {
+        serde_json::Value::Object(map) if depth < 3 => {
+            for (key, child) in map {
+                if fields.len() >= 48 {
+                    fields.push("...".into());
+                    break;
+                }
+                let next_prefix = if prefix.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_log_fields(fields, &next_prefix, child, depth + 1);
+            }
+        }
+        serde_json::Value::Null => {}
+        _ if !prefix.is_empty() => {
+            fields.push(format!("{prefix}={}", format_log_value(value)));
+        }
+        _ => {}
+    }
+}
+
+fn format_app_log_line(
+    timestamp: &str,
+    level: &str,
+    event: &str,
+    details: &serde_json::Value,
+) -> String {
+    let mut fields = Vec::new();
+    flatten_log_fields(&mut fields, "", details, 0);
+    let suffix = if fields.is_empty() {
+        "-".into()
+    } else {
+        fields.join(" ")
+    };
+    format!(
+        "{timestamp} {:<5} {event} -- {suffix}",
+        level.to_ascii_uppercase()
+    )
+}
+
+fn append_log_line(path: PathBuf, line: &str) {
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+fn append_app_log<R: Runtime>(
+    _app: &tauri::AppHandle<R>,
+    level: &str,
+    event: &str,
+    details: serde_json::Value,
+) {
+    let Ok(logs_dir) = resolve_aura_home().map(|home| home.join("logs")) else {
+        return;
+    };
+    let _ = ensure_directory(&logs_dir);
+    let now_ms = current_timestamp_ms();
+    prune_old_app_logs(&logs_dir, now_ms);
+    let timestamp = utc_log_timestamp(now_ms);
+    let date = utc_log_date(now_ms);
+    let human_line = format_app_log_line(&timestamp, level, event, &details);
+    let entry = serde_json::json!({
+        "timestamp": timestamp,
+        "timestampMs": now_ms,
+        "level": level,
+        "event": event,
+        "details": details,
+    });
+    append_log_line(logs_dir.join(format!("app-{date}.log")), &human_line);
+    append_log_line(logs_dir.join(format!("app-{date}.jsonl")), &entry.to_string());
+}
+
+fn normalize_app_log_level(level: Option<String>) -> &'static str {
+    match level.as_deref() {
+        Some("debug") => "debug",
+        Some("warn") => "warn",
+        Some("error") => "error",
+        _ => "info",
+    }
+}
+
+fn sanitize_url_for_log(value: &str) -> String {
+    let without_query = value.split('?').next().unwrap_or(value);
+    without_query
+        .split('#')
+        .next()
+        .unwrap_or(without_query)
+        .to_string()
+}
+
+fn agent_payload_log_details(task_id: &str, payload: &serde_json::Value) -> serde_json::Value {
+    let settings = payload.get("settings").unwrap_or(&serde_json::Value::Null);
+    let message_count = payload
+        .get("messages")
+        .and_then(|value| value.as_array())
+        .map(|value| value.len())
+        .unwrap_or(0);
+    serde_json::json!({
+        "taskId": task_id,
+        "provider": settings.get("provider").and_then(|value| value.as_str()),
+        "model": settings.get("model").and_then(|value| value.as_str()),
+        "baseUrl": settings
+            .get("baseUrl")
+            .and_then(|value| value.as_str())
+            .map(sanitize_url_for_log),
+        "providerProxyEnabled": settings
+            .get("providerProxyEnabled")
+            .and_then(|value| value.as_bool()),
+        "networkProxyConfigured": settings
+            .get("networkProxy")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+        "cwd": settings.get("cwd").and_then(|value| value.as_str()),
+        "messageCount": message_count,
+    })
+}
+
+fn provider_action_log_details(payload: &serde_json::Value) -> serde_json::Value {
+    let settings = payload.get("settings").unwrap_or(&serde_json::Value::Null);
+    serde_json::json!({
+        "action": payload.get("action").and_then(|value| value.as_str()),
+        "provider": settings.get("provider").and_then(|value| value.as_str()),
+        "model": settings.get("model").and_then(|value| value.as_str()),
+        "baseUrl": settings
+            .get("baseUrl")
+            .and_then(|value| value.as_str())
+            .map(sanitize_url_for_log),
+        "providerProxyEnabled": settings
+            .get("providerProxyEnabled")
+            .and_then(|value| value.as_bool()),
+        "networkProxyConfigured": settings
+            .get("networkProxy")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+    })
+}
+
+fn event_log_details(task_id: &str, event: &serde_json::Value) -> serde_json::Value {
+    let event_type = event
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    match event_type {
+        "runtime_status" => serde_json::json!({
+            "taskId": task_id,
+            "phase": event.get("phase").and_then(|value| value.as_str()),
+            "stalled": event.get("stalled").and_then(|value| value.as_bool()),
+            "lastHeartbeatAt": event.get("lastHeartbeatAt").and_then(|value| value.as_u64()),
+            "lastProgressAt": event.get("lastProgressAt").and_then(|value| value.as_u64()),
+        }),
+        "retry_progress" => serde_json::json!({
+            "taskId": task_id,
+            "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
+        }),
+        "tool_event" => {
+            let tool_event = event.get("event").unwrap_or(&serde_json::Value::Null);
+            serde_json::json!({
+                "taskId": task_id,
+                "toolEventId": tool_event.get("id").and_then(|value| value.as_str()),
+                "source": tool_event.get("source").and_then(|value| value.as_str()),
+                "toolName": tool_event.get("name").and_then(|value| value.as_str()),
+                "summary": tool_event.get("summary").and_then(|value| value.as_str()),
+                "input": tool_event.get("input").and_then(|value| value.as_str()),
+                "status": tool_event.get("status").and_then(|value| value.as_str()),
+                "error": tool_event.get("error").and_then(|value| value.as_str()),
+                "errorInfo": tool_event.get("errorInfo").cloned().unwrap_or(serde_json::Value::Null),
+            })
+        }
+        "failed" => serde_json::json!({
+            "taskId": task_id,
+            "message": event.get("message").and_then(|value| value.as_str()),
+            "code": event.get("code").and_then(|value| value.as_str()),
+            "source": event.get("source").and_then(|value| value.as_str()),
+            "rawMessage": event.get("rawMessage").and_then(|value| value.as_str()),
+            "errorInfo": event.get("errorInfo").cloned().unwrap_or(serde_json::Value::Null),
+            "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
+        }),
+        "completed" => {
+            let result = event.get("result").unwrap_or(&serde_json::Value::Null);
+            serde_json::json!({
+                "taskId": task_id,
+                "status": "completed",
+                "usage": result.get("usage").cloned().unwrap_or(serde_json::Value::Null),
+                "agentMode": result.get("agentMode").and_then(|value| value.as_str()),
+                "completionState": result.get("completionState").and_then(|value| value.as_str()),
+                "toolEventCount": result
+                    .get("toolEvents")
+                    .and_then(|value| value.as_array())
+                    .map(|value| value.len())
+                    .unwrap_or(0),
+            })
+        }
+        _ => serde_json::json!({
+            "taskId": task_id,
+            "type": event_type,
+        }),
+    }
+}
+
 fn canonical_display_path(path: &Path) -> String {
     fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -1512,8 +1823,19 @@ fn build_augmented_path() -> String {
     let current_path = std::env::var("PATH").unwrap_or_else(|_| String::new());
 
     let mut extra_dirs: Vec<String> = vec![
+        format!("{}/.aura/bin", home),
+        format!("{}/.local/bin", home),
+        format!("{}/.cargo/bin", home),
+        format!("{}/.bun/bin", home),
         "/opt/homebrew/bin".to_string(),
         "/usr/local/bin".to_string(),
+        "/usr/bin".to_string(),
+        "/bin".to_string(),
+        "/usr/sbin".to_string(),
+        "/sbin".to_string(),
+        "/Library/Apple/usr/bin".to_string(),
+        "/System/Cryptexes/App/usr/bin".to_string(),
+        "/Applications/Codex.app/Contents/Resources".to_string(),
     ];
 
     // Add nvm current bin if exists
@@ -1755,6 +2077,12 @@ fn spawn_agent_task<R: Runtime>(
         .ok_or_else(|| "Failed to capture Node bridge stderr.".to_string())?;
 
     let task_id = format!("task-{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
+    append_app_log(
+        &app,
+        "info",
+        "agent_task_spawned",
+        agent_payload_log_details(&task_id, &payload),
+    );
     let snapshot = Arc::new(Mutex::new(AgentTaskSnapshot {
         id: task_id.clone(),
         status: "queued".into(),
@@ -1807,8 +2135,12 @@ fn spawn_agent_task<R: Runtime>(
     let stdout_snapshot = snapshot.clone();
     let stdout_stdin = handle.stdin.clone();
     let stdout_app = app.clone();
+    let stdout_log_app = app.clone();
+    let stdout_task_id = task_id.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        let mut last_logged_phase: Option<String> = None;
+        let mut logged_running_tools: HashSet<String> = HashSet::new();
         for line in reader.lines() {
             let Ok(line) = line else {
                 break;
@@ -1817,6 +2149,15 @@ fn spawn_agent_task<R: Runtime>(
                 continue;
             }
             let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                append_app_log(
+                    &stdout_log_app,
+                    "error",
+                    "bridge_event_parse_failed",
+                    serde_json::json!({
+                        "taskId": stdout_task_id.as_str(),
+                        "line": line,
+                    }),
+                );
                 with_snapshot(&stdout_snapshot, |current| {
                     current.status = "failed".into();
                     current.error = Some(format!("Failed to parse bridge event: {line}"));
@@ -1826,6 +2167,12 @@ fn spawn_agent_task<R: Runtime>(
 
             match event.get("type").and_then(|value| value.as_str()) {
                 Some("started") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "info",
+                        "agent_task_started",
+                        event_log_details(&stdout_task_id, &event),
+                    );
                     current.status = "running".into();
                     current.phase = Some("preparing".into());
                     current.error = None;
@@ -1857,9 +2204,37 @@ fn spawn_agent_task<R: Runtime>(
                     current.usage = extract_object(event.get("usage"));
                 }),
                 Some("retry_progress") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "warn",
+                        "agent_retry_progress",
+                        event_log_details(&stdout_task_id, &event),
+                    );
                     current.retry_info = extract_object(event.get("retryInfo"));
                 }),
                 Some("tool_event") => with_snapshot(&stdout_snapshot, |current| {
+                    let tool_event = event.get("event").unwrap_or(&serde_json::Value::Null);
+                    let tool_status = tool_event
+                        .get("status")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    let should_log_tool_event = if tool_status == "running" {
+                        tool_event
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .map(|id| logged_running_tools.insert(id.to_string()))
+                            .unwrap_or(true)
+                    } else {
+                        true
+                    };
+                    if should_log_tool_event {
+                        append_app_log(
+                            &stdout_log_app,
+                            if tool_status == "error" { "error" } else { "info" },
+                            "agent_tool_event",
+                            event_log_details(&stdout_task_id, &event),
+                        );
+                    }
                     if let Some(tool_event) = event.get("event") {
                         merge_tool_event(current, tool_event);
                     }
@@ -1871,14 +2246,32 @@ fn spawn_agent_task<R: Runtime>(
                     current.task_tree = extract_array(event.get("tree"));
                 }),
                 Some("runtime_status") => with_snapshot(&stdout_snapshot, |current| {
+                    let next_phase = event
+                        .get("phase")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                    let stalled = event
+                        .get("stalled")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    if stalled || next_phase != last_logged_phase {
+                        append_app_log(
+                            &stdout_log_app,
+                            if stalled { "warn" } else { "info" },
+                            "agent_runtime_status",
+                            event_log_details(&stdout_task_id, &event),
+                        );
+                        last_logged_phase = next_phase.clone();
+                    }
                     current.phase = event
                         .get("phase")
                         .and_then(|value| value.as_str())
                         .map(|value| value.to_string());
                     current.phase_started_at =
                         event.get("phaseStartedAt").and_then(|value| value.as_u64());
-                    current.last_heartbeat_at =
-                        event.get("lastHeartbeatAt").and_then(|value| value.as_u64());
+                    current.last_heartbeat_at = event
+                        .get("lastHeartbeatAt")
+                        .and_then(|value| value.as_u64());
                     current.last_progress_at =
                         event.get("lastProgressAt").and_then(|value| value.as_u64());
                     current.stalled = event.get("stalled").and_then(|value| value.as_bool());
@@ -1938,6 +2331,12 @@ fn spawn_agent_task<R: Runtime>(
                     }
                 }
                 Some("completed") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "info",
+                        "agent_task_completed",
+                        event_log_details(&stdout_task_id, &event),
+                    );
                     current.status = "completed".into();
                     current.pending_approval = None;
                     current.pending_user_input = None;
@@ -1980,6 +2379,12 @@ fn spawn_agent_task<R: Runtime>(
                     }
                 }),
                 Some("failed") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "error",
+                        "agent_task_failed",
+                        event_log_details(&stdout_task_id, &event),
+                    );
                     current.status = "failed".into();
                     current.pending_approval = None;
                     current.pending_user_input = None;
@@ -2023,7 +2428,10 @@ fn spawn_agent_task<R: Runtime>(
         // --- 核心修复：检测管道断开带来的异常退出 ---
         // 短暂等待以确保 stderr 线程也完成了写入
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let collected_stderr = stderr_buffer.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let collected_stderr = stderr_buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         with_snapshot(&stdout_snapshot, |current| {
             if current.status == "running"
                 || current.status == "queued"
@@ -2032,6 +2440,15 @@ fn spawn_agent_task<R: Runtime>(
             {
                 current.status = "failed".into();
                 let stderr_message = collected_stderr.trim().to_string();
+                append_app_log(
+                    &stdout_log_app,
+                    "error",
+                    "bridge_process_disconnected",
+                    serde_json::json!({
+                        "taskId": stdout_task_id.as_str(),
+                        "stderr": stderr_message,
+                    }),
+                );
                 current.error = Some(if stderr_message.is_empty() {
                     "Node 桥接进程已断开。这可能是由于网络错误或脚本执行异常导致的崩溃。".into()
                 } else {
@@ -2042,6 +2459,8 @@ fn spawn_agent_task<R: Runtime>(
     });
 
     let stderr_buf_for_thread = stderr_buffer_for_stderr.clone();
+    let stderr_log_app = app.clone();
+    let stderr_task_id = task_id.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -2051,6 +2470,15 @@ fn spawn_agent_task<R: Runtime>(
             if line.trim().is_empty() {
                 continue;
             }
+            append_app_log(
+                &stderr_log_app,
+                "warn",
+                "bridge_stderr",
+                serde_json::json!({
+                    "taskId": stderr_task_id.as_str(),
+                    "line": line.as_str(),
+                }),
+            );
             // 实时追加每行 stderr 到共享 buffer，上限 8KB
             if let Ok(mut buf) = stderr_buf_for_thread.lock() {
                 if buf.len() < 8192 {
@@ -2086,10 +2514,30 @@ fn spawn_agent_task<R: Runtime>(
 }
 
 #[tauri::command]
+fn write_app_log<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    level: Option<String>,
+    event: String,
+    details: serde_json::Value,
+) -> Result<(), String> {
+    if event.trim().is_empty() {
+        return Ok(());
+    }
+    append_app_log(&app, normalize_app_log_level(level), event.trim(), details);
+    Ok(())
+}
+
+#[tauri::command]
 fn run_provider_action<R: Runtime>(
     app: tauri::AppHandle<R>,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    append_app_log(
+        &app,
+        "info",
+        "provider_action_started",
+        provider_action_log_details(&payload),
+    );
     let script_path = resolve_bridge_script_path(&app, "providerActions.mjs")?;
     let bridge_cwd = resolve_bridge_cwd(&app)?;
     let output = build_node_command(&app, &bridge_cwd)?
@@ -2099,19 +2547,49 @@ fn run_provider_action<R: Runtime>(
                 .map_err(|error| format!("Failed to serialize provider action payload: {error}"))?,
         )
         .output()
-        .map_err(|error| format!("Failed to run provider action bridge: {}", format_node_launch_error(&error)))?;
+        .map_err(|error| {
+            format!(
+                "Failed to run provider action bridge: {}",
+                format_node_launch_error(&error)
+            )
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
+        let message = if stderr.is_empty() {
             "Provider action failed.".into()
         } else {
             stderr
-        });
+        };
+        append_app_log(
+            &app,
+            "error",
+            "provider_action_failed",
+            serde_json::json!({
+                "request": provider_action_log_details(&payload),
+                "error": message,
+            }),
+        );
+        return Err(message);
     }
 
-    serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .map_err(|error| format!("Failed to parse provider action response: {error}"))
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|error| format!("Failed to parse provider action response: {error}"))?;
+    append_app_log(
+        &app,
+        "info",
+        "provider_action_completed",
+        serde_json::json!({
+            "request": provider_action_log_details(&payload),
+            "modelCount": parsed
+                .get("models")
+                .and_then(|value| value.as_array())
+                .map(|value| value.len())
+                .unwrap_or(0),
+            "message": parsed.get("message").and_then(|value| value.as_str()),
+        }),
+    );
+    Ok(parsed)
 }
 
 #[tauri::command]
@@ -3235,6 +3713,7 @@ fn main() {
             respond_to_agent_approval,
             append_input_to_agent_task,
             cancel_agent_task_step,
+            write_app_log,
             run_provider_action,
             run_mcp_action,
             ensure_aura_home,

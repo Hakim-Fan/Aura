@@ -118,6 +118,20 @@ function classifyError({ code, status, rawMessage }) {
     return 'cancelled'
   }
   if (
+    normalizedMessage.includes('patch context did not match') ||
+    normalizedMessage.includes('update hunk') ||
+    normalizedMessage.includes('patch touches')
+  ) {
+    return 'patch_context_mismatch'
+  }
+  if (
+    normalizedMessage.includes('oldtext was not found') ||
+    normalizedMessage.includes('expectedtext did not match') ||
+    normalizedMessage.includes('line range') && normalizedMessage.includes('outside the target file')
+  ) {
+    return 'text_context_mismatch'
+  }
+  if (
     normalizedMessage.includes('tool not found') ||
     normalizedMessage.includes('not found')
   ) {
@@ -165,6 +179,10 @@ function buildSummary(category, operationLabel) {
       return `${label}失败，目标工具、文件或资源不存在。`
     case 'invalid_input':
       return `${label}失败，请求参数或返回格式不符合预期。`
+    case 'patch_context_mismatch':
+      return `${label}失败，补丁上下文和当前文件内容不一致。`
+    case 'text_context_mismatch':
+      return `${label}失败，精确文本或行号范围和当前文件内容不一致。`
     case 'cancelled':
       return `${label}已被停止或拒绝执行。`
     case 'unsupported':
@@ -196,6 +214,10 @@ function buildSuggestedAction(category) {
       return '请确认目标工具、文件、插件或 MCP 服务已经正确安装并启用。'
     case 'invalid_input':
       return '请检查本次传入参数、工具输入或服务返回格式。'
+    case 'patch_context_mismatch':
+      return '请先用 read_file 重新读取目标文件的最新内容，再基于当前内容生成新的 apply_patch；不要重复提交同一个已失效补丁。'
+    case 'text_context_mismatch':
+      return '请先用 read_file 重新读取目标文件的最新内容；如果 exact oldText 不稳定，请用刚读取到的 startLine/endLine 调用 replace_line_range。'
     case 'cancelled':
       return '如果还需要继续，可以重新执行这一步。'
     case 'unsupported':
@@ -220,6 +242,7 @@ export function createStructuredError(summary, extras = {}) {
       summary,
       detail: extras.detail || rawMessage,
       suggestedAction: extras.suggestedAction,
+      repairHint: extras.repairHint,
       retryable: extras.retryable,
     },
   })

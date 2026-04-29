@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { buildShellEnv } from '../shellEnv.mjs'
 import { createStructuredError } from '../runtimeErrors.mjs'
 import { truncate } from '../utils.mjs'
 
@@ -368,7 +369,7 @@ export function createUnifiedExecRuntime({ shell = DEFAULT_SHELL } = {}) {
 
     const child = spawn(shell, buildShellArgs(command, login), {
       cwd,
-      env: process.env,
+      env: buildShellEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 

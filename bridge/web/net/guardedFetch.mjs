@@ -316,6 +316,7 @@ export async function guardedFetch(url, init = {}, options = {}) {
       if (options.allowLocal !== true && isLocalHostname(currentUrl.hostname)) {
         throw new Error(`Blocked local or private URL: ${currentUrl.hostname}`)
       }
+      const requestProxy = isLocalHostname(currentUrl.hostname) ? '' : fixedProxy
 
       const fetchInit = {
         ...init,
@@ -324,7 +325,7 @@ export async function guardedFetch(url, init = {}, options = {}) {
           'user-agent': DEFAULT_USER_AGENT,
           accept: 'application/json,text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5',
           'accept-encoding':
-            proxyMode === 'always' || fixedProxy ? 'identity' : 'gzip, deflate, br',
+            proxyMode === 'always' || requestProxy ? 'identity' : 'gzip, deflate, br',
           ...(init.headers || {}),
         },
       }
@@ -362,7 +363,7 @@ export async function guardedFetch(url, init = {}, options = {}) {
           }
         }
       } else {
-        response = await executeSingleFetch(currentUrl, fetchInit, linked.signal, fixedProxy)
+        response = await executeSingleFetch(currentUrl, fetchInit, linked.signal, requestProxy)
       }
 
       if (![301, 302, 303, 307, 308].includes(response.status)) {

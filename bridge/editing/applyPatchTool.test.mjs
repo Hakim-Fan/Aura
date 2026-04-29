@@ -144,3 +144,82 @@ test('applyPatchInWorkspace aborts the whole patch when verification fails', asy
     await assert.rejects(fs.access(path.join(workspace, 'src', 'new.txt')))
   })
 })
+
+test('applyPatchInWorkspace returns structured repair hints for stale patch context', async () => {
+  await withTempWorkspace(async workspace => {
+    await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
+    await fs.writeFile(path.join(workspace, 'src', 'a.txt'), 'one\ntwo\nthree\n', 'utf8')
+
+    await assert.rejects(
+      applyPatchInWorkspace(
+        workspace,
+        [
+          '*** Begin Patch',
+          '*** Update File: src/a.txt',
+          '@@',
+          ' one',
+          '-missing',
+          '+updated',
+          ' three',
+          '*** End Patch',
+        ].join('\n'),
+      ),
+      error =>
+        error?.errorInfo?.category === 'patch_context_mismatch' &&
+        error?.errorInfo?.repairHint?.useTool === 'read_file' &&
+        error?.errorInfo?.repairHint?.args?.path === 'src/a.txt' &&
+        error?.errorInfo?.repairHint?.args?.mode === 'edit_context',
+    )
+  })
+})
+
+test('applyPatchInWorkspace matches context with harmless whitespace drift', async () => {
+  await withTempWorkspace(async workspace => {
+    await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
+    await fs.writeFile(
+      path.join(workspace, 'src', 'a.txt'),
+      'function demo() {\n    return oldValue;   \n}\n',
+      'utf8',
+    )
+
+    const result = await applyPatchInWorkspace(
+      workspace,
+      [
+        '*** Begin Patch',
+        '*** Update File: src/a.txt',
+        '@@ function demo() {',
+        '-    return oldValue;',
+        '+  return newValue;',
+        '*** End Patch',
+      ].join('\n'),
+    )
+
+    assert.equal(result.ok, true)
+    assert.equal(
+      await fs.readFile(path.join(workspace, 'src', 'a.txt'), 'utf8'),
+      'function demo() {\n  return newValue;\n}\n',
+    )
+  })
+})
+
+test('applyPatchInWorkspace matches common unicode punctuation drift', async () => {
+  await withTempWorkspace(async workspace => {
+    await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
+    await fs.writeFile(path.join(workspace, 'src', 'a.txt'), 'copy “old”\n', 'utf8')
+
+    const result = await applyPatchInWorkspace(
+      workspace,
+      [
+        '*** Begin Patch',
+        '*** Update File: src/a.txt',
+        '@@',
+        '-copy "old"',
+        '+copy "new"',
+        '*** End Patch',
+      ].join('\n'),
+    )
+
+    assert.equal(result.ok, true)
+    assert.equal(await fs.readFile(path.join(workspace, 'src', 'a.txt'), 'utf8'), 'copy "new"\n')
+  })
+})

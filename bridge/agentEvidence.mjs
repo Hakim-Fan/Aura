@@ -18,6 +18,7 @@ const WRITE_EFFECT_TOOLS = new Set([
   'apply_patch',
   'edit_file',
   'multi_edit_file',
+  'replace_line_range',
   'aura_enable_skill',
   'aura_enable_plugin',
   'aura_import_skill',
@@ -345,6 +346,8 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     })
   }
 
+  const hasExecutionFailure = hasUnresolvedExecutionFailure(records)
+
   return {
     records,
     hasAnyExecution: records.some(record =>
@@ -372,18 +375,59 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     hasVerifiedEvidence: records.some(record => record.verificationLevel === 'verified'),
     hasApprovalBlock: records.some(record => record.status === 'denied'),
     hasCapabilityBlock: false,
-    hasExecutionFailure: records.some(
-      record =>
-        (
-          record.status === 'error' &&
-          record.effectTypes.some(
-            effectType =>
-              effectType === 'write' || effectType === 'execute' || effectType === 'browser',
-          )
-        ) ||
-        record.producedEvidence.includes('command_timeout'),
-    ),
+    hasExecutionFailure,
   }
+}
+
+function hasUnresolvedExecutionFailure(records) {
+  const unresolved = {
+    write: false,
+    execute: false,
+    browser: false,
+  }
+
+  for (const record of records) {
+    const failed =
+      (
+        record.status === 'error' &&
+        record.effectTypes.some(
+          effectType =>
+            effectType === 'write' ||
+            effectType === 'execute' ||
+            effectType === 'browser',
+        )
+      ) ||
+      record.producedEvidence.includes('command_timeout')
+
+    if (failed) {
+      if (record.effectTypes.includes('write')) {
+        unresolved.write = true
+      }
+      if (record.effectTypes.includes('execute')) {
+        unresolved.execute = true
+      }
+      if (record.effectTypes.includes('browser')) {
+        unresolved.browser = true
+      }
+      continue
+    }
+
+    if (record.status !== 'success') {
+      continue
+    }
+
+    if (record.effectTypes.includes('write')) {
+      unresolved.write = false
+    }
+    if (record.effectTypes.includes('execute')) {
+      unresolved.execute = false
+    }
+    if (record.effectTypes.includes('browser')) {
+      unresolved.browser = false
+    }
+  }
+
+  return unresolved.write || unresolved.execute || unresolved.browser
 }
 
 export function deriveCompletionState(routeState, evidenceSummary, runtimeBlocks = {}) {

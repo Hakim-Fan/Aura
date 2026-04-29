@@ -473,6 +473,24 @@ function getFirstEnabledModelId(profile: ProviderProfile | null) {
   return profile.models.find(model => model.enabled)?.id || ''
 }
 
+function providerModeRequiresApiKey(provider?: string) {
+  return provider !== 'custom'
+}
+
+function providerRequiresApiKey(profile: ProviderProfile | null) {
+  return providerModeRequiresApiKey(profile?.provider)
+}
+
+function isProviderReady(profile: ProviderProfile | null, fallbackSettings?: AgentSettings) {
+  if (!profile || !getFirstEnabledModelId(profile)) {
+    return false
+  }
+  if (!providerRequiresApiKey(profile)) {
+    return true
+  }
+  return Boolean(profile.apiKey.trim() || fallbackSettings?.apiKey.trim())
+}
+
 function resolvePreferredModelId(profile: ProviderProfile | null, preferredModelId?: string) {
   if (!profile) {
     return ''
@@ -1576,7 +1594,7 @@ export function MainWindowApp() {
                   appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
                   error: snapshot.error,
                   errorInfo: snapshot.errorInfo,
-                  retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
+                  retryInfo: snapshot.retryInfo || undefined,
                   agentMode: snapshot.agentMode || currentVariant.agentMode,
                   routeDecision: snapshot.routeDecision || currentVariant.routeDecision,
                   completionState:
@@ -1644,7 +1662,7 @@ export function MainWindowApp() {
                               snapshot.status === 'failed'
                                 ? snapshot.errorInfo
                                 : undefined,
-                            retryInfo: snapshot.retryInfo || currentVariant.retryInfo,
+                            retryInfo: snapshot.retryInfo || undefined,
                             agentMode: snapshot.agentMode || currentVariant.agentMode,
                             routeDecision:
                               snapshot.routeDecision || currentVariant.routeDecision,
@@ -2551,7 +2569,11 @@ export function MainWindowApp() {
       resolvePreferredModelId(latestProviderProfile, latestSettings.model) ||
       latestSettings.model
 
-    if (!latestProviderProfile?.apiKey.trim() && !latestSettings.apiKey.trim()) {
+    if (
+      providerModeRequiresApiKey(latestEffectiveProvider) &&
+      !latestProviderProfile?.apiKey.trim() &&
+      !latestSettings.apiKey.trim()
+    ) {
       setError('请先在设置窗口里完成 Provider 配置。')
       await openSettingsWindow('providers').catch(caught => {
         setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')
@@ -3353,9 +3375,7 @@ export function MainWindowApp() {
             />
           ) : (
             <HomeView
-              providerConfigured={Boolean(
-                activeProviderProfile?.apiKey.trim() && getFirstEnabledModelId(activeProviderProfile),
-              )}
+              providerConfigured={isProviderReady(activeProviderProfile, settings)}
               workspaceConfigured={Boolean(settings.cwd.trim())}
               onNewSession={createFreshSession}
               onOpenProviders={() =>

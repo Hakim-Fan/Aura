@@ -89,18 +89,26 @@ function toProviderModel(entry) {
   }
 }
 
+function openAiCompatibleHeaders(settings = {}) {
+  const headers = {}
+  const apiKey = typeof settings.apiKey === 'string' ? settings.apiKey.trim() : ''
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`
+  }
+  return headers
+}
+
 async function fetchOpenAiModels(settings) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
   const response = await guardedFetch(
     `${apiBase}/models`,
     {
-      headers: {
-        authorization: `Bearer ${settings.apiKey}`,
-      },
+      headers: openAiCompatibleHeaders(settings),
     },
     {
       settings,
       proxyMode: 'provider-explicit',
+      allowLocal: true,
       timeoutMs: 20_000,
       timeoutMessage: 'Timed out while fetching provider models.',
     },
@@ -128,6 +136,7 @@ async function fetchGoogleModels(settings) {
     {
       settings,
       proxyMode: 'provider-explicit',
+      allowLocal: true,
       timeoutMs: 20_000,
       timeoutMessage: 'Timed out while fetching provider models.',
     },
@@ -204,7 +213,7 @@ async function runAction(payload) {
     return testProxyConnectivity(settings)
   }
 
-  if (!settings?.apiKey?.trim()) {
+  if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
     throw new Error('Missing API key.')
   }
 

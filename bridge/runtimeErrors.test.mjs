@@ -30,3 +30,32 @@ test('normalizeRuntimeError keeps spawn ENOENT classified as missing_dependency'
   assert.equal(normalized.errorInfo.category, 'missing_dependency')
   assert.match(normalized.message, /缺少所需命令或依赖/)
 })
+
+test('normalizeRuntimeError classifies stale apply_patch context as recoverable guidance', () => {
+  const error = new Error(
+    'Patch context did not match the current content of attachments/NewHomePageScreen.redesigned.tsx.',
+  )
+
+  const normalized = normalizeRuntimeError(error, {
+    source: 'tool',
+    operationLabel: 'Apply a structured patch.',
+  })
+
+  assert.equal(normalized.errorInfo.category, 'patch_context_mismatch')
+  assert.match(normalized.message, /补丁上下文和当前文件内容不一致/)
+  assert.match(normalized.errorInfo.suggestedAction, /read_file/)
+  assert.match(normalized.errorInfo.suggestedAction, /apply_patch/)
+})
+
+test('normalizeRuntimeError classifies exact edit misses as text context mismatch', () => {
+  const error = new Error('oldText was not found in the target file.')
+
+  const normalized = normalizeRuntimeError(error, {
+    source: 'tool',
+    operationLabel: 'Edit a file by replacing an exact text block.',
+  })
+
+  assert.equal(normalized.errorInfo.category, 'text_context_mismatch')
+  assert.match(normalized.message, /精确文本或行号范围和当前文件内容不一致/)
+  assert.match(normalized.errorInfo.suggestedAction, /replace_line_range/)
+})

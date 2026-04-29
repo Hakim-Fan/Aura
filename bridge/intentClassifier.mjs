@@ -347,14 +347,18 @@ export function inferDeterministicClassification(messages, options = {}) {
 async function classifyWithOpenAiCompatible(settings, messages) {
   const classifierSettings = resolveIntentClassifierSettings(settings)
   const apiBase = normalizeBaseUrl(classifierSettings.baseUrl, 'https://api.openai.com/v1')
+  const headers = {
+    'content-type': 'application/json',
+  }
+  const apiKey = typeof classifierSettings.apiKey === 'string' ? classifierSettings.apiKey.trim() : ''
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`
+  }
   const response = await guardedFetch(
     `${apiBase}/chat/completions`,
     {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${classifierSettings.apiKey}`,
-      },
+      headers,
       body: JSON.stringify({
         model: classifierSettings.model,
         messages: buildOpenAiClassifierMessages(messages),
@@ -366,6 +370,7 @@ async function classifyWithOpenAiCompatible(settings, messages) {
     {
       settings,
       proxyMode: 'provider-explicit',
+      allowLocal: true,
       timeoutMs: INTENT_CLASSIFIER_TIMEOUT_MS,
       timeoutMessage: 'Timed out while classifying intent.',
     },
@@ -399,6 +404,7 @@ async function classifyWithGoogle(settings, messages) {
     {
       settings,
       proxyMode: 'provider-explicit',
+      allowLocal: true,
       timeoutMs: INTENT_CLASSIFIER_TIMEOUT_MS,
       timeoutMessage: 'Timed out while classifying intent.',
     },
@@ -423,8 +429,14 @@ export function peekDeterministicIntentClassification(messages, options = {}) {
 export async function classifyIntent(messages, settings) {
   const classifierSettings = resolveIntentClassifierSettings(settings)
 
-  if (!classifierSettings.apiKey?.trim() || !classifierSettings.model?.trim()) {
+  if (
+    classifierSettings.provider !== 'custom' &&
+    !classifierSettings.apiKey?.trim()
+  ) {
     throw new Error('Missing provider API key for intent classification.')
+  }
+  if (!classifierSettings.model?.trim()) {
+    throw new Error('Missing provider model for intent classification.')
   }
 
   const recentMessages = getRecentConversationMessages(messages)

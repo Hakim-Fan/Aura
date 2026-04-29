@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import {
@@ -18,9 +19,11 @@ import { parseApplyPatchShellCommand } from './editing/applyPatchShell.mjs'
 import {
   applyEditFileMutation,
   applyMultiEditFileMutation,
+  applyReplaceLineRangeMutation,
   applyWriteFileMutation,
 } from './editing/textMutationRuntime.mjs'
 import { createUnifiedExecRuntime } from './editing/unifiedExecRuntime.mjs'
+import { buildShellEnv } from './shellEnv.mjs'
 
 const execFileAsync = promisify(execFile)
 const ALWAYS_ON_SKILL_IDS = new Set([
@@ -63,6 +66,99 @@ function shouldSkipSearchEntry(name) {
 
 async function runShell(command, cwd, timeoutMs = 60_000) {
   return runShellStreaming(command, cwd, timeoutMs)
+}
+
+function sha256Text(text) {
+  return createHash('sha256').update(String(text), 'utf8').digest('hex')
+}
+
+function splitReadableLines(text) {
+  const source = String(text || '').replace(/\r\n/g, '\n')
+  const lines = source.split('\n')
+  if (source.endsWith('\n')) {
+    lines.pop()
+  }
+  return lines
+}
+
+function resolveReadRange(text, args = {}) {
+  const startLine = Number(args.startLine)
+  const endLine = Number(args.endLine)
+  const hasStartLine = Number.isFinite(startLine)
+  const hasEndLine = Number.isFinite(endLine)
+  const lines = splitReadableLines(text)
+
+  if (!hasStartLine && !hasEndLine) {
+    return {
+      lines,
+      start: 1,
+      end: lines.length,
+      selected: lines,
+    }
+  }
+
+  const start = hasStartLine ? Math.floor(startLine) : 1
+  const end = hasEndLine ? Math.floor(endLine) : lines.length
+
+  if (start < 1 || end < start || start > Math.max(lines.length, 1)) {
+    throw createStructuredError('read_file 的行号范围无效。', {
+      source: 'tool',
+      category: 'invalid_input',
+      code: 'INVALID_READ_RANGE',
+      detail: `Received startLine=${args.startLine}, endLine=${args.endLine}; file has ${lines.length} line(s).`,
+      suggestedAction:
+        '请使用 1-based 行号，并确保 startLine <= endLine 且起始行没有超过文件总行数。',
+    })
+  }
+
+  const boundedEnd = Math.min(lines.length, end)
+  return {
+    lines,
+    start,
+    end: boundedEnd,
+    selected: lines.slice(start - 1, boundedEnd),
+  }
+}
+
+function formatNumberedLines(lines, start, prefix = '') {
+  return lines.map((line, index) => `${prefix}${start + index}: ${line}`).join('\n')
+}
+
+function readTextSlice(text, args = {}) {
+  const { lines, start, end, selected } = resolveReadRange(text, args)
+  const mode = typeof args.mode === 'string' ? args.mode.trim() : ''
+  const hasExplicitRange =
+    Number.isFinite(Number(args.startLine)) || Number.isFinite(Number(args.endLine))
+  const rawText = selected.join('\n')
+
+  if (!mode && !hasExplicitRange) {
+    return text
+  }
+
+  if (mode === 'raw') {
+    return rawText
+  }
+
+  if (mode === 'display') {
+    return formatNumberedLines(selected, start, 'L')
+  }
+
+  if (mode === 'edit_context') {
+    return {
+      path: args.path,
+      startLine: start,
+      endLine: end,
+      lineCount: lines.length,
+      text: rawText,
+      numberedText: formatNumberedLines(selected, start, 'L'),
+      sha256: sha256Text(rawText),
+    }
+  }
+
+  if (args.lineNumbers === false) {
+    return selected.join('\n')
+  }
+  return selected.map((line, index) => `${start + index}:${line}`).join('\n')
 }
 
 function resolveShellPatchInterception(tool, args, hooks = {}) {
@@ -137,6 +233,61 @@ function resolveShellPatchInterception(tool, args, hooks = {}) {
   }
 }
 
+const SHELL_SCRIPT_FILE_WRITE_PATTERN =
+  /\b(?:python3?|node|ruby|perl|php)\b[\s\S]*(?:\.write_text\s*\(|\.write_bytes\s*\(|\bopen\s*\([^)]*,\s*['"][wa]\b|\bwriteFile(?:Sync)?\s*\(|\bcreateWriteStream\s*\()/i
+
+const SHELL_IN_PLACE_EDIT_PATTERN =
+  /\b(?:sed|perl)\b[\s\S]*(?:\s-i(?:\s|$|['"])|--in-place\b)/i
+
+const SHELL_REDIRECT_SOURCE_WRITE_PATTERN =
+  /\b(?:cat|tee|printf|echo)\b[\s\S]*(?:>|>>)\s*['"]?[^'"\s]+\.(?:cjs|css|go|html|java|js|jsx|json|kt|mjs|md|py|rs|scss|svelte|swift|toml|ts|tsx|vue|ya?ml)\b/i
+
+function looksLikeShellFileMutation(command) {
+  return (
+    SHELL_SCRIPT_FILE_WRITE_PATTERN.test(command) ||
+    SHELL_IN_PLACE_EDIT_PATTERN.test(command) ||
+    SHELL_REDIRECT_SOURCE_WRITE_PATTERN.test(command)
+  )
+}
+
+function resolveShellFileMutationInterception(tool, args) {
+  if (tool?.name !== 'run_shell' || typeof args?.command !== 'string') {
+    return null
+  }
+
+  if (!looksLikeShellFileMutation(args.command)) {
+    return null
+  }
+
+  return {
+    tool: {
+      ...tool,
+      name: 'run_shell',
+      aliases: ['bash', 'shell', 'terminal', 'command'],
+      approvalCategory: undefined,
+      description:
+        'Blocked a shell command that appears to create or modify source files.',
+      async run() {
+        throw createStructuredError('已阻止使用 shell 脚本直接修改源码文件。', {
+          source: 'tool',
+          category: 'invalid_input',
+          code: 'SHELL_FILE_MUTATION_BLOCKED',
+          detail:
+            'Shell commands may run verification or build steps, but source edits should use the mounted file editing tools.',
+          suggestedAction:
+            '请先用 read_file 读取当前文件，再用 apply_patch 修改已有文件；如果精确上下文不稳定，请用 replace_line_range；如果是新文件或完整重写，请使用 write_file。',
+        })
+      },
+    },
+    args: {
+      command: args.command,
+    },
+    originalCommand: args.command,
+    summary:
+      'Blocked shell-based source editing; use apply_patch, replace_line_range, or write_file instead.',
+  }
+}
+
 function buildStepCancelledError(tool) {
   return createStructuredError('这一步已被用户主动停止。', {
     source:
@@ -199,7 +350,7 @@ async function runShellStreaming(
 
     const child = spawn('/bin/zsh', ['-lc', command], {
       cwd,
-      env: process.env,
+      env: buildShellEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -429,6 +580,7 @@ async function searchWorkspace(query, target, cwd, signal) {
       ],
       {
         cwd,
+        env: buildShellEnv(),
         maxBuffer: 1024 * 1024,
         signal,
       },
@@ -950,6 +1102,25 @@ export function createBuiltinTools(context) {
             type: 'string',
             description: 'Relative file path inside the workspace.',
           },
+          startLine: {
+            type: 'number',
+            description: 'Optional 1-based first line to read.',
+          },
+          endLine: {
+            type: 'number',
+            description: 'Optional 1-based last line to read.',
+          },
+          lineNumbers: {
+            type: 'boolean',
+            description:
+              'Include line numbers when reading a range. Defaults to true for ranged reads.',
+          },
+          mode: {
+            type: 'string',
+            enum: ['raw', 'display', 'edit_context'],
+            description:
+              'Optional output mode. Use raw for copyable text, display for L-prefixed line numbers, and edit_context for structured text plus line range metadata.',
+          },
         },
         required: ['path'],
       },
@@ -960,7 +1131,7 @@ export function createBuiltinTools(context) {
         if (detectBinary(content)) {
           return summarizeBinaryFile(target, content)
         }
-        return truncate(content.toString('utf8'))
+        return truncate(readTextSlice(content.toString('utf8'), args))
       },
     },
     {
@@ -1019,7 +1190,7 @@ export function createBuiltinTools(context) {
       aliases: ['edit', 'replace'],
       approvalCategory: 'file_write',
       description:
-        'Edit a file by replacing an exact text block. Use this as a fallback when apply_patch would be overkill.',
+        'Edit a file by replacing an exact text block. Use this as a fallback when apply_patch would be overkill. If exact text matching fails after reading a line range, use replace_line_range instead.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1056,6 +1227,58 @@ export function createBuiltinTools(context) {
           {
             replaceAll: args.replaceAll,
             expectedReplacements: args.expectedReplacements,
+            toolPath: args.path,
+          },
+          runtime,
+        )
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'replace_line_range',
+      aliases: ['edit_range', 'replace_lines'],
+      approvalCategory: 'file_write',
+      description:
+        'Replace an inclusive 1-based line range in a workspace text file. Use this after read_file with startLine/endLine when apply_patch or exact edit_file context does not match. Content must not include line-number prefixes.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'Relative file path inside the workspace.',
+          },
+          startLine: {
+            type: 'number',
+            description: 'Inclusive 1-based first line to replace.',
+          },
+          endLine: {
+            type: 'number',
+            description: 'Inclusive 1-based last line to replace.',
+          },
+          content: {
+            type: 'string',
+            description:
+              'Replacement text for the selected line range, without read_file line-number prefixes.',
+          },
+          expectedText: {
+            type: 'string',
+            description:
+              'Optional exact text expected in the selected range before writing.',
+          },
+        },
+        required: ['path', 'startLine', 'endLine', 'content'],
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const target = resolveWorkspacePath(context.cwd, args.path)
+        return applyReplaceLineRangeMutation(
+          target,
+          args.startLine,
+          args.endLine,
+          args.content,
+          {
+            expectedText: args.expectedText,
+            toolPath: args.path,
           },
           runtime,
         )
@@ -1218,7 +1441,7 @@ export function createBuiltinTools(context) {
       aliases: ['exec', 'shell_session', 'command_session'],
       approvalCategory: 'shell',
       description:
-        'Start a long-lived shell command session inside the workspace. Use this for watch tasks, repeated debugging, or commands that need follow-up interaction.',
+        'Start a long-lived shell command session inside the workspace. Use this for watch tasks, repeated debugging, or commands that need follow-up interaction. Prefer list_files, glob_files, read_file, and search_code for workspace inspection.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1334,7 +1557,7 @@ export function createBuiltinTools(context) {
       aliases: ['bash', 'shell', 'terminal', 'command'],
       approvalCategory: 'shell',
       description:
-        'Run a one-shot shell command inside the workspace. Prefer exec_command for long-running or interactive sessions, and keep run_shell focused on short commands.',
+        'Run a one-shot shell command inside the workspace. Prefer exec_command for long-running or interactive sessions, and keep run_shell focused on short commands. Prefer list_files, glob_files, read_file, and search_code for workspace inspection. Source edits are routed through file editing tools rather than shell scripts.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1756,12 +1979,18 @@ function emitToolEvent(event, toolEvents, hooks) {
 
 export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   const shellPatchInterception = resolveShellPatchInterception(tool, args, hooks)
-  const effectiveTool = shellPatchInterception?.tool || tool
-  const effectiveArgs = shellPatchInterception?.args || args
+  const shellFileMutationInterception = shellPatchInterception
+    ? null
+    : resolveShellFileMutationInterception(tool, args)
+  const effectiveTool =
+    shellPatchInterception?.tool || shellFileMutationInterception?.tool || tool
+  const effectiveArgs =
+    shellPatchInterception?.args || shellFileMutationInterception?.args || args
   const eventId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const shouldEmitEvent = effectiveTool.internalOnly !== true
   const eventSummary =
     shellPatchInterception?.summary ||
+    shellFileMutationInterception?.summary ||
     (typeof effectiveTool.getSummary === 'function'
       ? effectiveTool.getSummary(effectiveArgs) || effectiveTool.description
       : effectiveTool.description)
@@ -1777,6 +2006,8 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     input:
       shellPatchInterception?.originalCommand
         ? `$ ${shellPatchInterception.originalCommand}`
+        : shellFileMutationInterception?.originalCommand
+          ? `$ ${shellFileMutationInterception.originalCommand}`
         : (
               effectiveTool.name === 'run_shell' &&
               typeof effectiveArgs?.command === 'string'
@@ -1904,6 +2135,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     return [
       normalized.errorInfo.summary,
       normalized.errorInfo.suggestedAction || null,
+      normalized.errorInfo.repairHint
+        ? `repairHint:\n${stringifyOutput(normalized.errorInfo.repairHint)}`
+        : null,
       detail ? `原始错误:\n${detail}` : null,
     ]
       .filter(Boolean)

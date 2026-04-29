@@ -267,6 +267,7 @@ async function fetchWithTimeout(url, init, { timeoutMs, timeoutMessage, messages
       timeoutMessage,
       settings,
       proxyMode: 'provider-explicit',
+      allowLocal: true,
     })
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
@@ -285,6 +286,17 @@ async function fetchWithTimeout(url, init, { timeoutMs, timeoutMessage, messages
     }
     throw error
   }
+}
+
+function openAiCompatibleHeaders(settings = {}) {
+  const headers = {
+    'content-type': 'application/json',
+  }
+  const apiKey = typeof settings.apiKey === 'string' ? settings.apiKey.trim() : ''
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`
+  }
+  return headers
 }
 
 async function readChunkWithTimeout(reader, timeoutMs, timeoutMessage, messages) {
@@ -606,10 +618,12 @@ export const __testInternals = {
   extractInlineToolCalls,
   getProviderFailureRecoveryMaxRetries,
   getProviderRetryDelayMs,
+  hasWriteRepairAttemptSince,
   mergeStreamedField,
   mergeOpenAiToolCalls,
   parseToolArguments,
   runProviderOperationWithRetry,
+  updateUnresolvedToolErrorForRepair,
 }
 
 function pushUsage(hooks, usage) {
@@ -788,6 +802,8 @@ const PROVIDER_CONNECT_TIMEOUT_MS = 45_000
 const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 90_000
 const PROVIDER_FINALIZATION_TIMEOUT_MS = 60_000
 const PROVIDER_RETRY_DELAYS_MS = [0, 1_200, 3_000, 7_000, 15_000]
+const STEP_LIMIT_TOOL_ERROR_REPAIR_TURNS = 6
+const STEP_LIMIT_TOOL_ERROR_WRITE_REPAIR_ATTEMPTS = 4
 
 function providerRetryStageLabel(stage) {
   switch (stage) {
@@ -1145,6 +1161,221 @@ function getLoopConfig(settings) {
   }
 }
 
+const TOOL_ERROR_REPAIR_CLEARING_TOOLS = new Set([
+  'apply_patch',
+  'write_file',
+  'edit_file',
+  'multi_edit_file',
+  'replace_line_range',
+])
+
+function hasWriteRepairAttemptSince(toolEvents, startIndex) {
+  return toolEvents
+    .slice(startIndex)
+    .some(
+      event =>
+        TOOL_ERROR_REPAIR_CLEARING_TOOLS.has(event?.name) &&
+        event?.errorInfo?.category !== 'invalid_input',
+    )
+}
+
+function updateUnresolvedToolErrorForRepair(toolEvents, startIndex, previousValue) {
+  let hasUnresolvedError = previousValue
+  for (const event of toolEvents.slice(startIndex)) {
+    if (event?.status === 'error') {
+      hasUnresolvedError = true
+      continue
+    }
+    if (
+      event?.status === 'success' &&
+      TOOL_ERROR_REPAIR_CLEARING_TOOLS.has(event?.name)
+    ) {
+      hasUnresolvedError = false
+    }
+  }
+  return hasUnresolvedError
+}
+
+function joinReasoningBlocks(blocks = []) {
+  return blocks
+    .map(block => (typeof block?.content === 'string' ? block.content.trim() : ''))
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+async function finalizeOpenAiTranscriptAfterStepLimit({
+  settings,
+  apiBase,
+  transcript,
+  conversationMessages,
+  toolEvents,
+  providerReasoningBlocks,
+  draftMessage,
+  latestUsage,
+  providerRetryCount,
+  maxRetries,
+  hooks,
+}) {
+  hooks?.onPhaseChange?.('finalizing')
+  const prompt = buildFinalizerPrompt({
+    toolEvents,
+    reasoningText: joinReasoningBlocks(providerReasoningBlocks),
+    draftMessage,
+    completionState: 'needs_final_answer_after_tool_results',
+    responseStyle: hooks?.routeState?.responseStyle,
+  })
+  const attemptResult = await runProviderOperationWithRetry(async () => {
+    const response = await fetchWithTimeout(
+      `${apiBase}/chat/completions`,
+      {
+        method: 'POST',
+        headers: openAiCompatibleHeaders(settings),
+        body: JSON.stringify({
+          model: settings.model,
+          messages: [
+            ...transcript,
+            {
+              role: 'user',
+              content: prompt,
+            },
+          ],
+          stream: false,
+        }),
+      },
+      {
+        timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+        timeoutMessage: 'Timed out while waiting for the final answer completion request.',
+        messages: conversationMessages,
+        settings,
+      },
+    )
+
+    if (!response.ok) {
+      const data = await parseJsonResponse(response)
+      throw buildProviderHttpError(
+        response,
+        data.error?.message || 'OpenAI-compatible finalization request failed',
+        conversationMessages,
+      )
+    }
+
+    const data = await parseJsonResponse(response)
+    return flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
+  }, {
+    messages: conversationMessages,
+    maxRetries,
+    stage: 'finalization',
+    hooks,
+  })
+
+  return {
+    message: attemptResult.value || '模型没有返回文本内容。',
+    toolEvents,
+    reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
+    usage: latestUsage,
+    messages: conversationMessages,
+    retryInfo: mergeProviderRetryInfo(
+      buildProviderRetryInfo(providerRetryCount, maxRetries, {
+        stage: 'response',
+      }),
+      buildProviderRetryInfo(attemptResult.retryCount, maxRetries, {
+        stage: 'finalization',
+      }),
+    ),
+  }
+}
+
+async function finalizeGoogleTranscriptAfterStepLimit({
+  settings,
+  apiBase,
+  systemPrompt,
+  transcript,
+  conversationMessages,
+  toolEvents,
+  providerReasoningBlocks,
+  draftMessage,
+  latestUsage,
+  providerRetryCount,
+  maxRetries,
+  hooks,
+}) {
+  hooks?.onPhaseChange?.('finalizing')
+  const prompt = buildFinalizerPrompt({
+    toolEvents,
+    reasoningText: joinReasoningBlocks(providerReasoningBlocks),
+    draftMessage,
+    completionState: 'needs_final_answer_after_tool_results',
+    responseStyle: hooks?.routeState?.responseStyle,
+  })
+  const attemptResult = await runProviderOperationWithRetry(async () => {
+    const response = await fetchWithTimeout(
+      `${apiBase}/models/${settings.model}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-goog-api-key': settings.apiKey,
+        },
+        body: JSON.stringify({
+          system_instruction: {
+            parts: [{ text: systemPrompt }],
+          },
+          contents: [
+            ...transcript,
+            {
+              role: 'user',
+              parts: [{ text: prompt }],
+            },
+          ],
+        }),
+      },
+      {
+        timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+        timeoutMessage: 'Timed out while waiting for the final answer completion request.',
+        messages: conversationMessages,
+        settings,
+      },
+    )
+
+    if (!response.ok) {
+      const data = await parseJsonResponse(response)
+      throw buildProviderHttpError(
+        response,
+        data.error?.message || 'Google finalization request failed',
+        conversationMessages,
+      )
+    }
+
+    const data = await parseJsonResponse(response)
+    const parts = data.candidates?.[0]?.content?.parts || []
+    return parts
+      .map(part => (typeof part.text === 'string' ? part.text : ''))
+      .join('\n')
+      .trim()
+  }, {
+    messages: conversationMessages,
+    maxRetries,
+    stage: 'finalization',
+    hooks,
+  })
+
+  return {
+    message: attemptResult.value || '模型没有返回文本内容。',
+    toolEvents,
+    reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
+    usage: latestUsage,
+    messages: conversationMessages,
+    retryInfo: mergeProviderRetryInfo(
+      buildProviderRetryInfo(providerRetryCount, maxRetries, {
+        stage: 'response',
+      }),
+      buildProviderRetryInfo(attemptResult.retryCount, maxRetries, {
+        stage: 'finalization',
+      }),
+    ),
+  }
+}
+
 function createLongTaskGuard(loopConfig) {
   let lastFingerprint = ''
   let repeatedCount = 0
@@ -1228,10 +1459,7 @@ export async function finalizeOpenAiCompatibleAnswer({
       `${apiBase}/chat/completions`,
       {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${settings.apiKey}`,
-        },
+        headers: openAiCompatibleHeaders(settings),
         body: JSON.stringify({
           model: settings.model,
           messages: transcript,
@@ -1381,12 +1609,26 @@ export async function runOpenAiCompatibleAgent({
   let providerRetryCount = 0
   let providerReasoning = ''
   const providerReasoningBlocks = []
+  let lastDraftMessage = ''
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
   const maxRetries = getProviderFailureRecoveryMaxRetries()
 
   try {
-    for (let step = 0; step < loopConfig.maxIterations; step += 1) {
+    let step = 0
+    let repairTurns = 0
+    let writeRepairAttempts = 0
+    let hasUnresolvedToolError = false
+    while (
+      step < loopConfig.maxIterations ||
+      (hasUnresolvedToolError &&
+        repairTurns < STEP_LIMIT_TOOL_ERROR_REPAIR_TURNS &&
+        writeRepairAttempts < STEP_LIMIT_TOOL_ERROR_WRITE_REPAIR_ATTEMPTS)
+    ) {
+      const isRepairIteration = step >= loopConfig.maxIterations
+      if (isRepairIteration) {
+        repairTurns += 1
+      }
       appendQueuedInputsToOpenAiTranscript(transcript, conversationMessages, hooks)
       const reasoningBlockId = `provider-phase-${step + 1}`
       const reasoningOrder = step * 2
@@ -1398,10 +1640,7 @@ export async function runOpenAiCompatibleAgent({
           `${apiBase}/chat/completions`,
           {
             method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              authorization: `Bearer ${settings.apiKey}`,
-            },
+            headers: openAiCompatibleHeaders(settings),
             body: JSON.stringify({
               model: settings.model,
               messages: transcript,
@@ -1556,6 +1795,9 @@ export async function runOpenAiCompatibleAgent({
       }
 
       const { content, finalizedToolCalls } = stepResult
+      if (content.trim()) {
+        lastDraftMessage = content
+      }
       if (finalizedToolCalls.length === 0) {
       const queuedInputs = drainAppendedInputs(hooks)
       if (queuedInputs.length > 0) {
@@ -1576,6 +1818,7 @@ export async function runOpenAiCompatibleAgent({
             content: toOpenAiContent(input),
           })
         }
+        step += 1
         continue
       }
       return {
@@ -1610,6 +1853,7 @@ export async function runOpenAiCompatibleAgent({
       })
 
       hooks?.onPhaseChange?.('tool_running')
+      const toolEventStartIndex = toolEvents.length
       for (const toolCall of finalizedToolCalls) {
         const tool = registry.get(toolCall.function.name)
         const args = parseToolArguments(toolCall.function.arguments || '{}')
@@ -1635,9 +1879,30 @@ export async function runOpenAiCompatibleAgent({
           content: result,
         })
       }
+      hasUnresolvedToolError = updateUnresolvedToolErrorForRepair(
+        toolEvents,
+        toolEventStartIndex,
+        hasUnresolvedToolError,
+      )
+      if (isRepairIteration && hasWriteRepairAttemptSince(toolEvents, toolEventStartIndex)) {
+        writeRepairAttempts += 1
+      }
+      step += 1
     }
 
-    throw new Error(loopConfig.limitMessage)
+    return await finalizeOpenAiTranscriptAfterStepLimit({
+      settings,
+      apiBase,
+      transcript,
+      conversationMessages,
+      toolEvents,
+      providerReasoningBlocks,
+      draftMessage: lastDraftMessage,
+      latestUsage,
+      providerRetryCount,
+      maxRetries,
+      hooks,
+    })
   } catch (error) {
     const normalized = maybeNormalizeProviderTermination(error, conversationMessages)
     const aggregateRetryInfo = mergeProviderRetryInfo(
@@ -1690,12 +1955,26 @@ export async function runGoogleAgent({
   let providerRetryCount = 0
   let providerReasoning = ''
   const providerReasoningBlocks = []
+  let lastDraftMessage = ''
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
   const maxRetries = getProviderFailureRecoveryMaxRetries()
 
   try {
-    for (let step = 0; step < loopConfig.maxIterations; step += 1) {
+    let step = 0
+    let repairTurns = 0
+    let writeRepairAttempts = 0
+    let hasUnresolvedToolError = false
+    while (
+      step < loopConfig.maxIterations ||
+      (hasUnresolvedToolError &&
+        repairTurns < STEP_LIMIT_TOOL_ERROR_REPAIR_TURNS &&
+        writeRepairAttempts < STEP_LIMIT_TOOL_ERROR_WRITE_REPAIR_ATTEMPTS)
+    ) {
+      const isRepairIteration = step >= loopConfig.maxIterations
+      if (isRepairIteration) {
+        repairTurns += 1
+      }
       appendQueuedInputsToGeminiTranscript(transcript, conversationMessages, hooks)
       const reasoningBlockId = `provider-phase-${step + 1}`
       const reasoningOrder = step * 2
@@ -1834,6 +2113,9 @@ export async function runGoogleAgent({
       }
 
       const { content, functionCalls } = stepResult
+      if (content.trim()) {
+        lastDraftMessage = content
+      }
       if (functionCalls.length === 0) {
       const queuedInputs = drainAppendedInputs(hooks)
       if (queuedInputs.length > 0) {
@@ -1854,6 +2136,7 @@ export async function runGoogleAgent({
             parts: toGeminiParts(input),
           })
         }
+        step += 1
         continue
       }
       return {
@@ -1896,6 +2179,7 @@ export async function runGoogleAgent({
 
       hooks?.onPhaseChange?.('tool_running')
       const toolResponses = []
+      const toolEventStartIndex = toolEvents.length
       for (const entry of functionCalls) {
         const tool = registry.get(entry.name)
         const result = tool
@@ -1928,9 +2212,31 @@ export async function runGoogleAgent({
         role: 'user',
         parts: toolResponses,
       })
+      hasUnresolvedToolError = updateUnresolvedToolErrorForRepair(
+        toolEvents,
+        toolEventStartIndex,
+        hasUnresolvedToolError,
+      )
+      if (isRepairIteration && hasWriteRepairAttemptSince(toolEvents, toolEventStartIndex)) {
+        writeRepairAttempts += 1
+      }
+      step += 1
     }
 
-    throw new Error(loopConfig.limitMessage)
+    return await finalizeGoogleTranscriptAfterStepLimit({
+      settings,
+      apiBase,
+      systemPrompt,
+      transcript,
+      conversationMessages,
+      toolEvents,
+      providerReasoningBlocks,
+      draftMessage: lastDraftMessage,
+      latestUsage,
+      providerRetryCount,
+      maxRetries,
+      hooks,
+    })
   } catch (error) {
     const normalized = maybeNormalizeProviderTermination(error, conversationMessages)
     const aggregateRetryInfo = mergeProviderRetryInfo(
