@@ -26,6 +26,14 @@ export async function applyPatchInWorkspace(rootPath, patchText, runtime = {}) {
   const verifiedPatch = await verifyPatchAgainstWorkspace(rootPath, parsedPatch, runtime)
   runtime.onUpdate?.({
     stage: 'patch_progress',
+    phase: 'preview',
+    total: verifiedPatch.changes.length,
+    affectedPaths: verifiedPatch.affectedPaths,
+    files: verifiedPatch.preview,
+    summary: `Patch preview ready for ${verifiedPatch.changes.length} file(s).`,
+  })
+  runtime.onUpdate?.({
+    stage: 'patch_progress',
     phase: 'verified',
     total: verifiedPatch.changes.length,
     affectedPaths: verifiedPatch.affectedPaths,

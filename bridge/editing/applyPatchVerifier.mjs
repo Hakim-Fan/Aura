@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import { createStructuredError } from '../runtimeErrors.mjs'
 import { resolveWorkspacePath } from '../utils.mjs'
+import { buildTextMutationEvidence } from './fileVerification.mjs'
 
 function splitFileContent(content) {
   const normalized = String(content || '').replace(/\r\n/g, '\n')
@@ -261,6 +262,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
       path: absolutePath,
       relativePath: operation.path,
       newContent: operation.content,
+      ...buildTextMutationEvidence('', operation.content),
     }
   }
 
@@ -272,6 +274,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
       path: absolutePath,
       relativePath: operation.path,
       oldContent,
+      ...buildTextMutationEvidence(oldContent, ''),
     }
   }
 
@@ -295,6 +298,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
       destinationRelativePath: operation.moveTo,
       oldContent,
       newContent,
+      ...buildTextMutationEvidence(oldContent, newContent),
     }
   }
 
@@ -304,6 +308,19 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
     relativePath: operation.path,
     oldContent,
     newContent,
+    ...buildTextMutationEvidence(oldContent, newContent),
+  }
+}
+
+function summarizePatchPreviewChange(change) {
+  return {
+    kind: change.kind,
+    path: change.kind === 'move' ? change.destinationRelativePath : change.relativePath,
+    movedFrom: change.kind === 'move' ? change.relativePath : undefined,
+    beforeSha256: change.beforeSha256,
+    afterSha256: change.afterSha256,
+    changed: change.changed,
+    diffStat: change.diffStat,
   }
 }
 
@@ -327,6 +344,7 @@ export async function verifyPatchAgainstWorkspace(rootPath, parsedPatch, runtime
     cwd: rootPath,
     patch: parsedPatch?.patch || '',
     changes,
+    preview: changes.map(summarizePatchPreviewChange),
     counts,
     affectedPaths: Array.from(new Set(affectedPaths.filter(Boolean))),
     summary: buildPatchSummaryFromCounts(counts) || `patched ${changes.length} file(s)`,

@@ -1,8 +1,30 @@
 # Agent 代码与文件编辑能力优化方案
 
-> 状态：优化方案 v1  
+> 状态：优化方案 v1，本轮已落地 P0/P1 关键止血项，并补充 Phase 2/3 的基础能力
 > 日期：2026-04-30  
 > 背景：连续日志暴露出 `apply_patch` 上下文失配、`edit_file` 精确文本失配、`replace_line_range` 参数错误后过早 finalizing 等问题。本文在现有 Aura 编辑链路基础上，对照本仓库内 `codex-main` 的编辑实现，给出分阶段优化方案。
+
+---
+
+## 0. 当前实现进度
+
+截至本轮开发，已经完成：
+
+1. `replace_line_range` 的参数预校验、行号前缀拒绝和结构化 repairHint。
+2. `apply_patch` 的多级上下文匹配：exact、忽略行尾空白、trim、常见 Unicode 标点/空白归一化。
+3. `read_file` 的 `raw/display/edit_context` 模式。
+4. 新增 `read_block`，支持按 `anchorLine` 或 `anchorText` 读取缩进代码块，并返回 `startLine/endLine/text/numberedText/sha256`。
+5. 编辑工具写后证据统一补充 `beforeSha256/afterSha256/changed/diffStat`。
+6. `apply_patch` 在写入前产生 `preview` 进度事件，包含 affected paths 和文件级 diffStat。
+7. `apply_patch` 兼容 `patch/input/command/content` 字段，降低不同调用路径的参数错配概率。
+8. 修复循环已能区分 read-only inspection、invalid input 和实际写入修复尝试，避免参数错误直接耗尽写入预算。
+
+仍属于后续较大架构项：
+
+1. 将编辑工具从 `bridge/tools.mjs` 进一步拆成 Tool Spec / Handler / Runtime。
+2. 真正的 freeform `apply_patch` 协议和模型参数流式解析。
+3. UI 侧展示 patch preview 的可视化 diff。
+4. 文档、PPT、Excel 的领域 runtime 接入同一套 evidence/completion gate。
 
 ---
 
@@ -528,3 +550,41 @@ patch fail
 ```
 
 这就是 Aura 和 Codex 当前体验差距的核心。
+
+
+进度：
+当前改造进度：基础稳定性改造已完成，可进入使用验证阶段。
+
+已完成
+
+Provider 本地地址、key、小眼睛、手动模型等相关问题已处理。
+日志能力已完成：支持本地日志文件、结构化日志、人类可读日志、错误上下文。
+代码编辑稳定性 P0/P1 已完成：
+replace_line_range 参数校验
+apply_patch 上下文模糊匹配
+stale patch / oldText mismatch 的结构化 repairHint
+工具失败后不再轻易直接 finalizing
+shell 脚本直接改源码会被拦截
+读取能力已增强：
+read_file mode=raw/display/edit_context
+新增 read_block
+编辑证据已增强：
+beforeSha256
+afterSha256
+changed
+diffStat
+apply_patch preview
+测试和构建已通过：
+67 个 bridge/editing 测试通过
+pnpm build:bridge 通过
+pnpm typecheck 通过
+pnpm build 通过
+cargo check 通过
+未完成 / 后续大项
+
+bridge/tools.mjs 继续拆成 Tool Spec / Handler / Runtime。
+真正 freeform apply_patch 和参数流式解析。
+UI 侧展示 patch preview 可视化 diff。
+DOCX / PPT / Excel 接入同一套 evidence / completion gate。
+更细的 search_code 返回可直接读取的 suggested ranges。
+

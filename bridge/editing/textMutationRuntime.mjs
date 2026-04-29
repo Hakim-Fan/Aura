@@ -228,6 +228,7 @@ export async function applyWriteFileMutation(targetPath, content, runtime = {}) 
   })
 
   const existedBefore = await pathExists(targetPath)
+  const beforeContent = existedBefore ? await fs.readFile(targetPath, 'utf8') : ''
   runtime.throwIfAborted?.()
   await fs.mkdir(path.dirname(targetPath), { recursive: true })
   await fs.writeFile(targetPath, content, 'utf8')
@@ -235,6 +236,7 @@ export async function applyWriteFileMutation(targetPath, content, runtime = {}) 
   const verification = await verifyWorkspaceTextMutation(targetPath, {
     existedBefore,
     expectedContent: content,
+    beforeContent,
   })
 
   const result = {
@@ -287,6 +289,7 @@ export async function applyReplaceLineRangeMutation(
   const verification = await verifyWorkspaceTextMutation(targetPath, {
     existedBefore: true,
     expectedContent: replacement.nextContent,
+    beforeContent: content,
   })
 
   const result = {
@@ -335,6 +338,7 @@ export async function applyEditFileMutation(
   const verification = await verifyWorkspaceTextMutation(targetPath, {
     existedBefore: true,
     expectedContent: replacement.nextContent,
+    beforeContent: content,
   })
 
   const result = {
@@ -407,6 +411,7 @@ export async function applyMultiEditFileMutation(targetPath, edits, runtime = {}
   const verification = await verifyWorkspaceTextMutation(targetPath, {
     existedBefore: true,
     expectedContent: nextContent,
+    beforeContent: originalContent,
   })
 
   const result = {

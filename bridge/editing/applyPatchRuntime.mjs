@@ -47,6 +47,7 @@ export async function applyVerifiedPatch(verifiedPatch, runtime = {}) {
       const verification = await verifyWorkspaceTextMutation(change.path, {
         existedBefore: false,
         expectedContent: change.newContent,
+        beforeContent: '',
       })
       files.push({
         kind: 'add',
@@ -58,6 +59,7 @@ export async function applyVerifiedPatch(verifiedPatch, runtime = {}) {
       await fs.rm(change.path)
       const verification = await verifyWorkspaceTextMutation(change.path, {
         allowMissing: true,
+        beforeContent: change.oldContent,
       })
       files.push({
         kind: 'delete',
@@ -72,9 +74,11 @@ export async function applyVerifiedPatch(verifiedPatch, runtime = {}) {
       const verification = await verifyWorkspaceTextMutation(change.destinationPath, {
         existedBefore: false,
         expectedContent: change.newContent,
+        beforeContent: '',
       })
       const sourceVerification = await verifyWorkspaceTextMutation(change.path, {
         allowMissing: true,
+        beforeContent: change.oldContent,
       })
       files.push({
         kind: 'move',
@@ -89,6 +93,7 @@ export async function applyVerifiedPatch(verifiedPatch, runtime = {}) {
       const verification = await verifyWorkspaceTextMutation(change.path, {
         existedBefore: true,
         expectedContent: change.newContent,
+        beforeContent: change.oldContent,
       })
       files.push({
         kind: 'update',
@@ -115,6 +120,7 @@ export async function applyVerifiedPatch(verifiedPatch, runtime = {}) {
     verified: ok,
     counts: verifiedPatch?.counts || undefined,
     affectedPaths: verifiedPatch?.affectedPaths || undefined,
+    preview: verifiedPatch?.preview || undefined,
     summary: verifiedPatch?.summary || `patched ${files.length} file(s)`,
   }
 

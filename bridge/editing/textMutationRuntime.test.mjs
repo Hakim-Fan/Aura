@@ -51,6 +51,16 @@ test('applyEditFileMutation updates the file once and returns structured verific
     assert.equal(result.operation, 'edit_file')
     assert.equal(result.replacedCount, 1)
     assert.equal(result.verified, true)
+    assert.equal(result.changed, true)
+    assert.equal(result.beforeSha256.length, 64)
+    assert.equal(result.afterSha256.length, 64)
+    assert.notEqual(result.beforeSha256, result.afterSha256)
+    assert.deepEqual(result.diffStat, {
+      beforeLines: 2,
+      afterLines: 2,
+      addedLines: 1,
+      removedLines: 1,
+    })
     assert.equal(await fs.readFile(targetPath, 'utf8'), 'alpha\ngamma\n')
   })
 })

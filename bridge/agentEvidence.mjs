@@ -2,6 +2,7 @@ const READ_EFFECT_TOOLS = new Set([
   'list_files',
   'glob_files',
   'read_file',
+  'read_block',
   'search_code',
   'aura_list_capabilities',
   'aura_read_skill',

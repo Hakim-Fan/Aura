@@ -248,7 +248,7 @@ export function buildRouteFirstSystemPrompt(
         'For code changes, prefer apply_patch as the main editing path. Use write_file mainly for new files or full-document rewrites, keep edit_file / multi_edit_file as exact-match fallbacks, and use replace_line_range after a fresh read_file range when exact patch context repeatedly fails.',
       )
       sections.push(
-        'A high-quality local editing loop is: locate with search_code or glob_files, inspect with read_file, patch with apply_patch, then do targeted verification before the final answer. When you need a specific file range, call read_file with startLine/endLine and mode=edit_context instead of shell awk/sed; use mode=raw when you need copyable replacement text without line numbers.',
+        'A high-quality local editing loop is: locate with search_code or glob_files, inspect with read_file or read_block, patch with apply_patch, then do targeted verification before the final answer. When you need a specific file range, call read_file with startLine/endLine and mode=edit_context instead of shell awk/sed; use mode=raw when you need copyable replacement text without line numbers.',
       )
       sections.push(
         'For longer-running or interactive commands, prefer exec_command and continue with write_stdin. Use write_stdin to send more input, poll more output, close stdin, or terminate the session. Keep run_shell for short one-shot commands.',

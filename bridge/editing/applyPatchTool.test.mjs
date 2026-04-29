@@ -81,10 +81,24 @@ test('applyPatchInWorkspace applies add, update, move, and delete with progress 
       updates.some(
         update =>
           update.stage === 'patch_progress' &&
+          update.phase === 'preview' &&
+          Array.isArray(update.files) &&
+          update.files.length === 4,
+      ),
+    )
+    assert.ok(
+      updates.some(
+        update =>
+          update.stage === 'patch_progress' &&
           update.phase === 'applied' &&
           update.completed === 4,
       ),
     )
+    assert.equal(result.files[0].changed, true)
+    assert.equal(result.files[0].beforeSha256.length, 64)
+    assert.equal(result.files[0].afterSha256.length, 64)
+    assert.equal(result.files[0].diffStat.addedLines, 1)
+    assert.equal(result.files[0].diffStat.removedLines, 1)
   })
 })
 

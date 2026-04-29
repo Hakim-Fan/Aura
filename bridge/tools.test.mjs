@@ -210,6 +210,67 @@ test('read_file edit_context mode returns structured edit metadata', async () =>
   assert.equal(parsed.sha256.length, 64)
 })
 
+test('read_block returns a structured indentation block around an anchor', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-read-block-'))
+  await fs.writeFile(
+    path.join(workspace, 'sample.ts'),
+    [
+      'const outside = true',
+      '',
+      'function demo() {',
+      '  const x = 1',
+      '  if (x) {',
+      '    return x',
+      '  }',
+      '}',
+      '',
+      'function next() {}',
+      '',
+    ].join('\n'),
+  )
+
+  const readBlock = createBuiltinTools({ cwd: workspace }).find(
+    tool => tool.name === 'read_block',
+  )
+  const output = await readBlock.run({
+    path: 'sample.ts',
+    anchorText: 'function demo',
+  })
+
+  const parsed = JSON.parse(output)
+  assert.equal(parsed.path, 'sample.ts')
+  assert.equal(parsed.anchorLine, 3)
+  assert.equal(parsed.startLine, 3)
+  assert.equal(parsed.endLine, 8)
+  assert.match(parsed.text, /function demo\(\)/)
+  assert.doesNotMatch(parsed.text, /function next/)
+  assert.equal(parsed.numberedText.split('\n')[0], 'L3: function demo() {')
+  assert.equal(parsed.sha256.length, 64)
+})
+
+test('apply_patch accepts compatibility input aliases', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-apply-patch-alias-'))
+  await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
+  await fs.writeFile(path.join(workspace, 'src', 'sample.txt'), 'old\n', 'utf8')
+
+  const applyPatch = createBuiltinTools({ cwd: workspace }).find(
+    tool => tool.name === 'apply_patch',
+  )
+  const result = await applyPatch.run({
+    input: [
+      '*** Begin Patch',
+      '*** Update File: src/sample.txt',
+      '@@',
+      '-old',
+      '+new',
+      '*** End Patch',
+    ].join('\n'),
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(await fs.readFile(path.join(workspace, 'src', 'sample.txt'), 'utf8'), 'new\n')
+})
+
 test('invokeTool includes structured repair hints in tool error output', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-repair-hint-'))
   await fs.writeFile(path.join(workspace, 'sample.ts'), 'one\ntwo\nthree\n')
