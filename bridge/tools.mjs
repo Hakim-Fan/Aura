@@ -1,9 +1,7 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
-import { execFile, spawn } from 'node:child_process'
-import { promisify } from 'node:util'
+import { spawn } from 'node:child_process'
 import {
   formatToolError,
   parseCommandSpec,
@@ -14,18 +12,17 @@ import {
 } from './utils.mjs'
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 import { createWebTools } from './webTools.mjs'
+import { parsePatch } from './editing/applyPatchParser.mjs'
 import { applyPatchInWorkspace } from './editing/applyPatchTool.mjs'
 import { parseApplyPatchShellCommand } from './editing/applyPatchShell.mjs'
 import {
-  applyEditFileMutation,
-  applyMultiEditFileMutation,
-  applyReplaceLineRangeMutation,
-  applyWriteFileMutation,
-} from './editing/textMutationRuntime.mjs'
+  createEditingTools,
+  normalizeApplyPatchToolInput,
+} from './editing/toolHandlers.mjs'
 import { createUnifiedExecRuntime } from './editing/unifiedExecRuntime.mjs'
+import { verifyPatchAgainstWorkspace } from './editing/applyPatchVerifier.mjs'
 import { buildShellEnv } from './shellEnv.mjs'
 
-const execFileAsync = promisify(execFile)
 const ALWAYS_ON_SKILL_IDS = new Set([
   'aura-browser-operator',
   'desktop-operator',
@@ -62,278 +59,6 @@ function shouldSkipSearchEntry(name) {
     name === '.next' ||
     name === '.turbo'
   )
-}
-
-async function runShell(command, cwd, timeoutMs = 60_000) {
-  return runShellStreaming(command, cwd, timeoutMs)
-}
-
-function sha256Text(text) {
-  return createHash('sha256').update(String(text), 'utf8').digest('hex')
-}
-
-function splitReadableLines(text) {
-  const source = String(text || '').replace(/\r\n/g, '\n')
-  const lines = source.split('\n')
-  if (source.endsWith('\n')) {
-    lines.pop()
-  }
-  return lines
-}
-
-function resolveReadRange(text, args = {}) {
-  const startLine = Number(args.startLine)
-  const endLine = Number(args.endLine)
-  const hasStartLine = Number.isFinite(startLine)
-  const hasEndLine = Number.isFinite(endLine)
-  const lines = splitReadableLines(text)
-
-  if (!hasStartLine && !hasEndLine) {
-    return {
-      lines,
-      start: 1,
-      end: lines.length,
-      selected: lines,
-    }
-  }
-
-  const start = hasStartLine ? Math.floor(startLine) : 1
-  const end = hasEndLine ? Math.floor(endLine) : lines.length
-
-  if (start < 1 || end < start || start > Math.max(lines.length, 1)) {
-    throw createStructuredError('read_file 的行号范围无效。', {
-      source: 'tool',
-      category: 'invalid_input',
-      code: 'INVALID_READ_RANGE',
-      detail: `Received startLine=${args.startLine}, endLine=${args.endLine}; file has ${lines.length} line(s).`,
-      suggestedAction:
-        '请使用 1-based 行号，并确保 startLine <= endLine 且起始行没有超过文件总行数。',
-    })
-  }
-
-  const boundedEnd = Math.min(lines.length, end)
-  return {
-    lines,
-    start,
-    end: boundedEnd,
-    selected: lines.slice(start - 1, boundedEnd),
-  }
-}
-
-function formatNumberedLines(lines, start, prefix = '') {
-  return lines.map((line, index) => `${prefix}${start + index}: ${line}`).join('\n')
-}
-
-function readTextSlice(text, args = {}) {
-  const { lines, start, end, selected } = resolveReadRange(text, args)
-  const mode = typeof args.mode === 'string' ? args.mode.trim() : ''
-  const hasExplicitRange =
-    Number.isFinite(Number(args.startLine)) || Number.isFinite(Number(args.endLine))
-  const rawText = selected.join('\n')
-
-  if (!mode && !hasExplicitRange) {
-    return text
-  }
-
-  if (mode === 'raw') {
-    return rawText
-  }
-
-  if (mode === 'display') {
-    return formatNumberedLines(selected, start, 'L')
-  }
-
-  if (mode === 'edit_context') {
-    return {
-      path: args.path,
-      startLine: start,
-      endLine: end,
-      lineCount: lines.length,
-      text: rawText,
-      numberedText: formatNumberedLines(selected, start, 'L'),
-      sha256: sha256Text(rawText),
-    }
-  }
-
-  if (args.lineNumbers === false) {
-    return selected.join('\n')
-  }
-  return selected.map((line, index) => `${start + index}:${line}`).join('\n')
-}
-
-function normalizeApplyPatchToolInput(args = {}) {
-  if (typeof args === 'string' && args.trim()) {
-    return args
-  }
-
-  for (const key of ['patch', 'input', 'command', 'content']) {
-    if (typeof args?.[key] === 'string' && args[key].trim()) {
-      return args[key]
-    }
-  }
-
-  throw createStructuredError('apply_patch 需要一段结构化 patch 文本。', {
-    source: 'tool',
-    category: 'invalid_input',
-    code: 'MISSING_PATCH_TEXT',
-    detail:
-      'Expected a patch string in args.patch. Also accepts args.input, args.command, or args.content for compatibility.',
-    suggestedAction:
-      '请传入以 "*** Begin Patch" 开头、以 "*** End Patch" 结尾的 patch 字符串。',
-  })
-}
-
-function getLineIndentWidth(line) {
-  const match = String(line || '').match(/^[\t ]*/u)
-  const indent = match ? match[0] : ''
-  let width = 0
-  for (const char of indent) {
-    width += char === '\t' ? 2 : 1
-  }
-  return width
-}
-
-function looksLikeBlockOpener(line) {
-  const trimmed = String(line || '').trim()
-  return (
-    /[\{\(\[]\s*$/u.test(trimmed) ||
-    /=>\s*(?:\{|\()\s*$/u.test(trimmed) ||
-    /(?:function|class|interface|type|enum)\b/u.test(trimmed)
-  )
-}
-
-function looksLikeBlockCloser(line) {
-  return /^[\}\]\)]\s*[,;)]*\s*$/u.test(String(line || '').trim())
-}
-
-function findReadBlockAnchor(lines, args = {}) {
-  const anchorLine = Number(args.anchorLine)
-  if (Number.isFinite(anchorLine)) {
-    const index = Math.floor(anchorLine) - 1
-    if (index < 0 || index >= lines.length) {
-      throw createStructuredError('read_block 的 anchorLine 超出文件范围。', {
-        source: 'tool',
-        category: 'invalid_input',
-        code: 'INVALID_BLOCK_ANCHOR',
-        detail: `Received anchorLine=${args.anchorLine}; file has ${lines.length} line(s).`,
-        suggestedAction: '请先用 search_code 或 read_file 找到当前文件里的有效行号。',
-      })
-    }
-    return index
-  }
-
-  const anchorText = typeof args.anchorText === 'string' ? args.anchorText.trim() : ''
-  if (anchorText) {
-    const index = lines.findIndex(line => line.includes(anchorText))
-    if (index >= 0) {
-      return index
-    }
-    throw createStructuredError('read_block 没有找到 anchorText。', {
-      source: 'tool',
-      category: 'not_found',
-      code: 'BLOCK_ANCHOR_NOT_FOUND',
-      detail: `Could not find anchorText in file: ${anchorText}`,
-      suggestedAction: '请先用 search_code 查找目标符号，再用返回行号调用 read_block。',
-    })
-  }
-
-  throw createStructuredError('read_block 需要 anchorLine 或 anchorText。', {
-    source: 'tool',
-    category: 'invalid_input',
-    code: 'MISSING_BLOCK_ANCHOR',
-    detail: 'Expected anchorLine or anchorText.',
-    suggestedAction: '请提供一个目标行号，或提供要定位的唯一文本片段。',
-  })
-}
-
-function resolveReadBlockRange(lines, anchorIndex, args = {}) {
-  const anchorIndent = getLineIndentWidth(lines[anchorIndex])
-  const anchorIsOpener = looksLikeBlockOpener(lines[anchorIndex])
-  let startIndex = anchorIndex
-  let blockIndent = anchorIndent
-
-  if (!anchorIsOpener) {
-    for (let index = anchorIndex - 1; index >= 0; index -= 1) {
-      const line = lines[index]
-      if (!String(line || '').trim()) {
-        continue
-      }
-
-      const indent = getLineIndentWidth(line)
-      if (indent < anchorIndent) {
-        startIndex = index
-        blockIndent = indent
-        break
-      }
-    }
-  }
-
-  let endIndex = startIndex
-  for (let index = startIndex + 1; index < lines.length; index += 1) {
-    const line = lines[index]
-    const trimmed = String(line || '').trim()
-    if (!trimmed) {
-      endIndex = index
-      continue
-    }
-
-    const indent = getLineIndentWidth(line)
-    if (indent < blockIndent) {
-      break
-    }
-
-    if (index > startIndex && indent === blockIndent) {
-      if (looksLikeBlockCloser(line)) {
-        endIndex = index
-      }
-      break
-    }
-
-    endIndex = index
-  }
-
-  const contextLines = Math.max(0, Math.min(20, Math.floor(Number(args.contextLines) || 0)))
-  startIndex = Math.max(0, startIndex - contextLines)
-  endIndex = Math.min(lines.length - 1, endIndex + contextLines)
-
-  const maxLines = Math.max(20, Math.min(500, Math.floor(Number(args.maxLines) || 160)))
-  let truncated = false
-  if (endIndex - startIndex + 1 > maxLines) {
-    truncated = true
-    const halfWindow = Math.floor(maxLines / 2)
-    startIndex = Math.max(startIndex, anchorIndex - halfWindow)
-    endIndex = Math.min(lines.length - 1, startIndex + maxLines - 1)
-  }
-
-  return {
-    startLine: startIndex + 1,
-    endLine: endIndex + 1,
-    truncated,
-  }
-}
-
-function readTextBlock(text, args = {}) {
-  const lines = splitReadableLines(text)
-  const anchorIndex = findReadBlockAnchor(lines, args)
-  const { startLine, endLine, truncated } = resolveReadBlockRange(
-    lines,
-    anchorIndex,
-    args,
-  )
-  const selected = lines.slice(startLine - 1, endLine)
-  const rawText = selected.join('\n')
-
-  return {
-    path: args.path,
-    anchorLine: anchorIndex + 1,
-    startLine,
-    endLine,
-    lineCount: lines.length,
-    text: rawText,
-    numberedText: formatNumberedLines(selected, startLine, 'L'),
-    sha256: sha256Text(rawText),
-    truncated,
-  }
 }
 
 function resolveShellPatchInterception(tool, args, hooks = {}) {
@@ -402,6 +127,7 @@ function resolveShellPatchInterception(tool, args, hooks = {}) {
     args: {
       patch,
     },
+    patchRoot,
     originalCommand: args.command,
     summary:
       'Intercepted a shell apply_patch command and routed it through the verified patch tool.',
@@ -600,179 +326,6 @@ async function runShellStreaming(
       )
     })
   })
-}
-
-function detectBinary(buffer) {
-  const sample = buffer.subarray(0, Math.min(buffer.length, 2048))
-  let suspicious = 0
-
-  for (const byte of sample) {
-    if (byte === 0) {
-      return true
-    }
-    if ((byte < 7 || (byte > 14 && byte < 32)) && byte !== 9 && byte !== 10 && byte !== 13) {
-      suspicious += 1
-    }
-  }
-
-  return sample.length > 0 && suspicious / sample.length > 0.15
-}
-
-function readPngDimensions(buffer) {
-  if (buffer.length < 24) {
-    return null
-  }
-  const signature = '89504e470d0a1a0a'
-  if (buffer.subarray(0, 8).toString('hex') !== signature) {
-    return null
-  }
-  return {
-    width: buffer.readUInt32BE(16),
-    height: buffer.readUInt32BE(20),
-  }
-}
-
-function summarizeBinaryFile(target, buffer) {
-  const extension = path.extname(target).slice(1).toLowerCase() || 'unknown'
-  const size = buffer.byteLength
-  const pngDimensions = readPngDimensions(buffer)
-  const details = [
-    `Binary file detected: ${path.basename(target)}`,
-    `Type: ${extension.toUpperCase()}`,
-    `Size: ${size} bytes`,
-  ]
-
-  if (pngDimensions) {
-    details.push(`Dimensions: ${pngDimensions.width} x ${pngDimensions.height}`)
-  }
-
-  details.push(
-    'This tool only previews text safely. For images, rely on visual input or use a dedicated metadata/image tool instead of reading raw bytes as text.',
-  )
-  return details.join('\n')
-}
-
-async function collectSearchMatches(rootPath, query, baseCwd, matches = [], signal) {
-  if (signal?.aborted) {
-    throw buildStepCancelledError({ source: 'builtin', name: 'search_code' })
-  }
-
-  let stats
-  try {
-    stats = await fs.stat(rootPath)
-  } catch {
-    return matches
-  }
-
-  if (stats.isFile()) {
-    let content
-    try {
-      content = await fs.readFile(rootPath)
-    } catch {
-      return matches
-    }
-
-    if (detectBinary(content)) {
-      return matches
-    }
-
-    const text = content.toString('utf8')
-    const lines = text.split(/\r?\n/u)
-    for (let index = 0; index < lines.length; index += 1) {
-      if (!lines[index].includes(query)) {
-        continue
-      }
-      matches.push(
-        `${path.relative(baseCwd, rootPath) || path.basename(rootPath)}:${index + 1}:${lines[index]}`,
-      )
-      if (matches.length >= 200) {
-        return matches
-      }
-    }
-
-    return matches
-  }
-
-  const entries = await fs.readdir(rootPath, { withFileTypes: true })
-
-  for (const entry of entries) {
-    if (shouldSkipSearchEntry(entry.name)) {
-      continue
-    }
-
-    const entryPath = path.join(rootPath, entry.name)
-    if (entry.isDirectory()) {
-      await collectSearchMatches(entryPath, query, baseCwd, matches, signal)
-      continue
-    }
-
-    if (!entry.isFile()) {
-      continue
-    }
-
-    let content
-    try {
-      content = await fs.readFile(entryPath)
-    } catch {
-      continue
-    }
-
-    if (detectBinary(content)) {
-      continue
-    }
-
-    const text = content.toString('utf8')
-    const lines = text.split(/\r?\n/u)
-    for (let index = 0; index < lines.length; index += 1) {
-      if (!lines[index].includes(query)) {
-        continue
-      }
-      matches.push(
-        `${path.relative(baseCwd, entryPath) || path.basename(entryPath)}:${index + 1}:${lines[index]}`,
-      )
-      if (matches.length >= 200) {
-        return matches
-      }
-    }
-  }
-
-  return matches
-}
-
-async function searchWorkspace(query, target, cwd, signal) {
-  try {
-    const { stdout } = await execFileAsync(
-      'rg',
-      [
-        '-n',
-        '--hidden',
-        '--glob',
-        '!node_modules',
-        '--glob',
-        '!.git',
-        query,
-        target,
-      ],
-      {
-        cwd,
-        env: buildShellEnv(),
-        maxBuffer: 1024 * 1024,
-        signal,
-      },
-    )
-    return truncate(stdout || 'No matches found')
-  } catch (error) {
-    if (
-      error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
-      const matches = await collectSearchMatches(target, query, cwd, [], signal)
-      return truncate(matches.join('\n') || 'No matches found')
-    }
-    throw error
-  }
 }
 
 function resolveAuraHomePath() {
@@ -1265,326 +818,7 @@ export function createBuiltinTools(context) {
         return globWorkspace(args.pattern, target, context.cwd)
       },
     },
-    {
-      source: 'builtin',
-      name: 'read_file',
-      aliases: ['read', 'readfile', 'cat'],
-      description: 'Read a text file from inside the workspace.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Relative file path inside the workspace.',
-          },
-          startLine: {
-            type: 'number',
-            description: 'Optional 1-based first line to read.',
-          },
-          endLine: {
-            type: 'number',
-            description: 'Optional 1-based last line to read.',
-          },
-          lineNumbers: {
-            type: 'boolean',
-            description:
-              'Include line numbers when reading a range. Defaults to true for ranged reads.',
-          },
-          mode: {
-            type: 'string',
-            enum: ['raw', 'display', 'edit_context'],
-            description:
-              'Optional output mode. Use raw for copyable text, display for L-prefixed line numbers, and edit_context for structured text plus line range metadata.',
-          },
-        },
-        required: ['path'],
-      },
-      async run(args, runtime = {}) {
-        runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
-        const content = await fs.readFile(target)
-        if (detectBinary(content)) {
-          return summarizeBinaryFile(target, content)
-        }
-        return truncate(readTextSlice(content.toString('utf8'), args))
-      },
-    },
-    {
-      source: 'builtin',
-      name: 'read_block',
-      aliases: ['readblock', 'read_symbol', 'read_context'],
-      description:
-        'Read an indentation-based code block around an anchor line or anchor text. Use this before editing a function, component, or object section when exact line ranges are uncertain.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Relative file path inside the workspace.',
-          },
-          anchorLine: {
-            type: 'number',
-            description: '1-based line near or inside the target block.',
-          },
-          anchorText: {
-            type: 'string',
-            description:
-              'Text to locate when the line number is unknown. Prefer a unique symbol or heading.',
-          },
-          contextLines: {
-            type: 'number',
-            description:
-              'Optional extra lines before and after the detected block, default 0 and max 20.',
-          },
-          maxLines: {
-            type: 'number',
-            description:
-              'Maximum lines to return from the detected block, default 160 and max 500.',
-          },
-        },
-        required: ['path'],
-      },
-      async run(args, runtime = {}) {
-        runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
-        const content = await fs.readFile(target)
-        if (detectBinary(content)) {
-          return summarizeBinaryFile(target, content)
-        }
-        return truncate(readTextBlock(content.toString('utf8'), args))
-      },
-    },
-    {
-      source: 'builtin',
-      name: 'apply_patch',
-      aliases: ['patch'],
-      approvalCategory: 'file_write',
-      description:
-        'Apply a structured multi-file patch inside the workspace. Prefer this for modifying existing files. Pass a single patch string that starts with "*** Begin Patch" and ends with "*** End Patch".',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          patch: {
-            type: 'string',
-            description:
-              'Structured patch text using "*** Begin Patch", "*** Update File:", "*** Add File:", "*** Delete File:", "@@" hunks, and "*** End Patch".',
-          },
-          input: {
-            type: 'string',
-            description:
-              'Compatibility alias for patch. Use patch for new calls.',
-          },
-          command: {
-            type: 'string',
-            description:
-              'Compatibility alias for patch text when a caller forwards an apply_patch shell command body.',
-          },
-          content: {
-            type: 'string',
-            description:
-              'Compatibility alias for patch. Use patch for new calls.',
-          },
-        },
-      },
-      async run(args, runtime = {}) {
-        runtime.throwIfAborted?.()
-        return applyPatchInWorkspace(
-          context.cwd,
-          normalizeApplyPatchToolInput(args),
-          runtime,
-        )
-      },
-    },
-    {
-      source: 'builtin',
-      name: 'write_file',
-      aliases: ['write', 'writefile'],
-      approvalCategory: 'file_write',
-      description:
-        'Write a text file inside the workspace. Best for new files or full-document rewrites.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Relative file path inside the workspace.',
-          },
-          content: {
-            type: 'string',
-            description: 'Full text content to write.',
-          },
-        },
-        required: ['path', 'content'],
-      },
-      async run(args, runtime = {}) {
-        runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
-        return applyWriteFileMutation(target, args.content, runtime)
-      },
-    },
-    {
-      source: 'builtin',
-      name: 'edit_file',
-      aliases: ['edit', 'replace'],
-      approvalCategory: 'file_write',
-      description:
-        'Edit a file by replacing an exact text block. Use this as a fallback when apply_patch would be overkill. If exact text matching fails after reading a line range, use replace_line_range instead.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Relative file path inside the workspace.',
-          },
-          oldText: {
-            type: 'string',
-            description: 'Exact text to replace.',
-          },
-          newText: {
-            type: 'string',
-            description: 'Replacement text.',
-          },
-          replaceAll: {
-            type: 'boolean',
-            description: 'Replace every occurrence instead of only the first one.',
-          },
-          expectedReplacements: {
-            type: 'number',
-            description: 'Optional minimum number of occurrences expected before editing.',
-          },
-        },
-        required: ['path', 'oldText', 'newText'],
-      },
-      async run(args, runtime = {}) {
-        runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
-        return applyEditFileMutation(
-          target,
-          args.oldText,
-          args.newText,
-          {
-            replaceAll: args.replaceAll,
-            expectedReplacements: args.expectedReplacements,
-            toolPath: args.path,
-          },
-          runtime,
-        )
-      },
-    },
-    {
-      source: 'builtin',
-      name: 'replace_line_range',
-      aliases: ['edit_range', 'replace_lines'],
-      approvalCategory: 'file_write',
-      description:
-        'Replace an inclusive 1-based line range in a workspace text file. Use this after read_file with startLine/endLine when apply_patch or exact edit_file context does not match. Content must not include line-number prefixes.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Relative file path inside the workspace.',
-          },
-          startLine: {
-            type: 'number',
-            description: 'Inclusive 1-based first line to replace.',
-          },
-          endLine: {
-            type: 'number',
-            description: 'Inclusive 1-based last line to replace.',
-          },
-          content: {
-            type: 'string',
-            description:
-              'Replacement text for the selected line range, without read_file line-number prefixes.',
-          },
-          expectedText: {
-            type: 'string',
-            description:
-              'Optional exact text expected in the selected range before writing.',
-          },
-        },
-        required: ['path', 'startLine', 'endLine', 'content'],
-      },
-      async run(args, runtime = {}) {
-        runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
-        return applyReplaceLineRangeMutation(
-          target,
-          args.startLine,
-          args.endLine,
-          args.content,
-          {
-            expectedText: args.expectedText,
-            toolPath: args.path,
-          },
-          runtime,
-        )
-      },
-    },
-    {
-      source: 'builtin',
-      name: 'multi_edit_file',
-      aliases: ['multiedit', 'editmany'],
-      approvalCategory: 'file_write',
-      description:
-        'Apply multiple exact text replacements to one file in sequence. Use this only when apply_patch is unnecessary and several exact replacements are clearer.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Relative file path inside the workspace.',
-          },
-          edits: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                oldText: { type: 'string' },
-                newText: { type: 'string' },
-                replaceAll: { type: 'boolean' },
-                expectedReplacements: { type: 'number' },
-              },
-              required: ['oldText', 'newText'],
-            },
-            description: 'Ordered list of exact replacements to apply.',
-          },
-        },
-        required: ['path', 'edits'],
-      },
-      async run(args, runtime = {}) {
-        runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
-        return applyMultiEditFileMutation(target, args.edits, runtime)
-      },
-    },
-    {
-      source: 'builtin',
-      name: 'search_code',
-      aliases: ['search', 'grep', 'ripgrep'],
-      description:
-        'Search the workspace using ripgrep. Good for finding symbols, text, or patterns.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'Search query for ripgrep.',
-          },
-          path: {
-            type: 'string',
-            description: 'Optional relative path inside the workspace.',
-          },
-        },
-        required: ['query'],
-      },
-      async run(args, runtime = {}) {
-        runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path || '.')
-        return searchWorkspace(args.query, target, context.cwd, runtime.signal)
-      },
-    },
+    ...createEditingTools(context),
     {
       source: 'builtin',
       name: 'todo_write',
@@ -2205,6 +1439,45 @@ async function resolveApprovalSettings(hooks = {}) {
   return hooks.settings || {}
 }
 
+async function buildApplyPatchApprovalPreview(tool, args, hooks = {}, patchRoot) {
+  if (tool?.name !== 'apply_patch') {
+    return undefined
+  }
+
+  const rootPath =
+    typeof patchRoot === 'string' && patchRoot.trim()
+      ? patchRoot
+      : typeof hooks.settings?.cwd === 'string' && hooks.settings.cwd.trim()
+        ? hooks.settings.cwd
+        : ''
+  if (!rootPath) {
+    return undefined
+  }
+
+  try {
+    const patchText = normalizeApplyPatchToolInput(args)
+    const parsedPatch = parsePatch(patchText)
+    const verifiedPatch = await verifyPatchAgainstWorkspace(rootPath, parsedPatch, {
+      signal: hooks.signal,
+    })
+    return stringifyOutput({
+      stage: 'patch_progress',
+      phase: 'approval_preview',
+      total: verifiedPatch.changes.length,
+      affectedPaths: verifiedPatch.affectedPaths,
+      files: verifiedPatch.preview,
+      summary: `Patch approval preview ready for ${verifiedPatch.changes.length} file(s).`,
+    })
+  } catch (error) {
+    return stringifyOutput({
+      stage: 'patch_progress',
+      phase: 'approval_unavailable',
+      summary: 'Patch preview is unavailable before approval.',
+      error: formatToolError(error),
+    })
+  }
+}
+
 function emitToolEvent(event, toolEvents, hooks) {
   const index = toolEvents.findIndex(entry => entry.id === event.id)
   if (index >= 0) {
@@ -2276,12 +1549,19 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     : hooks.settings || {}
 
   if (effectiveTool.approvalCategory && !isAutoApproved(effectiveTool, approvalSettings)) {
+    const approvalPreview = await buildApplyPatchApprovalPreview(
+      effectiveTool,
+      effectiveArgs,
+      hooks,
+      shellPatchInterception?.patchRoot,
+    )
     const decision = await hooks.requestApproval?.({
       id: eventId,
       category: effectiveTool.approvalCategory,
       toolName: effectiveTool.name,
       summary: effectiveTool.description,
       input: stringifyOutput(effectiveArgs ?? {}),
+      output: approvalPreview,
     })
 
     if (decision !== 'approve') {

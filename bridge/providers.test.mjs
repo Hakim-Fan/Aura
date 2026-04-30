@@ -86,6 +86,37 @@ test('parseToolArguments surfaces a structured provider error for malformed JSON
   )
 })
 
+test('parseToolArguments accepts raw apply_patch bodies for apply_patch', () => {
+  const rawPatch = [
+    '*** Begin Patch',
+    '*** Update File: src/sample.txt',
+    '@@',
+    '-old',
+    '+new',
+    '*** End Patch',
+  ].join('\n')
+
+  assert.deepEqual(parseToolArguments(rawPatch, 'apply_patch'), {
+    patch: rawPatch,
+  })
+})
+
+test('parseToolArguments extracts freeform apply_patch bodies from malformed wrappers', () => {
+  const rawPatch = [
+    '*** Begin Patch',
+    '*** Add File: note.txt',
+    '+hello',
+    '*** End Patch',
+  ].join('\n')
+
+  assert.deepEqual(
+    parseToolArguments(`{"patch": "${rawPatch}"}`, 'apply_patch'),
+    {
+      patch: rawPatch,
+    },
+  )
+})
+
 test('extractInlineToolCalls converts codex-style raw tool markers into executable tool calls', () => {
   const extracted = extractInlineToolCalls(
     [

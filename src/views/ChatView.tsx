@@ -1544,6 +1544,258 @@ function SearchControllerDecisionCard({
   )
 }
 
+function hasPatchPreviewOutput(output: Record<string, unknown> | null) {
+  if (!output) {
+    return false
+  }
+  if (Array.isArray(output.preview) || Array.isArray(output.files)) {
+    return true
+  }
+  return (
+    output.stage === 'patch_progress' &&
+    (output.phase === 'preview' ||
+      output.phase === 'approval_preview' ||
+      output.phase === 'streaming_preview' ||
+      output.phase === 'streaming_complete')
+  )
+}
+
+function readPatchPreviewFiles(output: Record<string, unknown>) {
+  const rawFiles = Array.isArray(output.preview)
+    ? output.preview
+    : Array.isArray(output.files)
+      ? output.files
+      : []
+  return rawFiles.filter(isRecord).slice(0, 8)
+}
+
+function readPatchNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+const PATCH_COMPACT_DIFF_LINE_LIMIT = 36
+
+function PatchDiffLine({ line }: { line: Record<string, unknown> }) {
+  const type = typeof line.type === 'string' ? line.type : 'context'
+  const text = typeof line.text === 'string' ? line.text : ''
+  const oldLine = readPatchNumber(line.oldLine)
+  const newLine = readPatchNumber(line.newLine)
+  const prefix =
+    type === 'add'
+      ? '+'
+      : type === 'remove'
+        ? '-'
+        : type === 'truncated'
+          ? '...'
+          : ' '
+  const tone =
+    type === 'add'
+      ? 'bg-emerald-50 text-emerald-800'
+      : type === 'remove'
+        ? 'bg-red-50 text-red-800'
+        : type === 'truncated'
+          ? 'bg-amber-50 text-amber-700'
+          : 'bg-white text-[#52525b]'
+
+  return (
+    <div className={`grid grid-cols-[44px_28px_1fr] gap-2 px-2 py-0.5 ${tone}`}>
+      <span className="select-none text-right text-[10px] text-gray-400">
+        {oldLine || newLine || ''}
+      </span>
+      <span className="select-none text-[10px] font-700">{prefix}</span>
+      <span className="min-w-0 whitespace-pre-wrap break-words">{text}</span>
+    </div>
+  )
+}
+
+function PatchPreviewCard({
+  output,
+  status,
+}: {
+  output: Record<string, unknown>
+  status: MessageEvent['status']
+}) {
+  const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({})
+  const [expandedDiffs, setExpandedDiffs] = useState<Record<string, boolean>>({})
+  const files = readPatchPreviewFiles(output)
+  const affectedPaths = Array.isArray(output.affectedPaths)
+    ? output.affectedPaths
+        .filter((entry): entry is string => typeof entry === 'string')
+        .slice(0, 8)
+    : []
+  const operations = Array.isArray(output.operations)
+    ? output.operations.filter(isRecord).slice(0, 8)
+    : []
+  const summary =
+    typeof output.summary === 'string' && output.summary.trim()
+      ? output.summary.trim()
+      : status === 'running' || status === 'awaiting_approval'
+        ? 'Patch preview ready'
+        : 'Patch applied'
+
+  if (files.length === 0 && affectedPaths.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="mt-2 rounded-xl border border-[rgba(79,123,116,0.12)] bg-[rgba(79,123,116,0.05)] p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center rounded-full bg-white/85 px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+          Patch
+        </span>
+        <span className="text-[12px] font-600 text-[var(--text-primary)]">{summary}</span>
+        {affectedPaths.length > 0 ? (
+          <span className="rounded-full bg-white/75 px-2 py-1 text-[10px] text-[var(--text-secondary)]">
+            {affectedPaths.length} file{affectedPaths.length === 1 ? '' : 's'}
+          </span>
+        ) : null}
+      </div>
+
+      {files.length === 0 && affectedPaths.length > 0 ? (
+        <div className="mt-2 flex flex-col gap-1.5">
+          {affectedPaths.map((pathLabel, index) => {
+            const operation = operations.find(
+              entry => entry.path === pathLabel || entry.moveTo === pathLabel,
+            )
+            const kind = typeof operation?.kind === 'string' ? operation.kind : 'pending'
+            return (
+              <div
+                key={`${pathLabel}-${index}`}
+                className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-white/80 bg-white/85 px-3 py-2"
+              >
+                <span className="min-w-0 truncate text-[12px] font-600 text-[var(--text-primary)]">
+                  {pathLabel}
+                </span>
+                <span className="shrink-0 rounded-full bg-[rgba(79,123,116,0.08)] px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
+                  {kind}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
+
+      {files.length > 0 ? (
+        <div className="mt-2 flex flex-col gap-2">
+          {files.map((file, index) => {
+            const pathLabel =
+              typeof file.path === 'string'
+                ? file.path
+                : typeof file.relativePath === 'string'
+                  ? file.relativePath
+                  : `file-${index + 1}`
+            const kind = typeof file.kind === 'string' ? file.kind : 'update'
+            const diffStat = isRecord(file.diffStat) ? file.diffStat : {}
+            const addedLines = readPatchNumber(diffStat.addedLines)
+            const removedLines = readPatchNumber(diffStat.removedLines)
+            const diffPreview = isRecord(file.diffPreview) ? file.diffPreview : null
+            const diffLines = Array.isArray(diffPreview?.lines)
+              ? diffPreview.lines.filter(isRecord).slice(0, 120)
+              : []
+            const fileKey = `${pathLabel}-${index}`
+            const isFileExpanded =
+              expandedFiles[fileKey] ?? (files.length === 1 || index === 0)
+            const isLargeDiff =
+              diffLines.length > PATCH_COMPACT_DIFF_LINE_LIMIT ||
+              diffPreview?.truncated === true
+            const isDiffExpanded = expandedDiffs[fileKey] === true
+            const compactDiffLines =
+              isLargeDiff && !isDiffExpanded
+                ? diffLines.slice(0, PATCH_COMPACT_DIFF_LINE_LIMIT)
+                : diffLines
+            const visibleDiffLines =
+              isLargeDiff &&
+              !isDiffExpanded &&
+              diffPreview?.truncated === true &&
+              !compactDiffLines.some(line => line.type === 'truncated')
+                ? [
+                    ...compactDiffLines,
+                    diffLines.find(line => line.type === 'truncated'),
+                  ].filter(isRecord)
+                : compactDiffLines
+
+            return (
+              <div
+                key={`${pathLabel}-${index}`}
+                className="rounded-lg border border-white/80 bg-white/85"
+              >
+                <button
+                  aria-expanded={isFileExpanded}
+                  className="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-2 text-left"
+                  onClick={() =>
+                    setExpandedFiles(current => ({
+                      ...current,
+                      [fileKey]: !isFileExpanded,
+                    }))
+                  }
+                  type="button"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    {isFileExpanded ? (
+                      <ChevronDown size={14} className="shrink-0 text-[var(--text-secondary)]" />
+                    ) : (
+                      <ChevronRight size={14} className="shrink-0 text-[var(--text-secondary)]" />
+                    )}
+                    <div className="min-w-0">
+                      <div className="truncate text-[12px] font-600 text-[var(--text-primary)]">
+                        {pathLabel}
+                      </div>
+                      <div className="mt-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--text-secondary)] opacity-70">
+                        {kind}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5 text-[10px] font-700">
+                    {diffPreview?.truncated === true ? (
+                      <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-700">
+                        truncated
+                      </span>
+                    ) : null}
+                    <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700">
+                      +{addedLines}
+                    </span>
+                    <span className="rounded-full bg-red-50 px-2 py-1 text-red-700">
+                      -{removedLines}
+                    </span>
+                  </div>
+                </button>
+                {isFileExpanded && diffLines.length > 0 ? (
+                  <div className="border-t border-[rgba(15,23,42,0.05)]">
+                    <div className="max-h-72 overflow-auto font-[SFMono-Regular,Menlo,monospace] text-[11px] leading-5 custom-scrollbar">
+                      {visibleDiffLines.map((line, lineIndex) => (
+                        <PatchDiffLine
+                          key={`${pathLabel}-${index}-${lineIndex}`}
+                          line={line}
+                        />
+                      ))}
+                    </div>
+                    {isLargeDiff ? (
+                      <div className="flex justify-end border-t border-[rgba(15,23,42,0.05)] bg-white/75 px-2 py-1.5">
+                        <button
+                          className="rounded-md px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)] transition-colors hover:bg-[rgba(79,123,116,0.08)]"
+                          onClick={() =>
+                            setExpandedDiffs(current => ({
+                              ...current,
+                              [fileKey]: !isDiffExpanded,
+                            }))
+                          }
+                          type="button"
+                        >
+                          {isDiffExpanded ? '收起预览' : '展开更多'}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function ShellOutputViewport({
   content,
   isLive,
@@ -1608,6 +1860,8 @@ function MessageEventCard({
   const isStructuredWebResearchEvent = toolName === 'web_research' && Boolean(parsedOutput)
   const isStructuredWebSearchEvent = toolName === 'web_search' && Boolean(parsedOutput)
   const isStructuredWebFetchEvent = toolName === 'web_fetch' && Boolean(parsedOutput)
+  const isStructuredPatchPreviewEvent =
+    toolName === 'apply_patch' && hasPatchPreviewOutput(parsedOutput)
   const isSearchControllerDecisionEvent =
     isStructuredWebSearchEvent &&
     parsedOutput &&
@@ -1716,12 +1970,23 @@ function MessageEventCard({
       {!isApproval && isStructuredWebFetchEvent && parsedOutput ? (
         <WebFetchEventCard event={event} output={parsedOutput} />
       ) : null}
+      {isStructuredPatchPreviewEvent && parsedOutput ? (
+        <PatchPreviewCard output={parsedOutput} status={event.status} />
+      ) : null}
       {isApproval ? (
         <div className="mt-2 rounded-xl border border-amber-200 bg-white p-3">
           {event.input ? (
-            <pre className="overflow-x-auto rounded-lg border border-gray-100 bg-gray-50 p-3 text-11px">
-              {event.input}
-            </pre>
+            <details
+              className="rounded-lg border border-gray-100 bg-gray-50"
+              open={!isStructuredPatchPreviewEvent}
+            >
+              <summary className="cursor-pointer px-3 py-2 text-11px font-600 text-[var(--text-secondary)]">
+                原始请求
+              </summary>
+              <pre className="max-h-72 overflow-auto border-t border-gray-100 p-3 text-11px custom-scrollbar">
+                {event.input}
+              </pre>
+            </details>
           ) : null}
           <div className="mt-3 flex items-center justify-end gap-2">
             <button

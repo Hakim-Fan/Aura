@@ -630,6 +630,7 @@ function buildSnapshotMessageEvents(snapshot: AgentTaskSnapshot): MessageEvent[]
               .reduce((max, value) => Math.max(max, value), 0) || 0) + 1,
           status: 'awaiting_approval' as const,
           input: snapshot.pendingApproval.input,
+          output: snapshot.pendingApproval.output,
         },
       ]
       : []),

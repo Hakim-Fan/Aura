@@ -424,6 +424,7 @@ export type ApprovalRequest = {
   toolName: string
   summary: string
   input?: string
+  output?: string
 }
 
 export type UserInputRequest = {

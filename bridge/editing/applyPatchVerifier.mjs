@@ -1,7 +1,10 @@
 import fs from 'node:fs/promises'
 import { createStructuredError } from '../runtimeErrors.mjs'
 import { resolveWorkspacePath } from '../utils.mjs'
-import { buildTextMutationEvidence } from './fileVerification.mjs'
+import {
+  buildTextDiffPreview,
+  buildTextMutationEvidence,
+} from './fileVerification.mjs'
 
 function splitFileContent(content) {
   const normalized = String(content || '').replace(/\r\n/g, '\n')
@@ -263,6 +266,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
       relativePath: operation.path,
       newContent: operation.content,
       ...buildTextMutationEvidence('', operation.content),
+      diffPreview: buildTextDiffPreview('', operation.content),
     }
   }
 
@@ -275,6 +279,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
       relativePath: operation.path,
       oldContent,
       ...buildTextMutationEvidence(oldContent, ''),
+      diffPreview: buildTextDiffPreview(oldContent, ''),
     }
   }
 
@@ -299,6 +304,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
       oldContent,
       newContent,
       ...buildTextMutationEvidence(oldContent, newContent),
+      diffPreview: buildTextDiffPreview(oldContent, newContent),
     }
   }
 
@@ -309,6 +315,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
     oldContent,
     newContent,
     ...buildTextMutationEvidence(oldContent, newContent),
+    diffPreview: buildTextDiffPreview(oldContent, newContent),
   }
 }
 
@@ -321,6 +328,7 @@ function summarizePatchPreviewChange(change) {
     afterSha256: change.afterSha256,
     changed: change.changed,
     diffStat: change.diffStat,
+    diffPreview: change.diffPreview,
   }
 }
 

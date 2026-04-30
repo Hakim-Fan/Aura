@@ -4,6 +4,7 @@ const READ_EFFECT_TOOLS = new Set([
   'read_file',
   'read_block',
   'search_code',
+  'verify_artifact',
   'aura_list_capabilities',
   'aura_read_skill',
   'web_research',
@@ -181,6 +182,21 @@ function collectProducedEvidence(event, effectTypes) {
   if (event?.status === 'success') {
     if (effectTypes.includes('write')) {
       producedEvidence.push('file_mutation')
+      if (artifactVerification.verifiedCount > 0) {
+        producedEvidence.push('file_verified')
+      }
+      if (artifactVerification.hasPresentArtifact) {
+        producedEvidence.push('artifact_present')
+      }
+      if (artifactVerification.hasReadBack) {
+        producedEvidence.push('artifact_read_back')
+      }
+      if (artifactVerification.hasHash) {
+        producedEvidence.push('artifact_hash_recorded')
+      }
+    }
+
+    if (name === 'verify_artifact') {
       if (artifactVerification.verifiedCount > 0) {
         producedEvidence.push('file_verified')
       }

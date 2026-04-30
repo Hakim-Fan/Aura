@@ -3,6 +3,7 @@ import { createStructuredError } from './runtimeErrors.mjs'
 import { buildDeliveryPolicy } from './agentEvidence.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
 import { guardedFetch } from './web/net/guardedFetch.mjs'
+import { createApplyPatchStreamingReporter } from './editing/applyPatchStreaming.mjs'
 
 function flattenOpenAiMessageContent(content) {
   if (typeof content === 'string') {
@@ -402,14 +403,40 @@ async function readSseStream(response, onData, options = {}) {
   }
 }
 
-function parseToolArguments(rawArgs) {
+function extractCompleteApplyPatchText(rawArgs) {
+  const text = String(rawArgs || '')
+  const beginMarker = '*** Begin Patch'
+  const endMarker = '*** End Patch'
+  const begin = text.indexOf(beginMarker)
+  const end = begin >= 0 ? text.indexOf(endMarker, begin + beginMarker.length) : -1
+  if (begin < 0 || end < 0) {
+    return ''
+  }
+  return text.slice(begin, end + endMarker.length).trim()
+}
+
+function parseToolArguments(rawArgs, toolName = '') {
   if (!rawArgs?.trim()) {
     return {}
+  }
+
+  const rawApplyPatchText =
+    toolName === 'apply_patch' ? extractCompleteApplyPatchText(rawArgs) : ''
+  if (rawApplyPatchText && rawArgs.trim().startsWith('*** Begin Patch')) {
+    return {
+      patch: rawApplyPatchText,
+    }
   }
 
   try {
     return JSON.parse(rawArgs)
   } catch (error) {
+    if (rawApplyPatchText) {
+      return {
+        patch: rawApplyPatchText,
+      }
+    }
+
     const detail = error instanceof Error ? error.message : String(error)
     const preview = rawArgs.length > 1200 ? `${rawArgs.slice(0, 1200)}...` : rawArgs
     throw createClassifiedError('模型返回了无法解析的工具参数。', {
@@ -1678,6 +1705,10 @@ export async function runOpenAiCompatibleAgent({
         let phaseReasoning = ''
         const toolCalls = []
         let usageForAttempt
+        const applyPatchStreamingReporter = createApplyPatchStreamingReporter({
+          hooks,
+          order: toolOrder,
+        })
         const streamParser = createThinkStreamParser({
           onContent(text) {
             content += text
@@ -1733,6 +1764,7 @@ export async function runOpenAiCompatibleAgent({
           if (Array.isArray(choice.delta?.tool_calls) && choice.delta.tool_calls.length > 0) {
             attemptState.receivedOutput = true
             mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
+            applyPatchStreamingReporter.inspect(toolCalls)
           }
         }, {
           messages: conversationMessages,
@@ -1754,6 +1786,7 @@ export async function runOpenAiCompatibleAgent({
           toolCalls,
           dedupeInlineToolCalls(toolCalls, inlineReasoningToolCalls.toolCalls),
         )
+        applyPatchStreamingReporter.inspect(toolCalls)
 
         const inlineContentToolCalls = extractInlineToolCalls(
           content,
@@ -1764,6 +1797,7 @@ export async function runOpenAiCompatibleAgent({
           toolCalls,
           dedupeInlineToolCalls(toolCalls, inlineContentToolCalls.toolCalls),
         )
+        applyPatchStreamingReporter.inspect(toolCalls)
 
         return {
           content,
@@ -1856,7 +1890,10 @@ export async function runOpenAiCompatibleAgent({
       const toolEventStartIndex = toolEvents.length
       for (const toolCall of finalizedToolCalls) {
         const tool = registry.get(toolCall.function.name)
-        const args = parseToolArguments(toolCall.function.arguments || '{}')
+        const args = parseToolArguments(
+          toolCall.function.arguments || '{}',
+          toolCall.function.name,
+        )
         const result = tool
           ? await invokeTool(tool, args, toolEvents, {
               ...hooks,

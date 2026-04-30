@@ -18,13 +18,18 @@
 6. `apply_patch` 在写入前产生 `preview` 进度事件，包含 affected paths 和文件级 diffStat。
 7. `apply_patch` 兼容 `patch/input/command/content` 字段，降低不同调用路径的参数错配概率。
 8. 修复循环已能区分 read-only inspection、invalid input 和实际写入修复尝试，避免参数错误直接耗尽写入预算。
+9. 编辑工具已从 `bridge/tools.mjs` 拆分为 Tool Spec / Handler / Runtime 模块。
+10. `search_code` 已返回可直接传给 `read_file mode=edit_context` 的 `suggestedRange/suggestedRanges`。
+11. `apply_patch` 已支持 raw/freeform patch 参数容错，并在 OpenAI 兼容流式工具参数生成过程中输出 patch progress。
+12. UI 已支持展示 `apply_patch` preview 的可视化 diff、streaming 阶段 affected paths、按文件折叠、大 diff 展开和审批前 diff 预览。
+13. 新增 `verify_artifact`，DOCX/PPTX/XLSX 已能接入 artifact evidence 和 completion gate 的基础验收链路。
 
-仍属于后续较大架构项：
+后续可继续深化的架构项：
 
-1. 将编辑工具从 `bridge/tools.mjs` 进一步拆成 Tool Spec / Handler / Runtime。
-2. 真正的 freeform `apply_patch` 协议和模型参数流式解析。
-3. UI 侧展示 patch preview 的可视化 diff。
-4. 文档、PPT、Excel 的领域 runtime 接入同一套 evidence/completion gate。
+1. 将 DOCX / PPT / Excel 从“产物存在与容器验证”继续升级到领域级内容读写 runtime。
+2. 将 patch preview diff 继续升级为更完整的审阅工作台，例如逐文件审批、文件内跳转、搜索和更完整的大文件 diff 获取。
+3. 在更多 Provider 协议下复用 `apply_patch` 参数流式解析；如果 Provider 支持真正 freeform tool channel，再把 schema 层从兼容容错升级为原生 freeform。
+4. 将所有编辑入口进一步收束到统一 editing transaction，统一审批、预览、写入和验收事件。
 
 ---
 
@@ -551,40 +556,8 @@ patch fail
 
 这就是 Aura 和 Codex 当前体验差距的核心。
 
+剩余后续大项
 
-进度：
-当前改造进度：基础稳定性改造已完成，可进入使用验证阶段。
+DOCX / PPT / Excel 从“产物验证”升级到真正领域级读写 runtime。
 
-已完成
-
-Provider 本地地址、key、小眼睛、手动模型等相关问题已处理。
-日志能力已完成：支持本地日志文件、结构化日志、人类可读日志、错误上下文。
-代码编辑稳定性 P0/P1 已完成：
-replace_line_range 参数校验
-apply_patch 上下文模糊匹配
-stale patch / oldText mismatch 的结构化 repairHint
-工具失败后不再轻易直接 finalizing
-shell 脚本直接改源码会被拦截
-读取能力已增强：
-read_file mode=raw/display/edit_context
-新增 read_block
-编辑证据已增强：
-beforeSha256
-afterSha256
-changed
-diffStat
-apply_patch preview
-测试和构建已通过：
-67 个 bridge/editing 测试通过
-pnpm build:bridge 通过
-pnpm typecheck 通过
-pnpm build 通过
-cargo check 通过
-未完成 / 后续大项
-
-bridge/tools.mjs 继续拆成 Tool Spec / Handler / Runtime。
-真正 freeform apply_patch 和参数流式解析。
-UI 侧展示 patch preview 可视化 diff。
-DOCX / PPT / Excel 接入同一套 evidence / completion gate。
-更细的 search_code 返回可直接读取的 suggested ranges。
-
+所有编辑入口进一步收束为统一 editing transaction：审批、预览、写入、验收完全统一。

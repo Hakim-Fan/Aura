@@ -251,6 +251,12 @@ export function buildRouteFirstSystemPrompt(
         'A high-quality local editing loop is: locate with search_code or glob_files, inspect with read_file or read_block, patch with apply_patch, then do targeted verification before the final answer. When you need a specific file range, call read_file with startLine/endLine and mode=edit_context instead of shell awk/sed; use mode=raw when you need copyable replacement text without line numbers.',
       )
       sections.push(
+        'search_code returns suggestedRanges that can be passed directly to read_file with mode=edit_context. Prefer those ranges over guessing line numbers after a match.',
+      )
+      sections.push(
+        'When producing binary or office artifacts such as DOCX, PPTX, XLSX, PDF, or images, call verify_artifact on the output path before finalizing so the evidence gate records existence, hash, read-back, and Office container structure when applicable.',
+      )
+      sections.push(
         'For longer-running or interactive commands, prefer exec_command and continue with write_stdin. Use write_stdin to send more input, poll more output, close stdin, or terminate the session. Keep run_shell for short one-shot commands.',
       )
     }
