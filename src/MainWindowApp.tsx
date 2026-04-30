@@ -596,6 +596,7 @@ function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
           : 'success',
     input: event.input,
     output: event.output,
+    structuredOutput: event.structuredOutput,
     error: event.error,
     errorInfo: event.errorInfo,
   }

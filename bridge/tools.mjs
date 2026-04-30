@@ -12,15 +12,13 @@ import {
 } from './utils.mjs'
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 import { createWebTools } from './webTools.mjs'
-import { parsePatch } from './editing/applyPatchParser.mjs'
 import { applyPatchInWorkspace } from './editing/applyPatchTool.mjs'
 import { parseApplyPatchShellCommand } from './editing/applyPatchShell.mjs'
 import {
+  buildEditingToolApprovalPreview,
   createEditingTools,
-  normalizeApplyPatchToolInput,
 } from './editing/toolHandlers.mjs'
 import { createUnifiedExecRuntime } from './editing/unifiedExecRuntime.mjs'
-import { verifyPatchAgainstWorkspace } from './editing/applyPatchVerifier.mjs'
 import { buildShellEnv } from './shellEnv.mjs'
 
 const ALWAYS_ON_SKILL_IDS = new Set([
@@ -30,6 +28,24 @@ const ALWAYS_ON_SKILL_IDS = new Set([
   'repo-reviewer',
   'web-research',
 ])
+
+const STRUCTURED_EVENT_OUTPUT_TOOLS = new Set([
+  'apply_patch',
+  'write_file',
+  'edit_file',
+  'multi_edit_file',
+  'replace_line_range',
+])
+
+function structuredEventOutputForTool(toolName, value) {
+  if (!STRUCTURED_EVENT_OUTPUT_TOOLS.has(toolName)) {
+    return undefined
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined
+  }
+  return value
+}
 
 async function walkDirectory(dirPath, maxDepth, currentDepth = 0) {
   const entries = await fs.readdir(dirPath, { withFileTypes: true })
@@ -1439,11 +1455,7 @@ async function resolveApprovalSettings(hooks = {}) {
   return hooks.settings || {}
 }
 
-async function buildApplyPatchApprovalPreview(tool, args, hooks = {}, patchRoot) {
-  if (tool?.name !== 'apply_patch') {
-    return undefined
-  }
-
+async function buildEditingApprovalPreview(tool, args, hooks = {}, patchRoot) {
   const rootPath =
     typeof patchRoot === 'string' && patchRoot.trim()
       ? patchRoot
@@ -1455,24 +1467,17 @@ async function buildApplyPatchApprovalPreview(tool, args, hooks = {}, patchRoot)
   }
 
   try {
-    const patchText = normalizeApplyPatchToolInput(args)
-    const parsedPatch = parsePatch(patchText)
-    const verifiedPatch = await verifyPatchAgainstWorkspace(rootPath, parsedPatch, {
+    const preview = await buildEditingToolApprovalPreview(rootPath, tool?.name, args, {
       signal: hooks.signal,
     })
-    return stringifyOutput({
-      stage: 'patch_progress',
-      phase: 'approval_preview',
-      total: verifiedPatch.changes.length,
-      affectedPaths: verifiedPatch.affectedPaths,
-      files: verifiedPatch.preview,
-      summary: `Patch approval preview ready for ${verifiedPatch.changes.length} file(s).`,
-    })
+    return preview ? stringifyOutput(preview) : undefined
   } catch (error) {
     return stringifyOutput({
-      stage: 'patch_progress',
+      stage: 'edit_transaction_preview',
       phase: 'approval_unavailable',
-      summary: 'Patch preview is unavailable before approval.',
+      operation: 'edit_transaction',
+      sourceOperation: tool?.name,
+      summary: 'Editing preview is unavailable before approval.',
       error: formatToolError(error),
     })
   }
@@ -1549,7 +1554,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     : hooks.settings || {}
 
   if (effectiveTool.approvalCategory && !isAutoApproved(effectiveTool, approvalSettings)) {
-    const approvalPreview = await buildApplyPatchApprovalPreview(
+    const approvalPreview = await buildEditingApprovalPreview(
       effectiveTool,
       effectiveArgs,
       hooks,
@@ -1603,15 +1608,21 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         effectiveTool.run(effectiveArgs, {
           signal: abortController?.signal,
           settings: hooks.settings,
+          appControl: hooks.appControl,
           routeState: hooks.routeState,
           researchMode: hooks.researchMode,
           throwIfAborted() {
             throwIfAborted(abortController?.signal, effectiveTool)
           },
           onUpdate(nextOutput) {
+            const structuredOutput = structuredEventOutputForTool(
+              effectiveTool.name,
+              nextOutput,
+            )
             updateEvent({
               status: 'running',
               output: stringifyOutput(nextOutput),
+              structuredOutput,
             })
           },
           registerTools(nextTools) {
@@ -1625,9 +1636,11 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       abortController?.signal,
       effectiveTool,
     )
+    const structuredOutput = structuredEventOutputForTool(effectiveTool.name, output)
     updateEvent({
       status: 'success',
       output: stringifyOutput(output),
+      structuredOutput,
       error: undefined,
     })
     return stringifyOutput(output)

@@ -11,12 +11,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, Runtime, State};
 use tauri_plugin_shell::ShellExt;
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 const APP_LOG_RETENTION_DAYS: u64 = 14;
+const EDIT_TRANSACTION_SNAPSHOT_KEY_PREFIX: &str = "edit_transaction_snapshot:";
 
 #[derive(Clone, Serialize, Default)]
 struct AgentTaskSnapshot {
@@ -75,6 +76,25 @@ struct AgentTaskHandle {
     child: Arc<Mutex<Option<std::process::Child>>>,
     stdin: Arc<Mutex<ChildStdin>>,
     snapshot: Arc<Mutex<AgentTaskSnapshot>>,
+}
+
+#[derive(Clone, Deserialize)]
+struct EditTransactionSnapshot {
+    #[serde(rename = "transactionId")]
+    transaction_id: String,
+    changes: Vec<EditSnapshotChange>,
+}
+
+#[derive(Clone, Deserialize)]
+struct EditSnapshotChange {
+    kind: String,
+    path: String,
+    #[serde(rename = "destinationPath")]
+    destination_path: Option<String>,
+    #[serde(rename = "oldContent")]
+    old_content: Option<String>,
+    #[serde(rename = "newContent")]
+    new_content: Option<String>,
 }
 
 #[derive(Default)]
@@ -1576,6 +1596,117 @@ fn upsert_kv(connection: &Connection, key: &str, value: &serde_json::Value) -> R
     Ok(())
 }
 
+fn edit_transaction_snapshot_key(transaction_id: &str) -> String {
+    format!("{EDIT_TRANSACTION_SNAPSHOT_KEY_PREFIX}{transaction_id}")
+}
+
+fn store_edit_transaction_snapshot<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let snapshot: EditTransactionSnapshot = serde_json::from_value(payload.clone())
+        .map_err(|error| format!("Invalid edit transaction snapshot: {error}"))?;
+    if snapshot.transaction_id.trim().is_empty() {
+        return Err("Missing edit transaction id.".into());
+    }
+
+    let connection = open_app_db(app)?;
+    upsert_kv(
+        &connection,
+        &edit_transaction_snapshot_key(&snapshot.transaction_id),
+        payload,
+    )?;
+    Ok(serde_json::json!({
+        "transactionId": snapshot.transaction_id,
+        "stored": true,
+    }))
+}
+
+fn load_edit_transaction_snapshot<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    transaction_id: &str,
+) -> Result<EditTransactionSnapshot, String> {
+    let connection = open_app_db(app)?;
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM app_kv WHERE key = ?1",
+            params![edit_transaction_snapshot_key(transaction_id)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load edit transaction snapshot: {error}"))?;
+    let value = parse_json_column(raw);
+    serde_json::from_value(value)
+        .map_err(|error| format!("Invalid stored edit transaction snapshot: {error}"))
+}
+
+fn write_edit_snapshot_file(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create directory {}: {error}", parent.display()))?;
+    }
+    fs::write(path, content)
+        .map_err(|error| format!("Failed to write file {}: {error}", path.display()))
+}
+
+fn remove_edit_snapshot_file(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+            .map_err(|error| format!("Failed to remove directory {}: {error}", path.display()))
+    } else {
+        fs::remove_file(path)
+            .map_err(|error| format!("Failed to remove file {}: {error}", path.display()))
+    }
+}
+
+fn apply_edit_snapshot_change(change: &EditSnapshotChange, target_after: bool) -> Result<(), String> {
+    let source_path = PathBuf::from(&change.path);
+    let destination_path = change.destination_path.as_ref().map(PathBuf::from);
+    let old_content = change.old_content.as_deref().unwrap_or("");
+    let new_content = change.new_content.as_deref().unwrap_or("");
+
+    match (change.kind.as_str(), target_after) {
+        ("add", true) => write_edit_snapshot_file(&source_path, new_content),
+        ("add", false) => remove_edit_snapshot_file(&source_path),
+        ("delete", true) => remove_edit_snapshot_file(&source_path),
+        ("delete", false) => write_edit_snapshot_file(&source_path, old_content),
+        ("move", true) => {
+            let destination = destination_path
+                .as_ref()
+                .ok_or_else(|| "Move snapshot is missing destinationPath.".to_string())?;
+            write_edit_snapshot_file(destination, new_content)?;
+            remove_edit_snapshot_file(&source_path)
+        }
+        ("move", false) => {
+            if let Some(destination) = destination_path.as_ref() {
+                remove_edit_snapshot_file(destination)?;
+            }
+            write_edit_snapshot_file(&source_path, old_content)
+        }
+        (_, true) => write_edit_snapshot_file(&source_path, new_content),
+        (_, false) => write_edit_snapshot_file(&source_path, old_content),
+    }
+}
+
+fn apply_edit_transaction_snapshot(
+    snapshot: &EditTransactionSnapshot,
+    target_after: bool,
+) -> Result<(), String> {
+    if target_after {
+        for change in &snapshot.changes {
+            apply_edit_snapshot_change(change, true)?;
+        }
+    } else {
+        for change in snapshot.changes.iter().rev() {
+            apply_edit_snapshot_change(change, false)?;
+        }
+    }
+    Ok(())
+}
+
 fn load_settings_value<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<serde_json::Value, String> {
     let connection = open_app_db(app)?;
     let settings_json: Option<String> = connection
@@ -1611,6 +1742,7 @@ fn handle_bridge_app_action<R: Runtime>(
             emit_settings_updated(app)?;
             Ok(settings)
         }
+        "record_edit_transaction_snapshot" => store_edit_transaction_snapshot(app, payload),
         "ensure_aura_home" => {
             let aura = ensure_aura_layout(app)?;
             serde_json::to_value(aura)
@@ -3283,6 +3415,40 @@ fn read_text_file(file_path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn toggle_edit_transaction_snapshots<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    transaction_ids: Vec<String>,
+    target_state: String,
+) -> Result<serde_json::Value, String> {
+    let target_after = match target_state.as_str() {
+        "after" => true,
+        "before" => false,
+        _ => return Err("targetState must be either before or after.".into()),
+    };
+    let snapshots = transaction_ids
+        .iter()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| load_edit_transaction_snapshot(&app, id))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if target_after {
+        for snapshot in &snapshots {
+            apply_edit_transaction_snapshot(snapshot, true)?;
+        }
+    } else {
+        for snapshot in snapshots.iter().rev() {
+            apply_edit_transaction_snapshot(snapshot, false)?;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "targetState": target_state,
+        "transactionIds": transaction_ids,
+        "ok": true,
+    }))
+}
+
+#[tauri::command]
 fn ensure_aura_home<R: Runtime>(app: tauri::AppHandle<R>) -> Result<AuraHomeState, String> {
     ensure_aura_layout(&app)
 }
@@ -3722,6 +3888,7 @@ fn main() {
             write_aura_file,
             read_workspace_tree,
             read_text_file,
+            toggle_edit_transaction_snapshots,
             read_image_preview,
             open_path_in_default_app,
             create_session_workspace,

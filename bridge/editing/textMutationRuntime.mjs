@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createStructuredError } from '../runtimeErrors.mjs'
-import { verifyWorkspaceTextMutation } from './fileVerification.mjs'
+import { applyEditingTransaction } from './editingTransaction.mjs'
 
 async function pathExists(targetPath) {
   try {
@@ -219,59 +219,69 @@ function looksLikeLineNumberedContent(content) {
   return meaningfulLines.every(line => /^(?:L)?\d+:\s?/.test(line))
 }
 
-export async function applyWriteFileMutation(targetPath, content, runtime = {}) {
-  runtime.throwIfAborted?.()
-  emitMutationEvent(runtime, {
-    stage: 'text_mutation_begin',
-    operation: 'write_file',
-    path: targetPath,
-  })
-
-  const existedBefore = await pathExists(targetPath)
-  const beforeContent = existedBefore ? await fs.readFile(targetPath, 'utf8') : ''
-  runtime.throwIfAborted?.()
-  await fs.mkdir(path.dirname(targetPath), { recursive: true })
-  await fs.writeFile(targetPath, content, 'utf8')
-
-  const verification = await verifyWorkspaceTextMutation(targetPath, {
-    existedBefore,
-    expectedContent: content,
-    beforeContent,
-  })
-
-  const result = {
-    operation: 'write_file',
-    ...verification,
+function splitOptionsAndRuntime(optionsOrRuntime = {}, runtimeArg) {
+  if (runtimeArg) {
+    return {
+      options: optionsOrRuntime || {},
+      runtime: runtimeArg,
+    }
   }
-
-  emitMutationEvent(runtime, {
-    stage: 'text_mutation_end',
-    operation: 'write_file',
-    path: targetPath,
-    verified: result.verified === true,
-    bytes: result.bytes,
-  })
-
-  return result
+  const value = optionsOrRuntime || {}
+  const looksLikeRuntime =
+    typeof value.onUpdate === 'function' ||
+    typeof value.throwIfAborted === 'function' ||
+    value.signal
+  return looksLikeRuntime
+    ? {
+        options: {},
+        runtime: value,
+      }
+    : {
+        options: value,
+        runtime: {},
+      }
 }
 
-export async function applyReplaceLineRangeMutation(
+function displayPathFor(targetPath, options = {}) {
+  return typeof options.toolPath === 'string' && options.toolPath.trim()
+    ? options.toolPath.trim()
+    : targetPath
+}
+
+export async function prepareWriteFileTransaction(targetPath, content, options = {}) {
+  const existedBefore = await pathExists(targetPath)
+  const beforeContent = existedBefore ? await fs.readFile(targetPath, 'utf8') : ''
+  const displayPath = displayPathFor(targetPath, options)
+  return {
+    operation: 'write_file',
+    summary: `${existedBefore ? 'updated' : 'added'} ${displayPath}`,
+    changes: [
+      {
+        kind: existedBefore ? 'update' : 'add',
+        path: targetPath,
+        relativePath: displayPath,
+        oldContent: beforeContent,
+        newContent: content,
+      },
+    ],
+  }
+}
+
+export async function applyWriteFileMutation(targetPath, content, optionsOrRuntime = {}, runtimeArg) {
+  const { options, runtime } = splitOptionsAndRuntime(optionsOrRuntime, runtimeArg)
+  runtime.throwIfAborted?.()
+  const transaction = await prepareWriteFileTransaction(targetPath, content, options)
+  runtime.throwIfAborted?.()
+  return applyEditingTransaction(transaction, runtime)
+}
+
+export async function prepareReplaceLineRangeTransaction(
   targetPath,
   startLine,
   endLine,
   newText,
   options = {},
-  runtime = {},
 ) {
-  runtime.throwIfAborted?.()
-  emitMutationEvent(runtime, {
-    stage: 'text_mutation_begin',
-    operation: 'replace_line_range',
-    path: targetPath,
-    startLine,
-    endLine,
-  })
-
   const content = await fs.readFile(targetPath, 'utf8')
   const replacement = applyLineRangeReplacement(
     content,
@@ -283,37 +293,79 @@ export async function applyReplaceLineRangeMutation(
       toolPath: options.toolPath,
     },
   )
-  runtime.throwIfAborted?.()
-  await fs.writeFile(targetPath, replacement.nextContent, 'utf8')
-
-  const verification = await verifyWorkspaceTextMutation(targetPath, {
-    existedBefore: true,
-    expectedContent: replacement.nextContent,
-    beforeContent: content,
-  })
-
-  const result = {
+  const displayPath = displayPathFor(targetPath, options)
+  return {
     operation: 'replace_line_range',
-    path: targetPath,
-    startLine: replacement.startLine,
-    endLine: replacement.endLine,
-    replacedLineCount: replacement.replacedLineCount,
-    insertedLineCount: replacement.insertedLineCount,
-    beforeLength: replacement.beforeLength,
-    afterLength: replacement.afterLength,
-    ...verification,
+    summary: `replaced lines ${replacement.startLine}-${replacement.endLine} in ${displayPath}`,
+    changes: [
+      {
+        kind: 'update',
+        path: targetPath,
+        relativePath: displayPath,
+        oldContent: content,
+        newContent: replacement.nextContent,
+      },
+    ],
+    resultFields: {
+      path: targetPath,
+      startLine: replacement.startLine,
+      endLine: replacement.endLine,
+      replacedLineCount: replacement.replacedLineCount,
+      insertedLineCount: replacement.insertedLineCount,
+      beforeLength: replacement.beforeLength,
+      afterLength: replacement.afterLength,
+    },
   }
+}
 
-  emitMutationEvent(runtime, {
-    stage: 'text_mutation_end',
-    operation: 'replace_line_range',
-    path: targetPath,
-    verified: result.verified === true,
-    startLine: result.startLine,
-    endLine: result.endLine,
-  })
+export async function applyReplaceLineRangeMutation(
+  targetPath,
+  startLine,
+  endLine,
+  newText,
+  options = {},
+  runtime = {},
+) {
+  runtime.throwIfAborted?.()
+  const transaction = await prepareReplaceLineRangeTransaction(
+    targetPath,
+    startLine,
+    endLine,
+    newText,
+    options,
+  )
+  runtime.throwIfAborted?.()
+  return applyEditingTransaction(transaction, runtime)
+}
 
-  return result
+export async function prepareEditFileTransaction(
+  targetPath,
+  oldText,
+  newText,
+  options = {},
+) {
+  const content = await fs.readFile(targetPath, 'utf8')
+  const replacement = applyExactTextReplacement(content, oldText, newText, options)
+  const displayPath = displayPathFor(targetPath, options)
+  return {
+    operation: 'edit_file',
+    summary: `edited ${displayPath}`,
+    changes: [
+      {
+        kind: 'update',
+        path: targetPath,
+        relativePath: displayPath,
+        oldContent: content,
+        newContent: replacement.nextContent,
+      },
+    ],
+    resultFields: {
+      path: targetPath,
+      replacedCount: replacement.replacedCount,
+      beforeLength: replacement.beforeLength,
+      afterLength: replacement.afterLength,
+    },
+  }
 }
 
 export async function applyEditFileMutation(
@@ -324,55 +376,25 @@ export async function applyEditFileMutation(
   runtime = {},
 ) {
   runtime.throwIfAborted?.()
-  emitMutationEvent(runtime, {
-    stage: 'text_mutation_begin',
-    operation: 'edit_file',
-    path: targetPath,
-  })
-
-  const content = await fs.readFile(targetPath, 'utf8')
-  const replacement = applyExactTextReplacement(content, oldText, newText, options)
+  const transaction = await prepareEditFileTransaction(
+    targetPath,
+    oldText,
+    newText,
+    options,
+  )
   runtime.throwIfAborted?.()
-  await fs.writeFile(targetPath, replacement.nextContent, 'utf8')
-
-  const verification = await verifyWorkspaceTextMutation(targetPath, {
-    existedBefore: true,
-    expectedContent: replacement.nextContent,
-    beforeContent: content,
-  })
-
-  const result = {
-    operation: 'edit_file',
-    path: targetPath,
-    replacedCount: replacement.replacedCount,
-    beforeLength: replacement.beforeLength,
-    afterLength: replacement.afterLength,
-    ...verification,
-  }
-
-  emitMutationEvent(runtime, {
-    stage: 'text_mutation_end',
-    operation: 'edit_file',
-    path: targetPath,
-    verified: result.verified === true,
-    replacedCount: result.replacedCount,
-  })
-
-  return result
+  return applyEditingTransaction(transaction, runtime)
 }
 
-export async function applyMultiEditFileMutation(targetPath, edits, runtime = {}) {
-  runtime.throwIfAborted?.()
+export async function prepareMultiEditFileTransaction(
+  targetPath,
+  edits,
+  options = {},
+  runtime = {},
+) {
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new Error('edits must contain at least one replacement.')
   }
-
-  emitMutationEvent(runtime, {
-    stage: 'text_mutation_begin',
-    operation: 'multi_edit_file',
-    path: targetPath,
-    totalEdits: edits.length,
-  })
 
   const originalContent = await fs.readFile(targetPath, 'utf8')
   let nextContent = originalContent
@@ -397,7 +419,7 @@ export async function applyMultiEditFileMutation(targetPath, edits, runtime = {}
       afterLength: replacement.afterLength,
     })
     emitMutationEvent(runtime, {
-      stage: 'text_mutation_progress',
+      stage: 'edit_transaction_prepare_progress',
       operation: 'multi_edit_file',
       path: targetPath,
       completedEdits: index + 1,
@@ -405,30 +427,42 @@ export async function applyMultiEditFileMutation(targetPath, edits, runtime = {}
       replacedCount: replacement.replacedCount,
     })
   }
+  const displayPath = displayPathFor(targetPath, options)
 
-  runtime.throwIfAborted?.()
-  await fs.writeFile(targetPath, nextContent, 'utf8')
-  const verification = await verifyWorkspaceTextMutation(targetPath, {
-    existedBefore: true,
-    expectedContent: nextContent,
-    beforeContent: originalContent,
-  })
-
-  const result = {
+  return {
     operation: 'multi_edit_file',
-    path: targetPath,
-    editsApplied: results.length,
-    results,
-    ...verification,
+    summary: `applied ${results.length} edits to ${displayPath}`,
+    changes: [
+      {
+        kind: 'update',
+        path: targetPath,
+        relativePath: displayPath,
+        oldContent: originalContent,
+        newContent: nextContent,
+      },
+    ],
+    resultFields: {
+      path: targetPath,
+      editsApplied: results.length,
+      results,
+    },
   }
+}
 
-  emitMutationEvent(runtime, {
-    stage: 'text_mutation_end',
-    operation: 'multi_edit_file',
-    path: targetPath,
-    verified: result.verified === true,
-    editsApplied: result.editsApplied,
-  })
-
-  return result
+export async function applyMultiEditFileMutation(
+  targetPath,
+  edits,
+  optionsOrRuntime = {},
+  runtimeArg,
+) {
+  const { options, runtime } = splitOptionsAndRuntime(optionsOrRuntime, runtimeArg)
+  runtime.throwIfAborted?.()
+  const transaction = await prepareMultiEditFileTransaction(
+    targetPath,
+    edits,
+    options,
+    runtime,
+  )
+  runtime.throwIfAborted?.()
+  return applyEditingTransaction(transaction, runtime)
 }

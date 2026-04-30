@@ -98,3 +98,33 @@ test('artifact verification can verify shell-produced office outputs', () => {
     'executed_verified',
   )
 })
+
+test('structured tool output provides verification even when display output is truncated', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'apply_patch',
+      source: 'builtin',
+      status: 'success',
+      output: '{"verified":true,\n...<truncated>',
+      structuredOutput: {
+        verified: true,
+        files: [
+          {
+            path: 'src/App.tsx',
+            exists: true,
+            verified: true,
+            readBackOk: true,
+            sha256: 'b'.repeat(64),
+          },
+        ],
+      },
+    },
+  ])
+
+  assert.equal(evidence.hasVerifiedEvidence, true)
+  assert.equal(evidence.hasFileVerification, true)
+  assert.equal(
+    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    'executed_verified',
+  )
+})

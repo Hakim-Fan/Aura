@@ -559,5 +559,3 @@ patch fail
 剩余后续大项
 
 DOCX / PPT / Excel 从“产物验证”升级到真正领域级读写 runtime。
-
-所有编辑入口进一步收束为统一 editing transaction：审批、预览、写入、验收完全统一。

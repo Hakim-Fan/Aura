@@ -350,19 +350,11 @@ export function SettingsWindowApp({ initialTab }: Props) {
     }
   }
 
-  async function handleApprovalSettingChange<K extends keyof AgentSettings>(
+  function handleApprovalSettingChange<K extends keyof AgentSettings>(
     key: K,
     value: AgentSettings[K],
   ) {
-    const nextSettings = {
-      ...draftSettings,
-      [key]: value,
-    }
-    setDraftSettings(nextSettings)
-    setSavedSettings(cloneSettings(nextSettings))
-    setSaveState('saved')
-    await saveSettingsAndAwaitPersistence(nextSettings)
-    await broadcastSettingsUpdated()
+    handleSettingsChange(key, value)
   }
 
   function updateLightpandaSettings(patch: Partial<AgentSettings['browser']['lightpanda']>) {
@@ -1830,7 +1822,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   <input
                     checked={draftSettings[item.key as keyof AgentSettings] as boolean}
                     onChange={event =>
-                      void handleApprovalSettingChange(
+                      handleApprovalSettingChange(
                         item.key as keyof AgentSettings,
                         event.target.checked,
                       )
@@ -1846,7 +1838,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
               ))}
             </div>
             <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-70">
-              这组开关会立即生效并同步到主窗口。注意: `Shell` 只覆盖命令执行，文件写入和桌面交互仍按各自开关审批。
+              这组开关会在保存后同步到主窗口。注意: `Shell` 只覆盖命令执行，文件写入和桌面交互仍按各自开关审批。
             </p>
           </section>
 

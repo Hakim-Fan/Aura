@@ -364,6 +364,84 @@ export async function searchWorkspaceCode(query, target, cwd, options = {}) {
   })
 }
 
+function truncateSearchText(value, maxLength) {
+  const text = String(value || '')
+  if (text.length <= maxLength) {
+    return text
+  }
+  return `${text.slice(0, Math.max(0, maxLength))}...<truncated>`
+}
+
+function compactSearchMatch(match, maxTextLength) {
+  const text = typeof match?.text === 'string' ? match.text : ''
+  return {
+    path: match.path,
+    line: match.line,
+    text: truncateSearchText(text, maxTextLength),
+    textTruncated: text.length > maxTextLength || undefined,
+    suggestedRange: match.suggestedRange,
+  }
+}
+
+function buildStructuredSearchPayload(result, options = {}) {
+  const sourceMatches = Array.isArray(result?.matches) ? result.matches : []
+  const matchLimit = Math.max(0, Math.min(sourceMatches.length, options.matchLimit ?? 80))
+  const maxTextLength = Math.max(40, Math.min(500, options.maxTextLength ?? 240))
+  const matches = sourceMatches
+    .slice(0, matchLimit)
+    .map(match => compactSearchMatch(match, maxTextLength))
+  const outputTruncated =
+    matchLimit < sourceMatches.length ||
+    matches.some(match => match.textTruncated === true)
+
+  return {
+    query: result?.query || '',
+    root: result?.root || '.',
+    backend: result?.backend || 'unknown',
+    total: Number.isFinite(result?.total) ? result.total : sourceMatches.length,
+    returnedMatches: matches.length,
+    truncated: result?.truncated === true || outputTruncated,
+    outputTruncated,
+    omittedMatches: Math.max(0, sourceMatches.length - matches.length),
+    matches,
+    suggestedRanges: dedupeSuggestedRanges(matches),
+  }
+}
+
+export function formatStructuredSearchResultJson(result, options = {}) {
+  const maxLength = Math.max(2000, Math.min(20000, Math.floor(Number(options.maxLength) || 11000)))
+  const sourceMatches = Array.isArray(result?.matches) ? result.matches : []
+  const initialMatchLimit = Math.min(sourceMatches.length, 80)
+  const textLimits = [240, 160, 100, 60, 40]
+
+  for (const maxTextLength of textLimits) {
+    let matchLimit = initialMatchLimit
+    while (matchLimit >= 0) {
+      const json = JSON.stringify(
+        buildStructuredSearchPayload(result, {
+          matchLimit,
+          maxTextLength,
+        }),
+        null,
+        2,
+      )
+      if (json.length <= maxLength || matchLimit === 0) {
+        return json
+      }
+      matchLimit = Math.floor(matchLimit / 2)
+    }
+  }
+
+  return JSON.stringify(
+    buildStructuredSearchPayload(result, {
+      matchLimit: 0,
+      maxTextLength: 40,
+    }),
+    null,
+    2,
+  )
+}
+
 export function formatSearchResultText(result) {
   const matches = Array.isArray(result?.matches) ? result.matches : []
   if (matches.length === 0) {

@@ -137,7 +137,7 @@ test('invokeTool falls back to task-start settings when live settings are unavai
   assert.match(output, /"ok": true/)
 })
 
-test('invokeTool includes apply_patch diff preview in approval requests', async () => {
+test('invokeTool includes editing transaction preview in apply_patch approval requests', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-apply-patch-approval-'))
   await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
   await fs.writeFile(path.join(workspace, 'src', 'sample.txt'), 'old\n', 'utf8')
@@ -176,11 +176,54 @@ test('invokeTool includes apply_patch diff preview in approval requests', async 
   assert.match(output, /denied by the user/)
   assert.equal(await fs.readFile(path.join(workspace, 'src', 'sample.txt'), 'utf8'), 'old\n')
   const preview = JSON.parse(approvalRequest.output)
-  assert.equal(preview.stage, 'patch_progress')
+  assert.equal(preview.stage, 'edit_transaction_preview')
   assert.equal(preview.phase, 'approval_preview')
+  assert.equal(preview.sourceOperation, 'apply_patch')
   assert.deepEqual(preview.affectedPaths, ['src/sample.txt'])
   assert.equal(preview.files[0].path, 'src/sample.txt')
   assert.ok(Array.isArray(preview.files[0].diffPreview.lines))
+})
+
+test('invokeTool includes editing transaction preview for exact edit approval requests', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-edit-approval-'))
+  await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
+  await fs.writeFile(path.join(workspace, 'src', 'sample.txt'), 'old\n', 'utf8')
+  const editFile = createBuiltinTools({ cwd: workspace }).find(
+    tool => tool.name === 'edit_file',
+  )
+  let approvalRequest
+
+  const output = await invokeTool(
+    editFile,
+    {
+      path: 'src/sample.txt',
+      oldText: 'old',
+      newText: 'new',
+    },
+    [],
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveFileWrite: false,
+        autoApproveShell: true,
+        autoApproveComputerUse: true,
+      },
+      async requestApproval(request) {
+        approvalRequest = request
+        return 'deny'
+      },
+    },
+  )
+
+  assert.match(output, /denied by the user/)
+  assert.equal(await fs.readFile(path.join(workspace, 'src', 'sample.txt'), 'utf8'), 'old\n')
+  const preview = JSON.parse(approvalRequest.output)
+  assert.equal(preview.stage, 'edit_transaction_preview')
+  assert.equal(preview.phase, 'approval_preview')
+  assert.equal(preview.sourceOperation, 'edit_file')
+  assert.deepEqual(preview.affectedPaths, ['src/sample.txt'])
+  assert.equal(preview.files[0].diffStat.addedLines, 1)
+  assert.equal(preview.files[0].diffStat.removedLines, 1)
 })
 
 test('invokeTool blocks shell scripts that write source files', async () => {
@@ -369,6 +412,44 @@ test('apply_patch accepts compatibility input aliases', async () => {
   assert.equal(await fs.readFile(path.join(workspace, 'src', 'sample.txt'), 'utf8'), 'new\n')
 })
 
+test('invokeTool keeps structured edit output when display output is truncated', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-apply-patch-structured-'))
+  await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
+  const patch = [
+    '*** Begin Patch',
+    ...Array.from({ length: 80 }, (_, index) => [
+      `*** Add File: src/file-${index}.txt`,
+      '+alpha',
+      '+beta',
+      '+gamma',
+    ]).flat(),
+    '*** End Patch',
+  ].join('\n')
+  const applyPatch = createBuiltinTools({ cwd: workspace }).find(
+    tool => tool.name === 'apply_patch',
+  )
+  const toolEvents = []
+
+  await invokeTool(
+    applyPatch,
+    { patch },
+    toolEvents,
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: true,
+      },
+    },
+  )
+
+  assert.equal(toolEvents.length, 1)
+  assert.match(toolEvents[0].output, /<truncated>/)
+  assert.equal(toolEvents[0].structuredOutput.verified, true)
+  assert.equal(toolEvents[0].structuredOutput.preview.length, 80)
+})
+
 test('search_code returns suggested read_file ranges for matches', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-search-code-'))
   await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
@@ -399,6 +480,34 @@ test('search_code returns suggested read_file ranges for matches', async () => {
     mode: 'edit_context',
   })
   assert.deepEqual(parsed.suggestedRanges[0], parsed.matches[0].suggestedRange)
+})
+
+test('search_code structured output stays valid JSON when compacted', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-search-code-compact-'))
+  await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
+  const longLine = `${'x'.repeat(900)} targetCompact ${'y'.repeat(900)}`
+  await fs.writeFile(
+    path.join(workspace, 'src', 'large.ts'),
+    Array.from({ length: 120 }, (_, index) => `${index}: ${longLine}`).join('\n'),
+    'utf8',
+  )
+
+  const searchCode = createBuiltinTools({ cwd: workspace }).find(
+    tool => tool.name === 'search_code',
+  )
+  const output = await searchCode.run({
+    query: 'targetCompact',
+    path: 'src',
+    maxMatches: 120,
+  })
+  const parsed = JSON.parse(output)
+
+  assert.ok(output.length <= 12000)
+  assert.equal(parsed.query, 'targetCompact')
+  assert.equal(parsed.total, 120)
+  assert.equal(parsed.outputTruncated, true)
+  assert.ok(parsed.returnedMatches < parsed.total)
+  assert.ok(Array.isArray(parsed.suggestedRanges))
 })
 
 test('verify_artifact validates office container evidence', async () => {

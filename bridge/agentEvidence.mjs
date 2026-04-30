@@ -64,6 +64,10 @@ function isDeniedToolEvent(event) {
 }
 
 function parseStructuredOutput(output) {
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    return output
+  }
+
   if (typeof output !== 'string' || !output.trim()) {
     return null
   }
@@ -171,7 +175,7 @@ function collectProducedEvidence(event, effectTypes) {
   const producedEvidence = []
   const name = normalizeToolName(event?.name)
   const denied = isDeniedToolEvent(event)
-  const structuredOutput = parseStructuredOutput(event?.output)
+  const structuredOutput = parseStructuredOutput(event?.structuredOutput || event?.output)
   const artifactVerification = summarizeArtifactVerification(structuredOutput)
 
   if (denied) {
@@ -347,7 +351,9 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     const producedEvidence = collectProducedEvidence(event, effectTypes)
     const denied = isDeniedToolEvent(event)
     const verificationLevel = inferVerificationLevel(event, effectTypes, producedEvidence)
-    const artifactVerification = summarizeArtifactVerification(parseStructuredOutput(event?.output))
+    const artifactVerification = summarizeArtifactVerification(
+      parseStructuredOutput(event?.structuredOutput || event?.output),
+    )
     verifiedArtifactCount += artifactVerification.verifiedCount
     for (const artifactPath of artifactVerification.paths) {
       artifactPaths.add(artifactPath)

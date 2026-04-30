@@ -80,6 +80,23 @@ test('applyPatchInWorkspace applies add, update, move, and delete with progress 
     assert.ok(
       updates.some(
         update =>
+          update.stage === 'edit_transaction_preview' &&
+          update.sourceOperation === 'apply_patch' &&
+          Array.isArray(update.files) &&
+          update.files.length === 4,
+      ),
+    )
+    assert.ok(
+      updates.some(
+        update =>
+          update.stage === 'edit_transaction_end' &&
+          update.sourceOperation === 'apply_patch' &&
+          update.verified === true,
+      ),
+    )
+    assert.ok(
+      updates.some(
+        update =>
           update.stage === 'patch_progress' &&
           update.phase === 'preview' &&
           Array.isArray(update.files) &&

@@ -47,6 +47,7 @@ import {
   WebSearchEventCard,
 } from '../components/WebToolEventCards'
 import { formatConversationTimestamp } from '../lib/sessionMeta'
+import { toggleEditTransactionSnapshots } from '../lib/workspace'
 import type {
   AgentExecutionPhase,
   AgentSettings,
@@ -236,6 +237,10 @@ function parseJsonOutput(value?: string) {
   } catch {
     return null
   }
+}
+
+function readEventStructuredOutput(event: MessageEvent) {
+  return isRecord(event.structuredOutput) ? event.structuredOutput : parseJsonOutput(event.output)
 }
 
 const ANSI_OSC_PATTERN = /\u001B\][\s\S]*?(?:\u0007|\u001B\\)/g
@@ -654,7 +659,7 @@ function isSearchControllerDecisionEvent(event: MessageEvent) {
     return false
   }
 
-  const parsedOutput = parseJsonOutput(event.output)
+  const parsedOutput = readEventStructuredOutput(event)
   return Boolean(parsedOutput && isSearchControllerDecisionOutput(parsedOutput))
 }
 
@@ -1544,6 +1549,14 @@ function SearchControllerDecisionCard({
   )
 }
 
+const EDITING_PREVIEW_TOOL_NAMES = new Set([
+  'apply_patch',
+  'write_file',
+  'edit_file',
+  'multi_edit_file',
+  'replace_line_range',
+])
+
 function hasPatchPreviewOutput(output: Record<string, unknown> | null) {
   if (!output) {
     return false
@@ -1552,7 +1565,7 @@ function hasPatchPreviewOutput(output: Record<string, unknown> | null) {
     return true
   }
   return (
-    output.stage === 'patch_progress' &&
+    (output.stage === 'patch_progress' || output.stage === 'edit_transaction_preview') &&
     (output.phase === 'preview' ||
       output.phase === 'approval_preview' ||
       output.phase === 'streaming_preview' ||
@@ -1573,7 +1586,7 @@ function readPatchNumber(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
-const PATCH_COMPACT_DIFF_LINE_LIMIT = 36
+const FINAL_CHANGE_FILE_LIMIT = 12
 
 function PatchDiffLine({ line }: { line: Record<string, unknown> }) {
   const type = typeof line.type === 'string' ? line.type : 'context'
@@ -1608,6 +1621,265 @@ function PatchDiffLine({ line }: { line: Record<string, unknown> }) {
   )
 }
 
+type FinalChangedFile = {
+  path: string
+  kind: string
+  addedLines: number
+  removedLines: number
+  diffLines: Record<string, unknown>[]
+  truncated: boolean
+  eventCount: number
+}
+
+type FinalChangeSummary = {
+  files: FinalChangedFile[]
+  transactionIds: string[]
+}
+
+function readFinalChangeFilesFromOutput(output: Record<string, unknown>) {
+  const rawFiles = Array.isArray(output.preview)
+    ? output.preview
+    : Array.isArray(output.files)
+      ? output.files
+      : []
+
+  return rawFiles.filter(isRecord)
+}
+
+function normalizeFinalChangedFile(
+  file: Record<string, unknown>,
+  index: number,
+): FinalChangedFile | null {
+  const pathLabel =
+    typeof file.path === 'string'
+      ? file.path
+      : typeof file.relativePath === 'string'
+        ? file.relativePath
+        : ''
+  if (!pathLabel) {
+    return null
+  }
+
+  const diffStat = isRecord(file.diffStat) ? file.diffStat : {}
+  const diffPreview = isRecord(file.diffPreview) ? file.diffPreview : null
+  const diffLines = Array.isArray(diffPreview?.lines)
+    ? diffPreview.lines.filter(isRecord)
+    : []
+  const addedLines = readPatchNumber(diffStat.addedLines)
+  const removedLines = readPatchNumber(diffStat.removedLines)
+  const changed = file.changed !== false
+
+  if (!changed && addedLines === 0 && removedLines === 0 && diffLines.length === 0) {
+    return null
+  }
+
+  return {
+    path: pathLabel,
+    kind: typeof file.kind === 'string' ? file.kind : index === 0 ? 'update' : 'edit',
+    addedLines,
+    removedLines,
+    diffLines,
+    truncated: diffPreview?.truncated === true,
+    eventCount: 1,
+  }
+}
+
+function mergeFinalChangedFile(
+  current: FinalChangedFile,
+  next: FinalChangedFile,
+): FinalChangedFile {
+  const separator =
+    current.diffLines.length > 0 && next.diffLines.length > 0
+      ? [
+          {
+            type: 'truncated',
+            text: `下一次编辑：${next.path}`,
+          },
+        ]
+      : []
+
+  return {
+    ...current,
+    kind: current.kind === next.kind ? current.kind : 'update',
+    addedLines: current.addedLines + next.addedLines,
+    removedLines: current.removedLines + next.removedLines,
+    diffLines: [...current.diffLines, ...separator, ...next.diffLines],
+    truncated: current.truncated || next.truncated,
+    eventCount: current.eventCount + next.eventCount,
+  }
+}
+
+function collectFinalChangeSummary(events: MessageEvent[] = []): FinalChangeSummary {
+  const byPath = new Map<string, FinalChangedFile>()
+  const transactionIds: string[] = []
+
+  for (const event of events) {
+    if (
+      event.kind === 'approval' ||
+      event.status !== 'success' ||
+      !EDITING_PREVIEW_TOOL_NAMES.has(event.toolName || '')
+    ) {
+      continue
+    }
+
+    const parsedOutput = readEventStructuredOutput(event)
+    if (!parsedOutput) {
+      continue
+    }
+
+    const transactionId =
+      parsedOutput.reversible === true && typeof parsedOutput.transactionId === 'string'
+        ? parsedOutput.transactionId
+        : ''
+    if (transactionId && !transactionIds.includes(transactionId)) {
+      transactionIds.push(transactionId)
+    }
+
+    for (const [index, file] of readFinalChangeFilesFromOutput(parsedOutput).entries()) {
+      const normalized = normalizeFinalChangedFile(file, index)
+      if (!normalized) {
+        continue
+      }
+
+      const existing = byPath.get(normalized.path)
+      byPath.set(
+        normalized.path,
+        existing ? mergeFinalChangedFile(existing, normalized) : normalized,
+      )
+    }
+  }
+
+  return {
+    files: Array.from(byPath.values()).slice(0, FINAL_CHANGE_FILE_LIMIT),
+    transactionIds,
+  }
+}
+
+function FinalChangedFilesCard({ summary }: { summary: FinalChangeSummary }) {
+  const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({})
+  const [changeState, setChangeState] = useState<'applied' | 'reverted'>('applied')
+  const [toggleError, setToggleError] = useState('')
+  const [isToggling, setIsToggling] = useState(false)
+  const visibleFiles = summary.files.slice(0, FINAL_CHANGE_FILE_LIMIT)
+  const canToggle = summary.transactionIds.length > 0
+  const totalAdded = visibleFiles.reduce((sum, file) => sum + file.addedLines, 0)
+  const totalRemoved = visibleFiles.reduce((sum, file) => sum + file.removedLines, 0)
+
+  if (visibleFiles.length === 0) {
+    return null
+  }
+
+  async function handleToggleChangeSet() {
+    if (!canToggle || isToggling) {
+      return
+    }
+
+    const targetState = changeState === 'applied' ? 'before' : 'after'
+    setIsToggling(true)
+    setToggleError('')
+    try {
+      await toggleEditTransactionSnapshots(summary.transactionIds, targetState)
+      setChangeState(targetState === 'before' ? 'reverted' : 'applied')
+    } catch (caught) {
+      setToggleError(caught instanceof Error ? caught.message : '切换变更状态失败。')
+    } finally {
+      setIsToggling(false)
+    }
+  }
+
+  return (
+    <section className="mt-1 overflow-hidden rounded-xl border border-[rgba(15,23,42,0.08)] bg-white shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.025)] px-3 py-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-13px font-700 text-[var(--text-primary)]">
+            {visibleFiles.length} 个文件已更改
+          </span>
+          <span className="text-12px font-700 text-emerald-600">+{totalAdded}</span>
+          <span className="text-12px font-700 text-red-600">-{totalRemoved}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`rounded-full px-2 py-0.5 text-10px font-700 ${
+            changeState === 'applied'
+              ? 'bg-emerald-50 text-emerald-700'
+              : 'bg-amber-50 text-amber-700'
+          }`}>
+            {changeState === 'applied' ? '已应用' : '已撤销'}
+          </span>
+          {canToggle ? (
+            <button
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[rgba(15,23,42,0.08)] bg-white px-2.5 py-1.5 text-12px font-600 text-[var(--text-primary)] transition-colors hover:bg-[rgba(15,23,42,0.04)] disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={isToggling}
+              onClick={() => void handleToggleChangeSet()}
+              type="button"
+            >
+              <RefreshCw size={13} className={isToggling ? 'animate-spin' : ''} />
+              {changeState === 'applied' ? '撤销' : '应用'}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {toggleError ? (
+        <div className="border-b border-red-100 bg-red-50 px-3 py-2 text-12px text-red-600">
+          {toggleError}
+        </div>
+      ) : null}
+
+      <div className="divide-y divide-[rgba(15,23,42,0.06)]">
+        {visibleFiles.map((file, index) => {
+          const fileKey = `${file.path}-${index}`
+          const isFileExpanded = expandedFiles[fileKey] ?? false
+
+          return (
+            <div key={fileKey} className="bg-white">
+              <button
+                aria-expanded={isFileExpanded}
+                className="flex w-full flex-wrap items-center justify-between gap-2 bg-[rgba(15,23,42,0.035)] px-3 py-2 text-left transition-colors hover:bg-[rgba(15,23,42,0.055)]"
+                onClick={() =>
+                  setExpandedFiles(current => ({
+                    ...current,
+                    [fileKey]: !isFileExpanded,
+                  }))
+                }
+                type="button"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  {isFileExpanded ? (
+                    <ChevronDown size={14} className="shrink-0 text-[var(--text-secondary)]" />
+                  ) : (
+                    <ChevronRight size={14} className="shrink-0 text-[var(--text-secondary)]" />
+                  )}
+                  <span className="min-w-0 truncate text-13px font-600 text-[var(--text-primary)]">
+                    {file.path}
+                  </span>
+                  {file.eventCount > 1 ? (
+                    <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-10px font-700 text-[var(--text-secondary)]">
+                      {file.eventCount} edits
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5 text-12px font-800">
+                  <span className="text-emerald-600">+{file.addedLines}</span>
+                  <span className="text-red-600">-{file.removedLines}</span>
+                </div>
+              </button>
+
+              {isFileExpanded && file.diffLines.length > 0 ? (
+                <div className="border-t border-[rgba(15,23,42,0.04)]">
+                  <div className="max-h-[28rem] overflow-auto font-[SFMono-Regular,Menlo,monospace] text-[12px] leading-5 custom-scrollbar">
+                    {file.diffLines.map((line, lineIndex) => (
+                      <PatchDiffLine key={`${fileKey}-${lineIndex}`} line={line} />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
 function PatchPreviewCard({
   output,
   status,
@@ -1616,7 +1888,6 @@ function PatchPreviewCard({
   status: MessageEvent['status']
 }) {
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({})
-  const [expandedDiffs, setExpandedDiffs] = useState<Record<string, boolean>>({})
   const files = readPatchPreviewFiles(output)
   const affectedPaths = Array.isArray(output.affectedPaths)
     ? output.affectedPaths
@@ -1626,12 +1897,17 @@ function PatchPreviewCard({
   const operations = Array.isArray(output.operations)
     ? output.operations.filter(isRecord).slice(0, 8)
     : []
+  const isEditTransaction = output.stage === 'edit_transaction_preview'
   const summary =
     typeof output.summary === 'string' && output.summary.trim()
       ? output.summary.trim()
       : status === 'running' || status === 'awaiting_approval'
-        ? 'Patch preview ready'
-        : 'Patch applied'
+        ? isEditTransaction
+          ? 'Editing preview ready'
+          : 'Patch preview ready'
+        : isEditTransaction
+          ? 'Editing transaction complete'
+          : 'Patch applied'
 
   if (files.length === 0 && affectedPaths.length === 0) {
     return null
@@ -1641,7 +1917,7 @@ function PatchPreviewCard({
     <div className="mt-2 rounded-xl border border-[rgba(79,123,116,0.12)] bg-[rgba(79,123,116,0.05)] p-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="inline-flex items-center rounded-full bg-white/85 px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
-          Patch
+          {isEditTransaction ? 'Edit' : 'Patch'}
         </span>
         <span className="text-[12px] font-600 text-[var(--text-primary)]">{summary}</span>
         {affectedPaths.length > 0 ? (
@@ -1695,24 +1971,6 @@ function PatchPreviewCard({
             const fileKey = `${pathLabel}-${index}`
             const isFileExpanded =
               expandedFiles[fileKey] ?? (files.length === 1 || index === 0)
-            const isLargeDiff =
-              diffLines.length > PATCH_COMPACT_DIFF_LINE_LIMIT ||
-              diffPreview?.truncated === true
-            const isDiffExpanded = expandedDiffs[fileKey] === true
-            const compactDiffLines =
-              isLargeDiff && !isDiffExpanded
-                ? diffLines.slice(0, PATCH_COMPACT_DIFF_LINE_LIMIT)
-                : diffLines
-            const visibleDiffLines =
-              isLargeDiff &&
-              !isDiffExpanded &&
-              diffPreview?.truncated === true &&
-              !compactDiffLines.some(line => line.type === 'truncated')
-                ? [
-                    ...compactDiffLines,
-                    diffLines.find(line => line.type === 'truncated'),
-                  ].filter(isRecord)
-                : compactDiffLines
 
             return (
               <div
@@ -1762,29 +2020,13 @@ function PatchPreviewCard({
                 {isFileExpanded && diffLines.length > 0 ? (
                   <div className="border-t border-[rgba(15,23,42,0.05)]">
                     <div className="max-h-72 overflow-auto font-[SFMono-Regular,Menlo,monospace] text-[11px] leading-5 custom-scrollbar">
-                      {visibleDiffLines.map((line, lineIndex) => (
+                      {diffLines.map((line, lineIndex) => (
                         <PatchDiffLine
                           key={`${pathLabel}-${index}-${lineIndex}`}
                           line={line}
                         />
                       ))}
                     </div>
-                    {isLargeDiff ? (
-                      <div className="flex justify-end border-t border-[rgba(15,23,42,0.05)] bg-white/75 px-2 py-1.5">
-                        <button
-                          className="rounded-md px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)] transition-colors hover:bg-[rgba(79,123,116,0.08)]"
-                          onClick={() =>
-                            setExpandedDiffs(current => ({
-                              ...current,
-                              [fileKey]: !isDiffExpanded,
-                            }))
-                          }
-                          type="button"
-                        >
-                          {isDiffExpanded ? '收起预览' : '展开更多'}
-                        </button>
-                      </div>
-                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1854,14 +2096,14 @@ function MessageEventCard({
   const isApproval = event.kind === 'approval' && event.status === 'awaiting_approval'
   const isUserInputWait =
     event.kind === 'user_input' && event.status === 'awaiting_user_input'
-  const parsedOutput = parseJsonOutput(event.output)
+  const parsedOutput = readEventStructuredOutput(event)
   const parsedShellSnapshot = isShellLog ? parseShellEventSnapshot(event.output) : null
   const toolName = typeof event.toolName === 'string' ? event.toolName : ''
   const isStructuredWebResearchEvent = toolName === 'web_research' && Boolean(parsedOutput)
   const isStructuredWebSearchEvent = toolName === 'web_search' && Boolean(parsedOutput)
   const isStructuredWebFetchEvent = toolName === 'web_fetch' && Boolean(parsedOutput)
   const isStructuredPatchPreviewEvent =
-    toolName === 'apply_patch' && hasPatchPreviewOutput(parsedOutput)
+    EDITING_PREVIEW_TOOL_NAMES.has(toolName) && hasPatchPreviewOutput(parsedOutput)
   const isSearchControllerDecisionEvent =
     isStructuredWebSearchEvent &&
     parsedOutput &&
@@ -2897,6 +3139,10 @@ function AssistantMessageCard({
     visiblePhaseOutputs,
     message.events || [],
   )
+  const finalChangeSummary = useMemo(
+    () => collectFinalChangeSummary(message.events || []),
+    [message.events],
+  )
   const approvalEvents = executionTimeline.filter(
     (item): item is Extract<ExecutionTimelineItem, { kind: 'event' }> =>
       isExecutionEventItem(item) && isAwaitingUserResponseEvent(item.event),
@@ -3145,6 +3391,10 @@ function AssistantMessageCard({
                 {phaseSummary || '正在整理信息并生成最终回答...'}
               </div>
             )
+          ) : null}
+
+          {!isStreaming && finalChangeSummary.files.length > 0 ? (
+            <FinalChangedFilesCard summary={finalChangeSummary} />
           ) : null}
 
           {shouldShowStatusNotice ? (

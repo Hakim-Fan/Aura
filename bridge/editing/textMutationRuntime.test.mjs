@@ -30,12 +30,25 @@ test('applyWriteFileMutation creates parent directories and verifies the written
     })
 
     assert.equal(result.operation, 'write_file')
+    assert.equal(result.transactionOperation, 'edit_transaction')
     assert.equal(result.verified, true)
     assert.equal(result.created, true)
     assert.equal(await fs.readFile(targetPath, 'utf8'), '# hello\n')
-    assert.deepEqual(
-      updates.map(update => update.stage),
-      ['text_mutation_begin', 'text_mutation_end'],
+    assert.ok(
+      updates.some(
+        update =>
+          update.stage === 'edit_transaction_preview' &&
+          update.sourceOperation === 'write_file' &&
+          Array.isArray(update.files),
+      ),
+    )
+    assert.ok(
+      updates.some(
+        update =>
+          update.stage === 'edit_transaction_end' &&
+          update.sourceOperation === 'write_file' &&
+          update.verified === true,
+      ),
     )
   })
 })
@@ -49,6 +62,7 @@ test('applyEditFileMutation updates the file once and returns structured verific
     const result = await applyEditFileMutation(targetPath, 'beta', 'gamma')
 
     assert.equal(result.operation, 'edit_file')
+    assert.equal(result.transactionOperation, 'edit_transaction')
     assert.equal(result.replacedCount, 1)
     assert.equal(result.verified, true)
     assert.equal(result.changed, true)
@@ -62,6 +76,35 @@ test('applyEditFileMutation updates the file once and returns structured verific
       removedLines: 1,
     })
     assert.equal(await fs.readFile(targetPath, 'utf8'), 'alpha\ngamma\n')
+  })
+})
+
+test('applyEditFileMutation records reversible edit snapshots when app control is available', async () => {
+  await withTempWorkspace(async workspace => {
+    const targetPath = path.join(workspace, 'src', 'file.txt')
+    await fs.mkdir(path.dirname(targetPath), { recursive: true })
+    await fs.writeFile(targetPath, 'alpha\nbeta\n', 'utf8')
+    const snapshots = []
+
+    const result = await applyEditFileMutation(
+      targetPath,
+      'beta',
+      'gamma',
+      {},
+      {
+        async appControl(action, payload) {
+          snapshots.push({ action, payload })
+          return { stored: true }
+        },
+      },
+    )
+
+    assert.equal(result.reversible, true)
+    assert.equal(snapshots.length, 1)
+    assert.equal(snapshots[0].action, 'record_edit_transaction_snapshot')
+    assert.equal(snapshots[0].payload.transactionId, result.transactionId)
+    assert.equal(snapshots[0].payload.changes[0].oldContent, 'alpha\nbeta\n')
+    assert.equal(snapshots[0].payload.changes[0].newContent, 'alpha\ngamma\n')
   })
 })
 
@@ -213,14 +256,22 @@ test('applyMultiEditFileMutation applies all replacements in order and verifies 
     )
 
     assert.equal(result.operation, 'multi_edit_file')
+    assert.equal(result.transactionOperation, 'edit_transaction')
     assert.equal(result.editsApplied, 2)
     assert.equal(result.verified, true)
     assert.equal(await fs.readFile(targetPath, 'utf8'), 'ONE\nTWO\nthree\n')
     assert.ok(
       updates.some(
         update =>
-          update.stage === 'text_mutation_progress' &&
+          update.stage === 'edit_transaction_prepare_progress' &&
           update.completedEdits === 2,
+      ),
+    )
+    assert.ok(
+      updates.some(
+        update =>
+          update.stage === 'edit_transaction_end' &&
+          update.sourceOperation === 'multi_edit_file',
       ),
     )
   })

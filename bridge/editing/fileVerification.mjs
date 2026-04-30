@@ -25,6 +25,14 @@ function splitDiffLines(value) {
   return lines
 }
 
+function compactDiffLineText(value, maxLength = 360) {
+  const text = String(value ?? '')
+  if (text.length <= maxLength) {
+    return text
+  }
+  return `${text.slice(0, maxLength)}... <${text.length - maxLength} char(s) omitted>`
+}
+
 export function buildTextDiffStat(beforeContent, afterContent) {
   const beforeLines = splitDiffLines(beforeContent)
   const afterLines = splitDiffLines(afterContent)
@@ -107,7 +115,7 @@ export function buildTextDiffPreview(beforeContent, afterContent, options = {}) 
       type: 'context',
       oldLine: index + 1,
       newLine: afterContextStart + (index - beforeContextStart) + 1,
-      text: beforeLines[index],
+      text: compactDiffLineText(beforeLines[index]),
     })
   }
 
@@ -115,7 +123,7 @@ export function buildTextDiffPreview(beforeContent, afterContent, options = {}) 
     lines.push({
       type: 'remove',
       oldLine: prefixLength + index + 1,
-      text: removedLines[index],
+      text: compactDiffLineText(removedLines[index]),
     })
   }
 
@@ -123,7 +131,7 @@ export function buildTextDiffPreview(beforeContent, afterContent, options = {}) 
     lines.push({
       type: 'add',
       newLine: prefixLength + index + 1,
-      text: addedLines[index],
+      text: compactDiffLineText(addedLines[index]),
     })
   }
 
@@ -140,7 +148,7 @@ export function buildTextDiffPreview(beforeContent, afterContent, options = {}) 
       type: 'context',
       oldLine: oldIndex + 1,
       newLine: index + 1,
-      text: afterLines[index],
+      text: compactDiffLineText(afterLines[index]),
     })
   }
 

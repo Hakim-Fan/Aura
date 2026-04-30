@@ -114,6 +114,7 @@ export type MessageEvent = {
   status: MessageEventStatus
   input?: string
   output?: string
+  structuredOutput?: Record<string, unknown>
   error?: string
   errorInfo?: RuntimeErrorInfo
 }
@@ -409,6 +410,7 @@ export type ToolEvent = {
   status: 'running' | 'success' | 'error'
   input?: string
   output?: string
+  structuredOutput?: Record<string, unknown>
   error?: string
   errorInfo?: RuntimeErrorInfo
 }

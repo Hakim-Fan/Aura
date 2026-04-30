@@ -1,8 +1,11 @@
 import fs from 'node:fs/promises'
 import { createStructuredError } from '../runtimeErrors.mjs'
 import { resolveWorkspacePath, truncate } from '../utils.mjs'
+import { parsePatch } from './applyPatchParser.mjs'
 import { applyPatchInWorkspace } from './applyPatchTool.mjs'
+import { verifyPatchAgainstWorkspace } from './applyPatchVerifier.mjs'
 import { verifyWorkspaceArtifact } from './artifactRuntime.mjs'
+import { buildEditingTransactionPreview } from './editingTransaction.mjs'
 import {
   detectBinary,
   readTextBlock,
@@ -11,6 +14,7 @@ import {
 } from './readRuntime.mjs'
 import {
   formatSearchResultText,
+  formatStructuredSearchResultJson,
   searchWorkspaceCode,
 } from './searchRuntime.mjs'
 import {
@@ -18,6 +22,10 @@ import {
   applyMultiEditFileMutation,
   applyReplaceLineRangeMutation,
   applyWriteFileMutation,
+  prepareEditFileTransaction,
+  prepareMultiEditFileTransaction,
+  prepareReplaceLineRangeTransaction,
+  prepareWriteFileTransaction,
 } from './textMutationRuntime.mjs'
 import {
   applyPatchToolSpec,
@@ -50,6 +58,81 @@ export function normalizeApplyPatchToolInput(args = {}) {
       'Expected a patch string in args.patch. Also accepts args.input, args.command, or args.content for compatibility.',
     suggestedAction:
       '请传入以 "*** Begin Patch" 开头、以 "*** End Patch" 结尾的 patch 字符串。',
+  })
+}
+
+export async function buildEditingToolTransaction(rootPath, toolName, args = {}, runtime = {}) {
+  if (toolName === 'apply_patch') {
+    const patchText = normalizeApplyPatchToolInput(args)
+    const parsedPatch = parsePatch(patchText)
+    const verifiedPatch = await verifyPatchAgainstWorkspace(rootPath, parsedPatch, runtime)
+    return {
+      operation: 'apply_patch',
+      changes: verifiedPatch.changes,
+      counts: verifiedPatch.counts,
+      affectedPaths: verifiedPatch.affectedPaths,
+      preview: verifiedPatch.preview,
+      summary: verifiedPatch.summary,
+    }
+  }
+
+  if (toolName === 'write_file') {
+    return prepareWriteFileTransaction(
+      resolveWorkspacePath(rootPath, args.path),
+      args.content,
+      {
+        toolPath: args.path,
+      },
+    )
+  }
+
+  if (toolName === 'edit_file') {
+    return prepareEditFileTransaction(
+      resolveWorkspacePath(rootPath, args.path),
+      args.oldText,
+      args.newText,
+      {
+        replaceAll: args.replaceAll,
+        expectedReplacements: args.expectedReplacements,
+        toolPath: args.path,
+      },
+    )
+  }
+
+  if (toolName === 'replace_line_range') {
+    return prepareReplaceLineRangeTransaction(
+      resolveWorkspacePath(rootPath, args.path),
+      args.startLine,
+      args.endLine,
+      args.content,
+      {
+        expectedText: args.expectedText,
+        toolPath: args.path,
+      },
+    )
+  }
+
+  if (toolName === 'multi_edit_file') {
+    return prepareMultiEditFileTransaction(
+      resolveWorkspacePath(rootPath, args.path),
+      args.edits,
+      {
+        toolPath: args.path,
+      },
+      runtime,
+    )
+  }
+
+  return null
+}
+
+export async function buildEditingToolApprovalPreview(rootPath, toolName, args = {}, runtime = {}) {
+  const transaction = await buildEditingToolTransaction(rootPath, toolName, args, runtime)
+  if (!transaction) {
+    return undefined
+  }
+  return buildEditingTransactionPreview(transaction, {
+    phase: 'approval_preview',
   })
 }
 
@@ -95,7 +178,9 @@ export function createEditingTools(context) {
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path)
-        return applyWriteFileMutation(target, args.content, runtime)
+        return applyWriteFileMutation(target, args.content, {
+          toolPath: args.path,
+        }, runtime)
       },
     },
     {
@@ -139,7 +224,9 @@ export function createEditingTools(context) {
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const target = resolveWorkspacePath(context.cwd, args.path)
-        return applyMultiEditFileMutation(target, args.edits, runtime)
+        return applyMultiEditFileMutation(target, args.edits, {
+          toolPath: args.path,
+        }, runtime)
       },
     },
     {
@@ -154,7 +241,7 @@ export function createEditingTools(context) {
         })
         return args.format === 'text'
           ? truncate(formatSearchResultText(result))
-          : truncate(result)
+          : formatStructuredSearchResultJson(result)
       },
     },
     {

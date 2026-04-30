@@ -9,6 +9,13 @@ export async function readTextFile(filePath: string): Promise<string> {
   return invoke<string>('read_text_file', { filePath })
 }
 
+export async function toggleEditTransactionSnapshots(
+  transactionIds: string[],
+  targetState: 'before' | 'after',
+): Promise<void> {
+  await invoke('toggle_edit_transaction_snapshots', { transactionIds, targetState })
+}
+
 export async function readImagePreview(filePath: string): Promise<string | null> {
   return invoke<string | null>('read_image_preview', { filePath })
 }
