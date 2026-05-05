@@ -251,18 +251,26 @@ function buildFinalizerPrompt({
   completionState,
   deliveryPolicy,
   responseStyle,
+  includeToolDigest = true,
+  includeReasoningText = true,
 }) {
-  const toolDigest = toolEvents
-    .slice(-8)
-    .map(event => {
-      const pieces = [
-        `- ${event.name} [${event.status}]`,
-        event.output ? `输出摘要: ${String(event.output).slice(0, 600)}` : null,
-        event.error ? `错误: ${String(event.error).slice(0, 300)}` : null,
-      ].filter(Boolean)
-      return pieces.join('\n')
-    })
-    .join('\n')
+  const toolDigest = includeToolDigest
+    ? toolEvents
+        .slice(-8)
+        .map(event => {
+          const pieces = [
+            `- ${event.name} [${event.status}]`,
+            event.output ? `输出摘要: ${String(event.output).slice(0, 600)}` : null,
+            event.error ? `错误: ${String(event.error).slice(0, 300)}` : null,
+          ].filter(Boolean)
+          return pieces.join('\n')
+        })
+        .join('\n')
+    : ''
+  const reasoningDigest =
+    includeReasoningText && reasoningText?.trim()
+      ? `本轮原始思考流（仅供你整理最终回答，不要照抄）：\n${reasoningText.slice(0, 6000)}`
+      : null
 
   return [
     '请基于当前对话和以下执行结果，直接输出给用户的最终回答。',
@@ -278,7 +286,7 @@ function buildFinalizerPrompt({
       : null,
     draftMessage?.trim() ? `当前已有但不完整的回答：\n${draftMessage}` : null,
     toolDigest ? `本轮工具结果摘要：\n${toolDigest}` : null,
-    reasoningText?.trim() ? `本轮原始思考流（仅供你整理最终回答，不要照抄）：\n${reasoningText.slice(0, 6000)}` : null,
+    reasoningDigest,
   ]
     .filter(Boolean)
     .join('\n\n')
@@ -688,7 +696,7 @@ export async function compactMessagesWithProvider({
   )
   let rollingSummary = ''
 
-  hooks?.onPhaseChange?.('preparing')
+  hooks?.onPhaseChange?.('compressing_context')
 
   for (const [index, batch] of batches.entries()) {
     const batchTargetTokens = maxOutputTokens
@@ -1112,6 +1120,7 @@ function dedupeInlineToolCalls(existingCalls, nextCalls) {
 }
 
 export const __testInternals = {
+  buildFinalizerPrompt,
   buildProviderRetryInfo,
   compactMessagesWithProvider,
   dedupeInlineToolCalls,
@@ -1725,6 +1734,8 @@ async function finalizeOpenAiTranscriptAfterStepLimit({
     draftMessage,
     completionState: 'needs_final_answer_after_tool_results',
     responseStyle: hooks?.routeState?.responseStyle,
+    includeToolDigest: false,
+    includeReasoningText: false,
   })
   const attemptResult = await runProviderOperationWithRetry(async () => {
     const response = await fetchWithTimeout(
@@ -1808,6 +1819,8 @@ async function finalizeGoogleTranscriptAfterStepLimit({
     draftMessage,
     completionState: 'needs_final_answer_after_tool_results',
     responseStyle: hooks?.routeState?.responseStyle,
+    includeToolDigest: false,
+    includeReasoningText: false,
   })
   const attemptResult = await runProviderOperationWithRetry(async () => {
     const response = await fetchWithTimeout(

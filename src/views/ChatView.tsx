@@ -258,6 +258,7 @@ function usageRows(usage?: MessageUsage) {
 }
 
 function ContextTokenMeter({
+  displayTokens,
   usedTokens,
   cumulativeTokens,
   thresholdTokens,
@@ -266,6 +267,7 @@ function ContextTokenMeter({
   compressing,
   onCompressNow,
 }: {
+  displayTokens: number
   usedTokens: number
   cumulativeTokens: number
   thresholdTokens: number
@@ -352,7 +354,7 @@ function ContextTokenMeter({
             transform="rotate(-90 10 10)"
           />
         </svg>
-        <span>{formatTokenCount(usedTokens)}</span>
+        <span>{formatTokenCount(displayTokens)}</span>
       </button>
       {open ? (
         <div className="absolute bottom-full left-1/2 z-[80] w-[220px] -translate-x-1/2 pb-2">
@@ -362,12 +364,15 @@ function ContextTokenMeter({
             <div className="mt-1 text-12px text-[var(--text-secondary)]">
               已用 {formatTokenCount(usedTokens)}，上限 {formatTokenCount(safeThreshold)}
             </div>
+            <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-70">
+              会话总上下文 {formatTokenCount(displayTokens)}
+            </div>
             <div className="mt-2.5 border-t border-[var(--border-subtle)] pt-2.5 text-11px text-[var(--text-secondary)] opacity-80">
               Aura 自动压缩背景信息
             </div>
             {contextCompression ? (
               <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-60">
-                已手动压缩至 {formatTokenCount(contextCompression.compressedTokenEstimate)}
+                最近一次手动压缩：{formatTokenCount(contextCompression.originalTokenEstimate)}{' -> '}{formatTokenCount(contextCompression.compressedTokenEstimate)}
               </div>
             ) : cumulativeTokens > 0 ? (
               <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-50">
@@ -575,6 +580,8 @@ function activityPhaseLabel(phase?: AgentExecutionPhase, stalled = false) {
   switch (phase) {
     case 'preparing':
       return `准备上下文${suffix}`
+    case 'compressing_context':
+      return `压缩上下文${suffix}`
     case 'model_connecting':
       return `连接模型${suffix}`
     case 'model_streaming':
@@ -3252,6 +3259,8 @@ function AssistantMessageCard({
   const appendedInputs = message.appendedInputs || []
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
   const isRetryInProgress = isStreaming && message.retryInfo?.inProgress === true
+  const isContextCompressionInProgress =
+    isStreaming && activity?.phase === 'compressing_context'
   const messageFailureSummary =
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.summary || summarizeFailureReason(message.error)
@@ -3403,6 +3412,9 @@ function AssistantMessageCard({
         ? 'progress'
         : 'neutral'
   const shouldShowStatusNotice = Boolean(statusNoticeTitle || messageRetryDetail)
+  const compressionStatusDetail = activity?.stalled === true
+    ? 'Aura 正在压缩已累积的运行上下文，连接较慢，完成后会继续回答。'
+    : 'Aura 正在压缩已累积的运行上下文，完成后会继续回答。'
 
   return (
     <article className="group relative flex flex-col gap-3">
@@ -3558,6 +3570,15 @@ function AssistantMessageCard({
             </div>
           ) : null}
 
+          {isContextCompressionInProgress ? (
+            <MessageStatusNotice
+              tone="progress"
+              title="正在压缩上下文"
+              detail={compressionStatusDetail}
+              animateDetail
+            />
+          ) : null}
+
           {shouldShowAnswer && !shouldSuppressStreamingAnswerBody ? (
             isStreaming ? (
               <StreamingMarkdownAnswer content={message.content} onCopyText={onCopyText} />
@@ -3568,7 +3589,9 @@ function AssistantMessageCard({
             shouldSuppressStreamingAnswerBody || isRetryInProgress ? null : (
               <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
                 <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
-                {phaseSummary || '正在整理信息并生成最终回答...'}
+                {isContextCompressionInProgress
+                  ? '正在压缩上下文，随后继续回答...'
+                  : phaseSummary || '正在整理信息并生成最终回答...'}
               </div>
             )
           ) : null}
@@ -3959,6 +3982,10 @@ export function ChatView({
 
   const sessionUsage = useMemo(() => collectSessionUsage(messages), [messages])
   const sessionTotalTokens = sessionUsage.inputTokens + sessionUsage.outputTokens
+  const sessionRawContextTokens = useMemo(
+    () => estimateSessionContextTokens(messages),
+    [messages],
+  )
   const sessionContextMessages = useMemo(
     () => buildRuntimeMessagesWithContextCompression(messages, contextCompression),
     [contextCompression, messages],
@@ -4444,6 +4471,7 @@ export function ChatView({
                       ) : null}
                     </div>
                     <ContextTokenMeter
+                      displayTokens={sessionRawContextTokens}
                       usedTokens={sessionContextTokens}
                       cumulativeTokens={sessionTotalTokens}
                       thresholdTokens={compressionThresholdTokens}

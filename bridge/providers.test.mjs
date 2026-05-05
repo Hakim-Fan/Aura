@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { __testInternals } from './providers.mjs'
 
 const {
+  buildFinalizerPrompt,
   buildProviderRetryInfo,
   compactMessagesWithProvider,
   extractInlineToolCalls,
@@ -206,6 +207,27 @@ test('runProviderOperationWithRetry clears in-progress retry state after a succe
   assert.equal(progressEvents[1]?.inProgress, undefined)
   assert.equal(progressEvents[1]?.attemptedRetries, 1)
   assert.match(progressEvents[1]?.lastErrorSummary || '', /模型连接在生成过程中被中断/)
+})
+
+test('buildFinalizerPrompt can omit duplicated tool and reasoning digests', () => {
+  const prompt = buildFinalizerPrompt({
+    toolEvents: [
+      {
+        name: 'read_file',
+        status: 'success',
+        output: 'const meaning = 42;',
+      },
+    ],
+    reasoningText: '先读取文件，再整理答案。',
+    draftMessage: '我已经定位到问题。',
+    completionState: 'needs_final_answer_after_tool_results',
+    includeToolDigest: false,
+    includeReasoningText: false,
+  })
+
+  assert.match(prompt, /当前已有但不完整的回答/)
+  assert.doesNotMatch(prompt, /本轮工具结果摘要/)
+  assert.doesNotMatch(prompt, /本轮原始思考流/)
 })
 
 test('resolveCompactionSettings prefers a dedicated analysis profile and model when configured', () => {

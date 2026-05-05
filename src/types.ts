@@ -81,6 +81,7 @@ export type ProviderRetryInfo = {
 
 export type AgentExecutionPhase =
   | 'preparing'
+  | 'compressing_context'
   | 'model_connecting'
   | 'model_streaming'
   | 'tool_running'

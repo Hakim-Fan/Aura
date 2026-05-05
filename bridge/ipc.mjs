@@ -89,6 +89,7 @@ function emit(event) {
 
 const PHASE_STALL_TIMEOUTS_MS = {
   preparing: 20_000,
+  compressing_context: 90_000,
   model_connecting: 45_000,
   model_streaming: 90_000,
   tool_running: 120_000,
