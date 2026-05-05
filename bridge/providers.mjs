@@ -291,6 +291,42 @@ function resolveCompactionOutputTokens(targetTokens, recentTokens = 0) {
   )
 }
 
+function chooseRecentMessagesForCompaction(allMessages, requestedRecentCount, targetTokens) {
+  const maxRecentCount = Math.min(
+    requestedRecentCount,
+    Math.max(0, (Array.isArray(allMessages) ? allMessages.length : 0) - 1),
+  )
+  const recentTokenBudget = Math.max(
+    1_200,
+    Math.min(
+      Math.max(1_200, Math.floor(Number(targetTokens) || 0) - 1_200),
+      Math.floor((Number(targetTokens) || 0) * 0.5),
+    ),
+  )
+
+  let recentCount = maxRecentCount
+  while (recentCount > 0) {
+    const recentMessages = allMessages.slice(-recentCount)
+    const recentTokens = estimateMessagesTokens(recentMessages)
+    if (recentTokens <= recentTokenBudget) {
+      return {
+        recentCount,
+        recentMessages,
+        olderMessages: allMessages.slice(0, -recentCount),
+        recentTokens,
+      }
+    }
+    recentCount -= 1
+  }
+
+  return {
+    recentCount: 0,
+    recentMessages: [],
+    olderMessages: allMessages,
+    recentTokens: 0,
+  }
+}
+
 function flattenGeminiTextResponse(data) {
   const parts = data?.candidates?.[0]?.content?.parts || []
   return parts
@@ -626,6 +662,7 @@ export async function compactMessagesWithProvider({
   keepRecentCount = 6,
   maxInputBatchTokens = 48_000,
   hooks,
+  callProvider = callProviderForCompaction,
 } = {}) {
   const allMessages = Array.isArray(messages) ? messages : []
   const requestedRecentCount =
@@ -636,10 +673,12 @@ export async function compactMessagesWithProvider({
     return allMessages
   }
 
-  const recentCount = Math.min(requestedRecentCount, Math.max(0, allMessages.length - 1))
-  const recentMessages = recentCount > 0 ? allMessages.slice(-recentCount) : []
-  const olderMessages = recentCount > 0 ? allMessages.slice(0, -recentCount) : allMessages
-  const recentTokens = estimateMessagesTokens(recentMessages)
+  const { recentCount, recentMessages, olderMessages, recentTokens } =
+    chooseRecentMessagesForCompaction(
+      allMessages,
+      requestedRecentCount,
+      targetTokens,
+    )
   const maxOutputTokens = resolveCompactionOutputTokens(targetTokens, recentTokens)
   const compactionSettings = resolveCompactionSettings(settings)
   const compactionBudget = buildContextCompressionBudget(compactionSettings)
@@ -647,50 +686,32 @@ export async function compactMessagesWithProvider({
     olderMessages,
     Math.min(maxInputBatchTokens, compactionBudget.compactionInputBatchTokens),
   )
-  const batchSummaries = []
+  let rollingSummary = ''
 
   hooks?.onPhaseChange?.('preparing')
 
   for (const [index, batch] of batches.entries()) {
-    const batchTargetTokens = Math.max(
-      800,
-      Math.floor(maxOutputTokens / Math.max(1, batches.length)),
-    )
-    const summary = await callProviderForCompaction(compactionSettings, {
+    const batchTargetTokens = maxOutputTokens
+    const summary = await callProvider(compactionSettings, {
       systemPrompt: buildCompactionSystemPrompt(batchTargetTokens),
       userPrompt: buildCompactionUserPrompt(batch, {
         batchIndex: index,
         batchCount: batches.length,
+        previousSummary: rollingSummary,
       }),
       maxOutputTokens: batchTargetTokens,
       messages: allMessages,
     })
-    batchSummaries.push(summary)
+    rollingSummary = summary
   }
-
-  const summary = batchSummaries.length === 1
-    ? batchSummaries[0]
-    : await callProviderForCompaction(compactionSettings, {
-        systemPrompt: buildCompactionSystemPrompt(maxOutputTokens),
-        userPrompt: [
-          `Merge these ${batchSummaries.length} compacted conversation-history summaries into one coherent summary.`,
-          'Do not drop details just because they appear in an earlier batch.',
-          '',
-          batchSummaries
-            .map((entry, index) => `## Batch ${index + 1}\n\n${entry}`)
-            .join('\n\n---\n\n'),
-        ].join('\n'),
-        maxOutputTokens,
-        messages: allMessages,
-      })
 
   const beforeTokens = estimateMessagesTokens(olderMessages)
   const summaryMessage = buildCompressedSummaryMessage(
-    summary,
+    rollingSummary,
     olderMessages.length,
     {
       beforeTokens,
-      afterTokens: estimateMessagesTokens([{ role: 'assistant', content: summary }]),
+      afterTokens: estimateMessagesTokens([{ role: 'assistant', content: rollingSummary }]),
     },
   )
 
@@ -1092,6 +1113,7 @@ function dedupeInlineToolCalls(existingCalls, nextCalls) {
 
 export const __testInternals = {
   buildProviderRetryInfo,
+  compactMessagesWithProvider,
   dedupeInlineToolCalls,
   extractInlineToolCalls,
   getProviderFailureRecoveryMaxRetries,
@@ -1100,6 +1122,8 @@ export const __testInternals = {
   mergeStreamedField,
   mergeOpenAiToolCalls,
   parseToolArguments,
+  resolveCompactionOutputTokens,
+  resolveCompactionSettings,
   runProviderOperationWithRetry,
   updateUnresolvedToolErrorForRepair,
 }

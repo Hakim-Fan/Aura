@@ -7,6 +7,7 @@ const MIN_TOOL_BUFFER_TOKENS = 4_000
 const MAX_TOOL_BUFFER_TOKENS = 20_000
 const DEFAULT_KEEP_RECENT_MESSAGE_COUNT = 6
 const DEFAULT_COMPACTION_INPUT_BATCH_RATIO = 0.45
+const ESTIMATED_CJK_TOKENS_PER_CHAR = 1.4
 
 function isCjkCharacter(char) {
   return /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u.test(char)
@@ -34,7 +35,9 @@ export function estimateTextTokens(value = '') {
     otherCount += 1
   }
 
-  return Math.ceil(cjkCount * 0.9 + otherCount / 3.7 + whitespaceCount / 8)
+  return Math.ceil(
+    cjkCount * ESTIMATED_CJK_TOKENS_PER_CHAR + otherCount / 3.7 + whitespaceCount / 8,
+  )
 }
 
 function estimatePartTokens(part) {
@@ -343,12 +346,29 @@ export function buildCompactionSystemPrompt(targetTokens) {
 }
 
 export function buildCompactionUserPrompt(messages = [], options = {}) {
+  const previousSummary =
+    typeof options.previousSummary === 'string' ? options.previousSummary.trim() : ''
+  const batchLabel =
+    typeof options.batchCount === 'number' && options.batchCount > 1
+      ? `This is batch ${(options.batchIndex || 0) + 1} of ${options.batchCount}.`
+      : ''
+
   return [
-    `Compress the following ${messages.length} earlier conversation message(s).`,
+    previousSummary
+      ? `Update the running compacted summary with the following ${messages.length} earlier conversation message(s).`
+      : `Compress the following ${messages.length} earlier conversation message(s).`,
+    batchLabel,
+    previousSummary ? 'Running summary from earlier batches:' : '',
+    previousSummary || '',
+    previousSummary
+      ? 'Revise that running summary with the new batch below. Preserve continuing state, and let newer facts override older ones when they conflict.'
+      : '',
     'The most recent conversation messages will be provided separately and should not be repeated unless needed to connect context.',
     '',
     formatMessagesForCompaction(messages),
-  ].join('\n')
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 export function buildCompressedSummaryMessage(summary, originalMessageCount, metadata = {}) {

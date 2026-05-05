@@ -333,5 +333,149 @@ estimateTokenCount()              ← token 级精确估算（新增）
 
 ---
 
+---
+
+## 十、实现 Code Review（2026-05-05）
+
+> 基于已落地的代码：`contextCompression.mjs`（263行）、`manualContextCompression.mjs`（65行）、`providers.mjs` 中 `compactMessagesWithProvider`（68行）、`agent.mjs` 中 `maybeCompressMessagesForContext`（50行）及两处调用点。
+
+### 整体评价
+
+方案的**架构设计正确**——实现了完整的 token 估算 → 预算计算 → 触发判断 → 分批压缩 → 摘要合并的流水线，并且在 agent loop 中做了**两层拦截**（preflight + runtime pass），provider 层也独立做了 transcript 压缩。比之前完全没有压缩是质的提升。
+
+复核结果：第 1/2/3/4 项在当时的代码里确实存在，已在后续实现中修复；第 5/6 项进一步核对后发现当前实现已经具备，不属于阻塞性缺陷。
+
+### 🔴 需要修复
+
+#### 1. `KEEP_RECENT = 6` 但未限制近期消息的 token 上限
+
+```js
+// contextCompression.mjs:10
+const DEFAULT_KEEP_RECENT_MESSAGE_COUNT = 6
+// agent.mjs
+const recentMessages = recentCount > 0 ? allMessages.slice(-recentCount) : []
+```
+
+`compactMessagesWithProvider` 无条件保留最后 6 条消息。如果这 6 条消息中包含大量工具输出（如读取了 3 个大文件），近期消息本身可能就占 30K-50K tokens，压缩完旧历史后近期消息仍然超出预算。
+
+**建议**：在 `compactMessagesWithProvider` 中，对近期消息也做 token 估算，如果近期消息本身超过 `targetConversationTokens` 的 50%，则进一步减少 `recentCount` 或对最早的近期消息做截断。
+
+#### 2. 分批压缩时上下文割裂
+
+```js
+// providers.mjs:654-668
+for (const [index, batch] of batches.entries()) {
+  const summary = await callProviderForCompaction(compactionSettings, {
+    systemPrompt: buildCompactionSystemPrompt(batchTargetTokens),
+    userPrompt: buildCompactionUserPrompt(batch, { ... }),
+  })
+  batchSummaries.push(summary)
+}
+// providers.mjs:671-685
+const summary = batchSummaries.length === 1
+  ? batchSummaries[0]
+  : await callProviderForCompaction(compactionSettings, { /* merge */ })
+```
+
+每个 batch 被独立压缩，**batch 之间缺乏上下文**。例如 batch 1 包含"用户让我创建文件 X"，batch 3 包含"修复文件 X 的 bug"——独立压缩时 batch 1 不知道这个文件后来有 bug，batch 3 不知道文件是什么时候创建的。虽然有合并步骤，但合并只是把几个摘要拼在一起再压缩一次，信息已经不可逆地丢失了。
+
+**建议**：采用 `chain-of-summary` 模式，将前一个 batch 的摘要注入下一个 batch 的压缩 prompt：
+
+```js
+let previousSummary = ''
+for (const [index, batch] of batches.entries()) {
+  const summary = await callProviderForCompaction(compactionSettings, {
+    systemPrompt: buildCompactionSystemPrompt(batchTargetTokens),
+    userPrompt: [
+      previousSummary ? `Previous context:\n${previousSummary}\n\n---\n` : '',
+      buildCompactionUserPrompt(batch, ...),
+    ].join(''),
+  })
+  batchSummaries.push(summary)
+  previousSummary = summary
+}
+```
+
+### 🟠 建议优化
+
+#### 3. Token 估算的 CJK 系数偏保守
+
+```js
+// contextCompression.mjs:18
+return Math.ceil(cjkCount * 0.9 + otherCount / 3.7 + whitespaceCount / 8)
+```
+
+主流 BPE tokenizer 对中文的实际 token/字符比大约在 1.2-2.0 之间（取决于分词器），0.9 会**低估中文内容 25%-50%**。如果对话以中文为主，压缩触发会偏晚，导致实际发送时超出窗口限制。
+
+**建议**：将 CJK 系数调高到 `1.4`，或提供可配置的 `tokenEstimationScale` 参数。
+
+#### 4. 两处压缩调用的 `systemPrompt` 传递不一致
+
+```js
+// agent.mjs:1022 (preflight) — 没传 systemPrompt
+const preflightCompression = await maybeCompressMessagesForContext({
+  messages, settings, hooks, stage: 'preflight',
+})
+
+// agent.mjs:1219 (runtime) — 传了 systemPrompt
+const runtimeCompression = await maybeCompressMessagesForContext({
+  messages, settings: effectiveRunSettings, systemPrompt: lastSystemPrompt,
+  hooks, stage: `pass-${pass + 1}`,
+})
+```
+
+Preflight 阶段没有传 `systemPrompt`，导致 `shouldCompressMessages` 中 `systemPromptTokens = 0`，预算计算会**高估可用空间**约 8K-12K tokens。
+
+**建议**：Preflight 也传入 systemPrompt 估算值（此时 systemPrompt 可能还没构建完成，但可以先用一个粗估值如 `estimateSystemPromptTokens()` ）。
+
+#### 5. 运行时 transcript 压缩与 messages 压缩是两套独立系统
+
+`compactOpenAiRuntimeTranscript` 和 `compactGeminiRuntimeTranscript` 在实现层面与 `compactMessagesWithProvider` 分开，但当前预算计算已经统一复用 `buildContextCompressionBudget`，并非两套完全独立的预算源。
+
+**复核补充**：这条更适合作为后续架构收敛建议，而不是当前 bug。
+
+#### 6. 独立压缩模型配置
+
+`resolveCompactionSettings` 当前会优先检查 `analysisProviderProfileId + analysisModel`，只有未配置或模型不可用时才 fallback 到主模型设置。
+
+**复核补充**：这条已具备，不是当前缺失项。
+
+### 🟡 测试覆盖补充
+
+已覆盖：
+- ✅ Token 估算
+- ✅ 预算构建
+- ✅ 触发判断
+- ✅ 分批逻辑
+- ✅ 超大消息拆分
+- ✅ 摘要消息构建
+
+缺失：
+- ❌ `compactMessagesWithProvider` 的集成测试（mock provider）
+- ❌ 多 batch 合并流程
+- ❌ `splitOversizedMessageForBatch` 中 chunk 重建的内容一致性
+- ❌ `resolveCompactionSettings` 和 `resolveCompactionOutputTokens` 的行为
+- ❌ `splitTextIntoTokenChunks` 对超长文本（100KB+）的收敛性能
+
+### Review 总结
+
+| 维度 | 评价 |
+|------|------|
+| **架构设计** | ✅ 正确，两层拦截（preflight + runtime）+ provider 级 transcript 压缩 |
+| **Token 估算** | ⚠️ CJK 系数偏保守，可能低估 25%-50% |
+| **近期消息保护** | ❌ 无 token 上限，近期大文件输出会绕过压缩 |
+| **分批压缩** | ⚠️ 缺乏跨 batch 上下文传递（chain-of-summary） |
+| **systemPrompt 一致性** | ⚠️ Preflight 缺少 systemPrompt 导致预算高估 |
+| **双压缩系统** | ✅ transcript 与 messages 共用 `buildContextCompressionBudget` 预算源 |
+| **测试覆盖** | ⚠️ 核心模块有测试，集成路径仍可继续补强 |
+| **前端集成** | ✅ 有手动压缩入口 + 自动 preflight 压缩 |
+
+**最高优先级修复**：
+1. 给近期消息加 token 上限，防止近期大输出绕过压缩
+2. 分批压缩改为 chain-of-summary 模式
+3. Preflight 阶段补传 systemPrompt 估算
+
+---
+
 *文档生成时间：2026-05-05*
 *关联文档：[analysis-vs-codex.md](./analysis-vs-codex.md)、[analysis-token-consumption.md](./analysis-token-consumption.md)*

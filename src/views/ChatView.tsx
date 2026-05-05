@@ -168,6 +168,7 @@ const reasoningEffortOptions: Array<{
   ]
 
 const MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
+const ESTIMATED_CJK_TOKENS_PER_CHAR = 1.4
 
 function formatTokenCount(value: number) {
   if (value >= 1000) {
@@ -189,7 +190,9 @@ function estimateTextTokens(value = '') {
       otherCount += 1
     }
   }
-  return Math.ceil(cjkCount * 0.9 + otherCount / 3.7 + whitespaceCount / 8)
+  return Math.ceil(
+    cjkCount * ESTIMATED_CJK_TOKENS_PER_CHAR + otherCount / 3.7 + whitespaceCount / 8,
+  )
 }
 
 function estimateMessageContextTokens(message: ChatMessage) {

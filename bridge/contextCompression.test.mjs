@@ -13,7 +13,7 @@ import {
 
 test('estimateTextTokens counts CJK text more densely than ASCII text', () => {
   assert.ok(estimateTextTokens('hello world '.repeat(100)) < 400)
-  assert.ok(estimateTextTokens('你好世界'.repeat(100)) > 300)
+  assert.ok(estimateTextTokens('你好世界'.repeat(100)) >= 560)
 })
 
 test('formatMessagesForCompaction preserves text and summarizes binary parts without data URLs', () => {

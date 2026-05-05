@@ -168,6 +168,34 @@ function appendCarryoverContextToPrompt(systemPrompt, carryoverContext) {
   ].join('\n\n')
 }
 
+function buildPreflightSystemPromptEstimate({
+  messages,
+  settings,
+  carryoverContext = '',
+}) {
+  const hardSignals = deriveHardSignals(messages)
+  const routeState = inferRouteState(messages, {
+    classification: null,
+    hardSignals,
+    settings,
+  })
+  const promptRouteState = {
+    ...routeState,
+    availableEscalations: getRouteEscalationTargets(routeState, {
+      visitedTiers: new Set([routeState.capabilityTier]),
+    }),
+  }
+  const estimatedSystemPrompt = buildRouteFirstSystemPrompt(
+    buildEffectiveRunSettings(settings, promptRouteState),
+    '',
+    '',
+    promptRouteState,
+    summarizeMountedToolAvailability([]),
+  )
+
+  return appendCarryoverContextToPrompt(estimatedSystemPrompt, carryoverContext)
+}
+
 async function maybeCompressMessagesForContext({
   messages,
   settings,
@@ -1019,9 +1047,15 @@ export async function runRouteFirstAgent(request) {
     })
   }
 
+  const preflightSystemPrompt = buildPreflightSystemPromptEstimate({
+    messages,
+    settings,
+    carryoverContext,
+  })
   const preflightCompression = await maybeCompressMessagesForContext({
     messages,
     settings,
+    systemPrompt: preflightSystemPrompt,
     hooks,
     stage: 'preflight',
   })

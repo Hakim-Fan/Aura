@@ -4,12 +4,15 @@ import { __testInternals } from './providers.mjs'
 
 const {
   buildProviderRetryInfo,
+  compactMessagesWithProvider,
   extractInlineToolCalls,
   getProviderFailureRecoveryMaxRetries,
   getProviderRetryDelayMs,
   hasWriteRepairAttemptSince,
   mergeOpenAiToolCalls,
   parseToolArguments,
+  resolveCompactionOutputTokens,
+  resolveCompactionSettings,
   runProviderOperationWithRetry,
   updateUnresolvedToolErrorForRepair,
 } = __testInternals
@@ -203,6 +206,99 @@ test('runProviderOperationWithRetry clears in-progress retry state after a succe
   assert.equal(progressEvents[1]?.inProgress, undefined)
   assert.equal(progressEvents[1]?.attemptedRetries, 1)
   assert.match(progressEvents[1]?.lastErrorSummary || '', /模型连接在生成过程中被中断/)
+})
+
+test('resolveCompactionSettings prefers a dedicated analysis profile and model when configured', () => {
+  const resolved = resolveCompactionSettings({
+    provider: 'openai',
+    apiKey: 'primary-key',
+    baseUrl: 'https://primary.example/v1',
+    model: 'gpt-main',
+    analysisProviderProfileId: 'analysis',
+    analysisModel: 'gemini-2.5-flash',
+    providerProfiles: [
+      {
+        id: 'primary',
+        provider: 'openai',
+        apiKey: 'primary-key',
+        baseUrl: 'https://primary.example/v1',
+        models: [{ id: 'gpt-main', enabled: true }],
+      },
+      {
+        id: 'analysis',
+        provider: 'google',
+        apiKey: 'analysis-key',
+        baseUrl: 'https://google.example/v1beta',
+        models: [{ id: 'gemini-2.5-flash', enabled: true }],
+      },
+    ],
+  })
+
+  assert.equal(resolved.provider, 'google')
+  assert.equal(resolved.apiKey, 'analysis-key')
+  assert.equal(resolved.baseUrl, 'https://google.example/v1beta')
+  assert.equal(resolved.model, 'gemini-2.5-flash')
+})
+
+test('resolveCompactionOutputTokens leaves room for preserved recent context', () => {
+  assert.equal(resolveCompactionOutputTokens(10_000, 1_500), 8_000)
+  assert.equal(resolveCompactionOutputTokens(3_200, 2_900), 800)
+})
+
+test('compactMessagesWithProvider reduces preserved recent messages when they exceed the target budget', async () => {
+  const messages = [
+    { role: 'user', content: 'older context '.repeat(600) },
+    { role: 'assistant', content: 'older reply '.repeat(600) },
+    ...Array.from({ length: 6 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: 'recent oversized context '.repeat(1_200),
+    })),
+  ]
+
+  const result = await compactMessagesWithProvider({
+    settings: {
+      provider: 'openai',
+      apiKey: 'test-key',
+      model: 'gpt-main',
+    },
+    messages,
+    targetTokens: 6_000,
+    keepRecentCount: 6,
+    callProvider: async () => 'summary',
+  })
+
+  assert.equal(result.length, 1)
+  assert.match(result[0]?.content || '', /\[Compressed summary/)
+})
+
+test('compactMessagesWithProvider carries forward earlier batch summaries into later batches', async () => {
+  const prompts = []
+  const messages = Array.from({ length: 4 }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    content: `message-${index} ` + 'payload '.repeat(500),
+  }))
+
+  const result = await compactMessagesWithProvider({
+    settings: {
+      provider: 'openai',
+      apiKey: 'test-key',
+      model: 'gpt-main',
+    },
+    messages,
+    targetTokens: 5_000,
+    keepRecentCount: 0,
+    maxInputBatchTokens: 1_200,
+    callProvider: async (_settings, options) => {
+      prompts.push(options.userPrompt)
+      return `summary-${prompts.length}`
+    },
+  })
+
+  assert.ok(prompts.length > 1)
+  assert.match(prompts[1], /Running summary from earlier batches:/)
+  assert.match(prompts[1], /summary-1/)
+  assert.match(result[0]?.content || '', /summary-\d+/)
+  assert.match(result[0]?.content || '', new RegExp(`summary-${prompts.length}`))
 })
 
 test('tool-error repair state stays unresolved after read-only inspection', () => {
