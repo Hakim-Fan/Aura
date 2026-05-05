@@ -2,7 +2,7 @@
  * @Author: Haki fanhuaze_1114@126.com
  * @Date: 2026-04-12 15:11:57
  * @LastEditors: Haki fanhuaze_1114@126.com
- * @LastEditTime: 2026-04-12 16:02:26
+ * @LastEditTime: 2026-05-05 23:05:51
  * @FilePath: /desk-agent/bridge/mcp.mjs
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -277,7 +277,7 @@ function createMcpSession(server, commandSpec, env) {
       const nextClient = new Client(
         {
           name: 'aura-desktop',
-          version: '0.1.1',
+          version: '1.1.0',
         },
         {
           capabilities: {},
@@ -290,8 +290,8 @@ function createMcpSession(server, commandSpec, env) {
         transport = nextTransport
         return client
       } catch (error) {
-        await nextClient.close?.().catch(() => {})
-        await nextTransport.close?.().catch(() => {})
+        await nextClient.close?.().catch(() => { })
+        await nextTransport.close?.().catch(() => { })
         throw buildMcpConnectError(server, error)
       }
     })()
