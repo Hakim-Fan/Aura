@@ -352,35 +352,35 @@ function ContextTokenMeter({
         <span>{formatTokenCount(usedTokens)}</span>
       </button>
       {open ? (
-        <div className="absolute bottom-full left-1/2 z-[80] w-[248px] -translate-x-1/2 pb-2">
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-4 py-3 text-center shadow-xl">
-            <div className="text-13px text-[var(--text-secondary)]">背景信息窗口：</div>
-            <div className="mt-1 text-16px text-[var(--text-secondary)]">{percent}% 已用</div>
-            <div className="mt-2 text-15px font-700 text-[var(--text-primary)]">
-              已用 {formatTokenCount(usedTokens)} 标记，共 {formatTokenCount(safeThreshold)}
+        <div className="absolute bottom-full left-1/2 z-[80] w-[220px] -translate-x-1/2 pb-2">
+          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3 py-2.5 text-center shadow-2xl backdrop-blur-md">
+            <div className="text-11px font-500 text-[var(--text-secondary)] opacity-80">背景信息窗口</div>
+            <div className="mt-1 text-14px font-700 text-[var(--text-primary)]">{percent}% 已用</div>
+            <div className="mt-1 text-12px text-[var(--text-secondary)]">
+              已用 {formatTokenCount(usedTokens)}，上限 {formatTokenCount(safeThreshold)}
             </div>
-            <div className="mt-3 text-13px font-700 text-[var(--text-primary)]">
-              Aura 自动压缩其背景信息
+            <div className="mt-2.5 border-t border-[var(--border-subtle)] pt-2.5 text-11px text-[var(--text-secondary)] opacity-80">
+              Aura 自动压缩背景信息
             </div>
             {contextCompression ? (
-              <div className="mt-2 text-11px text-[var(--text-secondary)] opacity-70">
+              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-60">
                 已手动压缩至 {formatTokenCount(contextCompression.compressedTokenEstimate)}
               </div>
             ) : cumulativeTokens > 0 ? (
-              <div className="mt-2 text-11px text-[var(--text-secondary)] opacity-60">
+              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-50">
                 累计模型 Token {formatTokenCount(cumulativeTokens)}
               </div>
             ) : null}
             <button
               type="button"
-              className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--accent-soft-strong)] px-3 py-2 text-12px font-700 text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:brightness-100"
+              className="mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--accent-soft-strong)] px-3 py-1.5 text-11px font-700 text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:brightness-100"
               onClick={event => {
                 event.stopPropagation()
                 onCompressNow()
               }}
               disabled={actionDisabled}
             >
-              <Sparkles size={13} />
+              <Sparkles size={11} />
               <span>{actionLabel}</span>
             </button>
           </div>
