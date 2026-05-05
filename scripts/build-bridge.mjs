@@ -12,6 +12,7 @@ const destNodeModules = path.join(outdir, 'node_modules')
 const entryPoints = {
   ipc: path.join(repoRoot, 'bridge', 'ipc.mjs'),
   providerActions: path.join(repoRoot, 'bridge', 'providerActions.mjs'),
+  manualContextCompression: path.join(repoRoot, 'bridge', 'manualContextCompression.mjs'),
   mcpActions: path.join(repoRoot, 'bridge', 'mcpActions.mjs'),
   cli: path.join(repoRoot, 'bridge', 'cli.mjs'),
 }

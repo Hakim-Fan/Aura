@@ -1383,6 +1383,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               workspace_path TEXT NOT NULL,
               workspace_root TEXT NOT NULL,
               workspace_mode TEXT NOT NULL,
+              context_compression_json TEXT,
               updated_at INTEGER NOT NULL
             );
 
@@ -1465,6 +1466,18 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
         let message = error.to_string();
         if !message.contains("duplicate column name") {
             return Err(format!("Failed to migrate SQLite sessions table: {error}"));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE sessions ADD COLUMN context_compression_json TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite sessions context_compression_json column: {error}"
+            ));
         }
     }
 
@@ -2725,6 +2738,62 @@ fn run_provider_action<R: Runtime>(
 }
 
 #[tauri::command]
+async fn compress_agent_context<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let script_path = resolve_bridge_script_path(&app, "manualContextCompression.mjs")?;
+    let bridge_cwd = resolve_bridge_cwd(&app)?;
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|error| format!("Failed to serialize context compression payload: {error}"))?;
+    let app_handle = app.clone();
+
+    let output = tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
+        let mut child = build_node_command(&app_handle, &bridge_cwd)?
+            .arg(script_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                format!(
+                    "Failed to run context compression bridge: {}",
+                    format_node_launch_error(&error)
+                )
+            })?;
+
+        {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "Failed to open context compression bridge stdin.".to_string())?;
+            stdin
+                .write_all(payload_json.as_bytes())
+                .map_err(|error| format!("Failed to write context compression payload: {error}"))?;
+        }
+
+        child
+            .wait_with_output()
+            .map_err(|error| format!("Failed to read context compression response: {error}"))
+    })
+    .await
+    .map_err(|error| format!("Failed to join context compression task: {error}"))?
+    .map_err(|error| format!("Failed to run context compression bridge: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Context compression failed.".into()
+        } else {
+            stderr
+        });
+    }
+
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|error| format!("Failed to parse context compression response: {error}"))
+}
+
+#[tauri::command]
 async fn run_mcp_action<R: Runtime>(
     app: tauri::AppHandle<R>,
     payload: serde_json::Value,
@@ -2994,7 +3063,7 @@ fn load_persisted_app_state<R: Runtime>(
 
     let mut sessions_statement = connection
         .prepare(
-            "SELECT id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, updated_at
+            "SELECT id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, context_compression_json, updated_at
              FROM sessions
              ORDER BY updated_at DESC",
         )
@@ -3012,7 +3081,8 @@ fn load_persisted_app_state<R: Runtime>(
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
-                row.get::<_, i64>(9)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, i64>(10)?,
             ))
         })
         .map_err(|error| format!("Failed to read sessions from SQLite: {error}"))?;
@@ -3030,6 +3100,7 @@ fn load_persisted_app_state<R: Runtime>(
             workspace_path,
             workspace_root,
             workspace_mode,
+            context_compression_json,
             updated_at,
         ) = session_row.map_err(|error| format!("Failed to decode session row: {error}"))?;
 
@@ -3136,6 +3207,7 @@ fn load_persisted_app_state<R: Runtime>(
             "workspacePath": workspace_path,
             "workspaceRoot": workspace_root,
             "workspaceMode": workspace_mode,
+            "contextCompression": parse_json_object_column(context_compression_json),
             "messages": messages,
             "toolEvents": [],
             "taskTree": [],
@@ -3185,11 +3257,17 @@ fn upsert_session_sqlite<R: Runtime>(
     session: serde_json::Value,
 ) -> Result<(), String> {
     let connection = open_app_db(&app)?;
+    let context_compression = get_json_object_field(&session, "contextCompression");
+    let context_compression_json = if context_compression.is_null() {
+        None
+    } else {
+        Some(context_compression.to_string())
+    };
     connection
         .execute(
             "INSERT INTO sessions (
-                id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, context_compression_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 provider_profile_id = excluded.provider_profile_id,
@@ -3199,6 +3277,7 @@ fn upsert_session_sqlite<R: Runtime>(
                 workspace_path = excluded.workspace_path,
                 workspace_root = excluded.workspace_root,
                 workspace_mode = excluded.workspace_mode,
+                context_compression_json = excluded.context_compression_json,
                 updated_at = excluded.updated_at",
             params![
                 get_json_string_field(&session, "id", ""),
@@ -3210,6 +3289,7 @@ fn upsert_session_sqlite<R: Runtime>(
                 get_json_string_field(&session, "workspacePath", ""),
                 get_json_string_field(&session, "workspaceRoot", ""),
                 get_json_string_field(&session, "workspaceMode", "explicit"),
+                context_compression_json,
                 get_json_i64_field(&session, "updatedAt", 0),
             ],
         )
@@ -3881,6 +3961,7 @@ fn main() {
             cancel_agent_task_step,
             write_app_log,
             run_provider_action,
+            compress_agent_context,
             run_mcp_action,
             ensure_aura_home,
             detect_lightpanda_runtime,

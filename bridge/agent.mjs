@@ -25,11 +25,16 @@ import {
 } from './intentClassifier.mjs'
 import { loadMcpToolInventory } from './mcp.mjs'
 import {
+  compactMessagesWithProvider,
   finalizeGoogleAnswer,
   finalizeOpenAiCompatibleAnswer,
   runGoogleAgent,
   runOpenAiCompatibleAgent,
 } from './providers.mjs'
+import {
+  shouldCompressMessages,
+  estimateMessagesTokens,
+} from './contextCompression.mjs'
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 import { createBuiltinTools } from './tools.mjs'
 import {
@@ -56,6 +61,7 @@ const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ROUTE_ESCALATION_TOOL_NAME = 'route_request_escalation'
 const ROUTE_ESCALATION_REQUEST_CODE = 'ROUTE_ESCALATION_REQUEST'
 const MAX_ROUTE_RUNTIME_PASSES = 5
+const CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
 
 function createId(prefix = 'task') {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -160,6 +166,58 @@ function appendCarryoverContextToPrompt(systemPrompt, carryoverContext) {
     'Carryover evidence from earlier turns is already available below. Reuse it before repeating the same web lookup unless fresh verification is clearly necessary.',
     normalized,
   ].join('\n\n')
+}
+
+async function maybeCompressMessagesForContext({
+  messages,
+  settings,
+  systemPrompt = '',
+  hooks,
+  stage,
+}) {
+  const compressionState = shouldCompressMessages(messages, settings, {
+    systemPrompt,
+    keepRecentCount: CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
+  })
+
+  if (!compressionState.shouldCompress) {
+    return {
+      messages,
+      compressed: false,
+      beforeTokens: compressionState.estimatedTokens,
+      afterTokens: compressionState.estimatedTokens,
+      budget: compressionState.budget,
+    }
+  }
+
+  const compactedMessages = await compactMessagesWithProvider({
+    settings,
+    messages,
+    targetTokens: compressionState.budget.targetConversationTokens,
+    keepRecentCount: CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
+    maxInputBatchTokens: compressionState.budget.compactionInputBatchTokens,
+    hooks,
+  })
+  const afterTokens = estimateMessagesTokens(compactedMessages)
+  hooks?.onReasoningDelta?.(
+    [
+      `Context compression (${stage || 'runtime'}):`,
+      `${compressionState.estimatedTokens} estimated tokens -> ${afterTokens} estimated tokens.`,
+    ].join(' '),
+    {
+      blockId: `context-compression-${stage || 'runtime'}`,
+      kind: 'summary',
+      order: -100,
+    },
+  )
+
+  return {
+    messages: compactedMessages,
+    compressed: true,
+    beforeTokens: compressionState.estimatedTokens,
+    afterTokens,
+    budget: compressionState.budget,
+  }
 }
 
 function buildRuntimeBlocks(routeStopReason) {
@@ -934,12 +992,13 @@ function createTaskTracker(hooks, rootTitle) {
 export async function runRouteFirstAgent(request) {
   const {
     settings,
-    messages,
+    messages: requestedMessages,
     runtime = {},
     hooks = {},
     capabilities,
     carryoverContext = '',
   } = request
+  let messages = Array.isArray(requestedMessages) ? requestedMessages : []
   hooks?.onPhaseChange?.('preparing')
   if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
     throw createStructuredError('模型调用失败，当前缺少 API Key。', {
@@ -959,6 +1018,14 @@ export async function runRouteFirstAgent(request) {
       suggestedAction: '请先为当前会话设置工作区目录，再重新执行。',
     })
   }
+
+  const preflightCompression = await maybeCompressMessagesForContext({
+    messages,
+    settings,
+    hooks,
+    stage: 'preflight',
+  })
+  messages = preflightCompression.messages
 
   const toolEvents = []
   const context = {
@@ -1149,6 +1216,14 @@ export async function runRouteFirstAgent(request) {
         classificationReason: classificationResult?.reason,
         strategy,
       })
+      const runtimeCompression = await maybeCompressMessagesForContext({
+        messages,
+        settings: effectiveRunSettings,
+        systemPrompt: lastSystemPrompt,
+        hooks,
+        stage: `pass-${pass + 1}`,
+      })
+      messages = runtimeCompression.messages
       const turnToolEventStart = toolEvents.length
 
       let turnResult

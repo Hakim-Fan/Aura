@@ -5,7 +5,10 @@ import type {
   ChatMessage,
   ChatRole,
   AgentSettings,
+  SessionContextCompression,
 } from '../types'
+
+const DEFAULT_MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
 
 function collapseWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
@@ -234,6 +237,87 @@ function mergeCarryoverContext(...sections: Array<string | undefined>): string |
   return normalized.join('\n\n')
 }
 
+function buildAgentRuntimeMessages(messages: ChatMessage[]) {
+  return messages.map(message => ({
+    role: message.role as ChatRole,
+    content: message.content,
+    parts: message.parts || [],
+    researchMode: message.researchMode,
+  }))
+}
+
+function stripCompressionOnlyPart(part: NonNullable<ChatMessage['parts']>[number]) {
+  if (part.type === 'image') {
+    return {
+      ...part,
+      dataUrl: undefined,
+    }
+  }
+  return part
+}
+
+function buildAgentCompressionMessages(messages: ChatMessage[]) {
+  return messages.map(message => ({
+    id: message.id,
+    role: message.role as ChatRole,
+    content: message.content,
+    parts: (message.parts || []).map(stripCompressionOnlyPart),
+    researchMode: message.researchMode,
+  }))
+}
+
+export function buildRuntimeMessagesWithContextCompression(
+  messages: ChatMessage[],
+  contextCompression?: SessionContextCompression,
+) {
+  if (!contextCompression?.summary.trim()) {
+    return messages
+  }
+
+  const compressedThroughIndex = messages.findIndex(
+    message => message.id === contextCompression.compressedThroughMessageId,
+  )
+  if (compressedThroughIndex === -1) {
+    return messages
+  }
+
+  const summaryMessage: ChatMessage = {
+    id: `context-summary-${contextCompression.id}`,
+    role: 'assistant',
+    content: contextCompression.summary,
+    parts: [],
+    status: 'completed',
+    createdAt: contextCompression.createdAt,
+  }
+
+  return [summaryMessage, ...messages.slice(compressedThroughIndex + 1)]
+}
+
+export type AgentContextCompressionResult = {
+  ok: boolean
+  message: string
+  summary: string
+  originalTokens: number
+  compressedTokens: number
+  originalMessageCount: number
+  compressedMessageCount: number
+  keptRecentCount: number
+}
+
+export async function compressAgentContext(
+  settings: AgentSettings,
+  messages: ChatMessage[],
+  keepRecentCount = DEFAULT_MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
+): Promise<AgentContextCompressionResult> {
+  return invoke<AgentContextCompressionResult>('compress_agent_context', {
+    payload: {
+      settings,
+      messages: buildAgentCompressionMessages(messages),
+      keepRecentCount,
+    },
+  })
+}
+
 export async function startAgentTask(
   settings: AgentSettings,
   messages: ChatMessage[],
@@ -247,12 +331,7 @@ export async function startAgentTask(
       buildCarryoverWebContext(messages),
       extraCarryoverContext,
     ),
-    messages: messages.map(message => ({
-      role: message.role as ChatRole,
-      content: message.content,
-      parts: message.parts || [],
-      researchMode: message.researchMode,
-    })),
+    messages: buildAgentRuntimeMessages(messages),
   }
 
   return invoke<string>('start_agent_task', { payload })

@@ -47,6 +47,7 @@ import {
   WebSearchEventCard,
 } from '../components/WebToolEventCards'
 import { formatConversationTimestamp } from '../lib/sessionMeta'
+import { buildRuntimeMessagesWithContextCompression } from '../lib/agent'
 import { toggleEditTransactionSnapshots } from '../lib/workspace'
 import type {
   AgentExecutionPhase,
@@ -63,11 +64,13 @@ import type {
   MessageEvent,
   MessagePhaseOutput,
   MessageReasoning,
+  MessageStatus,
   MessageUsage,
   ProviderMode,
   ReasoningEffort,
   ResearchMode,
   RouteDecisionSnapshot,
+  SessionContextCompression,
   TaskNode,
   ToolEvent,
   WorkspaceNode,
@@ -85,6 +88,7 @@ type Props = {
   displayedToolEvents: ToolEvent[]
   displayedTaskTree: TaskNode[]
   settings: AgentSettings
+  contextCompression?: SessionContextCompression
   draft: string
   error: string
   isRunning: boolean
@@ -145,8 +149,10 @@ type Props = {
   onResendMessage: (messageId: string) => void
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
   onCancelCurrentStep: () => void
+  onCompressContext: () => void
   onToggleMessageActivity: (messageId: string) => void
   onStop: () => void
+  contextCompressionRunning?: boolean
 }
 
 const reasoningEffortOptions: Array<{
@@ -161,11 +167,50 @@ const reasoningEffortOptions: Array<{
     { value: 'max', label: '超高', description: '最强推理强度，适合最复杂任务' },
   ]
 
+const MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
+
 function formatTokenCount(value: number) {
   if (value >= 1000) {
-    return `${(value / 1000).toFixed(1)}k`
+    return `${(value / 1000).toFixed(value >= 100_000 ? 0 : 1)}k`
   }
   return String(value)
+}
+
+function estimateTextTokens(value = '') {
+  let cjkCount = 0
+  let otherCount = 0
+  let whitespaceCount = 0
+  for (const char of value) {
+    if (/\s/u.test(char)) {
+      whitespaceCount += 1
+    } else if (/[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u.test(char)) {
+      cjkCount += 1
+    } else {
+      otherCount += 1
+    }
+  }
+  return Math.ceil(cjkCount * 0.9 + otherCount / 3.7 + whitespaceCount / 8)
+}
+
+function estimateMessageContextTokens(message: ChatMessage) {
+  const contentTokens = estimateTextTokens(message.content || '')
+  const partTokens = (message.parts || []).reduce((total, part) => {
+    if (part.type === 'text') {
+      return total + estimateTextTokens(part.text || '')
+    }
+    if (part.type === 'image') {
+      return total + 1_200 + estimateTextTokens([part.name, part.mimeType, part.path].filter(Boolean).join(' '))
+    }
+    if (part.type === 'file') {
+      return total + 80 + estimateTextTokens([part.name, part.path, part.mimeType].filter(Boolean).join(' '))
+    }
+    return total
+  }, 0)
+  return 4 + Math.max(contentTokens, partTokens)
+}
+
+function estimateSessionContextTokens(messages: ChatMessage[]) {
+  return messages.reduce((total, message) => total + estimateMessageContextTokens(message), 0)
 }
 
 function mergeUsageTotals(
@@ -207,6 +252,142 @@ function usageRows(usage?: MessageUsage) {
     { label: '输出 Token', value: formatTokenCount(outputTokens) },
     { label: '总 Token', value: formatTokenCount(inputTokens + outputTokens) },
   ]
+}
+
+function ContextTokenMeter({
+  usedTokens,
+  cumulativeTokens,
+  thresholdTokens,
+  contextCompression,
+  canCompress,
+  compressing,
+  onCompressNow,
+}: {
+  usedTokens: number
+  cumulativeTokens: number
+  thresholdTokens: number
+  contextCompression?: SessionContextCompression
+  canCompress: boolean
+  compressing: boolean
+  onCompressNow: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+  const safeThreshold = Math.max(1, thresholdTokens || 256_000)
+  const ratio = Math.max(0, Math.min(1, usedTokens / safeThreshold))
+  const percent = Math.round(ratio * 100)
+  const circumference = 2 * Math.PI * 8
+  const strokeDashoffset = circumference * (1 - ratio)
+  const actionDisabled = !canCompress || compressing
+  const actionLabel = compressing
+    ? '压缩中...'
+    : contextCompression
+      ? '重新压缩'
+      : '立即压缩'
+
+  function openTooltip() {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+    setOpen(true)
+  }
+
+  function scheduleCloseTooltip() {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+    }
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpen(false)
+      closeTimerRef.current = null
+    }, 140)
+  }
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+    }
+  }, [])
+
+  return (
+    <div
+      className="relative ml-1"
+      onMouseEnter={openTooltip}
+      onMouseLeave={scheduleCloseTooltip}
+      onFocus={openTooltip}
+      onBlur={event => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          scheduleCloseTooltip()
+        }
+      }}
+    >
+      <button
+        type="button"
+        className="flex items-center gap-1 rounded-full bg-[rgba(15,23,42,0.04)] px-1.5 py-0.5 text-9px font-700 opacity-70 transition-colors hover:bg-[rgba(15,23,42,0.07)] hover:opacity-100"
+        aria-label="背景信息窗口"
+        onClick={() => setOpen(current => !current)}
+      >
+        <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
+          <circle
+            cx="10"
+            cy="10"
+            r="8"
+            fill="none"
+            stroke="rgba(15,23,42,0.12)"
+            strokeWidth="2.4"
+          />
+          <circle
+            cx="10"
+            cy="10"
+            r="8"
+            fill="none"
+            stroke="var(--accent-soft-strong)"
+            strokeWidth="2.4"
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeDashoffset}
+            transform="rotate(-90 10 10)"
+          />
+        </svg>
+        <span>{formatTokenCount(usedTokens)}</span>
+      </button>
+      {open ? (
+        <div className="absolute bottom-full left-1/2 z-[80] w-[248px] -translate-x-1/2 pb-2">
+          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-4 py-3 text-center shadow-xl">
+            <div className="text-13px text-[var(--text-secondary)]">背景信息窗口：</div>
+            <div className="mt-1 text-16px text-[var(--text-secondary)]">{percent}% 已用</div>
+            <div className="mt-2 text-15px font-700 text-[var(--text-primary)]">
+              已用 {formatTokenCount(usedTokens)} 标记，共 {formatTokenCount(safeThreshold)}
+            </div>
+            <div className="mt-3 text-13px font-700 text-[var(--text-primary)]">
+              Aura 自动压缩其背景信息
+            </div>
+            {contextCompression ? (
+              <div className="mt-2 text-11px text-[var(--text-secondary)] opacity-70">
+                已手动压缩至 {formatTokenCount(contextCompression.compressedTokenEstimate)}
+              </div>
+            ) : cumulativeTokens > 0 ? (
+              <div className="mt-2 text-11px text-[var(--text-secondary)] opacity-60">
+                累计模型 Token {formatTokenCount(cumulativeTokens)}
+              </div>
+            ) : null}
+            <button
+              type="button"
+              className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--accent-soft-strong)] px-3 py-2 text-12px font-700 text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:brightness-100"
+              onClick={event => {
+                event.stopPropagation()
+                onCompressNow()
+              }}
+              disabled={actionDisabled}
+            >
+              <Sparkles size={13} />
+              <span>{actionLabel}</span>
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 const suggestedPrompts = [
@@ -410,8 +591,9 @@ function activityPhaseLabel(phase?: AgentExecutionPhase, stalled = false) {
   }
 }
 
-function formatRetryLabel(retryInfo?: ChatMessage['retryInfo']) {
-  if (!retryInfo || retryInfo.attemptedRetries <= 0 || retryInfo.inProgress !== true) {
+function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], status?: MessageStatus) {
+  const terminal = status === 'completed' || status === 'failed'
+  if (terminal || !retryInfo || retryInfo.attemptedRetries <= 0 || retryInfo.inProgress !== true) {
     return ''
   }
 
@@ -1318,18 +1500,15 @@ function ExecutionDigestLog({ entries }: { entries: ExecutionDigestPreview[] }) 
             current === nextAutoScrollEnabled ? current : nextAutoScrollEnabled,
           )
         }}
-        className={`execution-digest-log__viewport custom-scrollbar ${
-          expanded ? 'execution-digest-log__viewport--expanded' : ''
-        } ${!expanded && hasOverflow ? 'execution-digest-log__viewport--masked' : ''}${
-          canToggle ? ' execution-digest-log__viewport--interactive' : ''
-        }`}
+        className={`execution-digest-log__viewport custom-scrollbar ${expanded ? 'execution-digest-log__viewport--expanded' : ''
+          } ${!expanded && hasOverflow ? 'execution-digest-log__viewport--masked' : ''}${canToggle ? ' execution-digest-log__viewport--interactive' : ''
+          }`}
       >
         {entries.map((entry, index) => (
           <div
             key={`${entry.label}-${entry.text}-${index}`}
-            className={`execution-digest-log__entry ${
-              (entry.tone || 'default') === 'error' ? 'execution-digest-log__entry--error' : ''
-            }`}
+            className={`execution-digest-log__entry ${(entry.tone || 'default') === 'error' ? 'execution-digest-log__entry--error' : ''
+              }`}
           >
             <span className="execution-digest-log__entry-label">{entry.label}</span>
             <div className="execution-digest-log__entry-text">{entry.text}</div>
@@ -1691,11 +1870,11 @@ function mergeFinalChangedFile(
   const separator =
     current.diffLines.length > 0 && next.diffLines.length > 0
       ? [
-          {
-            type: 'truncated',
-            text: `下一次编辑：${next.path}`,
-          },
-        ]
+        {
+          type: 'truncated',
+          text: `下一次编辑：${next.path}`,
+        },
+      ]
       : []
 
   return {
@@ -1798,11 +1977,10 @@ function FinalChangedFilesCard({ summary }: { summary: FinalChangeSummary }) {
           <span className="text-12px font-700 text-red-600">-{totalRemoved}</span>
         </div>
         <div className="flex items-center gap-2">
-          <span className={`rounded-full px-2 py-0.5 text-10px font-700 ${
-            changeState === 'applied'
+          <span className={`rounded-full px-2 py-0.5 text-10px font-700 ${changeState === 'applied'
               ? 'bg-emerald-50 text-emerald-700'
               : 'bg-amber-50 text-amber-700'
-          }`}>
+            }`}>
             {changeState === 'applied' ? '已应用' : '已撤销'}
           </span>
           {canToggle ? (
@@ -1891,8 +2069,8 @@ function PatchPreviewCard({
   const files = readPatchPreviewFiles(output)
   const affectedPaths = Array.isArray(output.affectedPaths)
     ? output.affectedPaths
-        .filter((entry): entry is string => typeof entry === 'string')
-        .slice(0, 8)
+      .filter((entry): entry is string => typeof entry === 'string')
+      .slice(0, 8)
     : []
   const operations = Array.isArray(output.operations)
     ? output.operations.filter(isRecord).slice(0, 8)
@@ -2071,9 +2249,8 @@ function ShellOutputViewport({
         const nextAutoFollow = isExecutionDigestNearBottom(event.currentTarget)
         setAutoFollow(current => (current === nextAutoFollow ? current : nextAutoFollow))
       }}
-      className={`max-h-260px overflow-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-12px leading-6 custom-scrollbar ${
-        tone === 'error' ? 'text-red-600' : 'text-[#52525b]'
-      }`}
+      className={`max-h-260px overflow-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-12px leading-6 custom-scrollbar ${tone === 'error' ? 'text-red-600' : 'text-[#52525b]'
+        }`}
     >
       {content}
     </pre>
@@ -2122,7 +2299,7 @@ function MessageEventCard({
   const shellOutputText = sanitizeTerminalOutput(
     parsedShellSnapshot
       ? parsedShellSnapshot.output ||
-          [parsedShellSnapshot.stdout, parsedShellSnapshot.stderr].filter(Boolean).join('\n\n')
+      [parsedShellSnapshot.stdout, parsedShellSnapshot.stderr].filter(Boolean).join('\n\n')
       : event.output,
   )
   const shellErrorText = sanitizeTerminalOutput(event.error)
@@ -2135,11 +2312,10 @@ function MessageEventCard({
       ? `命令仍在执行${shellDuration ? ` · 已运行 ${shellDuration}` : ''}`
       : event.status === 'success'
         ? `命令已执行完成${shellDuration ? ` · 用时 ${shellDuration}` : ''}`
-        : `命令执行失败${shellDuration ? ` · 已运行 ${shellDuration}` : ''}${
-            typeof parsedShellSnapshot?.exitCode === 'number'
-              ? ` · 退出码 ${parsedShellSnapshot.exitCode}`
-              : ''
-          }`
+        : `命令执行失败${shellDuration ? ` · 已运行 ${shellDuration}` : ''}${typeof parsedShellSnapshot?.exitCode === 'number'
+          ? ` · 退出码 ${parsedShellSnapshot.exitCode}`
+          : ''
+        }`
     : ''
   const shellTruncationNote =
     parsedShellSnapshot?.truncated === true ? '输出较长，仅保留了最近一部分。' : ''
@@ -3072,11 +3248,12 @@ function AssistantMessageCard({
   )
   const appendedInputs = message.appendedInputs || []
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
+  const isRetryInProgress = isStreaming && message.retryInfo?.inProgress === true
   const messageFailureSummary =
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.summary || summarizeFailureReason(message.error)
       : ''
-  const messageRetryDetail = formatRetryLabel(message.retryInfo)
+  const messageRetryDetail = formatRetryLabel(message.retryInfo, message.status)
   const phaseSummary = activityPhaseLabel(activity?.phase, activity?.stalled === true)
   const activitySummary = activity
     ? [
@@ -3215,11 +3392,11 @@ function AssistantMessageCard({
       ? summarizeFailureReason(message.retryInfo.lastErrorSummary)
       : ''
   const statusNoticeTitle =
-    messageFailureSummary || fallbackStatusTitle || (message.retryInfo?.inProgress ? retryFailureSummary : '')
+    messageFailureSummary || fallbackStatusTitle || (isRetryInProgress ? retryFailureSummary : '')
   const statusNoticeTone: MessageStatusNoticeTone =
     messageFailureSummary
       ? 'error'
-      : message.retryInfo?.inProgress
+      : isRetryInProgress
         ? 'progress'
         : 'neutral'
   const shouldShowStatusNotice = Boolean(statusNoticeTitle || messageRetryDetail)
@@ -3385,7 +3562,7 @@ function AssistantMessageCard({
               <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
             )
           ) : isStreaming ? (
-            shouldSuppressStreamingAnswerBody || message.retryInfo?.inProgress === true ? null : (
+            shouldSuppressStreamingAnswerBody || isRetryInProgress ? null : (
               <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
                 <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
                 {phaseSummary || '正在整理信息并生成最终回答...'}
@@ -3402,7 +3579,7 @@ function AssistantMessageCard({
               tone={statusNoticeTone}
               title={statusNoticeTitle}
               detail={messageRetryDetail}
-              animateDetail={message.retryInfo?.inProgress === true}
+              animateDetail={isRetryInProgress}
             />
           ) : null}
 
@@ -3583,6 +3760,7 @@ export function ChatView({
   displayedToolEvents,
   displayedTaskTree,
   settings,
+  contextCompression,
   draft,
   error,
   isRunning,
@@ -3634,8 +3812,10 @@ export function ChatView({
   onResendMessage,
   onForceExecuteAppendedInput,
   onCancelCurrentStep,
+  onCompressContext,
   onToggleMessageActivity,
   onStop,
+  contextCompressionRunning = false,
 }: Props) {
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [capabilityPanelOpen, setCapabilityPanelOpen] = useState(false)
@@ -3776,7 +3956,15 @@ export function ChatView({
 
   const sessionUsage = useMemo(() => collectSessionUsage(messages), [messages])
   const sessionTotalTokens = sessionUsage.inputTokens + sessionUsage.outputTokens
-  const usageLabel = `会话总 Token ${formatTokenCount(sessionTotalTokens)}`
+  const sessionContextMessages = useMemo(
+    () => buildRuntimeMessagesWithContextCompression(messages, contextCompression),
+    [contextCompression, messages],
+  )
+  const sessionContextTokens = useMemo(
+    () => estimateSessionContextTokens(sessionContextMessages),
+    [sessionContextMessages],
+  )
+  const compressionThresholdTokens = settings.contextCompressionThresholdTokens || 256_000
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isMetaEnter) {
@@ -4031,11 +4219,10 @@ export function ChatView({
                       <Paperclip size={16} />
                     </button>
                     <button
-                      className={`flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors ${
-                        deepResearchEnabled
+                      className={`flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors ${deepResearchEnabled
                           ? 'bg-[rgba(186,111,75,0.14)] text-[#9f4723]'
                           : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'
-                      }`}
+                        }`}
                       onClick={onToggleResearchMode}
                       title={
                         deepResearchEnabled
@@ -4253,11 +4440,18 @@ export function ChatView({
                         </div>
                       ) : null}
                     </div>
-                    {/* 上下文占用量 */}
-                    <div className="ml-1 flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[rgba(15,23,42,0.04)] text-9px font-700 opacity-60">
-                      <RefreshCw size={8} />
-                      <span>{usageLabel}</span>
-                    </div>
+                    <ContextTokenMeter
+                      usedTokens={sessionContextTokens}
+                      cumulativeTokens={sessionTotalTokens}
+                      thresholdTokens={compressionThresholdTokens}
+                      contextCompression={contextCompression}
+                      canCompress={
+                        !isRunning &&
+                        messages.length > MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES + 1
+                      }
+                      compressing={contextCompressionRunning}
+                      onCompressNow={onCompressContext}
+                    />
                   </div>
 
                   <div className="flex items-center gap-4">

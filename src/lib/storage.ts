@@ -26,6 +26,7 @@ import type {
   ReasoningEffort,
   RouteDecisionSnapshot,
   Session,
+  SessionContextCompression,
   SessionFolder,
   WorkspaceCapabilityOverrides,
 } from '../types'
@@ -195,6 +196,7 @@ export const defaultSettings: AgentSettings = {
   maxSteps: 8,
   executionMode: 'bounded',
   memoryMode: 'summary',
+  contextCompressionThresholdTokens: 256_000,
   reasoningEffort: 'medium',
   showDetailedExecutionDetails: false,
   enableMultiAgent: true,
@@ -392,6 +394,58 @@ function normalizeProviderRetryInfo(value: unknown) {
     lastErrorSummary:
       typeof retryInfo.lastErrorSummary === 'string'
         ? retryInfo.lastErrorSummary
+        : undefined,
+  }
+}
+
+function normalizeSessionContextCompression(value: unknown): SessionContextCompression | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const compression = value as Partial<SessionContextCompression>
+  const id = typeof compression.id === 'string' ? compression.id.trim() : ''
+  const summary = typeof compression.summary === 'string' ? compression.summary.trim() : ''
+  const compressedThroughMessageId =
+    typeof compression.compressedThroughMessageId === 'string'
+      ? compression.compressedThroughMessageId.trim()
+      : ''
+  const createdAt =
+    typeof compression.createdAt === 'number' && Number.isFinite(compression.createdAt)
+      ? Math.max(0, Math.round(compression.createdAt))
+      : Date.now()
+
+  if (!summary || !compressedThroughMessageId) {
+    return undefined
+  }
+
+  return {
+    id: id || `context-compression-${createdAt}`,
+    summary,
+    compressedThroughMessageId,
+    originalMessageCount:
+      typeof compression.originalMessageCount === 'number' &&
+      Number.isFinite(compression.originalMessageCount)
+        ? Math.max(0, Math.round(compression.originalMessageCount))
+        : 0,
+    originalTokenEstimate:
+      typeof compression.originalTokenEstimate === 'number' &&
+      Number.isFinite(compression.originalTokenEstimate)
+        ? Math.max(0, Math.round(compression.originalTokenEstimate))
+        : 0,
+    compressedTokenEstimate:
+      typeof compression.compressedTokenEstimate === 'number' &&
+      Number.isFinite(compression.compressedTokenEstimate)
+        ? Math.max(0, Math.round(compression.compressedTokenEstimate))
+        : 0,
+    createdAt,
+    providerProfileId:
+      typeof compression.providerProfileId === 'string'
+        ? compression.providerProfileId.trim() || undefined
+        : undefined,
+    model:
+      typeof compression.model === 'string'
+        ? compression.model.trim() || undefined
         : undefined,
   }
 }
@@ -1233,6 +1287,9 @@ function parseSettings(raw: string | null): AgentSettings {
       maxSteps: normalizeMaxSteps(parsed.maxSteps),
       executionMode: normalizeExecutionMode(parsed.executionMode),
       memoryMode: normalizeMemoryMode(parsed.memoryMode),
+      contextCompressionThresholdTokens: normalizeContextCompressionThreshold(
+        parsed.contextCompressionThresholdTokens,
+      ),
       reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
       showDetailedExecutionDetails: normalizeDetailedExecutionSetting(
         parsed.showDetailedExecutionDetails,
@@ -1273,6 +1330,14 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort {
 
 function normalizeDetailedExecutionSetting(value: unknown) {
   return value === true
+}
+
+function normalizeContextCompressionThreshold(value: unknown) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return defaultSettings.contextCompressionThresholdTokens
+  }
+  return Math.max(16_000, Math.min(2_000_000, Math.round(parsed)))
 }
 
 function normalizeMaxSteps(value: unknown) {
@@ -1537,6 +1602,7 @@ function parseSessions(raw: string | null): Session[] {
         workspacePath: session.workspacePath || '',
         workspaceRoot: session.workspaceRoot || '',
         workspaceMode: session.workspaceMode || 'explicit',
+        contextCompression: normalizeSessionContextCompression(session.contextCompression),
         messages: (session.messages || []).map(message => {
           const createdAt = message.createdAt || session.updatedAt || Date.now()
           const baseVariant = normalizeMessageVariant(message, createdAt) || {

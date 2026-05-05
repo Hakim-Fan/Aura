@@ -4,6 +4,15 @@ import { buildDeliveryPolicy } from './agentEvidence.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
 import { guardedFetch } from './web/net/guardedFetch.mjs'
 import { createApplyPatchStreamingReporter } from './editing/applyPatchStreaming.mjs'
+import {
+  buildContextCompressionBudget,
+  buildCompactionSystemPrompt,
+  buildCompactionUserPrompt,
+  buildCompressedSummaryMessage,
+  estimateTextTokens,
+  estimateMessagesTokens,
+  splitMessagesIntoTokenBatches,
+} from './contextCompression.mjs'
 
 function flattenOpenAiMessageContent(content) {
   if (typeof content === 'string') {
@@ -164,6 +173,35 @@ function toGeminiContents(messages) {
   }))
 }
 
+function resolveCompactionSettings(settings = {}) {
+  const profiles = Array.isArray(settings.providerProfiles) ? settings.providerProfiles : []
+  const requestedProfileId =
+    typeof settings.analysisProviderProfileId === 'string'
+      ? settings.analysisProviderProfileId.trim()
+      : ''
+  const requestedModel =
+    typeof settings.analysisModel === 'string' ? settings.analysisModel.trim() : ''
+
+  if (requestedProfileId && requestedModel) {
+    const profile = profiles.find(entry => entry?.id === requestedProfileId)
+    const modelEnabled = Array.isArray(profile?.models)
+      ? profile.models.some(model => model?.enabled !== false && model?.id === requestedModel)
+      : false
+
+    if (profile && modelEnabled) {
+      return {
+        ...settings,
+        provider: profile.provider || settings.provider,
+        apiKey: profile.apiKey || settings.apiKey,
+        baseUrl: profile.baseUrl || settings.baseUrl,
+        model: requestedModel,
+      }
+    }
+  }
+
+  return settings
+}
+
 function drainAppendedInputs(hooks) {
   if (typeof hooks?.consumeAppendedInputs !== 'function') {
     return []
@@ -244,6 +282,419 @@ function buildFinalizerPrompt({
   ]
     .filter(Boolean)
     .join('\n\n')
+}
+
+function resolveCompactionOutputTokens(targetTokens, recentTokens = 0) {
+  return Math.max(
+    800,
+    Math.min(8_000, Math.floor(Number(targetTokens) || 0) - Math.floor(recentTokens)),
+  )
+}
+
+function flattenGeminiTextResponse(data) {
+  const parts = data?.candidates?.[0]?.content?.parts || []
+  return parts
+    .map(part => (typeof part.text === 'string' ? part.text : ''))
+    .join('\n')
+    .trim()
+}
+
+function openAiTranscriptEntryText(entry, index) {
+  const lines = [`### Transcript entry ${index + 1} (${entry?.role || 'unknown'})`]
+  if (typeof entry?.content === 'string' && entry.content.trim()) {
+    lines.push(entry.content.trim())
+  } else if (Array.isArray(entry?.content)) {
+    const text = entry.content
+      .map(part => {
+        if (part?.type === 'text') {
+          return part.text || ''
+        }
+        if (part?.type === 'image_url') {
+          return '[Image input omitted; preserve that an image input existed.]'
+        }
+        return JSON.stringify(part)
+      })
+      .filter(Boolean)
+      .join('\n')
+    if (text.trim()) {
+      lines.push(text)
+    }
+  }
+  if (Array.isArray(entry?.tool_calls) && entry.tool_calls.length > 0) {
+    lines.push(
+      `Tool calls:\n${entry.tool_calls
+        .map(toolCall =>
+          [
+            `- ${toolCall?.function?.name || 'unknown'}`,
+            toolCall?.function?.arguments ? `args=${toolCall.function.arguments}` : null,
+          ]
+            .filter(Boolean)
+            .join(' '),
+        )
+        .join('\n')}`,
+    )
+  }
+  if (entry?.tool_call_id) {
+    lines.push(`tool_call_id: ${entry.tool_call_id}`)
+  }
+  return lines.join('\n\n')
+}
+
+function estimateOpenAiTranscriptTokens(transcript = []) {
+  return (Array.isArray(transcript) ? transcript : []).reduce(
+    (total, entry, index) => total + estimateTextTokens(openAiTranscriptEntryText(entry, index)) + 4,
+    0,
+  )
+}
+
+function geminiPartText(part) {
+  if (typeof part?.text === 'string') {
+    return part.text
+  }
+  if (part?.functionCall) {
+    return `Function call: ${part.functionCall.name || 'unknown'} args=${JSON.stringify(part.functionCall.args || {})}`
+  }
+  if (part?.functionResponse) {
+    return `Function response: ${part.functionResponse.name || 'unknown'} output=${JSON.stringify(part.functionResponse.response || {})}`
+  }
+  if (part?.inline_data || part?.inlineData) {
+    return '[Inline binary input omitted; preserve that binary input existed.]'
+  }
+  return part ? JSON.stringify(part) : ''
+}
+
+function geminiTranscriptEntryText(entry, index) {
+  const lines = [`### Transcript entry ${index + 1} (${entry?.role || 'unknown'})`]
+  const parts = Array.isArray(entry?.parts)
+    ? entry.parts.map(geminiPartText).filter(Boolean).join('\n')
+    : ''
+  if (parts.trim()) {
+    lines.push(parts)
+  }
+  return lines.join('\n\n')
+}
+
+function estimateGeminiTranscriptTokens(transcript = []) {
+  return (Array.isArray(transcript) ? transcript : []).reduce(
+    (total, entry, index) => total + estimateTextTokens(geminiTranscriptEntryText(entry, index)) + 4,
+    0,
+  )
+}
+
+function hasOpenAiToolCall(entry) {
+  return Array.isArray(entry?.tool_calls) && entry.tool_calls.length > 0
+}
+
+function chooseOpenAiRecentTranscriptStart(transcript, keepRecentEntries) {
+  let start = Math.max(1, transcript.length - keepRecentEntries)
+  while (start > 1 && transcript[start]?.role === 'tool') {
+    start -= 1
+  }
+  while (start > 1 && transcript[start - 1]?.role === 'tool') {
+    start -= 1
+  }
+  if (start > 1 && hasOpenAiToolCall(transcript[start - 1])) {
+    start -= 1
+  }
+  return start
+}
+
+function hasGeminiFunctionCall(entry) {
+  return Array.isArray(entry?.parts) && entry.parts.some(part => part?.functionCall)
+}
+
+function hasGeminiFunctionResponse(entry) {
+  return Array.isArray(entry?.parts) && entry.parts.some(part => part?.functionResponse)
+}
+
+function chooseGeminiRecentTranscriptStart(transcript, keepRecentEntries) {
+  let start = Math.max(0, transcript.length - keepRecentEntries)
+  while (start > 0 && hasGeminiFunctionResponse(transcript[start])) {
+    start -= 1
+  }
+  if (start > 0 && hasGeminiFunctionCall(transcript[start - 1])) {
+    start -= 1
+  }
+  return start
+}
+
+function transcriptEntriesToMessages(entries, formatter) {
+  return entries.map((entry, index) => ({
+    role: entry?.role === 'user' ? 'user' : 'assistant',
+    content: formatter(entry, index),
+    parts: [],
+  }))
+}
+
+async function compactRuntimeTranscript({
+  settings,
+  transcript,
+  estimateTokens,
+  formatEntry,
+  buildSummaryEntry,
+  chooseRecentStart,
+  systemPrompt = '',
+  hooks,
+  providerKind,
+}) {
+  const estimatedTokens = estimateTokens(transcript)
+  const budget = buildContextCompressionBudget(settings, { systemPrompt })
+  if (estimatedTokens <= budget.effectiveThresholdTokens) {
+    return transcript
+  }
+
+  const recentStart = chooseRecentStart(transcript, 8)
+  const preservedPrefix = providerKind === 'openai' ? transcript.slice(0, 1) : []
+  const olderEntries = transcript.slice(providerKind === 'openai' ? 1 : 0, recentStart)
+  const recentEntries = transcript.slice(recentStart)
+  if (olderEntries.length === 0) {
+    return transcript
+  }
+
+  const summaryMessages = await compactMessagesWithProvider({
+    settings,
+    messages: transcriptEntriesToMessages(olderEntries, formatEntry),
+    targetTokens: Math.max(1_500, budget.targetConversationTokens - estimateTokens(recentEntries)),
+    keepRecentCount: 0,
+    maxInputBatchTokens: budget.compactionInputBatchTokens,
+    hooks,
+  })
+  const summaryText = summaryMessages.map(message => message.content).join('\n\n')
+  hooks?.onReasoningDelta?.(
+    `Runtime transcript compression: ${estimatedTokens} estimated tokens -> ${estimateTokens([...preservedPrefix, buildSummaryEntry(summaryText), ...recentEntries])} estimated tokens.`,
+    {
+      blockId: `runtime-transcript-compression-${providerKind}`,
+      kind: 'summary',
+      order: -99,
+    },
+  )
+  return [...preservedPrefix, buildSummaryEntry(summaryText), ...recentEntries]
+}
+
+function compactOpenAiRuntimeTranscript({ settings, transcript, systemPrompt, hooks }) {
+  return compactRuntimeTranscript({
+    settings,
+    transcript,
+    estimateTokens: estimateOpenAiTranscriptTokens,
+    formatEntry: openAiTranscriptEntryText,
+    buildSummaryEntry(summary) {
+      return {
+        role: 'assistant',
+        content: `[Compressed runtime transcript summary]\n\n${summary}`,
+      }
+    },
+    chooseRecentStart: chooseOpenAiRecentTranscriptStart,
+    systemPrompt,
+    hooks,
+    providerKind: 'openai',
+  })
+}
+
+function compactGeminiRuntimeTranscript({ settings, transcript, systemPrompt, hooks }) {
+  return compactRuntimeTranscript({
+    settings,
+    transcript,
+    estimateTokens: estimateGeminiTranscriptTokens,
+    formatEntry: geminiTranscriptEntryText,
+    buildSummaryEntry(summary) {
+      return {
+        role: 'model',
+        parts: [{ text: `[Compressed runtime transcript summary]\n\n${summary}` }],
+      }
+    },
+    chooseRecentStart: chooseGeminiRecentTranscriptStart,
+    systemPrompt,
+    hooks,
+    providerKind: 'gemini',
+  })
+}
+
+async function callOpenAiCompatibleCompaction(settings, { systemPrompt, userPrompt, maxOutputTokens, messages }) {
+  const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
+  const response = await fetchWithTimeout(
+    `${apiBase}/chat/completions`,
+    {
+      method: 'POST',
+      headers: openAiCompatibleHeaders(settings),
+      body: JSON.stringify({
+        model: settings.model,
+        messages: [
+          {
+            role: 'system',
+            content: systemPrompt,
+          },
+          {
+            role: 'user',
+            content: userPrompt,
+          },
+        ],
+        max_tokens: maxOutputTokens,
+        stream: false,
+      }),
+    },
+    {
+      timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+      timeoutMessage: 'Timed out while compacting conversation context.',
+      messages,
+      settings,
+    },
+  )
+
+  if (!response.ok) {
+    const data = await parseJsonResponse(response)
+    throw buildProviderHttpError(
+      response,
+      data.error?.message || 'OpenAI-compatible compaction request failed',
+      messages,
+    )
+  }
+
+  const data = await parseJsonResponse(response)
+  return flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
+}
+
+async function callGoogleCompaction(settings, { systemPrompt, userPrompt, maxOutputTokens, messages }) {
+  const apiBase = normalizeBaseUrl(
+    settings.baseUrl,
+    'https://generativelanguage.googleapis.com/v1beta',
+  )
+  const response = await fetchWithTimeout(
+    `${apiBase}/models/${settings.model}:generateContent`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': settings.apiKey,
+      },
+      body: JSON.stringify({
+        system_instruction: {
+          parts: [{ text: systemPrompt }],
+        },
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: userPrompt }],
+          },
+        ],
+        generationConfig: {
+          maxOutputTokens,
+        },
+      }),
+    },
+    {
+      timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+      timeoutMessage: 'Timed out while compacting conversation context.',
+      messages,
+      settings,
+    },
+  )
+
+  if (!response.ok) {
+    const data = await parseJsonResponse(response)
+    throw buildProviderHttpError(
+      response,
+      data.error?.message || 'Google compaction request failed',
+      messages,
+    )
+  }
+
+  return flattenGeminiTextResponse(await parseJsonResponse(response))
+}
+
+async function callProviderForCompaction(settings, options) {
+  if (settings.provider === 'google') {
+    return callGoogleCompaction(settings, options)
+  }
+
+  if (settings.provider === 'openai' || settings.provider === 'custom') {
+    return callOpenAiCompatibleCompaction(settings, options)
+  }
+
+  throw createStructuredError(`模型调用失败，当前 Provider "${settings.provider}" 不支持上下文压缩。`, {
+    source: 'provider',
+    category: 'unsupported',
+    code: 'UNSUPPORTED_COMPACTION_PROVIDER',
+    detail: `Unsupported compaction provider: ${settings.provider}`,
+    suggestedAction: '请切换到 OpenAI-compatible 或 Google Provider 后再试。',
+  })
+}
+
+export async function compactMessagesWithProvider({
+  settings,
+  messages,
+  targetTokens,
+  keepRecentCount = 6,
+  maxInputBatchTokens = 48_000,
+  hooks,
+} = {}) {
+  const allMessages = Array.isArray(messages) ? messages : []
+  const requestedRecentCount =
+    Number.isFinite(Number(keepRecentCount)) && Number(keepRecentCount) >= 0
+      ? Math.floor(Number(keepRecentCount))
+      : 6
+  if (allMessages.length <= 1 && requestedRecentCount !== 0) {
+    return allMessages
+  }
+
+  const recentCount = Math.min(requestedRecentCount, Math.max(0, allMessages.length - 1))
+  const recentMessages = recentCount > 0 ? allMessages.slice(-recentCount) : []
+  const olderMessages = recentCount > 0 ? allMessages.slice(0, -recentCount) : allMessages
+  const recentTokens = estimateMessagesTokens(recentMessages)
+  const maxOutputTokens = resolveCompactionOutputTokens(targetTokens, recentTokens)
+  const compactionSettings = resolveCompactionSettings(settings)
+  const compactionBudget = buildContextCompressionBudget(compactionSettings)
+  const batches = splitMessagesIntoTokenBatches(
+    olderMessages,
+    Math.min(maxInputBatchTokens, compactionBudget.compactionInputBatchTokens),
+  )
+  const batchSummaries = []
+
+  hooks?.onPhaseChange?.('preparing')
+
+  for (const [index, batch] of batches.entries()) {
+    const batchTargetTokens = Math.max(
+      800,
+      Math.floor(maxOutputTokens / Math.max(1, batches.length)),
+    )
+    const summary = await callProviderForCompaction(compactionSettings, {
+      systemPrompt: buildCompactionSystemPrompt(batchTargetTokens),
+      userPrompt: buildCompactionUserPrompt(batch, {
+        batchIndex: index,
+        batchCount: batches.length,
+      }),
+      maxOutputTokens: batchTargetTokens,
+      messages: allMessages,
+    })
+    batchSummaries.push(summary)
+  }
+
+  const summary = batchSummaries.length === 1
+    ? batchSummaries[0]
+    : await callProviderForCompaction(compactionSettings, {
+        systemPrompt: buildCompactionSystemPrompt(maxOutputTokens),
+        userPrompt: [
+          `Merge these ${batchSummaries.length} compacted conversation-history summaries into one coherent summary.`,
+          'Do not drop details just because they appear in an earlier batch.',
+          '',
+          batchSummaries
+            .map((entry, index) => `## Batch ${index + 1}\n\n${entry}`)
+            .join('\n\n---\n\n'),
+        ].join('\n'),
+        maxOutputTokens,
+        messages: allMessages,
+      })
+
+  const beforeTokens = estimateMessagesTokens(olderMessages)
+  const summaryMessage = buildCompressedSummaryMessage(
+    summary,
+    olderMessages.length,
+    {
+      beforeTokens,
+      afterTokens: estimateMessagesTokens([{ role: 'assistant', content: summary }]),
+    },
+  )
+
+  return [summaryMessage, ...recentMessages]
 }
 
 async function parseJsonResponse(response) {
@@ -1631,7 +2082,7 @@ export async function runOpenAiCompatibleAgent({
   const activeTools = [...tools]
   const registry = new Map(activeTools.map(tool => [tool.name, tool]))
   const conversationMessages = [...messages]
-  const transcript = toOpenAiTranscript(systemPrompt, conversationMessages)
+  let transcript = toOpenAiTranscript(systemPrompt, conversationMessages)
   let latestUsage
   let providerRetryCount = 0
   let providerReasoning = ''
@@ -1657,6 +2108,12 @@ export async function runOpenAiCompatibleAgent({
         repairTurns += 1
       }
       appendQueuedInputsToOpenAiTranscript(transcript, conversationMessages, hooks)
+      transcript = await compactOpenAiRuntimeTranscript({
+        settings,
+        transcript,
+        systemPrompt,
+        hooks,
+      })
       const reasoningBlockId = `provider-phase-${step + 1}`
       const reasoningOrder = step * 2
       const toolOrder = reasoningOrder + 1
@@ -1987,7 +2444,7 @@ export async function runGoogleAgent({
   const activeTools = [...tools]
   const registry = new Map(activeTools.map(tool => [tool.name, tool]))
   const conversationMessages = [...messages]
-  const transcript = toGeminiContents(conversationMessages)
+  let transcript = toGeminiContents(conversationMessages)
   let latestUsage
   let providerRetryCount = 0
   let providerReasoning = ''
@@ -2013,6 +2470,12 @@ export async function runGoogleAgent({
         repairTurns += 1
       }
       appendQueuedInputsToGeminiTranscript(transcript, conversationMessages, hooks)
+      transcript = await compactGeminiRuntimeTranscript({
+        settings,
+        transcript,
+        systemPrompt,
+        hooks,
+      })
       const reasoningBlockId = `provider-phase-${step + 1}`
       const reasoningOrder = step * 2
       const toolOrder = reasoningOrder + 1

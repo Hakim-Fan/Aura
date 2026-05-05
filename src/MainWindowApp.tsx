@@ -9,7 +9,9 @@ import { AppSidebar } from './components/AppSidebar'
 import {
   abortAgentTask,
   appendInputToAgentTask,
+  buildRuntimeMessagesWithContextCompression,
   cancelAgentTaskStep,
+  compressAgentContext,
   getAgentTask,
   respondToApproval,
   startAgentTask,
@@ -59,6 +61,7 @@ import type {
   MessageReasoning,
   ProjectCapabilityOverrides,
   ProviderProfile,
+  ProviderRetryInfo,
   ReasoningEffort,
   ResearchMode,
   Session,
@@ -76,6 +79,38 @@ import { sortSessionsByRecentActivity } from './lib/sessionMeta'
 
 function createId() {
   return Math.random().toString(36).slice(2, 10)
+}
+
+const MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
+
+function clearRetryProgressInfo(retryInfo?: ProviderRetryInfo): ProviderRetryInfo | undefined {
+  if (!retryInfo) {
+    return undefined
+  }
+
+  return {
+    ...retryInfo,
+    inProgress: false,
+    nextRetryDelayMs: undefined,
+    nextAttemptNumber: undefined,
+  }
+}
+
+function findCompressedThroughIndex(session: Session) {
+  const compressedThroughMessageId = session.contextCompression?.compressedThroughMessageId
+  if (!compressedThroughMessageId) {
+    return -1
+  }
+  return session.messages.findIndex(message => message.id === compressedThroughMessageId)
+}
+
+function shouldInvalidateContextCompressionForMessage(session: Session, messageId: string) {
+  if (!session.contextCompression) {
+    return false
+  }
+  const changedIndex = session.messages.findIndex(message => message.id === messageId)
+  const compressedThroughIndex = findCompressedThroughIndex(session)
+  return changedIndex !== -1 && compressedThroughIndex !== -1 && changedIndex <= compressedThroughIndex
 }
 
 function getErrorMessage(caught: unknown, fallback: string) {
@@ -1217,6 +1252,7 @@ export function MainWindowApp() {
   const [runningTasksBySession, setRunningTasksBySession] = useState<
     Record<string, RunningTaskBinding>
   >({})
+  const [contextCompressionSessionId, setContextCompressionSessionId] = useState<string | null>(null)
 
   // --- Update Check Logic ---
   const [currentVersion, setCurrentVersion] = useState('')
@@ -1596,7 +1632,10 @@ export function MainWindowApp() {
                   appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
                   error: snapshot.error,
                   errorInfo: snapshot.errorInfo,
-                  retryInfo: snapshot.retryInfo || undefined,
+                  retryInfo:
+                    snapshot.status === 'completed' || snapshot.status === 'failed'
+                      ? clearRetryProgressInfo(snapshot.retryInfo)
+                      : snapshot.retryInfo || undefined,
                   agentMode: snapshot.agentMode || currentVariant.agentMode,
                   routeDecision: snapshot.routeDecision || currentVariant.routeDecision,
                   completionState:
@@ -1664,7 +1703,10 @@ export function MainWindowApp() {
                               snapshot.status === 'failed'
                                 ? snapshot.errorInfo
                                 : undefined,
-                            retryInfo: snapshot.retryInfo || undefined,
+                            retryInfo:
+                              snapshot.status === 'completed' || snapshot.status === 'failed'
+                                ? clearRetryProgressInfo(snapshot.retryInfo)
+                                : snapshot.retryInfo || undefined,
                             agentMode: snapshot.agentMode || currentVariant.agentMode,
                             routeDecision:
                               snapshot.routeDecision || currentVariant.routeDecision,
@@ -1717,7 +1759,7 @@ export function MainWindowApp() {
                 status: 'failed' as const,
                 error: message,
                 errorInfo: undefined,
-                retryInfo: currentVariant.retryInfo,
+                retryInfo: clearRetryProgressInfo(currentVariant.retryInfo),
                 activity: currentVariant.activity
                   ? {
                     ...currentVariant.activity,
@@ -2446,6 +2488,7 @@ export function MainWindowApp() {
           ...nextVariants[activeIndex],
           status: 'failed',
           error: '已根据补充要求中断当前执行，并立即重新规划。',
+          retryInfo: clearRetryProgressInfo(nextVariants[activeIndex]?.retryInfo),
           errorInfo: {
             source: 'system',
             category: 'cancelled',
@@ -2481,7 +2524,10 @@ export function MainWindowApp() {
     try {
       const taskId = await startAgentTask(
         runtimeSettings,
-        [...conversationBeforeAssistant, ...replayInputs],
+        buildRuntimeMessagesWithContextCompression(
+          [...conversationBeforeAssistant, ...replayInputs],
+          activeSession.contextCompression,
+        ),
         resolvedCapabilities.runtime,
         buildVariantCarryoverContext(currentAssistantVariant),
       )
@@ -2512,6 +2558,100 @@ export function MainWindowApp() {
       setError('')
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '立即接管当前补充失败。')
+    }
+  }
+
+  async function handleCompressActiveContext() {
+    if (!activeSession || contextCompressionSessionId || isRunning) {
+      return
+    }
+
+    if (activeSession.messages.length <= MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES + 1) {
+      setError('当前会话中可压缩的历史消息太少。')
+      return
+    }
+
+    const latestSettings = loadSettings()
+    const latestProviderProfile = getSessionProviderProfile(latestSettings, activeSession)
+    const latestEffectiveProvider = latestProviderProfile?.provider || latestSettings.provider
+    const latestEffectiveModel =
+      activeSession.model ||
+      resolvePreferredModelId(latestProviderProfile, latestSettings.model) ||
+      latestSettings.model
+
+    if (
+      providerModeRequiresApiKey(latestEffectiveProvider) &&
+      !latestProviderProfile?.apiKey.trim() &&
+      !latestSettings.apiKey.trim()
+    ) {
+      setError('请先在设置窗口里完成 Provider 配置。')
+      await openSettingsWindow('providers').catch(caught => {
+        setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')
+      })
+      return
+    }
+
+    const runtimeSettings: AgentSettings = {
+      ...latestSettings,
+      activeProviderProfileId:
+        latestProviderProfile?.id || latestSettings.activeProviderProfileId,
+      provider: latestEffectiveProvider,
+      apiKey: latestProviderProfile?.apiKey || latestSettings.apiKey,
+      baseUrl: latestProviderProfile?.baseUrl || latestSettings.baseUrl,
+      model: latestEffectiveModel,
+      cwd:
+        activeSession.workspacePath ||
+        activeSession.workspaceRoot ||
+        latestSettings.cwd,
+    }
+    const sourceMessages = activeSession.messages
+    const compressedThroughIndex =
+      sourceMessages.length - MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES - 1
+    const compressedThroughMessageId = sourceMessages[compressedThroughIndex]?.id
+    if (!compressedThroughMessageId) {
+      setError('当前会话中可压缩的历史消息太少。')
+      return
+    }
+
+    setContextCompressionSessionId(activeSession.id)
+    setError('')
+    try {
+      const result = await compressAgentContext(
+        runtimeSettings,
+        sourceMessages,
+        MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
+      )
+      if (!result.ok || !result.summary.trim()) {
+        throw new Error(result.message || '上下文压缩没有返回可用摘要。')
+      }
+      const compressedAt = Date.now()
+      updateSession(activeSession.id, session => {
+        if (!session.messages.some(message => message.id === compressedThroughMessageId)) {
+          return session
+        }
+        return {
+          ...session,
+          contextCompression: {
+            id: createId(),
+            summary: result.summary,
+            compressedThroughMessageId,
+            originalMessageCount: result.originalMessageCount || sourceMessages.length,
+            originalTokenEstimate: result.originalTokens,
+            compressedTokenEstimate: result.compressedTokens,
+            createdAt: compressedAt,
+            providerProfileId:
+              latestProviderProfile?.id || latestSettings.activeProviderProfileId,
+            model: latestEffectiveModel,
+          },
+          updatedAt: compressedAt,
+        }
+      })
+    } catch (caught) {
+      setError(getErrorMessage(caught, '立即压缩上下文失败。'))
+    } finally {
+      setContextCompressionSessionId(current =>
+        current === activeSession.id ? null : current,
+      )
     }
   }
 
@@ -2677,6 +2817,7 @@ export function MainWindowApp() {
 
     let runtimeMessages: ChatMessage[] = []
     let pendingAssistantMessageId = targetAssistantMessage?.id || createId()
+    let nextContextCompression = activeSession.contextCompression
 
     const updatedMessages = (() => {
       if (!targetUserMessage) {
@@ -2708,6 +2849,10 @@ export function MainWindowApp() {
       if (userIndex === -1) {
         runtimeMessages = [...activeSession.messages]
         return activeSession.messages
+      }
+      const compressedThroughIndex = findCompressedThroughIndex(activeSession)
+      if (compressedThroughIndex !== -1 && userIndex <= compressedThroughIndex) {
+        nextContextCompression = undefined
       }
 
       const nextMessages = [...activeSession.messages]
@@ -2797,6 +2942,7 @@ export function MainWindowApp() {
       providerProfileId: latestProviderProfile?.id || session.providerProfileId,
       provider: latestEffectiveProvider,
       model: latestEffectiveModel,
+      contextCompression: nextContextCompression,
       messages: updatedMessages,
       toolEvents: [],
       taskTree: [],
@@ -2811,7 +2957,7 @@ export function MainWindowApp() {
     try {
       const taskId = await startAgentTask(
         runtimeSettings,
-        runtimeMessages,
+        buildRuntimeMessagesWithContextCompression(runtimeMessages, nextContextCompression),
         resolvedCapabilities.runtime,
       )
       setRunningTasksBySession(current => ({
@@ -3034,6 +3180,10 @@ export function MainWindowApp() {
 
     updateSession(activeSession.id, session => ({
       ...session,
+      contextCompression:
+        shouldInvalidateContextCompressionForMessage(session, messageId)
+          ? undefined
+          : session.contextCompression,
       messages: session.messages
         .filter(message => message.id !== messageId)
         .map(message =>
@@ -3055,6 +3205,10 @@ export function MainWindowApp() {
 
     updateSession(activeSession.id, session => ({
       ...session,
+      contextCompression:
+        shouldInvalidateContextCompressionForMessage(session, messageId)
+          ? undefined
+          : session.contextCompression,
       messages: session.messages.map(message => {
         if (message.id !== messageId) {
           return message
@@ -3104,6 +3258,9 @@ export function MainWindowApp() {
                   finishedAt: stoppedAt,
                 }
                 : currentVariant.activity,
+              retryInfo: clearRetryProgressInfo(
+                currentSnapshot?.retryInfo || currentVariant.retryInfo,
+              ),
             }))
             : message,
         ),
@@ -3289,6 +3446,7 @@ export function MainWindowApp() {
               displayedToolEvents={displayedToolEvents}
               displayedTaskTree={displayedTaskTree}
               settings={effectiveSettings}
+              contextCompression={activeSession.contextCompression}
               draft={draft}
               error={error}
               isRunning={isRunning}
@@ -3372,8 +3530,10 @@ export function MainWindowApp() {
                 void forceExecuteAppendedInput(messageId, inputId)
               }
               onCancelCurrentStep={() => void handleCancelCurrentStep()}
+              onCompressContext={() => void handleCompressActiveContext()}
               onToggleMessageActivity={toggleMessageActivity}
               onStop={() => void handleStopAgentTask()}
+              contextCompressionRunning={contextCompressionSessionId === activeSession.id}
             />
           ) : (
             <HomeView

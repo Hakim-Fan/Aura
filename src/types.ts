@@ -401,6 +401,18 @@ export type ChatMessage = {
   activeVersionIndex?: number
 }
 
+export type SessionContextCompression = {
+  id: string
+  summary: string
+  compressedThroughMessageId: string
+  originalMessageCount: number
+  originalTokenEstimate: number
+  compressedTokenEstimate: number
+  createdAt: number
+  providerProfileId?: string
+  model?: string
+}
+
 export type ToolEvent = {
   id: string
   source: 'builtin' | 'mcp' | 'plugin' | 'subagent'
@@ -571,6 +583,7 @@ export type AgentSettings = {
   maxSteps: number
   executionMode: ExecutionMode
   memoryMode: MemoryMode
+  contextCompressionThresholdTokens: number
   reasoningEffort: ReasoningEffort
   showDetailedExecutionDetails: boolean
   enableMultiAgent: boolean
@@ -596,6 +609,7 @@ export type Session = {
   workspacePath: string
   workspaceRoot: string
   workspaceMode: 'explicit' | 'default'
+  contextCompression?: SessionContextCompression
   messages: ChatMessage[]
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]

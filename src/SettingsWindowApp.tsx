@@ -39,6 +39,7 @@ const PROVIDER_BASE_URLS: Record<ProviderMode, string> = {
 }
 
 const STEP_PRESETS = [8, 16, 32, 64] as const
+const CONTEXT_COMPRESSION_PRESETS = [128_000, 256_000, 512_000, 1_000_000] as const
 const builtinSkillIdSet = new Set(builtinSkills.map(item => item.id))
 
 function cloneSettings(settings: AgentSettings): AgentSettings {
@@ -1754,6 +1755,37 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
           <section className="dashboard-card">
             <div className="section-title">记忆模式</div>
+            <p className="muted">
+              Aura 会按背景信息窗口自动压缩历史消息和运行期工具上下文，默认阈值为 256K tokens。
+            </p>
+            <div className="settings-preset-row">
+              {CONTEXT_COMPRESSION_PRESETS.map(preset => (
+                <button
+                  key={preset}
+                  className={`settings-preset-chip ${draftSettings.contextCompressionThresholdTokens === preset ? 'active' : ''}`}
+                  onClick={() => handleSettingsChange('contextCompressionThresholdTokens', preset)}
+                  type="button"
+                >
+                  {formatTokenCount(preset)}
+                </button>
+              ))}
+            </div>
+            <label className="settings-number-field">
+              <span>自动压缩阈值</span>
+              <input
+                type="number"
+                min={16_000}
+                max={2_000_000}
+                step={1_000}
+                value={draftSettings.contextCompressionThresholdTokens}
+                onChange={event =>
+                  handleSettingsChange(
+                    'contextCompressionThresholdTokens',
+                    Math.max(16_000, Math.min(2_000_000, Number(event.target.value) || 256_000)),
+                  )
+                }
+              />
+            </label>
             <div className="toggle-stack">
               <label className="toggle-inline">
                 <input checked={draftSettings.memoryMode === 'summary'} disabled type="radio" />
