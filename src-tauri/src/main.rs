@@ -166,8 +166,7 @@ struct LightpandaRuntimeStatusRecord {
 }
 
 fn resolve_user_home() -> Result<PathBuf, String> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    resolve_user_home_dir()
         .ok_or_else(|| "Failed to resolve the user home directory.".to_string())
 }
 
@@ -1882,7 +1881,11 @@ fn resolve_bridge_script_path<R: Runtime>(
     ] {
         let bundled_bridge = resource_dir.join(relative_path);
         if bundled_bridge.exists() {
-            return Ok(bundled_bridge);
+            return Ok(PathBuf::from(
+                bundled_bridge
+                    .strip_prefix(&resource_dir)
+                    .unwrap_or(&bundled_bridge),
+            ));
         }
     }
 
@@ -2071,6 +2074,53 @@ fn build_augmented_path() -> OsString {
     std::env::join_paths(merged_paths).unwrap_or(current_path)
 }
 
+fn node_runtime_label() -> String {
+    if cfg!(debug_assertions) {
+        resolve_node_binary()
+    } else {
+        "sidecar:node".into()
+    }
+}
+
+fn bridge_launch_log_details<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    operation: &str,
+    bridge_cwd: &Path,
+    script_path: &Path,
+    augmented_path: &OsString,
+) -> serde_json::Value {
+    let resolved_script_path = if script_path.is_absolute() {
+        script_path.to_path_buf()
+    } else {
+        bridge_cwd.join(script_path)
+    };
+    let path_entries: Vec<PathBuf> = std::env::split_paths(augmented_path).collect();
+    let path_sample: Vec<String> = path_entries
+        .iter()
+        .take(8)
+        .map(|path| path.display().to_string())
+        .collect();
+
+    serde_json::json!({
+        "operation": operation,
+        "runtimeMode": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "nodeRuntime": node_runtime_label(),
+        "bridgeCwd": bridge_cwd.display().to_string(),
+        "bridgeCwdExists": bridge_cwd.exists(),
+        "resourceDir": app.path().resource_dir().ok().map(|path| path.display().to_string()),
+        "scriptArg": script_path.display().to_string(),
+        "scriptIsRelative": !script_path.is_absolute(),
+        "scriptResolvedPath": resolved_script_path.display().to_string(),
+        "scriptExists": resolved_script_path.exists(),
+        "scriptParentExists": resolved_script_path.parent().map(|path| path.exists()),
+        "cwdHasDistBridge": bridge_cwd.join("dist-bridge").exists(),
+        "cwdHasBridgeDir": bridge_cwd.join("bridge").exists(),
+        "pathEntryCount": path_entries.len(),
+        "pathEntrySample": path_sample,
+        "pathPreview": truncate_log_value(augmented_path.to_string_lossy().into_owned(), 240),
+    })
+}
+
 fn format_node_launch_error(error: &std::io::Error) -> String {
     if cfg!(debug_assertions) {
         let node_bin = resolve_node_binary();
@@ -2083,8 +2133,8 @@ fn format_node_launch_error(error: &std::io::Error) -> String {
 fn build_node_command<R: Runtime>(
     app: &tauri::AppHandle<R>,
     bridge_cwd: &Path,
+    augmented_path: &OsString,
 ) -> Result<Command, String> {
-    let augmented_path = build_augmented_path();
     let mut command = if cfg!(debug_assertions) {
         let node_bin = resolve_node_binary();
         Command::new(&node_bin)
@@ -2095,7 +2145,7 @@ fn build_node_command<R: Runtime>(
             .map_err(|error| format!("Failed to resolve bundled Node runtime: {error}"))?
     };
     command.current_dir(bridge_cwd);
-    command.env("PATH", &augmented_path);
+    command.env("PATH", augmented_path);
     Ok(command)
 }
 
@@ -2247,15 +2297,42 @@ fn spawn_agent_task<R: Runtime>(
     store: &AgentTaskStore,
     payload: serde_json::Value,
 ) -> Result<String, String> {
+    let task_id = format!("task-{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
     let bridge_path = resolve_bridge_script_path(&app, "ipc.mjs")?;
     let bridge_cwd = resolve_bridge_cwd(&app)?;
-    let mut child = build_node_command(&app, &bridge_cwd)?
+    let augmented_path = build_augmented_path();
+    let launch_details =
+        bridge_launch_log_details(&app, "start_agent_task", &bridge_cwd, &bridge_path, &augmented_path);
+    let launch_details_for_error = launch_details.clone();
+    append_app_log(
+        &app,
+        "info",
+        "bridge_launch_prepared",
+        serde_json::json!({
+            "taskId": task_id.as_str(),
+            "launch": launch_details.clone(),
+        }),
+    );
+    let mut child = build_node_command(&app, &bridge_cwd, &augmented_path)?
         .arg(bridge_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format_node_launch_error(&error))?;
+        .map_err(|error| {
+            let message = format_node_launch_error(&error);
+            append_app_log(
+                &app,
+                "error",
+                "bridge_launch_failed",
+                serde_json::json!({
+                    "taskId": task_id.as_str(),
+                    "error": message,
+                    "launch": launch_details_for_error,
+                }),
+            );
+            message
+        })?;
 
     let stdin = child
         .stdin
@@ -2270,12 +2347,14 @@ fn spawn_agent_task<R: Runtime>(
         .take()
         .ok_or_else(|| "Failed to capture Node bridge stderr.".to_string())?;
 
-    let task_id = format!("task-{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
     append_app_log(
         &app,
         "info",
         "agent_task_spawned",
-        agent_payload_log_details(&task_id, &payload),
+        serde_json::json!({
+            "task": agent_payload_log_details(&task_id, &payload),
+            "launch": launch_details,
+        }),
     );
     let snapshot = Arc::new(Mutex::new(AgentTaskSnapshot {
         id: task_id.clone(),
@@ -2726,15 +2805,27 @@ fn run_provider_action<R: Runtime>(
     app: tauri::AppHandle<R>,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let script_path = resolve_bridge_script_path(&app, "providerActions.mjs")?;
+    let bridge_cwd = resolve_bridge_cwd(&app)?;
+    let augmented_path = build_augmented_path();
+    let launch_details = bridge_launch_log_details(
+        &app,
+        "run_provider_action",
+        &bridge_cwd,
+        &script_path,
+        &augmented_path,
+    );
     append_app_log(
         &app,
         "info",
         "provider_action_started",
-        provider_action_log_details(&payload),
+        serde_json::json!({
+            "request": provider_action_log_details(&payload),
+            "launch": launch_details.clone(),
+        }),
     );
-    let script_path = resolve_bridge_script_path(&app, "providerActions.mjs")?;
-    let bridge_cwd = resolve_bridge_cwd(&app)?;
-    let output = build_node_command(&app, &bridge_cwd)?
+    let launch_details_for_error = launch_details.clone();
+    let output = build_node_command(&app, &bridge_cwd, &augmented_path)?
         .arg(script_path)
         .arg(
             serde_json::to_string(&payload)
@@ -2742,10 +2833,21 @@ fn run_provider_action<R: Runtime>(
         )
         .output()
         .map_err(|error| {
-            format!(
+            let message = format!(
                 "Failed to run provider action bridge: {}",
                 format_node_launch_error(&error)
-            )
+            );
+            append_app_log(
+                &app,
+                "error",
+                "provider_action_launch_failed",
+                serde_json::json!({
+                    "request": provider_action_log_details(&payload),
+                    "error": message,
+                    "launch": launch_details_for_error,
+                }),
+            );
+            message
         })?;
 
     if !output.status.success() {
@@ -2762,6 +2864,7 @@ fn run_provider_action<R: Runtime>(
             serde_json::json!({
                 "request": provider_action_log_details(&payload),
                 "error": message,
+                "launch": launch_details,
             }),
         );
         return Err(message);
@@ -2775,6 +2878,7 @@ fn run_provider_action<R: Runtime>(
         "provider_action_completed",
         serde_json::json!({
             "request": provider_action_log_details(&payload),
+            "launch": launch_details,
             "modelCount": parsed
                 .get("models")
                 .and_then(|value| value.as_array())
@@ -2793,22 +2897,49 @@ async fn compress_agent_context<R: Runtime>(
 ) -> Result<serde_json::Value, String> {
     let script_path = resolve_bridge_script_path(&app, "manualContextCompression.mjs")?;
     let bridge_cwd = resolve_bridge_cwd(&app)?;
+    let augmented_path = build_augmented_path();
+    let launch_details = bridge_launch_log_details(
+        &app,
+        "compress_agent_context",
+        &bridge_cwd,
+        &script_path,
+        &augmented_path,
+    );
+    append_app_log(
+        &app,
+        "info",
+        "context_compression_started",
+        serde_json::json!({
+            "launch": launch_details.clone(),
+        }),
+    );
     let payload_json = serde_json::to_string(&payload)
         .map_err(|error| format!("Failed to serialize context compression payload: {error}"))?;
     let app_handle = app.clone();
+    let launch_details_for_error = launch_details.clone();
 
     let output = tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
-        let mut child = build_node_command(&app_handle, &bridge_cwd)?
+        let mut child = build_node_command(&app_handle, &bridge_cwd, &augmented_path)?
             .arg(script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
-                format!(
+                let message = format!(
                     "Failed to run context compression bridge: {}",
                     format_node_launch_error(&error)
-                )
+                );
+                append_app_log(
+                    &app_handle,
+                    "error",
+                    "context_compression_launch_failed",
+                    serde_json::json!({
+                        "error": message,
+                        "launch": launch_details_for_error,
+                    }),
+                );
+                message
             })?;
 
         {
@@ -2831,15 +2962,34 @@ async fn compress_agent_context<R: Runtime>(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
+        let message = if stderr.is_empty() {
             "Context compression failed.".into()
         } else {
             stderr
-        });
+        };
+        append_app_log(
+            &app,
+            "error",
+            "context_compression_failed",
+            serde_json::json!({
+                "error": message,
+                "launch": launch_details,
+            }),
+        );
+        return Err(message);
     }
 
-    serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .map_err(|error| format!("Failed to parse context compression response: {error}"))
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|error| format!("Failed to parse context compression response: {error}"))?;
+    append_app_log(
+        &app,
+        "info",
+        "context_compression_completed",
+        serde_json::json!({
+            "launch": launch_details,
+        }),
+    );
+    Ok(parsed)
 }
 
 #[tauri::command]
@@ -2849,16 +2999,45 @@ async fn run_mcp_action<R: Runtime>(
 ) -> Result<serde_json::Value, String> {
     let script_path = resolve_bridge_script_path(&app, "mcpActions.mjs")?;
     let bridge_cwd = resolve_bridge_cwd(&app)?;
+    let augmented_path = build_augmented_path();
+    let launch_details = bridge_launch_log_details(
+        &app,
+        "run_mcp_action",
+        &bridge_cwd,
+        &script_path,
+        &augmented_path,
+    );
+    append_app_log(
+        &app,
+        "info",
+        "mcp_action_started",
+        serde_json::json!({
+            "launch": launch_details.clone(),
+        }),
+    );
     let payload_json = serde_json::to_string(&payload)
         .map_err(|error| format!("Failed to serialize MCP action payload: {error}"))?;
     let app_handle = app.clone();
+    let launch_details_for_error = launch_details.clone();
 
     let output = tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
-        build_node_command(&app_handle, &bridge_cwd)?
+        build_node_command(&app_handle, &bridge_cwd, &augmented_path)?
             .arg(script_path)
             .arg(payload_json)
             .output()
-            .map_err(|error| format_node_launch_error(&error))
+            .map_err(|error| {
+                let message = format_node_launch_error(&error);
+                append_app_log(
+                    &app_handle,
+                    "error",
+                    "mcp_action_launch_failed",
+                    serde_json::json!({
+                        "error": message,
+                        "launch": launch_details_for_error,
+                    }),
+                );
+                message
+            })
     })
     .await
     .map_err(|error| format!("Failed to join MCP action task: {error}"))?
@@ -2866,15 +3045,34 @@ async fn run_mcp_action<R: Runtime>(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
+        let message = if stderr.is_empty() {
             "MCP action failed.".into()
         } else {
             stderr
-        });
+        };
+        append_app_log(
+            &app,
+            "error",
+            "mcp_action_failed",
+            serde_json::json!({
+                "error": message,
+                "launch": launch_details,
+            }),
+        );
+        return Err(message);
     }
 
-    serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .map_err(|error| format!("Failed to parse MCP action response: {error}"))
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|error| format!("Failed to parse MCP action response: {error}"))?;
+    append_app_log(
+        &app,
+        "info",
+        "mcp_action_completed",
+        serde_json::json!({
+            "launch": launch_details,
+        }),
+    );
+    Ok(parsed)
 }
 
 #[tauri::command]
