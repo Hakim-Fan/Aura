@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -1963,63 +1964,111 @@ fn resolve_node_binary() -> String {
 
 /// Build an augmented PATH that includes common Node.js install locations.
 /// This ensures child processes can also find npx, npm, etc.
-fn build_augmented_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| String::new());
-    let current_path = std::env::var("PATH").unwrap_or_else(|_| String::new());
+fn resolve_user_home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
 
-    let mut extra_dirs: Vec<String> = vec![
-        format!("{}/.aura/bin", home),
-        format!("{}/.local/bin", home),
-        format!("{}/.cargo/bin", home),
-        format!("{}/.bun/bin", home),
-        "/opt/homebrew/bin".to_string(),
-        "/usr/local/bin".to_string(),
-        "/usr/bin".to_string(),
-        "/bin".to_string(),
-        "/usr/sbin".to_string(),
-        "/sbin".to_string(),
-        "/Library/Apple/usr/bin".to_string(),
-        "/System/Cryptexes/App/usr/bin".to_string(),
-        "/Applications/Codex.app/Contents/Resources".to_string(),
-    ];
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(profile));
+    }
 
-    // Add nvm current bin if exists
-    let nvm_dir = format!("{}/.nvm/versions/node", home);
-    if let Ok(entries) = fs::read_dir(&nvm_dir) {
-        let mut versions: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.join("bin/node").exists())
-            .collect();
-        versions.sort();
-        if let Some(latest) = versions.last() {
-            extra_dirs.push(latest.join("bin").display().to_string());
+    let home_drive = std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty());
+    let home_path = std::env::var_os("HOMEPATH").filter(|value| !value.is_empty());
+    match (home_drive, home_path) {
+        (Some(drive), Some(path)) => {
+            let mut combined = PathBuf::from(drive);
+            combined.push(path);
+            Some(combined)
+        }
+        _ => None,
+    }
+}
+
+fn build_augmented_path() -> OsString {
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut extra_dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(home) = resolve_user_home_dir() {
+        extra_dirs.push(home.join(".aura").join("bin"));
+        extra_dirs.push(home.join(".local").join("bin"));
+        extra_dirs.push(home.join(".cargo").join("bin"));
+        extra_dirs.push(home.join(".bun").join("bin"));
+
+        if cfg!(windows) {
+            extra_dirs.push(home.join("AppData").join("Local").join("Programs").join("nodejs"));
+            extra_dirs.push(home.join("AppData").join("Roaming").join("npm"));
+        }
+
+        let nvm_dir = home.join(".nvm").join("versions").join("node");
+        if let Ok(entries) = fs::read_dir(&nvm_dir) {
+            let mut versions: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.join("bin").join(if cfg!(windows) { "node.exe" } else { "node" }).exists())
+                .collect();
+            versions.sort();
+            if let Some(latest) = versions.last() {
+                extra_dirs.push(latest.join("bin"));
+            }
+        }
+
+        let fnm_dir = home.join(".local").join("share").join("fnm").join("node-versions");
+        if let Ok(entries) = fs::read_dir(&fnm_dir) {
+            let mut versions: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path().join("installation"))
+                .filter(|p| p.join("bin").join(if cfg!(windows) { "node.exe" } else { "node" }).exists())
+                .collect();
+            versions.sort();
+            if let Some(latest) = versions.last() {
+                extra_dirs.push(latest.join("bin"));
+            }
+        }
+
+        let volta_bin = home.join(".volta").join("bin");
+        if volta_bin.exists() {
+            extra_dirs.push(volta_bin);
         }
     }
 
-    // Add fnm
-    let fnm_dir = format!("{}/.local/share/fnm/node-versions", home);
-    if let Ok(entries) = fs::read_dir(&fnm_dir) {
-        let mut versions: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path().join("installation"))
-            .filter(|p| p.join("bin/node").exists())
-            .collect();
-        versions.sort();
-        if let Some(latest) = versions.last() {
-            extra_dirs.push(latest.join("bin").display().to_string());
+    if cfg!(windows) {
+        if let Some(program_files) =
+            std::env::var_os("ProgramFiles").filter(|value| !value.is_empty())
+        {
+            extra_dirs.push(PathBuf::from(program_files).join("nodejs"));
         }
+        if let Some(program_files_x86) =
+            std::env::var_os("ProgramFiles(x86)").filter(|value| !value.is_empty())
+        {
+            extra_dirs.push(PathBuf::from(program_files_x86).join("nodejs"));
+        }
+        if let Some(local_app_data) =
+            std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
+        {
+            extra_dirs.push(PathBuf::from(local_app_data).join("Programs").join("nodejs"));
+        }
+    } else {
+        extra_dirs.extend([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/sbin"),
+            PathBuf::from("/Library/Apple/usr/bin"),
+            PathBuf::from("/System/Cryptexes/App/usr/bin"),
+            PathBuf::from("/Applications/Codex.app/Contents/Resources"),
+        ]);
     }
 
-    // Add volta
-    let volta_bin = format!("{}/.volta/bin", home);
-    if Path::new(&volta_bin).exists() {
-        extra_dirs.push(volta_bin);
-    }
+    let mut merged_paths: Vec<PathBuf> = extra_dirs
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect();
+    merged_paths.extend(std::env::split_paths(&current_path));
 
-    // Merge: extra dirs first, then existing PATH
-    extra_dirs.push(current_path);
-    extra_dirs.join(":")
+    std::env::join_paths(merged_paths).unwrap_or(current_path)
 }
 
 fn format_node_launch_error(error: &std::io::Error) -> String {
