@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process'
 import { buildShellEnv } from '../shellEnv.mjs'
+import { resolveCommandShell } from '../shellRuntime.mjs'
 import { createStructuredError } from '../runtimeErrors.mjs'
 import { truncate } from '../utils.mjs'
 
-const DEFAULT_SHELL = '/bin/zsh'
 const DEFAULT_YIELD_TIME_MS = 1_000
 const DEFAULT_MAX_OUTPUT_CHARS = 12_000
 const MAX_SESSION_BUFFER_CHARS = 200_000
@@ -39,10 +39,6 @@ function trimBufferWithCursor(buffer, cursor, maxChars = MAX_SESSION_BUFFER_CHAR
     buffer: buffer.slice(overflow),
     cursor: Math.max(0, cursor - overflow),
   }
-}
-
-function buildShellArgs(command, login) {
-  return [login === false ? '-c' : '-lc', command]
 }
 
 function buildSessionError(message, detail, code = 'EXEC_SESSION_ERROR') {
@@ -221,7 +217,7 @@ function scheduleCommandTimeout(session) {
   }, session.commandTimeoutMs)
 }
 
-export function createUnifiedExecRuntime({ shell = DEFAULT_SHELL } = {}) {
+export function createUnifiedExecRuntime({ shell } = {}) {
   let nextSessionId = 1
   const sessions = new Map()
 
@@ -334,6 +330,7 @@ export function createUnifiedExecRuntime({ shell = DEFAULT_SHELL } = {}) {
       truncated: slice.truncated,
       wallTimeMs: Date.now() - session.startedAt,
       command: session.command,
+      shell: session.shell,
       cwd: session.cwd,
       pid: session.pid,
       tty: false,
@@ -367,9 +364,11 @@ export function createUnifiedExecRuntime({ shell = DEFAULT_SHELL } = {}) {
       )
     }
 
-    const child = spawn(shell, buildShellArgs(command, login), {
+    const env = buildShellEnv()
+    const commandShell = resolveCommandShell({ env, shell })
+    const child = spawn(commandShell.file, commandShell.args(command, login), {
       cwd,
-      env: buildShellEnv(),
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
@@ -377,6 +376,7 @@ export function createUnifiedExecRuntime({ shell = DEFAULT_SHELL } = {}) {
       id: nextSessionId++,
       child,
       command,
+      shell: commandShell.file,
       cwd,
       startedAt: Date.now(),
       lastActivityAt: Date.now(),

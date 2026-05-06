@@ -1,8 +1,9 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { findExecutable } from './shellRuntime.mjs'
 
-const COMMON_PATH_DIRS = [
+const POSIX_COMMON_PATH_DIRS = [
   '/opt/homebrew/bin',
   '/usr/local/bin',
   '/usr/bin',
@@ -13,6 +14,10 @@ const COMMON_PATH_DIRS = [
   '/System/Cryptexes/App/usr/bin',
   '/Applications/Codex.app/Contents/Resources',
 ]
+
+function resolvePathEnvKey(baseEnv) {
+  return Object.keys(baseEnv).find(key => key.toLowerCase() === 'path') || 'PATH'
+}
 
 function pathEntries(value = '') {
   return String(value)
@@ -28,20 +33,43 @@ function pushExistingPath(entries, nextPath) {
   entries.push(nextPath)
 }
 
-function findExecutable(name, searchPath) {
-  for (const entry of pathEntries(searchPath)) {
-    const candidate = path.join(entry, name)
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK)
-      return candidate
-    } catch {
-      // Keep searching.
-    }
+function windowsProgramPath(...parts) {
+  const base = parts.shift()
+  return base ? path.join(base, ...parts) : ''
+}
+
+function commonPathDirs(baseEnv = process.env) {
+  if (process.platform !== 'win32') {
+    return POSIX_COMMON_PATH_DIRS
   }
-  return ''
+
+  const home = baseEnv.USERPROFILE || baseEnv.HOME || os.homedir()
+  const systemRoot = baseEnv.SystemRoot || baseEnv.WINDIR || 'C:\\Windows'
+  return [
+    windowsProgramPath(baseEnv.LOCALAPPDATA, 'Microsoft', 'WindowsApps'),
+    windowsProgramPath(home, 'AppData', 'Roaming', 'npm'),
+    windowsProgramPath(home, 'scoop', 'shims'),
+    windowsProgramPath(baseEnv.ProgramFiles, 'nodejs'),
+    windowsProgramPath(baseEnv['ProgramFiles(x86)'], 'nodejs'),
+    windowsProgramPath(baseEnv.LOCALAPPDATA, 'Programs', 'nodejs'),
+    windowsProgramPath(baseEnv.ProgramFiles, 'PowerShell', '7'),
+    windowsProgramPath(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0'),
+    windowsProgramPath(baseEnv.ProgramFiles, 'Git', 'cmd'),
+    windowsProgramPath(baseEnv.ProgramFiles, 'Git', 'bin'),
+    windowsProgramPath(baseEnv['ProgramFiles(x86)'], 'Git', 'cmd'),
+    windowsProgramPath(baseEnv['ProgramFiles(x86)'], 'Git', 'bin'),
+    windowsProgramPath(baseEnv.ChocolateyInstall, 'bin'),
+    'C:\\ProgramData\\chocolatey\\bin',
+    windowsProgramPath(systemRoot, 'System32'),
+    systemRoot,
+  ]
 }
 
 function ensureShellShimDir(baseEnv, initialPath) {
+  if (process.platform === 'win32') {
+    return ''
+  }
+
   const auraBin = path.join(os.homedir(), '.aura', 'bin')
   try {
     fs.mkdirSync(auraBin, { recursive: true })
@@ -63,7 +91,8 @@ function ensureShellShimDir(baseEnv, initialPath) {
 }
 
 export function buildShellEnv(baseEnv = process.env) {
-  const home = baseEnv.HOME || os.homedir()
+  const home = baseEnv.HOME || baseEnv.USERPROFILE || os.homedir()
+  const pathKey = resolvePathEnvKey(baseEnv)
   const entries = []
 
   for (const candidate of [
@@ -72,9 +101,9 @@ export function buildShellEnv(baseEnv = process.env) {
     path.join(home, '.cargo', 'bin'),
     path.join(home, '.volta', 'bin'),
     path.join(home, '.bun', 'bin'),
-    ...COMMON_PATH_DIRS,
+    ...commonPathDirs(baseEnv),
     path.dirname(process.execPath),
-    ...pathEntries(baseEnv.PATH),
+    ...pathEntries(baseEnv[pathKey]),
   ]) {
     pushExistingPath(entries, candidate)
   }
@@ -85,8 +114,16 @@ export function buildShellEnv(baseEnv = process.env) {
     pushExistingPath(entries, shimDir)
   }
 
-  return {
-    ...baseEnv,
-    PATH: entries.join(path.delimiter),
+  const env = { ...baseEnv }
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === 'path' && key !== pathKey) {
+      delete env[key]
+    }
   }
+
+  env[pathKey] = entries.join(path.delimiter)
+  if (process.platform !== 'win32') {
+    env.PATH = env[pathKey]
+  }
+  return env
 }

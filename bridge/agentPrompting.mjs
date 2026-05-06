@@ -22,6 +22,27 @@ function buildCurrentDateContext() {
   ].join('\n')
 }
 
+function buildHostExecutionContext() {
+  const platformLabel =
+    process.platform === 'win32'
+      ? 'Windows'
+      : process.platform === 'darwin'
+        ? 'macOS'
+        : process.platform === 'linux'
+          ? 'Linux'
+          : process.platform
+
+  return [
+    `Host OS: ${platformLabel}.`,
+    process.platform === 'win32'
+      ? 'Shell commands run through a Windows shell; prefer PowerShell-compatible commands and Windows-native installers such as winget when helping with local setup.'
+      : 'Shell commands run through a POSIX shell; prefer commands that match the host OS and installed toolchain.',
+    process.platform === 'darwin'
+      ? 'Computer Use desktop automation may be mounted when enabled.'
+      : 'macOS-only Computer Use desktop automation is not mounted on this host.',
+  ].join('\n')
+}
+
 function buildApprovalPolicy(settings) {
   return [
     `Approval policy: shell is ${settings.autoApproveShell ? 'auto-approved' : 'approval-required'}.`,
@@ -171,6 +192,7 @@ export function buildRouteFirstSystemPrompt(
   const sections = [
     'You are Aura, a runtime-governed tool-using agent for workspace work, web retrieval, and browser tasks within mounted capabilities.',
     `The active workspace is: ${settings.cwd}`,
+    buildHostExecutionContext(),
     buildCurrentDateContext(),
     'Answer directly when your current knowledge or the mounted local context is sufficient.',
     'Use only the currently mounted tools when they materially reduce uncertainty or let you act directly on the user request.',

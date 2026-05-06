@@ -20,6 +20,7 @@ import {
 } from './editing/toolHandlers.mjs'
 import { createUnifiedExecRuntime } from './editing/unifiedExecRuntime.mjs'
 import { buildShellEnv } from './shellEnv.mjs'
+import { resolveCommandShell } from './shellRuntime.mjs'
 
 const ALWAYS_ON_SKILL_IDS = new Set([
   'aura-browser-operator',
@@ -265,15 +266,18 @@ async function runShellStreaming(
       return
     }
 
-    const child = spawn('/bin/zsh', ['-lc', command], {
+    const env = buildShellEnv()
+    const commandShell = resolveCommandShell({ env })
+    const child = spawn(commandShell.file, commandShell.args(command), {
       cwd,
-      env: buildShellEnv(),
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
     let stdout = ''
     let stderr = ''
     let flushTimer = null
+    let settled = false
 
     function flush() {
       flushTimer = null
@@ -293,11 +297,19 @@ async function runShellStreaming(
     }
 
     const timer = setTimeout(() => {
+      if (settled) {
+        return
+      }
+      settled = true
       child.kill('SIGTERM')
       reject(new Error(`Shell command timed out after ${timeoutMs}ms`))
     }, timeoutMs)
 
     const handleAbort = () => {
+      if (settled) {
+        return
+      }
+      settled = true
       clearTimeout(timer)
       if (flushTimer !== null) {
         clearTimeout(flushTimer)
@@ -317,8 +329,23 @@ async function runShellStreaming(
       scheduleFlush()
     })
 
-    child.on('error', reject)
+    child.on('error', error => {
+      if (settled) {
+        return
+      }
+      settled = true
+      clearTimeout(timer)
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer)
+      }
+      signal?.removeEventListener('abort', handleAbort)
+      reject(error)
+    })
     child.on('close', code => {
+      if (settled) {
+        return
+      }
+      settled = true
       clearTimeout(timer)
       if (flushTimer !== null) {
         clearTimeout(flushTimer)
@@ -461,7 +488,7 @@ async function collectWorkspaceFilePaths(rootPath, currentPath = rootPath, match
     }
 
     if (entry.isFile()) {
-      matches.push(path.relative(rootPath, entryPath) || entry.name)
+      matches.push((path.relative(rootPath, entryPath) || entry.name).split(path.sep).join('/'))
       if (matches.length >= 500) {
         return matches
       }

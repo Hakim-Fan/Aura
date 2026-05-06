@@ -69,7 +69,10 @@ export function resolveWorkspacePath(cwd, target = '.') {
   const root = path.resolve(cwd)
   const resolved = path.resolve(root, target)
   const safeRoot = `${root}${path.sep}`
-  if (resolved !== root && !resolved.startsWith(safeRoot)) {
+  const comparableRoot = process.platform === 'win32' ? root.toLowerCase() : root
+  const comparableResolved = process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  const comparableSafeRoot = `${comparableRoot}${path.sep}`
+  if (comparableResolved !== comparableRoot && !comparableResolved.startsWith(comparableSafeRoot)) {
     throw new Error(`Path escapes workspace root: ${target}`)
   }
   return resolved

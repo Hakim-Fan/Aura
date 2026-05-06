@@ -62,8 +62,8 @@ function formatModifiers(modifiers = []) {
   return converted.length > 0 ? ` using {${converted.join(', ')}}` : ''
 }
 
-function buildComputerTools({ settings, context }) {
-  if (!settings.enableComputerUse) {
+function buildComputerTools({ settings, context, platform = process.platform }) {
+  if (!settings.enableComputerUse || platform !== 'darwin') {
     return []
   }
 
