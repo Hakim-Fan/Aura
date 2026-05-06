@@ -277,7 +277,7 @@ function createMcpSession(server, commandSpec, env) {
       const nextClient = new Client(
         {
           name: 'aura-desktop',
-          version: '1.1.0',
+          version: '1.1.1',
         },
         {
           capabilities: {},
