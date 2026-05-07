@@ -228,6 +228,14 @@ export type RouteMountedCapabilitiesSnapshot = {
   tools: string[]
 }
 
+export type PromptContextSnapshot = {
+  systemPromptTokens: number
+  toolSchemaTokens: number
+  promptEnvelopeTokens: number
+  contextWindowTokens: number
+  compressionThresholdTokens: number
+}
+
 export type RouteDecisionSnapshot = {
   answerMode: RouteAnswerMode
   capabilityTier: RouteCapabilityTier
@@ -243,6 +251,7 @@ export type RouteDecisionSnapshot = {
     | 'budget_exhausted'
     | 'runtime_pass_limit'
   mountedCapabilities?: RouteMountedCapabilitiesSnapshot
+  contextEstimate?: PromptContextSnapshot
 }
 
 export type CompletionState =

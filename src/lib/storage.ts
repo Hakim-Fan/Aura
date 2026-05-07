@@ -664,6 +664,37 @@ function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefin
             tools: normalizeStrings(routeDecision.mountedCapabilities.tools),
           }
         : undefined,
+    contextEstimate:
+      routeDecision.contextEstimate &&
+      typeof routeDecision.contextEstimate === 'object' &&
+      typeof routeDecision.contextEstimate.systemPromptTokens === 'number' &&
+      typeof routeDecision.contextEstimate.toolSchemaTokens === 'number' &&
+      typeof routeDecision.contextEstimate.promptEnvelopeTokens === 'number' &&
+      typeof routeDecision.contextEstimate.contextWindowTokens === 'number' &&
+      typeof routeDecision.contextEstimate.compressionThresholdTokens === 'number'
+        ? {
+            systemPromptTokens: Math.max(
+              0,
+              Math.round(routeDecision.contextEstimate.systemPromptTokens),
+            ),
+            toolSchemaTokens: Math.max(
+              0,
+              Math.round(routeDecision.contextEstimate.toolSchemaTokens),
+            ),
+            promptEnvelopeTokens: Math.max(
+              0,
+              Math.round(routeDecision.contextEstimate.promptEnvelopeTokens),
+            ),
+            contextWindowTokens: Math.max(
+              0,
+              Math.round(routeDecision.contextEstimate.contextWindowTokens),
+            ),
+            compressionThresholdTokens: Math.max(
+              0,
+              Math.round(routeDecision.contextEstimate.compressionThresholdTokens),
+            ),
+          }
+        : undefined,
   }
 }
 

@@ -32,6 +32,8 @@ import {
   runOpenAiCompatibleAgent,
 } from './providers.mjs'
 import {
+  buildContextCompressionBudget,
+  estimateTextTokens,
   shouldCompressMessages,
   estimateMessagesTokens,
 } from './contextCompression.mjs'
@@ -330,6 +332,7 @@ function buildRouteDecisionSnapshot({
   routeState,
   selectedCapabilities,
   selectedTools,
+  contextEstimate,
   escalationCount,
   availableEscalations,
   tierHistory,
@@ -393,6 +396,36 @@ function buildRouteDecisionSnapshot({
         .map(tool => tool?.name)
         .filter(Boolean),
     },
+    contextEstimate,
+  }
+}
+
+function estimateMountedToolSchemaTokens(tools = []) {
+  const toolDefs = (Array.isArray(tools) ? tools : []).map(tool => ({
+    type: 'function',
+    function: {
+      name: tool?.name || '',
+      description: tool?.description || '',
+      parameters:
+        tool?.inputSchema && typeof tool.inputSchema === 'object'
+          ? tool.inputSchema
+          : {},
+    },
+  }))
+
+  return estimateTextTokens(JSON.stringify(toolDefs))
+}
+
+function buildPromptContextSnapshot(settings, systemPrompt, tools) {
+  const budget = buildContextCompressionBudget(settings, { systemPrompt })
+  const toolSchemaTokens = estimateMountedToolSchemaTokens(tools)
+
+  return {
+    systemPromptTokens: budget.systemPromptTokens,
+    toolSchemaTokens,
+    promptEnvelopeTokens: budget.systemPromptTokens + toolSchemaTokens,
+    contextWindowTokens: budget.contextWindowTokens,
+    compressionThresholdTokens: budget.compressionThresholdTokens,
   }
 }
 
@@ -1238,10 +1271,16 @@ export async function runRouteFirstAgent(request) {
       const allTools = escalationTool
         ? [...selectedCapabilities.selectedTools, escalationTool]
         : selectedCapabilities.selectedTools
+      const promptContextSnapshot = buildPromptContextSnapshot(
+        effectiveRunSettings,
+        lastSystemPrompt,
+        allTools,
+      )
       lastRouteDecision = buildRouteDecisionSnapshot({
         routeState: promptRouteState,
         selectedCapabilities,
         selectedTools: selectedCapabilities.selectedTools,
+        contextEstimate: promptContextSnapshot,
         escalationCount: routeEscalationCount,
         availableEscalations,
         tierHistory: [...routeHistory.map(entry => entry.capabilityTier), routeState.capabilityTier],
@@ -1366,6 +1405,7 @@ export async function runRouteFirstAgent(request) {
         routeState: promptRouteState,
         selectedCapabilities,
         selectedTools: selectedCapabilities.selectedTools,
+        contextEstimate: promptContextSnapshot,
         escalationCount: routeEscalationCount,
         availableEscalations,
         tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),
