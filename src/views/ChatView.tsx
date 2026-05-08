@@ -2169,8 +2169,8 @@ function FinalChangedFilesCard({ summary }: { summary: FinalChangeSummary }) {
         </div>
         <div className="flex items-center gap-2">
           <span className={`rounded-full px-2 py-0.5 text-10px font-700 ${changeState === 'applied'
-              ? 'bg-emerald-50 text-emerald-700'
-              : 'bg-amber-50 text-amber-700'
+            ? 'bg-emerald-50 text-emerald-700'
+            : 'bg-amber-50 text-amber-700'
             }`}>
             {changeState === 'applied' ? '已应用' : '已撤销'}
           </span>
@@ -4434,8 +4434,8 @@ export function ChatView({
                     </button>
                     <button
                       className={`flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors ${deepResearchEnabled
-                          ? 'bg-[rgba(186,111,75,0.14)] text-[#9f4723]'
-                          : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'
+                        ? 'bg-[rgba(186,111,75,0.14)] text-[#9f4723]'
+                        : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'
                         }`}
                       onClick={onToggleResearchMode}
                       title={
@@ -4495,15 +4495,6 @@ export function ChatView({
                         </div>
                       ) : null}
                     </div>
-                    {enabledSkillSummary ? (
-                      <div
-                        className="hidden min-w-0 max-w-[240px] shrink items-center gap-1.5 px-1.5 text-11px font-600 text-[var(--text-secondary)] opacity-65 sm:flex"
-                        title={`已启用技能：${enabledSkillSummary}`}
-                      >
-                        <Sparkles size={12} className="shrink-0 opacity-60" />
-                        <span className="truncate">技能：{enabledSkillSummary}</span>
-                      </div>
-                    ) : null}
                     <div className="relative" ref={reasoningMenuRef}>
                       <button
                         className={`p-1.5 rounded-md transition-colors ${reasoningMenuOpen ? 'bg-[rgba(0,0,0,0.07)] text-[var(--text-primary)]' : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'}`}
