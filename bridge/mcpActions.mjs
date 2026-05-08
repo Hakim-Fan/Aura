@@ -52,7 +52,7 @@ async function inspectServer(server) {
   const client = new Client(
     {
       name: 'aura-desktop',
-      version: '1.1.1', // 客户端标识版本，随应用版本同步更新
+      version: '1.1.2', // 客户端标识版本，随应用版本同步更新
     },
     {
       capabilities: {},
