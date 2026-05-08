@@ -11,7 +11,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=npm_node_execpath");
 
-    stage_node_sidecar().expect("failed to stage bundled Node runtime");
+    if let Err(error) = stage_node_sidecar() {
+        eprintln!("failed to stage bundled Node runtime: {error}");
+        std::process::exit(1);
+    }
     tauri_build::build();
 }
 
@@ -23,7 +26,6 @@ fn stage_node_sidecar() -> Result<(), String> {
             .map_err(|error| format!("missing CARGO_MANIFEST_DIR env: {error}"))?,
     );
     let source = resolve_node_binary(&target, &host)?;
-    validate_node_binary_for_target(&source, &target)?;
     let binaries_dir = manifest_dir.join("binaries");
     fs::create_dir_all(&binaries_dir).map_err(|error| {
         format!(
@@ -73,20 +75,24 @@ fn explicit_node_binary_from_env(key: &str) -> Result<Option<PathBuf>, String> {
         .map_err(|error| format!("failed to canonicalize Node runtime path from {key}: {error}"))
 }
 
+fn validate_candidate(candidate: PathBuf, target: &str) -> Result<PathBuf, String> {
+    validate_node_binary_for_target(&candidate, target)?;
+    Ok(candidate)
+}
+
 fn resolve_node_binary(target: &str, host: &str) -> Result<PathBuf, String> {
     if let Some(explicit) = explicit_node_binary_from_env("AURA_NODE_BINARY")? {
-        return Ok(explicit);
+        return validate_candidate(explicit, target);
     }
 
-    if target != host {
-        return Err(format!(
-            "Refusing to bundle the host Node runtime for cross-target build {host} -> {target}. Set AURA_NODE_BINARY to a Node executable built for {target}."
-        ));
-    }
+    let mut rejected = Vec::new();
 
     for key in ["npm_node_execpath", "NODE"] {
         if let Some(explicit) = explicit_node_binary_from_env(key)? {
-            return Ok(explicit);
+            match validate_candidate(explicit.clone(), target) {
+                Ok(candidate) => return Ok(candidate),
+                Err(error) => rejected.push(format!("{key}={} rejected: {error}", explicit.display())),
+            }
         }
     }
 
@@ -98,14 +104,31 @@ fn resolve_node_binary(target: &str, host: &str) -> Result<PathBuf, String> {
     for entry in env::split_paths(&path) {
         let candidate = entry.join(executable_name);
         if candidate.is_file() {
-            return candidate
+            let canonical = candidate
                 .canonicalize()
-                .map_err(|error| format!("failed to canonicalize Node runtime path: {error}"));
+                .map_err(|error| format!("failed to canonicalize Node runtime path: {error}"))?;
+            match validate_candidate(canonical.clone(), target) {
+                Ok(candidate) => return Ok(candidate),
+                Err(error) => rejected.push(format!("{} rejected: {error}", canonical.display())),
+            }
         }
     }
 
+    let cross_target_note = if target != host {
+        format!(
+            "This is a cross-target build ({host} -> {target}), so the Node sidecar must match the target, not the build VM."
+        )
+    } else {
+        format!("The Node sidecar must match the current build target {target}.")
+    };
+    let rejected_note = if rejected.is_empty() {
+        String::new()
+    } else {
+        format!("\nChecked candidates:\n- {}", rejected.join("\n- "))
+    };
+
     Err(format!(
-        "Unable to locate a Node runtime for bundling. Set AURA_NODE_BINARY or ensure `{executable_name}` is on PATH."
+        "Unable to locate a Node runtime matching {target}. {cross_target_note} Set AURA_NODE_BINARY to a matching Node executable or put one earlier on PATH.{rejected_note}"
     ))
 }
 
