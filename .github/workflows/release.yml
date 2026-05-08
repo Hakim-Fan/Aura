@@ -12,6 +12,7 @@ on:
         default: 'v0.1.0'
 
 env:
+  TAURI_SKIP_VERSION_CHECK: "true"
   # 综合防范各类网络超时和 DNS 解析失效等问题
   CARGO_HTTP_MULTIPLEXING: "false"
   CARGO_NET_RETRY: "10"
