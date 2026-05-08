@@ -39,6 +39,7 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
+import { readImagePreview } from '../lib/workspace'
 import { WorkspaceExplorer } from '../components/WorkspaceExplorer'
 import { TaskTreeView } from '../components/TaskTreeView'
 import {
@@ -471,6 +472,110 @@ function summarizePath(path: string) {
     return path
   }
   return `.../${segments.slice(-2).join('/')}`
+}
+
+function mimeTypeFromAttachmentPath(filePath?: string) {
+  const normalized = typeof filePath === 'string' ? filePath.trim() : ''
+  if (!normalized) {
+    return ''
+  }
+  const extension = normalized.split('.').pop()?.toLowerCase() || ''
+  switch (extension) {
+    case 'png':
+      return 'image/png'
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg'
+    case 'gif':
+      return 'image/gif'
+    case 'webp':
+      return 'image/webp'
+    case 'bmp':
+      return 'image/bmp'
+    case 'svg':
+      return 'image/svg+xml'
+    default:
+      return ''
+  }
+}
+
+function attachmentLooksLikeImage(attachment: {
+  path?: string
+  preview?: string
+  mimeType?: string
+}) {
+  if (attachment.preview?.startsWith('data:image/')) {
+    return true
+  }
+  return (
+    (typeof attachment.mimeType === 'string' && attachment.mimeType.startsWith('image/')) ||
+    mimeTypeFromAttachmentPath(attachment.path).startsWith('image/')
+  )
+}
+
+function AttachmentThumbnail({
+  attachment,
+  alt,
+  className,
+  fallbackClassName,
+  iconSize = 16,
+}: {
+  attachment: {
+    path?: string
+    preview?: string
+    mimeType?: string
+    name: string
+  }
+  alt: string
+  className: string
+  fallbackClassName: string
+  iconSize?: number
+}) {
+  const [preview, setPreview] = useState(attachment.preview || '')
+
+  useEffect(() => {
+    if (attachment.preview) {
+      setPreview(attachment.preview)
+      return
+    }
+    if (!attachmentLooksLikeImage(attachment) || !attachment.path) {
+      setPreview('')
+      return
+    }
+
+    let cancelled = false
+    void readImagePreview(attachment.path)
+      .then(nextPreview => {
+        if (!cancelled && nextPreview) {
+          setPreview(nextPreview)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPreview('')
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [attachment.mimeType, attachment.path, attachment.preview])
+
+  if (preview) {
+    return (
+      <img
+        src={preview}
+        alt={alt}
+        className={className}
+      />
+    )
+  }
+
+  return (
+    <div className={fallbackClassName}>
+      <Paperclip size={iconSize} />
+    </div>
+  )
 }
 
 function parseJsonOutput(value?: string) {
@@ -2810,7 +2915,7 @@ function MessageUsagePopover({ usage }: { usage?: MessageUsage }) {
           用量
         </strong>
         <p className="mt-1 text-11px text-[var(--text-secondary)] opacity-75">
-          当前回答这一版的模型用量
+          当前回答这一版的累计模型用量
         </p>
       </div>
 
@@ -3786,17 +3891,12 @@ function UserMessageCard({
               onClick={() => onOpenAttachment(attachment.path)}
               title={attachment.path}
             >
-              {attachment.preview ? (
-                <img
-                  src={attachment.preview}
-                  alt={attachment.name}
-                  className="h-10 w-10 shrink-0 rounded-xl object-cover border border-[rgba(15,23,42,0.06)]"
-                />
-              ) : (
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.03)] text-[var(--text-secondary)]">
-                  <Paperclip size={16} />
-                </div>
-              )}
+              <AttachmentThumbnail
+                attachment={attachment}
+                alt={attachment.name}
+                className="h-10 w-10 shrink-0 rounded-xl object-cover border border-[rgba(15,23,42,0.06)]"
+                fallbackClassName="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.03)] text-[var(--text-secondary)]"
+              />
               <span className="max-w-220px truncate text-13px font-600 text-[var(--text-primary)]">
                 {attachment.name}
               </span>
@@ -4279,17 +4379,13 @@ export function ChatView({
                           }}
                           title={attachment.preview ? '预览图片' : '打开附件'}
                         >
-                          {attachment.preview ? (
-                            <img
-                              src={attachment.preview}
-                              alt={attachment.name}
-                              className="h-8 w-8 shrink-0 rounded-lg object-cover border border-[rgba(15,23,42,0.06)]"
-                            />
-                          ) : (
-                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[rgba(15,23,42,0.06)] bg-white text-[var(--text-secondary)]">
-                              <Paperclip size={14} />
-                            </div>
-                          )}
+                          <AttachmentThumbnail
+                            attachment={attachment}
+                            alt={attachment.name}
+                            className="h-8 w-8 shrink-0 rounded-lg object-cover border border-[rgba(15,23,42,0.06)]"
+                            fallbackClassName="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[rgba(15,23,42,0.06)] bg-white text-[var(--text-secondary)]"
+                            iconSize={14}
+                          />
                           <span className="max-w-180px truncate text-13px font-600 text-[var(--text-primary)]">
                             {attachment.name}
                           </span>

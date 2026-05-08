@@ -429,6 +429,48 @@ function buildPromptContextSnapshot(settings, systemPrompt, tools) {
   }
 }
 
+function normalizeUsage(usage) {
+  const inputTokens = Math.max(0, Math.round(Number(usage?.inputTokens) || 0))
+  const outputTokens = Math.max(0, Math.round(Number(usage?.outputTokens) || 0))
+  if (inputTokens <= 0 && outputTokens <= 0) {
+    return undefined
+  }
+  return {
+    inputTokens,
+    outputTokens,
+  }
+}
+
+function createUsageTrackingHooks(baseHooks = {}) {
+  let totals = {
+    inputTokens: 0,
+    outputTokens: 0,
+  }
+
+  return {
+    hooks: {
+      ...baseHooks,
+      onUsage(usage) {
+        const normalized = normalizeUsage(usage)
+        if (!normalized) {
+          return
+        }
+        totals = {
+          inputTokens: totals.inputTokens + normalized.inputTokens,
+          outputTokens: totals.outputTokens + normalized.outputTokens,
+        }
+        baseHooks?.onUsage?.({
+          inputTokens: totals.inputTokens,
+          outputTokens: totals.outputTokens,
+        })
+      },
+    },
+    getAccumulatedUsage() {
+      return normalizeUsage(totals)
+    },
+  }
+}
+
 function inferRouteEscalationFromMessage(message, availableEscalations) {
   return null
 }
@@ -1055,10 +1097,11 @@ export async function runRouteFirstAgent(request) {
     settings,
     messages: requestedMessages,
     runtime = {},
-    hooks = {},
+    hooks: incomingHooks = {},
     capabilities,
     carryoverContext = '',
   } = request
+  const { hooks, getAccumulatedUsage } = createUsageTrackingHooks(incomingHooks)
   let messages = Array.isArray(requestedMessages) ? requestedMessages : []
   hooks?.onPhaseChange?.('preparing')
   if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
@@ -1461,6 +1504,7 @@ export async function runRouteFirstAgent(request) {
       taskTracker.completeTask(currentTaskId, '生成最终回答')
       return {
         ...result,
+        usage: getAccumulatedUsage() || result.usage,
         agentMode: 'route-first',
         routeDecision: lastRouteDecision,
         capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
@@ -1555,7 +1599,7 @@ export async function runRouteFirstAgent(request) {
                   recovered: true,
                 }
               : undefined,
-            usage: undefined,
+            usage: getAccumulatedUsage() || recovered.usage,
             status: 'completed',
             taskTree: taskTracker.getTree(),
           }
@@ -1595,7 +1639,7 @@ export async function runRouteFirstAgent(request) {
         capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
         reasoning: summaryReasoning,
         retryInfo: recoveryRetryInfo || retryInfo,
-        usage: undefined,
+        usage: getAccumulatedUsage(),
         status: 'completed',
         taskTree: taskTracker.getTree(),
       }

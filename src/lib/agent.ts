@@ -2,11 +2,14 @@ import { invoke } from '@tauri-apps/api/core'
 import type {
   ResolvedAgentCapabilities,
   AgentTaskSnapshot,
+  ChatContentPart,
   ChatMessage,
   ChatRole,
   AgentSettings,
+  MessageAttachment,
   SessionContextCompression,
 } from '../types'
+import { readImageDataUrl } from './workspace'
 
 const DEFAULT_MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
 
@@ -237,16 +240,184 @@ function mergeCarryoverContext(...sections: Array<string | undefined>): string |
   return normalized.join('\n\n')
 }
 
-function buildAgentRuntimeMessages(messages: ChatMessage[]) {
-  return messages.map(message => ({
-    role: message.role as ChatRole,
-    content: message.content,
-    parts: message.parts || [],
-    researchMode: message.researchMode,
-  }))
+function mimeTypeFromPath(filePath?: string) {
+  const normalized = typeof filePath === 'string' ? filePath.trim() : ''
+  if (!normalized) {
+    return ''
+  }
+  const extension = normalized.split('.').pop()?.toLowerCase() || ''
+  switch (extension) {
+    case 'png':
+      return 'image/png'
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg'
+    case 'gif':
+      return 'image/gif'
+    case 'webp':
+      return 'image/webp'
+    case 'bmp':
+      return 'image/bmp'
+    case 'svg':
+      return 'image/svg+xml'
+    case 'pdf':
+      return 'application/pdf'
+    default:
+      return ''
+  }
 }
 
-function stripCompressionOnlyPart(part: NonNullable<ChatMessage['parts']>[number]) {
+function mimeTypeFromDataUrl(dataUrl?: string) {
+  const match = /^data:([^;,]+)[;,]/u.exec(dataUrl || '')
+  return match?.[1] || ''
+}
+
+function resolveAttachmentMimeType(attachment: {
+  mimeType?: string
+  path?: string
+  preview?: string
+}) {
+  return (
+    attachment.mimeType ||
+    mimeTypeFromDataUrl(attachment.preview) ||
+    mimeTypeFromPath(attachment.path)
+  )
+}
+
+function isImageAttachment(attachment: {
+  mimeType?: string
+  path?: string
+  preview?: string
+}) {
+  return resolveAttachmentMimeType(attachment).startsWith('image/')
+}
+
+function attachmentLookupKeys(value: { path?: string; name?: string }) {
+  const keys: string[] = []
+  if (typeof value.path === 'string' && value.path.trim()) {
+    keys.push(`path:${value.path.trim()}`)
+  }
+  if (typeof value.name === 'string' && value.name.trim()) {
+    keys.push(`name:${value.name.trim()}`)
+  }
+  return keys
+}
+
+async function buildAgentRuntimeMessage(
+  message: ChatMessage,
+  imageDataUrlCache: Map<string, Promise<string | undefined>>,
+) {
+  const attachments = Array.isArray(message.attachments) ? message.attachments : []
+  const imageAttachments = attachments.filter(isImageAttachment)
+  const imageAttachmentsByKey = new Map<string, MessageAttachment>()
+  for (const attachment of imageAttachments) {
+    for (const key of attachmentLookupKeys(attachment)) {
+      imageAttachmentsByKey.set(key, attachment)
+    }
+  }
+
+  const loadImageDataUrl = (filePath?: string) => {
+    const normalizedPath = typeof filePath === 'string' ? filePath.trim() : ''
+    if (!normalizedPath) {
+      return Promise.resolve(undefined)
+    }
+    const existing = imageDataUrlCache.get(normalizedPath)
+    if (existing) {
+      return existing
+    }
+    const next = readImageDataUrl(normalizedPath)
+      .then(value => (typeof value === 'string' && value.trim() ? value : undefined))
+      .catch(() => undefined)
+    imageDataUrlCache.set(normalizedPath, next)
+    return next
+  }
+
+  const nextParts = await Promise.all(
+    (message.parts || []).map(async part => {
+      if (part.type === 'image') {
+        if (part.dataUrl?.trim()) {
+          return part
+        }
+        const dataUrl = await loadImageDataUrl(part.path)
+        return dataUrl ? { ...part, dataUrl } : part
+      }
+
+      if (part.type === 'file') {
+        const matchingAttachment = attachmentLookupKeys(part)
+          .map(key => imageAttachmentsByKey.get(key))
+          .find(Boolean)
+        if (!matchingAttachment) {
+          return part
+        }
+        const dataUrl = await loadImageDataUrl(matchingAttachment.path || part.path)
+        return {
+          type: 'image' as const,
+          name: part.name,
+          mimeType:
+            resolveAttachmentMimeType(matchingAttachment) ||
+            part.mimeType ||
+            mimeTypeFromPath(part.path) ||
+            'image/*',
+          path: part.path,
+          dataUrl,
+        }
+      }
+
+      return part
+    }),
+  )
+
+  const existingAttachmentPartKeys = new Set(
+    nextParts.flatMap(part =>
+      part.type === 'image' || part.type === 'file' ? attachmentLookupKeys(part) : [],
+    ),
+  )
+
+  for (const attachment of attachments) {
+    const keys = attachmentLookupKeys(attachment)
+    if (keys.some(key => existingAttachmentPartKeys.has(key))) {
+      continue
+    }
+    if (isImageAttachment(attachment)) {
+      const dataUrl = await loadImageDataUrl(attachment.path)
+      nextParts.push({
+        type: 'image',
+        name: attachment.name,
+        mimeType: resolveAttachmentMimeType(attachment) || 'image/*',
+        path: attachment.path,
+        dataUrl,
+      })
+      continue
+    }
+    nextParts.push({
+      type: 'file',
+      name: attachment.name,
+      path: attachment.path,
+      mimeType: resolveAttachmentMimeType(attachment) || undefined,
+    })
+  }
+
+  if (nextParts.length === 0 && message.content.trim()) {
+    nextParts.push({
+      type: 'text',
+      text: message.content,
+    })
+  }
+
+  return {
+    role: message.role as ChatRole,
+    content: message.content,
+    parts: nextParts as ChatContentPart[],
+    researchMode: message.researchMode,
+  }
+}
+
+async function buildAgentRuntimeMessages(messages: ChatMessage[]) {
+  const imageDataUrlCache = new Map<string, Promise<string | undefined>>()
+  return Promise.all(messages.map(message => buildAgentRuntimeMessage(message, imageDataUrlCache)))
+}
+
+function stripInlineImageDataFromPart(part: NonNullable<ChatMessage['parts']>[number]) {
   if (part.type === 'image') {
     return {
       ...part,
@@ -261,7 +432,7 @@ function buildAgentCompressionMessages(messages: ChatMessage[]) {
     id: message.id,
     role: message.role as ChatRole,
     content: message.content,
-    parts: (message.parts || []).map(stripCompressionOnlyPart),
+    parts: (message.parts || []).map(stripInlineImageDataFromPart),
     researchMode: message.researchMode,
   }))
 }
@@ -331,7 +502,7 @@ export async function startAgentTask(
       buildCarryoverWebContext(messages),
       extraCarryoverContext,
     ),
-    messages: buildAgentRuntimeMessages(messages),
+    messages: await buildAgentRuntimeMessages(messages),
   }
 
   return invoke<string>('start_agent_task', { payload })
@@ -339,6 +510,10 @@ export async function startAgentTask(
 
 export async function getAgentTask(taskId: string): Promise<AgentTaskSnapshot> {
   return invoke<AgentTaskSnapshot>('get_agent_task', { taskId })
+}
+
+export async function releaseAgentTask(taskId: string): Promise<void> {
+  return invoke('release_agent_task', { taskId })
 }
 
 export async function respondToApproval(
@@ -359,7 +534,34 @@ export async function appendInputToAgentTask(
     researchMode?: ChatMessage['researchMode']
   },
 ): Promise<void> {
-  return invoke('append_input_to_agent_task', { taskId, input })
+  const runtimeInput = await buildAgentRuntimeMessage(
+    {
+      id: input.id,
+      role: 'user',
+      content: input.content,
+      parts: input.parts || [],
+      attachments: input.attachments || [],
+      createdAt: input.createdAt,
+      status: 'completed',
+      researchMode: input.researchMode,
+    },
+    new Map<string, Promise<string | undefined>>(),
+  )
+  return invoke('append_input_to_agent_task', {
+    taskId,
+    input: {
+      ...input,
+      parts: runtimeInput.parts,
+      snapshotParts: runtimeInput.parts.map(part =>
+        part.type === 'image'
+          ? {
+            ...part,
+            dataUrl: undefined,
+          }
+          : part,
+      ),
+    },
+  })
 }
 
 export async function cancelAgentTaskStep(taskId: string): Promise<void> {

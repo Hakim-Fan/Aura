@@ -19,6 +19,10 @@ use tauri_plugin_shell::ShellExt;
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 const APP_LOG_RETENTION_DAYS: u64 = 14;
 const EDIT_TRANSACTION_SNAPSHOT_KEY_PREFIX: &str = "edit_transaction_snapshot:";
+const MAX_REASONING_CHARS: usize = 100_000;
+const MAX_PHASE_OUTPUT_CHARS: usize = 100_000;
+const SNAPSHOT_TRUNCATION_MARKER: &str = "\n...(truncated to keep memory bounded)...\n";
+const MAX_INLINE_IMAGE_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Default)]
 struct AgentTaskSnapshot {
@@ -166,8 +170,7 @@ struct LightpandaRuntimeStatusRecord {
 }
 
 fn resolve_user_home() -> Result<PathBuf, String> {
-    resolve_user_home_dir()
-        .ok_or_else(|| "Failed to resolve the user home directory.".to_string())
+    resolve_user_home_dir().ok_or_else(|| "Failed to resolve the user home directory.".to_string())
 }
 
 fn resolve_aura_home() -> Result<PathBuf, String> {
@@ -973,11 +976,9 @@ fn format_log_value(value: &serde_json::Value) -> String {
         serde_json::Value::String(value) => {
             let trimmed = truncate_log_value(value.clone(), 240);
             if trimmed.is_empty()
-                || trimmed
-                    .chars()
-                    .any(|character| {
-                        character.is_whitespace() || character == '"' || character == '\''
-                    })
+                || trimmed.chars().any(|character| {
+                    character.is_whitespace() || character == '"' || character == '\''
+                })
             {
                 serde_json::to_string(&trimmed).unwrap_or_else(|_| "\"\"".into())
             } else {
@@ -1071,7 +1072,10 @@ fn append_app_log<R: Runtime>(
         "details": details,
     });
     append_log_line(logs_dir.join(format!("app-{date}.log")), &human_line);
-    append_log_line(logs_dir.join(format!("app-{date}.jsonl")), &entry.to_string());
+    append_log_line(
+        logs_dir.join(format!("app-{date}.jsonl")),
+        &entry.to_string(),
+    );
 }
 
 fn normalize_app_log_level(level: Option<String>) -> &'static str {
@@ -1248,10 +1252,7 @@ fn lightpanda_name_score(path: &Path) -> usize {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if file_name == "lightpanda"
-        || file_name == "lightpanda.exe"
-        || file_name == "lightpanda.app"
-    {
+    if file_name == "lightpanda" || file_name == "lightpanda.exe" || file_name == "lightpanda.app" {
         return 3;
     }
     if file_name.contains("lightpanda") {
@@ -1675,7 +1676,10 @@ fn remove_edit_snapshot_file(path: &Path) -> Result<(), String> {
     }
 }
 
-fn apply_edit_snapshot_change(change: &EditSnapshotChange, target_after: bool) -> Result<(), String> {
+fn apply_edit_snapshot_change(
+    change: &EditSnapshotChange,
+    target_after: bool,
+) -> Result<(), String> {
     let source_path = PathBuf::from(&change.path);
     let destination_path = change.destination_path.as_ref().map(PathBuf::from);
     let old_content = change.old_content.as_deref().unwrap_or("");
@@ -1999,7 +2003,12 @@ fn build_augmented_path() -> OsString {
         extra_dirs.push(home.join(".bun").join("bin"));
 
         if cfg!(windows) {
-            extra_dirs.push(home.join("AppData").join("Local").join("Programs").join("nodejs"));
+            extra_dirs.push(
+                home.join("AppData")
+                    .join("Local")
+                    .join("Programs")
+                    .join("nodejs"),
+            );
             extra_dirs.push(home.join("AppData").join("Roaming").join("npm"));
         }
 
@@ -2008,7 +2017,11 @@ fn build_augmented_path() -> OsString {
             let mut versions: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.join("bin").join(if cfg!(windows) { "node.exe" } else { "node" }).exists())
+                .filter(|p| {
+                    p.join("bin")
+                        .join(if cfg!(windows) { "node.exe" } else { "node" })
+                        .exists()
+                })
                 .collect();
             versions.sort();
             if let Some(latest) = versions.last() {
@@ -2016,12 +2029,20 @@ fn build_augmented_path() -> OsString {
             }
         }
 
-        let fnm_dir = home.join(".local").join("share").join("fnm").join("node-versions");
+        let fnm_dir = home
+            .join(".local")
+            .join("share")
+            .join("fnm")
+            .join("node-versions");
         if let Ok(entries) = fs::read_dir(&fnm_dir) {
             let mut versions: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.path().join("installation"))
-                .filter(|p| p.join("bin").join(if cfg!(windows) { "node.exe" } else { "node" }).exists())
+                .filter(|p| {
+                    p.join("bin")
+                        .join(if cfg!(windows) { "node.exe" } else { "node" })
+                        .exists()
+                })
                 .collect();
             versions.sort();
             if let Some(latest) = versions.last() {
@@ -2049,7 +2070,11 @@ fn build_augmented_path() -> OsString {
         if let Some(local_app_data) =
             std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
         {
-            extra_dirs.push(PathBuf::from(local_app_data).join("Programs").join("nodejs"));
+            extra_dirs.push(
+                PathBuf::from(local_app_data)
+                    .join("Programs")
+                    .join("nodejs"),
+            );
         }
     } else {
         extra_dirs.extend([
@@ -2168,6 +2193,43 @@ fn extract_object(value: Option<&serde_json::Value>) -> Option<serde_json::Value
     value.and_then(|entry| entry.as_object().cloned().map(serde_json::Value::Object))
 }
 
+fn is_terminal_task_status(status: &str) -> bool {
+    status == "completed" || status == "failed"
+}
+
+fn truncate_snapshot_text(value: &str, max_chars: usize) -> String {
+    let total_chars = value.chars().count();
+    if total_chars <= max_chars {
+        return value.to_string();
+    }
+
+    let marker_chars = SNAPSHOT_TRUNCATION_MARKER.chars().count();
+    if max_chars <= marker_chars + 2 {
+        return value.chars().take(max_chars).collect();
+    }
+
+    let available_chars = max_chars - marker_chars;
+    let head_chars = (available_chars * 7) / 10;
+    let tail_chars = available_chars - head_chars;
+    let head: String = value.chars().take(head_chars).collect();
+    let tail: String = value
+        .chars()
+        .skip(total_chars.saturating_sub(tail_chars))
+        .collect();
+    format!("{head}{SNAPSHOT_TRUNCATION_MARKER}{tail}")
+}
+
+fn append_snapshot_delta(current: &str, delta: &str, max_chars: usize) -> String {
+    if current.is_empty() {
+        return truncate_snapshot_text(delta, max_chars);
+    }
+
+    let mut combined = String::with_capacity(current.len() + delta.len());
+    combined.push_str(current);
+    combined.push_str(delta);
+    truncate_snapshot_text(&combined, max_chars)
+}
+
 fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::Value) {
     let delta = event
         .get("delta")
@@ -2194,13 +2256,13 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
             .map(|value| value == block_id)
             .unwrap_or(false)
     }) {
-        let next_content = format!(
-            "{}{}",
+        let next_content = append_snapshot_delta(
             existing
                 .get("content")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default(),
-            delta
+            delta,
+            MAX_REASONING_CHARS,
         );
         *existing = serde_json::json!({
             "id": block_id,
@@ -2214,7 +2276,7 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
     current.reasoning.push(serde_json::json!({
         "id": block_id,
         "kind": kind,
-        "content": delta,
+        "content": truncate_snapshot_text(delta, MAX_REASONING_CHARS),
         "order": order,
     }));
 }
@@ -2242,13 +2304,13 @@ fn append_phase_output_delta(current: &mut AgentTaskSnapshot, event: &serde_json
             .map(|value| value == block_id)
             .unwrap_or(false)
     }) {
-        let next_content = format!(
-            "{}{}",
+        let next_content = append_snapshot_delta(
             existing
                 .get("content")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default(),
-            delta
+            delta,
+            MAX_PHASE_OUTPUT_CHARS,
         );
         *existing = serde_json::json!({
             "id": output_id,
@@ -2262,7 +2324,7 @@ fn append_phase_output_delta(current: &mut AgentTaskSnapshot, event: &serde_json
     current.phase_outputs.push(serde_json::json!({
         "id": output_id,
         "blockId": block_id,
-        "content": delta,
+        "content": truncate_snapshot_text(delta, MAX_PHASE_OUTPUT_CHARS),
         "order": order,
     }));
 }
@@ -2301,8 +2363,13 @@ fn spawn_agent_task<R: Runtime>(
     let bridge_path = resolve_bridge_script_path(&app, "ipc.mjs")?;
     let bridge_cwd = resolve_bridge_cwd(&app)?;
     let augmented_path = build_augmented_path();
-    let launch_details =
-        bridge_launch_log_details(&app, "start_agent_task", &bridge_cwd, &bridge_path, &augmented_path);
+    let launch_details = bridge_launch_log_details(
+        &app,
+        "start_agent_task",
+        &bridge_cwd,
+        &bridge_path,
+        &augmented_path,
+    );
     let launch_details_for_error = launch_details.clone();
     append_app_log(
         &app,
@@ -2503,7 +2570,11 @@ fn spawn_agent_task<R: Runtime>(
                     if should_log_tool_event {
                         append_app_log(
                             &stdout_log_app,
-                            if tool_status == "error" { "error" } else { "info" },
+                            if tool_status == "error" {
+                                "error"
+                            } else {
+                                "info"
+                            },
                             "agent_tool_event",
                             event_log_details(&stdout_task_id, &event),
                         );
@@ -2918,47 +2989,47 @@ async fn compress_agent_context<R: Runtime>(
     let app_handle = app.clone();
     let launch_details_for_error = launch_details.clone();
 
-    let output = tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
-        let mut child = build_node_command(&app_handle, &bridge_cwd, &augmented_path)?
-            .arg(script_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                let message = format!(
-                    "Failed to run context compression bridge: {}",
-                    format_node_launch_error(&error)
-                );
-                append_app_log(
-                    &app_handle,
-                    "error",
-                    "context_compression_launch_failed",
-                    serde_json::json!({
-                        "error": message,
-                        "launch": launch_details_for_error,
-                    }),
-                );
-                message
-            })?;
+    let output =
+        tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
+            let mut child = build_node_command(&app_handle, &bridge_cwd, &augmented_path)?
+                .arg(script_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| {
+                    let message = format!(
+                        "Failed to run context compression bridge: {}",
+                        format_node_launch_error(&error)
+                    );
+                    append_app_log(
+                        &app_handle,
+                        "error",
+                        "context_compression_launch_failed",
+                        serde_json::json!({
+                            "error": message,
+                            "launch": launch_details_for_error,
+                        }),
+                    );
+                    message
+                })?;
 
-        {
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| "Failed to open context compression bridge stdin.".to_string())?;
-            stdin
-                .write_all(payload_json.as_bytes())
-                .map_err(|error| format!("Failed to write context compression payload: {error}"))?;
-        }
+            {
+                let mut stdin = child.stdin.take().ok_or_else(|| {
+                    "Failed to open context compression bridge stdin.".to_string()
+                })?;
+                stdin.write_all(payload_json.as_bytes()).map_err(|error| {
+                    format!("Failed to write context compression payload: {error}")
+                })?;
+            }
 
-        child
-            .wait_with_output()
-            .map_err(|error| format!("Failed to read context compression response: {error}"))
-    })
-    .await
-    .map_err(|error| format!("Failed to join context compression task: {error}"))?
-    .map_err(|error| format!("Failed to run context compression bridge: {error}"))?;
+            child
+                .wait_with_output()
+                .map_err(|error| format!("Failed to read context compression response: {error}"))
+        })
+        .await
+        .map_err(|error| format!("Failed to join context compression task: {error}"))?
+        .map_err(|error| format!("Failed to run context compression bridge: {error}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -3020,28 +3091,29 @@ async fn run_mcp_action<R: Runtime>(
     let app_handle = app.clone();
     let launch_details_for_error = launch_details.clone();
 
-    let output = tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
-        build_node_command(&app_handle, &bridge_cwd, &augmented_path)?
-            .arg(script_path)
-            .arg(payload_json)
-            .output()
-            .map_err(|error| {
-                let message = format_node_launch_error(&error);
-                append_app_log(
-                    &app_handle,
-                    "error",
-                    "mcp_action_launch_failed",
-                    serde_json::json!({
-                        "error": message,
-                        "launch": launch_details_for_error,
-                    }),
-                );
-                message
-            })
-    })
-    .await
-    .map_err(|error| format!("Failed to join MCP action task: {error}"))?
-    .map_err(|error| format!("Failed to run MCP action bridge: {error}"))?;
+    let output =
+        tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
+            build_node_command(&app_handle, &bridge_cwd, &augmented_path)?
+                .arg(script_path)
+                .arg(payload_json)
+                .output()
+                .map_err(|error| {
+                    let message = format_node_launch_error(&error);
+                    append_app_log(
+                        &app_handle,
+                        "error",
+                        "mcp_action_launch_failed",
+                        serde_json::json!({
+                            "error": message,
+                            "launch": launch_details_for_error,
+                        }),
+                    );
+                    message
+                })
+        })
+        .await
+        .map_err(|error| format!("Failed to join MCP action task: {error}"))?
+        .map_err(|error| format!("Failed to run MCP action bridge: {error}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -3101,6 +3173,30 @@ fn get_agent_task(
         .lock()
         .map_err(|_| "Failed to lock task snapshot.".to_string())?;
     Ok(snapshot.clone())
+}
+
+#[tauri::command]
+fn release_agent_task(state: State<'_, AgentTaskStore>, task_id: String) -> Result<(), String> {
+    let mut tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| "Failed to lock task store.".to_string())?;
+    let Some(handle) = tasks.get(&task_id).cloned() else {
+        return Ok(());
+    };
+
+    let status = handle
+        .snapshot
+        .lock()
+        .map_err(|_| "Failed to lock task snapshot.".to_string())?
+        .status
+        .clone();
+    if !is_terminal_task_status(&status) {
+        return Ok(());
+    }
+
+    tasks.remove(&task_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -3173,7 +3269,11 @@ fn append_input_to_agent_task(
         snapshot.appended_inputs.push(serde_json::json!({
             "id": input.get("id").and_then(|value| value.as_str()).unwrap_or_default(),
             "content": input.get("content").and_then(|value| value.as_str()).unwrap_or_default(),
-            "parts": input.get("parts").cloned().unwrap_or(serde_json::Value::Array(Vec::new())),
+            "parts": input
+                .get("snapshotParts")
+                .or_else(|| input.get("parts"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(Vec::new())),
             "attachments": input
                 .get("attachments")
                 .cloned()
@@ -3792,7 +3892,9 @@ fn detect_lightpanda_runtime<R: Runtime>(
     let install_dir = ensure_aura_layout(&app)?.browser_dir;
     let resolved_path = match requested_path {
         Some(path) => resolve_executable_path(Path::new(path)),
-        None => detect_lightpanda_installation(Path::new(&install_dir)).or_else(detect_lightpanda_path),
+        None => {
+            detect_lightpanda_installation(Path::new(&install_dir)).or_else(detect_lightpanda_path)
+        }
     };
     let version = resolved_path
         .as_ref()
@@ -3901,8 +4003,10 @@ fn reset_aura_home<R: Runtime>(_app: tauri::AppHandle<R>) -> Result<(), String> 
     Ok(())
 }
 
-#[tauri::command]
-fn read_image_preview(file_path: String) -> Result<Option<String>, String> {
+fn read_image_data_url_internal(
+    file_path: &str,
+    max_bytes: Option<usize>,
+) -> Result<Option<String>, String> {
     let path = PathBuf::from(&file_path);
     if !path.exists() {
         return Err(format!("File does not exist: {}", path.display()));
@@ -3927,14 +4031,26 @@ fn read_image_preview(file_path: String) -> Result<Option<String>, String> {
     let bytes = fs::read(&path)
         .map_err(|error| format!("Failed to read image {}: {error}", path.display()))?;
 
-    if bytes.len() > 8 * 1024 * 1024 {
-        return Err("Image is too large to preview inline.".into());
+    if let Some(limit) = max_bytes {
+        if bytes.len() > limit {
+            return Err("Image is too large to preview inline.".into());
+        }
     }
 
     Ok(Some(format!(
         "data:{mime};base64,{}",
         STANDARD.encode(bytes)
     )))
+}
+
+#[tauri::command]
+fn read_image_preview(file_path: String) -> Result<Option<String>, String> {
+    read_image_data_url_internal(&file_path, Some(MAX_INLINE_IMAGE_PREVIEW_BYTES))
+}
+
+#[tauri::command]
+fn read_image_data_url(file_path: String) -> Result<Option<String>, String> {
+    read_image_data_url_internal(&file_path, None)
 }
 
 #[tauri::command]
@@ -4202,6 +4318,7 @@ fn main() {
             delete_message_version_sqlite,
             start_agent_task,
             get_agent_task,
+            release_agent_task,
             abort_agent_task,
             respond_to_agent_approval,
             append_input_to_agent_task,
@@ -4218,6 +4335,7 @@ fn main() {
             read_text_file,
             toggle_edit_transaction_snapshots,
             read_image_preview,
+            read_image_data_url,
             open_path_in_default_app,
             create_session_workspace,
             import_attachment_from_path,

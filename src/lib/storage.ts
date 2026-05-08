@@ -1846,12 +1846,17 @@ function serializeSessions(sessions: Session[]) {
 }
 
 type PersistedSessionRecord = ReturnType<typeof serializeSessions>[number]
+type PersistedMessageSnapshot = {
+  shellSignature: string
+  versionSignatures: string[]
+}
+type PersistedSessionSnapshot = Map<string, PersistedMessageSnapshot>
 
 let cachedSettings: AgentSettings = cloneValue(defaultSettings)
 let cachedSessions: Session[] = []
 let cachedSessionFolders: SessionFolder[] = []
 let cachedProjectCapabilityOverrides: ProjectCapabilityOverrides = {}
-let persistedSessionSnapshots = new Map<string, PersistedSessionRecord>()
+let persistedSessionSnapshots = new Map<string, PersistedSessionSnapshot>()
 let sessionPersistenceQueue = Promise.resolve()
 
 function parsePersistedJson(value: unknown): string | null {
@@ -1942,28 +1947,57 @@ function persistedMessageVersions(message: PersistedSessionRecord['messages'][nu
   ]
 }
 
+function hashSignaturePayload(value: string) {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `${value.length}:${(hash >>> 0).toString(36)}`
+}
+
 function messageShellSignature(
   message: PersistedSessionRecord['messages'][number],
   sortIndex: number,
 ) {
-  return JSON.stringify({
-    id: message.id,
-    role: message.role,
-    linkedMessageId: message.linkedMessageId || null,
-    sortIndex,
-    activeVersionIndex:
-      typeof message.activeVersionIndex === 'number' ? message.activeVersionIndex : 0,
-    createdAt: message.createdAt || 0,
-  })
+  return hashSignaturePayload(
+    JSON.stringify({
+      id: message.id,
+      role: message.role,
+      linkedMessageId: message.linkedMessageId || null,
+      sortIndex,
+      activeVersionIndex:
+        typeof message.activeVersionIndex === 'number' ? message.activeVersionIndex : 0,
+      createdAt: message.createdAt || 0,
+    }),
+  )
+}
+
+function messageVersionSignature(version: ChatMessageVariant) {
+  return hashSignaturePayload(JSON.stringify(version))
+}
+
+function buildPersistedSessionSnapshot(session: PersistedSessionRecord): PersistedSessionSnapshot {
+  return new Map(
+    session.messages.map((message, sortIndex) => [
+      message.id,
+      {
+        shellSignature: messageShellSignature(message, sortIndex),
+        versionSignatures: persistedMessageVersions(message).map(version =>
+          messageVersionSignature(version as ChatMessageVariant),
+        ),
+      },
+    ]),
+  )
 }
 
 async function syncPersistedSession(
   session: PersistedSessionRecord,
-  previous?: PersistedSessionRecord,
+  previous?: PersistedSessionSnapshot,
 ) {
   await upsertPersistedSession(session as Session)
 
-  const previousMessages = new Map((previous?.messages || []).map(message => [message.id, message]))
+  const previousMessages = previous || new Map<string, PersistedMessageSnapshot>()
   const nextMessages = new Map(session.messages.map(message => [message.id, message]))
 
   for (const previousMessageId of previousMessages.keys()) {
@@ -1974,27 +2008,27 @@ async function syncPersistedSession(
 
   for (const [sortIndex, message] of session.messages.entries()) {
     const previousMessage = previousMessages.get(message.id)
-    if (!previousMessage || messageShellSignature(previousMessage, sortIndex) !== messageShellSignature(message, sortIndex)) {
+    if (
+      !previousMessage ||
+      previousMessage.shellSignature !== messageShellSignature(message, sortIndex)
+    ) {
       await upsertPersistedMessage(session.id, message as Session['messages'][number], sortIndex)
     }
 
     const nextVersions = persistedMessageVersions(message)
-    const previousVersions = previousMessage ? persistedMessageVersions(previousMessage) : []
-    const maxVersionCount = Math.max(nextVersions.length, previousVersions.length)
+    const previousVersionSignatures = previousMessage?.versionSignatures || []
+    const maxVersionCount = Math.max(nextVersions.length, previousVersionSignatures.length)
 
     for (let versionIndex = 0; versionIndex < maxVersionCount; versionIndex += 1) {
       const nextVersion = nextVersions[versionIndex]
-      const previousVersion = previousVersions[versionIndex]
+      const previousVersionSignature = previousVersionSignatures[versionIndex]
 
-      if (!nextVersion && previousVersion) {
+      if (!nextVersion && previousVersionSignature) {
         await deletePersistedMessageVersion(message.id, versionIndex)
         continue
       }
 
-      if (
-        nextVersion &&
-        (!previousVersion || JSON.stringify(nextVersion) !== JSON.stringify(previousVersion))
-      ) {
+      if (nextVersion && messageVersionSignature(nextVersion as ChatMessageVariant) !== previousVersionSignature) {
         await upsertPersistedMessageVersion(
           message.id,
           nextVersion as ChatMessageVariant,
@@ -2023,7 +2057,7 @@ async function persistSessions(sessions: Session[]) {
 
     const previous = persistedSessionSnapshots.get(session.id)
     await syncPersistedSession(session, previous)
-    persistedSessionSnapshots.set(session.id, cloneValue(session))
+    persistedSessionSnapshots.set(session.id, buildPersistedSessionSnapshot(session))
   }
 }
 
@@ -2076,7 +2110,10 @@ async function readPersistedState() {
   cachedSessionFolders = cloneValue(sessionFolders)
   cachedProjectCapabilityOverrides = cloneValue(overrides)
   persistedSessionSnapshots = new Map(
-    serializeSessions(normalizedSessions).map(session => [session.id, cloneValue(session)]),
+    serializeSessions(normalizedSessions).map(session => [
+      session.id,
+      buildPersistedSessionSnapshot(session),
+    ]),
   )
 
   return {

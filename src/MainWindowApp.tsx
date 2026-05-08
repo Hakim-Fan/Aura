@@ -13,6 +13,7 @@ import {
   cancelAgentTaskStep,
   compressAgentContext,
   getAgentTask,
+  releaseAgentTask,
   respondToApproval,
   startAgentTask,
 } from './lib/agent'
@@ -346,16 +347,13 @@ function buildUserMessageParts(
 
   for (const attachment of attachments) {
     const mimeType = resolveAttachmentMimeType(attachment)
-    if (
-      mimeType.startsWith('image/') &&
-      attachment.preview?.startsWith('data:')
-    ) {
+    if (mimeType.startsWith('image/')) {
       parts.push({
         type: 'image',
         name: attachment.name,
         mimeType,
         path: attachment.path,
-        dataUrl: attachment.preview,
+        dataUrl: attachment.preview?.startsWith('data:') ? attachment.preview : undefined,
       })
       continue
     }
@@ -369,6 +367,24 @@ function buildUserMessageParts(
   }
 
   return parts
+}
+
+function stripInlineImageDataFromParts(parts: ChatContentPart[] = []) {
+  return parts.map(part =>
+    part.type === 'image'
+      ? {
+        ...part,
+        dataUrl: undefined,
+      }
+      : part,
+  )
+}
+
+function stripAttachmentPreviews(attachments: MessageAttachment[] = []) {
+  return attachments.map(attachment => ({
+    ...attachment,
+    preview: undefined,
+  }))
 }
 
 type DraftAttachment = {
@@ -746,6 +762,16 @@ function createPendingAssistantMessage(): ChatMessage {
 
 const REPLAN_ARCHIVE_PREFIX = 'replan-archive'
 const REPLAN_ARCHIVE_ORDER_OFFSET = 10_000
+const AGENT_TASK_POLL_INTERVAL_MS = 1000
+const MAX_ARCHIVED_REASONING_ENTRIES = 2
+const MAX_ARCHIVED_REASONING_CHARS = 1_200
+const MAX_ARCHIVED_PHASE_OUTPUTS = 3
+const MAX_ARCHIVED_PHASE_OUTPUT_CHARS = 1_600
+const MAX_ARCHIVED_EVENTS = 6
+const MAX_ARCHIVED_EVENT_INPUT_CHARS = 280
+const MAX_ARCHIVED_EVENT_OUTPUT_CHARS = 360
+const MAX_ARCHIVED_TASK_NODES = 12
+const MAX_ARCHIVED_TASK_DEPTH = 2
 
 function archiveExecutionId(kind: string, value: string) {
   return `${REPLAN_ARCHIVE_PREFIX}:${kind}:${value}`
@@ -759,37 +785,73 @@ function archiveExecutionOrder(order?: number) {
   return typeof order === 'number' ? order - REPLAN_ARCHIVE_ORDER_OFFSET : undefined
 }
 
+function truncateArchivedExecutionText(value?: string, maxLength = 0) {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  if (!normalized || !maxLength || normalized.length <= maxLength) {
+    return normalized
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`
+}
+
 function archiveReasoningEntries(entries: MessageReasoning[] = []): MessageReasoning[] {
-  return entries.map(entry => ({
+  return entries.slice(-MAX_ARCHIVED_REASONING_ENTRIES).map(entry => ({
     ...entry,
     id: archiveExecutionId('reasoning', entry.id),
+    content: truncateArchivedExecutionText(entry.content, MAX_ARCHIVED_REASONING_CHARS),
     order: archiveExecutionOrder(entry.order),
   }))
 }
 
 function archivePhaseOutputs(outputs: MessagePhaseOutput[] = []): MessagePhaseOutput[] {
-  return outputs.map(output => ({
+  return outputs.slice(-MAX_ARCHIVED_PHASE_OUTPUTS).map(output => ({
     ...output,
     id: archiveExecutionId('phase-output', output.id),
     blockId: archiveExecutionId('phase-block', output.blockId),
+    content: truncateArchivedExecutionText(output.content, MAX_ARCHIVED_PHASE_OUTPUT_CHARS),
     order: archiveExecutionOrder(output.order),
   }))
 }
 
 function archiveMessageEvents(events: MessageEvent[] = []): MessageEvent[] {
-  return events.map(event => ({
+  return events.slice(-MAX_ARCHIVED_EVENTS).map(event => ({
     ...event,
     id: archiveExecutionId('event', event.id),
+    summary: truncateArchivedExecutionText(event.summary, 220),
+    input: truncateArchivedExecutionText(event.input, MAX_ARCHIVED_EVENT_INPUT_CHARS) || undefined,
+    output:
+      truncateArchivedExecutionText(event.output, MAX_ARCHIVED_EVENT_OUTPUT_CHARS) || undefined,
+    error: truncateArchivedExecutionText(event.error, 220) || undefined,
+    structuredOutput: undefined,
     order: archiveExecutionOrder(event.order),
   }))
 }
 
 function archiveTaskTreeNodes(nodes: TaskNode[] = []): TaskNode[] {
-  return nodes.map(node => ({
-    ...node,
-    id: archiveExecutionId('task', node.id),
-    children: archiveTaskTreeNodes(node.children),
-  }))
+  let remainingNodes = MAX_ARCHIVED_TASK_NODES
+
+  function cloneNode(node: TaskNode, depth: number): TaskNode | null {
+    if (remainingNodes <= 0) {
+      return null
+    }
+    remainingNodes -= 1
+    const nextChildren =
+      depth >= MAX_ARCHIVED_TASK_DEPTH
+        ? []
+        : node.children
+          .map(child => cloneNode(child, depth + 1))
+          .filter((child): child is TaskNode => Boolean(child))
+    return {
+      ...node,
+      id: archiveExecutionId('task', node.id),
+      title: truncateArchivedExecutionText(node.title, 120),
+      summary: truncateArchivedExecutionText(node.summary, 220),
+      children: nextChildren,
+    }
+  }
+
+  return nodes
+    .map(node => cloneNode(node, 0))
+    .filter((node): node is TaskNode => Boolean(node))
 }
 
 function summarizeAppendedInputForTimeline(input: AppendedInput, maxLength = 180) {
@@ -1291,6 +1353,7 @@ export function MainWindowApp() {
   const [expandedPaths, setExpandedPaths] = useState<string[]>([])
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const runningTasksBySessionRef = useRef<Record<string, RunningTaskBinding>>({})
+  const previousRunningTasksBySessionRef = useRef<Record<string, RunningTaskBinding>>({})
 
   useEffect(() => {
     runningTasksBySessionRef.current = runningTasksBySession
@@ -1377,11 +1440,11 @@ export function MainWindowApp() {
     agentTask?.status === 'awaiting_approval' ||
     agentTask?.status === 'awaiting_user_input'
 
-  const displayedToolEvents =
-    agentTask ? agentTask.toolEvents : activeSession?.toolEvents || []
+  const hasActiveRunningTasks = Object.keys(runningTasksBySession).length > 0
 
-  const displayedTaskTree =
-    agentTask ? agentTask.taskTree : activeSession?.taskTree || []
+  const displayedToolEvents = agentTask?.toolEvents || []
+
+  const displayedTaskTree = agentTask?.taskTree || []
 
   const activeWorkspacePath =
     activeSession?.workspacePath || activeSession?.workspaceRoot || ''
@@ -1420,8 +1483,31 @@ export function MainWindowApp() {
     if (!storageReady) {
       return
     }
+    if (hasActiveRunningTasks) {
+      return
+    }
     saveSessions(sessions)
-  }, [sessions, storageReady])
+  }, [hasActiveRunningTasks, sessions, storageReady])
+
+  useEffect(() => {
+    const previousBindings = previousRunningTasksBySessionRef.current
+    previousRunningTasksBySessionRef.current = runningTasksBySession
+
+    const nextTaskIds = new Set(
+      Object.values(runningTasksBySession).map(binding => binding.taskId),
+    )
+    const releasedTaskIds = new Set(
+      Object.values(previousBindings)
+        .map(binding => binding.taskId)
+        .filter(taskId => !nextTaskIds.has(taskId)),
+    )
+
+    for (const taskId of releasedTaskIds) {
+      void releaseAgentTask(taskId).catch(() => {
+        // Best-effort cleanup: the task may already be gone or still be winding down.
+      })
+    }
+  }, [runningTasksBySession])
 
   useEffect(() => {
     if (!storageReady) {
@@ -1648,8 +1734,6 @@ export function MainWindowApp() {
               })
               : message,
           ),
-          toolEvents: snapshot.toolEvents,
-          taskTree: snapshot.taskTree,
         }))
 
         if (snapshot.status === 'completed' || snapshot.status === 'failed') {
@@ -1720,8 +1804,6 @@ export function MainWindowApp() {
                         })
                         : message,
                     ),
-                    toolEvents: snapshot.toolEvents,
-                    taskTree: snapshot.taskTree,
                     updatedAt: Date.now(),
                   }
                   : session,
@@ -1790,7 +1872,7 @@ export function MainWindowApp() {
     }
 
     void pollAll()
-    const timer = window.setInterval(() => void pollAll(), 250)
+    const timer = window.setInterval(() => void pollAll(), AGENT_TASK_POLL_INTERVAL_MS)
     return () => {
       cancelled = true
       window.clearInterval(timer)
@@ -2283,11 +2365,13 @@ export function MainWindowApp() {
       `已补充 ${materializedAttachments.length} 个附件：${materializedAttachments
         .map(attachment => attachment.name)
         .join('、')}`
+    const runtimeInputParts = buildUserMessageParts(content, materializedAttachments)
+    const storedInputAttachments = stripAttachmentPreviews(materializedAttachments)
     const appendedInput: AppendedInput = {
       id: createId(),
       content: contentForDisplay,
-      parts: buildUserMessageParts(content, materializedAttachments),
-      attachments: materializedAttachments,
+      parts: stripInlineImageDataFromParts(runtimeInputParts),
+      attachments: storedInputAttachments,
       createdAt: Date.now(),
       status: 'queued',
       researchMode: draftResearchMode,
@@ -2297,8 +2381,8 @@ export function MainWindowApp() {
       await appendInputToAgentTask(agentTask.id, {
         id: appendedInput.id,
         content: appendedInput.content,
-        parts: appendedInput.parts,
-        attachments: appendedInput.attachments,
+        parts: runtimeInputParts,
+        attachments: storedInputAttachments,
         createdAt: appendedInput.createdAt,
         researchMode: appendedInput.researchMode,
       })
@@ -2755,15 +2839,17 @@ export function MainWindowApp() {
         .map(attachment => attachment.name)
         .join('、')}`
     const userMessageParts = buildUserMessageParts(content, materializedAttachments)
+    const storedUserMessageParts = stripInlineImageDataFromParts(userMessageParts)
+    const storedUserMessageAttachments = stripAttachmentPreviews(materializedAttachments)
 
     const messageCreatedAt = Date.now()
     const userMessageVariant: ChatMessageVariant = {
       content: contentForDisplay,
-      parts: userMessageParts,
+      parts: storedUserMessageParts,
       status: 'completed',
       createdAt: messageCreatedAt,
       researchMode: options?.researchModeOverride || draftResearchMode,
-      attachments: materializedAttachments,
+      attachments: storedUserMessageAttachments,
     }
     const projectWorkspaceRoot =
       activeSession.workspaceRoot || latestSettings.cwd || workspacePath
@@ -3264,8 +3350,6 @@ export function MainWindowApp() {
             }))
             : message,
         ),
-        toolEvents: currentSnapshot?.toolEvents || session.toolEvents,
-        taskTree: currentSnapshot?.taskTree || session.taskTree,
         updatedAt: stoppedAt,
       }))
       setRunningTasksBySession(current => {

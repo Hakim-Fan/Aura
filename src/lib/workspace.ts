@@ -20,6 +20,10 @@ export async function readImagePreview(filePath: string): Promise<string | null>
   return invoke<string | null>('read_image_preview', { filePath })
 }
 
+export async function readImageDataUrl(filePath: string): Promise<string | null> {
+  return invoke<string | null>('read_image_data_url', { filePath })
+}
+
 export async function openPathInDefaultApp(path: string): Promise<void> {
   return invoke('open_path_in_default_app', { path })
 }

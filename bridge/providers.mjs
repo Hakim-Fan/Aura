@@ -38,6 +38,36 @@ function flattenOpenAiMessageContent(content) {
     .join('\n')
 }
 
+function normalizeOpenAiUsage(usage) {
+  if (!usage || typeof usage !== 'object') {
+    return undefined
+  }
+  const inputTokens = Math.max(0, Math.round(Number(usage.prompt_tokens) || 0))
+  const outputTokens = Math.max(0, Math.round(Number(usage.completion_tokens) || 0))
+  if (inputTokens <= 0 && outputTokens <= 0) {
+    return undefined
+  }
+  return {
+    inputTokens,
+    outputTokens,
+  }
+}
+
+function normalizeGoogleUsage(usage) {
+  if (!usage || typeof usage !== 'object') {
+    return undefined
+  }
+  const inputTokens = Math.max(0, Math.round(Number(usage.promptTokenCount) || 0))
+  const outputTokens = Math.max(0, Math.round(Number(usage.candidatesTokenCount) || 0))
+  if (inputTokens <= 0 && outputTokens <= 0) {
+    return undefined
+  }
+  return {
+    inputTokens,
+    outputTokens,
+  }
+}
+
 function openAiToolDefs(tools) {
   return tools.map(tool => ({
     type: 'function',
@@ -553,7 +583,10 @@ function compactGeminiRuntimeTranscript({ settings, transcript, systemPrompt, ho
   })
 }
 
-async function callOpenAiCompatibleCompaction(settings, { systemPrompt, userPrompt, maxOutputTokens, messages }) {
+async function callOpenAiCompatibleCompaction(
+  settings,
+  { systemPrompt, userPrompt, maxOutputTokens, messages, hooks },
+) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
   const response = await fetchWithTimeout(
     `${apiBase}/chat/completions`,
@@ -594,10 +627,14 @@ async function callOpenAiCompatibleCompaction(settings, { systemPrompt, userProm
   }
 
   const data = await parseJsonResponse(response)
+  pushUsage(hooks, normalizeOpenAiUsage(data.usage))
   return flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
 }
 
-async function callGoogleCompaction(settings, { systemPrompt, userPrompt, maxOutputTokens, messages }) {
+async function callGoogleCompaction(
+  settings,
+  { systemPrompt, userPrompt, maxOutputTokens, messages, hooks },
+) {
   const apiBase = normalizeBaseUrl(
     settings.baseUrl,
     'https://generativelanguage.googleapis.com/v1beta',
@@ -642,7 +679,9 @@ async function callGoogleCompaction(settings, { systemPrompt, userPrompt, maxOut
     )
   }
 
-  return flattenGeminiTextResponse(await parseJsonResponse(response))
+  const data = await parseJsonResponse(response)
+  pushUsage(hooks, normalizeGoogleUsage(data.usageMetadata))
+  return flattenGeminiTextResponse(data)
 }
 
 async function callProviderForCompaction(settings, options) {
@@ -709,6 +748,7 @@ export async function compactMessagesWithProvider({
       }),
       maxOutputTokens: batchTargetTokens,
       messages: allMessages,
+      hooks,
     })
     rollingSummary = summary
   }
@@ -1773,6 +1813,7 @@ async function finalizeOpenAiTranscriptAfterStepLimit({
     }
 
     const data = await parseJsonResponse(response)
+    pushUsage(hooks, normalizeOpenAiUsage(data.usage))
     return flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
   }, {
     messages: conversationMessages,
@@ -1862,6 +1903,7 @@ async function finalizeGoogleTranscriptAfterStepLimit({
     }
 
     const data = await parseJsonResponse(response)
+    pushUsage(hooks, normalizeGoogleUsage(data.usageMetadata))
     const parts = data.candidates?.[0]?.content?.parts || []
     return parts
       .map(part => (typeof part.text === 'string' ? part.text : ''))
@@ -1999,6 +2041,7 @@ export async function finalizeOpenAiCompatibleAnswer({
     }
 
     const data = await parseJsonResponse(response)
+    pushUsage(hooks, normalizeOpenAiUsage(data.usage))
     const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content)
     return content.trim()
   }, {
@@ -2088,6 +2131,7 @@ export async function finalizeGoogleAnswer({
     }
 
     const data = await parseJsonResponse(response)
+    pushUsage(hooks, normalizeGoogleUsage(data.usageMetadata))
     const parts = data.candidates?.[0]?.content?.parts || []
     return parts
       .map(part => (typeof part.text === 'string' ? part.text : ''))
@@ -2228,12 +2272,7 @@ export async function runOpenAiCompatibleAgent({
 
         await readSseStream(response, async payload => {
           const data = JSON.parse(payload)
-          const usage = data.usage
-            ? {
-                inputTokens: data.usage.prompt_tokens,
-                outputTokens: data.usage.completion_tokens,
-              }
-            : undefined
+          const usage = normalizeOpenAiUsage(data.usage)
           if (usage) {
             usageForAttempt = usage
           }
@@ -2582,12 +2621,7 @@ export async function runGoogleAgent({
 
         await readSseStream(response, async payload => {
           const data = JSON.parse(payload)
-          const usage = data.usageMetadata
-            ? {
-                inputTokens: data.usageMetadata.promptTokenCount,
-                outputTokens: data.usageMetadata.candidatesTokenCount,
-              }
-            : undefined
+          const usage = normalizeGoogleUsage(data.usageMetadata)
           if (usage) {
             usageForAttempt = usage
           }

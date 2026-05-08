@@ -163,10 +163,34 @@ const appendedInputs = []
 let currentStepAbortController = null
 let activeExecutionMonitor = null
 
+function stripInlineImageData(parts = []) {
+  return parts.map((part) =>
+    part && part.type === 'image'
+      ? {
+        ...part,
+        dataUrl: undefined,
+      }
+      : part,
+  )
+}
+
+function stripAttachmentPreviews(attachments = []) {
+  return attachments.map((attachment) => ({
+    ...attachment,
+    preview: undefined,
+  }))
+}
+
 function emitAppendedInputs() {
   emit({
     type: 'appended_inputs',
-    inputs: appendedInputs,
+    inputs: appendedInputs.map((input) => ({
+      ...input,
+      parts: stripInlineImageData(Array.isArray(input.parts) ? input.parts : []),
+      attachments: stripAttachmentPreviews(
+        Array.isArray(input.attachments) ? input.attachments : [],
+      ),
+    })),
   })
 }
 
