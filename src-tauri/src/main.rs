@@ -1972,6 +1972,23 @@ fn resolve_node_binary() -> String {
     "node".to_string()
 }
 
+fn find_executable_on_path(path_value: &OsString, executable_name: &str) -> Option<PathBuf> {
+    for entry in std::env::split_paths(path_value) {
+        let candidate = entry.join(executable_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn resolve_node_binary_from_path(path_value: &OsString) -> String {
+    let executable_name = if cfg!(windows) { "node.exe" } else { "node" };
+    find_executable_on_path(path_value, executable_name)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(resolve_node_binary)
+}
+
 /// Build an augmented PATH that includes common Node.js install locations.
 /// This ensures child processes can also find npx, npm, etc.
 fn resolve_user_home_dir() -> Option<PathBuf> {
@@ -2133,6 +2150,11 @@ fn bridge_launch_log_details<R: Runtime>(
         "operation": operation,
         "runtimeMode": if cfg!(debug_assertions) { "debug" } else { "release" },
         "nodeRuntime": node_runtime_label(),
+        "nodeRuntimeFallback": if cfg!(debug_assertions) {
+            None::<String>
+        } else {
+            Some(format!("system:{}", resolve_node_binary_from_path(augmented_path)))
+        },
         "bridgeCwd": bridge_cwd.display().to_string(),
         "bridgeCwdExists": bridge_cwd.exists(),
         "resourceDir": app.path().resource_dir().ok().map(|path| path.display().to_string()),
@@ -2158,7 +2180,15 @@ fn format_node_launch_error(error: &std::io::Error) -> String {
     }
 }
 
-fn build_node_command<R: Runtime>(
+fn build_system_node_command(bridge_cwd: &Path, augmented_path: &OsString) -> Command {
+    let node_bin = resolve_node_binary_from_path(augmented_path);
+    let mut command = Command::new(&node_bin);
+    command.current_dir(bridge_cwd);
+    command.env("PATH", augmented_path);
+    command
+}
+
+fn build_primary_node_command<R: Runtime>(
     app: &tauri::AppHandle<R>,
     bridge_cwd: &Path,
     augmented_path: &OsString,
@@ -2175,6 +2205,94 @@ fn build_node_command<R: Runtime>(
     command.current_dir(bridge_cwd);
     command.env("PATH", augmented_path);
     Ok(command)
+}
+
+fn should_attempt_system_node_fallback(_error: &std::io::Error) -> bool {
+    !cfg!(debug_assertions)
+}
+
+fn fallback_node_launch_message(primary_message: &str, fallback_error: &std::io::Error) -> String {
+    format!(
+        "{primary_message}\nFallback to system Node also failed: {fallback_error}"
+    )
+}
+
+fn spawn_node_command_with_fallback<R, F>(
+    app: &tauri::AppHandle<R>,
+    bridge_cwd: &Path,
+    augmented_path: &OsString,
+    configure: F,
+) -> Result<(std::process::Child, bool), String>
+where
+    R: Runtime,
+    F: Fn(&mut Command),
+{
+    let primary_error = match build_primary_node_command(app, bridge_cwd, augmented_path) {
+        Ok(mut command) => {
+            configure(&mut command);
+            match command.spawn() {
+                Ok(child) => return Ok((child, false)),
+                Err(error) => {
+                    if !should_attempt_system_node_fallback(&error) {
+                        return Err(format_node_launch_error(&error));
+                    }
+                    format_node_launch_error(&error)
+                }
+            }
+        }
+        Err(error) => {
+            if cfg!(debug_assertions) {
+                return Err(error);
+            }
+            error
+        }
+    };
+
+    let mut fallback = build_system_node_command(bridge_cwd, augmented_path);
+    configure(&mut fallback);
+    fallback
+        .spawn()
+        .map(|child| (child, true))
+        .map_err(|error| fallback_node_launch_message(&primary_error, &error))
+}
+
+fn output_node_command_with_fallback<R, F>(
+    app: &tauri::AppHandle<R>,
+    bridge_cwd: &Path,
+    augmented_path: &OsString,
+    configure: F,
+) -> Result<(std::process::Output, bool), String>
+where
+    R: Runtime,
+    F: Fn(&mut Command),
+{
+    let primary_error = match build_primary_node_command(app, bridge_cwd, augmented_path) {
+        Ok(mut command) => {
+            configure(&mut command);
+            match command.output() {
+                Ok(output) => return Ok((output, false)),
+                Err(error) => {
+                    if !should_attempt_system_node_fallback(&error) {
+                        return Err(format_node_launch_error(&error));
+                    }
+                    format_node_launch_error(&error)
+                }
+            }
+        }
+        Err(error) => {
+            if cfg!(debug_assertions) {
+                return Err(error);
+            }
+            error
+        }
+    };
+
+    let mut fallback = build_system_node_command(bridge_cwd, augmented_path);
+    configure(&mut fallback);
+    fallback
+        .output()
+        .map(|output| (output, true))
+        .map_err(|error| fallback_node_launch_message(&primary_error, &error))
 }
 
 fn with_snapshot<F>(snapshot: &Arc<Mutex<AgentTaskSnapshot>>, mutator: F)
@@ -2383,14 +2501,19 @@ fn spawn_agent_task<R: Runtime>(
             "launch": launch_details.clone(),
         }),
     );
-    let mut child = build_node_command(&app, &bridge_cwd, &augmented_path)?
-        .arg(bridge_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            let message = format_node_launch_error(&error);
+    let (mut child, used_system_node_fallback) = spawn_node_command_with_fallback(
+        &app,
+        &bridge_cwd,
+        &augmented_path,
+        |command| {
+            command
+                .arg(&bridge_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        },
+    )
+    .map_err(|message| {
             append_app_log(
                 &app,
                 "error",
@@ -2398,11 +2521,22 @@ fn spawn_agent_task<R: Runtime>(
                 serde_json::json!({
                     "taskId": task_id.as_str(),
                     "error": message,
-                    "launch": launch_details_for_error,
+                    "launch": launch_details_for_error.clone(),
                 }),
             );
             message
-        })?;
+    })?;
+    if used_system_node_fallback {
+        append_app_log(
+            &app,
+            "warn",
+            "bridge_launch_system_node_fallback_used",
+            serde_json::json!({
+                "taskId": task_id.as_str(),
+                "launch": launch_details.clone(),
+            }),
+        );
+    }
 
     let stdin = child
         .stdin
@@ -2899,18 +3033,18 @@ fn run_provider_action<R: Runtime>(
         }),
     );
     let launch_details_for_error = launch_details.clone();
-    let output = build_node_command(&app, &bridge_cwd, &augmented_path)?
-        .arg(script_path)
-        .arg(
-            serde_json::to_string(&payload)
-                .map_err(|error| format!("Failed to serialize provider action payload: {error}"))?,
-        )
-        .output()
-        .map_err(|error| {
-            let message = format!(
-                "Failed to run provider action bridge: {}",
-                format_node_launch_error(&error)
-            );
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|error| format!("Failed to serialize provider action payload: {error}"))?;
+    let (output, used_system_node_fallback) = output_node_command_with_fallback(
+        &app,
+        &bridge_cwd,
+        &augmented_path,
+        |command| {
+            command.arg(&script_path).arg(&payload_json);
+        },
+    )
+    .map_err(|error| {
+            let message = format!("Failed to run provider action bridge: {error}");
             append_app_log(
                 &app,
                 "error",
@@ -2918,11 +3052,22 @@ fn run_provider_action<R: Runtime>(
                 serde_json::json!({
                     "request": provider_action_log_details(&payload),
                     "error": message,
-                    "launch": launch_details_for_error,
+                    "launch": launch_details_for_error.clone(),
                 }),
             );
             message
-        })?;
+    })?;
+    if used_system_node_fallback {
+        append_app_log(
+            &app,
+            "warn",
+            "provider_action_system_node_fallback_used",
+            serde_json::json!({
+                "request": provider_action_log_details(&payload),
+                "launch": launch_details.clone(),
+            }),
+        );
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2994,28 +3139,41 @@ async fn compress_agent_context<R: Runtime>(
 
     let output =
         tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
-            let mut child = build_node_command(&app_handle, &bridge_cwd, &augmented_path)?
-                .arg(script_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|error| {
-                    let message = format!(
-                        "Failed to run context compression bridge: {}",
-                        format_node_launch_error(&error)
-                    );
+            let (mut child, used_system_node_fallback) = spawn_node_command_with_fallback(
+                &app_handle,
+                &bridge_cwd,
+                &augmented_path,
+                |command| {
+                    command
+                        .arg(&script_path)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped());
+                },
+            )
+            .map_err(|error| {
+                    let message = format!("Failed to run context compression bridge: {error}");
                     append_app_log(
                         &app_handle,
                         "error",
                         "context_compression_launch_failed",
                         serde_json::json!({
                             "error": message,
-                            "launch": launch_details_for_error,
+                            "launch": launch_details_for_error.clone(),
                         }),
                     );
                     message
-                })?;
+            })?;
+            if used_system_node_fallback {
+                append_app_log(
+                    &app_handle,
+                    "warn",
+                    "context_compression_system_node_fallback_used",
+                    serde_json::json!({
+                        "launch": launch_details_for_error.clone(),
+                    }),
+                );
+            }
 
             {
                 let mut stdin = child.stdin.take().ok_or_else(|| {
@@ -3096,23 +3254,37 @@ async fn run_mcp_action<R: Runtime>(
 
     let output =
         tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
-            build_node_command(&app_handle, &bridge_cwd, &augmented_path)?
-                .arg(script_path)
-                .arg(payload_json)
-                .output()
-                .map_err(|error| {
-                    let message = format_node_launch_error(&error);
+            let (output, used_system_node_fallback) = output_node_command_with_fallback(
+                &app_handle,
+                &bridge_cwd,
+                &augmented_path,
+                |command| {
+                    command.arg(&script_path).arg(&payload_json);
+                },
+            )
+            .map_err(|message| {
                     append_app_log(
                         &app_handle,
                         "error",
                         "mcp_action_launch_failed",
                         serde_json::json!({
                             "error": message,
-                            "launch": launch_details_for_error,
+                            "launch": launch_details_for_error.clone(),
                         }),
                     );
                     message
-                })
+            })?;
+            if used_system_node_fallback {
+                append_app_log(
+                    &app_handle,
+                    "warn",
+                    "mcp_action_system_node_fallback_used",
+                    serde_json::json!({
+                        "launch": launch_details_for_error.clone(),
+                    }),
+                );
+            }
+            Ok(output)
         })
         .await
         .map_err(|error| format!("Failed to join MCP action task: {error}"))?
