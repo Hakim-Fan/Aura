@@ -60,7 +60,7 @@ jobs:
         shell: bash
         run: |
           for attempt in 1 2 3; do
-            cargo fetch --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} && exit 0
+            cargo fetch --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.target }} && exit 0
             if [ "$attempt" -eq 3 ]; then
               echo "cargo fetch failed after ${attempt} attempts"
               exit 1
@@ -111,7 +111,7 @@ jobs:
         shell: bash
         run: |
           for attempt in 1 2 3; do
-            cargo fetch --manifest-path src-tauri/Cargo.toml && exit 0
+            cargo fetch --manifest-path src-tauri/Cargo.toml --locked && exit 0
             if [ "$attempt" -eq 3 ]; then
               echo "cargo fetch failed after ${attempt} attempts"
               exit 1
@@ -169,7 +169,7 @@ jobs:
         shell: bash
         run: |
           for attempt in 1 2 3; do
-            cargo fetch --manifest-path src-tauri/Cargo.toml && exit 0
+            cargo fetch --manifest-path src-tauri/Cargo.toml --locked && exit 0
             if [ "$attempt" -eq 3 ]; then
               echo "cargo fetch failed after ${attempt} attempts"
               exit 1
