@@ -134,11 +134,13 @@ Aura 的桌面基础框架是跨平台的，但当前最佳支持平台是 `macO
 现阶段能力分布大致如下：
 
 - 跨平台通用：
-  Provider、MCP、会话、设置、文件树、消息持久化、基础本地工具、Shell/命令执行
+  Provider、MCP、会话、设置、文件树、消息持久化、基础本地工具、Shell/命令执行、Aura skill 安装
 - macOS 增强：
   Computer Use、系统 Chrome 备用自动化、Chrome 登录态导入、部分浏览器运行时管理
 
 Windows / Linux 上不会挂载 macOS-only 的 `computer_*` 桌面自动化工具；基础 Agent 能力仍应使用宿主系统 shell 正常运行，例如在 Windows 上通过 PowerShell/cmd 辅助安装软件、配置 Node、运行项目命令。
+
+Aura 内置 `aura_install_skill`，可以从本地路径、粘贴的 `SKILL.md`、raw URL、GitHub 来源、npm 包或第三方文档里的 `npx` 安装命令解析并安装 skill。安装 Aura skill 时不会直接执行 Claude / Codex / 第三方 npx installer；这些命令只作为来源线索。
 
 ## 适合谁
 

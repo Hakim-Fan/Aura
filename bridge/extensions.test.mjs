@@ -13,6 +13,7 @@ test('buildSkillPrompt lists enabled skills without injecting preferred tool rou
   ])
 
   assert.match(prompt, /Web Research/)
+  assert.match(prompt, /id: web-research/)
+  assert.match(prompt, /aura_read_skill with skillId "web-research"/)
   assert.doesNotMatch(prompt, /preferred tools/i)
-  assert.match(prompt, /read the full skill file only if you decide to use it/i)
 })

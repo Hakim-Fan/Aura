@@ -81,7 +81,7 @@ test('route-first prompt frames skills as enabled options rather than preselecte
       autoApproveComputerUse: false,
       reasoningEffort: 'medium',
     },
-    '- Web Research: Find and compare public sources.; read the full skill file only if you decide to use it.',
+    '- Web Research (id: web-research): Find and compare public sources.; if this matches the user request, call aura_read_skill with skillId "web-research" before applying it.',
     '',
     {
       answerMode: 'advise',
@@ -92,5 +92,7 @@ test('route-first prompt frames skills as enabled options rather than preselecte
   )
 
   assert.match(prompt, /Enabled skill summaries:/)
-  assert.match(prompt, /not preselected instructions/i)
+  assert.match(prompt, /live routing hints/i)
+  assert.match(prompt, /even if the user does not mention a skill/i)
+  assert.match(prompt, /aura_read_skill with the exact skill id/i)
 })

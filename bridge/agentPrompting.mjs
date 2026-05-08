@@ -263,6 +263,9 @@ export function buildRouteFirstSystemPrompt(
     sections.push(
       'If you truly need the user to confirm a risky change or provide a missing local decision, call request_user_input. Do not hide the question only inside reasoning text.',
     )
+    sections.push(
+      'For skill installation requests, first identify the target application. If the user wants to install a skill for Aura, use aura_install_skill or aura_import_skill and do not execute third-party npx/Claude/Codex installer commands directly. Treat those commands as source clues. If the user appears to be installing a skill for another application, ask for confirmation before running that app-specific installer.',
+    )
 
     if (capabilityProfile.hasWorkspaceWriteTools) {
       sections.push('Workspace read and write tools are mounted for this turn. Keep changes focused and verify before claiming completion.')
@@ -365,7 +368,7 @@ export function buildRouteFirstSystemPrompt(
     sections.push('Enabled skill summaries:\n' + skillPrompt)
     if (routeState) {
       sections.push(
-        'These are enabled skills, not preselected instructions. Decide yourself whether any skill is relevant, and use aura_read_skill only if you need the full contents of a specific skill.',
+        'Enabled skills are live routing hints for this turn. At the start of each user request, scan the skill names, ids, and descriptions even if the user does not mention a skill. If a skill clearly or plausibly matches the request, use it proactively: call aura_read_skill with the exact skill id before applying the skill, then follow its instructions. If no skill matches, proceed normally and do not force an irrelevant skill.',
       )
     }
   }

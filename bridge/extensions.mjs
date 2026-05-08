@@ -754,9 +754,17 @@ export function buildSkillPrompt(skillEntries) {
 
   return skillEntries
     .map(skill => {
-      const details = [skill.description || skill.summary]
-      details.push('read the full skill file only if you decide to use it.')
-      return `- ${skill.name}: ${details.filter(Boolean).join('; ')}`
+      const details = []
+      if (skill.description) {
+        details.push(skill.description)
+      }
+      if (skill.summary && skill.summary !== skill.description) {
+        details.push(skill.summary)
+      }
+      details.push(
+        `if this matches the user request, call aura_read_skill with skillId "${skill.id}" before applying it.`,
+      )
+      return `- ${skill.name} (id: ${skill.id}): ${details.filter(Boolean).join('; ')}`
     })
     .join('\n')
 }

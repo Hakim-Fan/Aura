@@ -705,6 +705,21 @@ function buildSnapshotMessageEvents(snapshot: AgentTaskSnapshot): MessageEvent[]
   ]
 }
 
+function buildSnapshotErrorMessage(
+  snapshot: AgentTaskSnapshot,
+  fallback = 'Agent 执行失败。',
+) {
+  const candidates = [
+    snapshot.rawError,
+    snapshot.errorInfo?.detail,
+    snapshot.error,
+    snapshot.errorInfo?.suggestedAction,
+    snapshot.errorInfo?.summary,
+    fallback,
+  ]
+  return candidates.find(value => typeof value === 'string' && value.trim())?.trim() || fallback
+}
+
 function buildMessageActivity(
   status: AgentTaskSnapshot['status'],
   startedAt: number,
@@ -1449,7 +1464,7 @@ export function MainWindowApp() {
   const activeWorkspacePath =
     activeSession?.workspacePath || activeSession?.workspaceRoot || ''
   const activeProjectWorkspaceRoot =
-    activeSession?.workspaceRoot || settings.cwd || ''
+    activeSession?.workspaceRoot || settings.cwd || activeSession?.workspacePath || ''
   const activeProviderProfile = getSessionProviderProfile(settings, activeSession)
   const effectiveProvider = activeProviderProfile?.provider || settings.provider
   const effectiveModel =
@@ -1716,7 +1731,10 @@ export function MainWindowApp() {
                     currentVariant.activity?.expanded ?? true,
                   ),
                   appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
-                  error: snapshot.error,
+                  error:
+                    snapshot.status === 'failed'
+                      ? buildSnapshotErrorMessage(snapshot)
+                      : snapshot.error,
                   errorInfo: snapshot.errorInfo,
                   retryInfo:
                     snapshot.status === 'completed' || snapshot.status === 'failed'
@@ -1781,7 +1799,7 @@ export function MainWindowApp() {
                               snapshot.appendedInputs || currentVariant.appendedInputs,
                             error:
                               snapshot.status === 'failed'
-                                ? snapshot.error || 'Agent 执行失败。'
+                                ? buildSnapshotErrorMessage(snapshot)
                                 : undefined,
                             errorInfo:
                               snapshot.status === 'failed'

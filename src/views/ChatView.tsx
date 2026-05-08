@@ -71,6 +71,7 @@ import type {
   ReasoningEffort,
   ResearchMode,
   RouteDecisionSnapshot,
+  RuntimeErrorInfo,
   SessionContextCompression,
   TaskNode,
   ToolEvent,
@@ -718,6 +719,24 @@ function summarizeFailureReason(value?: string, fallback = '未返回更具体�
   return normalized.length > 140 ? `${normalized.slice(0, 140).trimEnd()}...` : normalized
 }
 
+function formatFailureDetail(errorInfo?: RuntimeErrorInfo, error?: string) {
+  const summary = (errorInfo?.summary || '').replace(/\s+/g, ' ').trim()
+  const candidates = [errorInfo?.detail, error, errorInfo?.suggestedAction]
+
+  for (const candidate of candidates) {
+    const normalized = (candidate || '').trim()
+    if (!normalized) {
+      continue
+    }
+    if (summary && normalized.replace(/\s+/g, ' ') === summary) {
+      continue
+    }
+    return normalized.length > 1200 ? `${normalized.slice(0, 1200).trimEnd()}...` : normalized
+  }
+
+  return ''
+}
+
 function activityStatusLabel(status?: string) {
   switch (status) {
     case 'queued':
@@ -841,9 +860,9 @@ function MessageStatusNotice({
     <div className={`rounded-xl border px-4 py-3 text-13px leading-relaxed ${palette.shell}`}>
       {title ? <div className="font-600">{title}</div> : null}
       {detail ? (
-        <div className={`${title ? 'mt-1 ' : ''}flex items-center gap-2 text-12px ${palette.detail}`}>
+        <div className={`${title ? 'mt-1 ' : ''}flex items-start gap-2 text-12px ${palette.detail}`}>
           {animateDetail ? <RetryStatusDots /> : null}
-          <span>{detail}</span>
+          <span className="whitespace-pre-wrap">{detail}</span>
         </div>
       ) : null}
     </div>
@@ -3427,7 +3446,13 @@ function AssistantMessageCard({
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.summary || summarizeFailureReason(message.error)
       : ''
+  const messageFailureDetail = messageFailureSummary
+    ? formatFailureDetail(message.errorInfo, message.error)
+    : ''
   const messageRetryDetail = formatRetryLabel(message.retryInfo, message.status)
+  const statusNoticeDetail = [messageFailureDetail, messageRetryDetail]
+    .filter(Boolean)
+    .join('\n')
   const phaseSummary = activityPhaseLabel(activity?.phase, activity?.stalled === true)
   const activitySummary = activity
     ? [
@@ -3766,7 +3791,7 @@ function AssistantMessageCard({
             <MessageStatusNotice
               tone={statusNoticeTone}
               title={statusNoticeTitle}
-              detail={messageRetryDetail}
+              detail={statusNoticeDetail}
               animateDetail={isRetryInProgress}
             />
           ) : null}
@@ -4470,6 +4495,15 @@ export function ChatView({
                         </div>
                       ) : null}
                     </div>
+                    {enabledSkillSummary ? (
+                      <div
+                        className="hidden min-w-0 max-w-[240px] shrink items-center gap-1.5 px-1.5 text-11px font-600 text-[var(--text-secondary)] opacity-65 sm:flex"
+                        title={`已启用技能：${enabledSkillSummary}`}
+                      >
+                        <Sparkles size={12} className="shrink-0 opacity-60" />
+                        <span className="truncate">技能：{enabledSkillSummary}</span>
+                      </div>
+                    ) : null}
                     <div className="relative" ref={reasoningMenuRef}>
                       <button
                         className={`p-1.5 rounded-md transition-colors ${reasoningMenuOpen ? 'bg-[rgba(0,0,0,0.07)] text-[var(--text-primary)]' : 'hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]'}`}

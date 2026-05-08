@@ -367,7 +367,10 @@ fn infer_skill_support(content: &str) -> (bool, Option<String>) {
         "auraenableplugin",
         "importskill",
         "installskill",
+        "skillinstall",
+        "installauraskill",
         "auraimportskill",
+        "aurainstallskill",
         "importplugin",
         "installplugin",
         "auraimportplugin",
@@ -4055,8 +4058,21 @@ fn read_image_data_url(file_path: String) -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn open_path_in_default_app(path: String) -> Result<(), String> {
-    Command::new("open")
-        .arg(&path)
+    let mut command = if cfg!(target_os = "windows") {
+        let mut command = Command::new("explorer");
+        command.arg(&path);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(&path);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(&path);
+        command
+    };
+
+    command
         .spawn()
         .map_err(|error| format!("Failed to open path in default app: {error}"))?;
     Ok(())

@@ -574,3 +574,86 @@ test('invokeTool includes structured repair hints in tool error output', async (
   assert.match(output, /"useTool": "read_file"/)
   assert.match(output, /"nextTool": "replace_line_range"/)
 })
+
+test('aura_install_skill installs inline content into Aura skills and enables it', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-install-skill-workspace-'))
+  const auraRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-install-skill-home-'))
+  const skillsDir = path.join(auraRoot, 'skills')
+  const pluginsDir = path.join(auraRoot, 'plugins')
+  await fs.mkdir(skillsDir, { recursive: true })
+  await fs.mkdir(pluginsDir, { recursive: true })
+
+  let settings = {
+    enabledSkillIds: [],
+    enabledPluginIds: [],
+    mcpServers: [],
+  }
+
+  async function scanAura() {
+    const skills = []
+    for (const entry of await fs.readdir(skillsDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.md')) {
+        continue
+      }
+      const id = path.basename(entry.name, '.md')
+      const entryPath = path.join(skillsDir, entry.name)
+      skills.push({
+        id,
+        name: id,
+        description: '',
+        path: entryPath,
+        entryPath,
+        supported: true,
+        supportMessage: '',
+        readonly: false,
+      })
+    }
+
+    return {
+      homeDir: auraRoot,
+      skillsDir,
+      pluginsDir,
+      skills,
+      plugins: [],
+    }
+  }
+
+  const installSkill = createBuiltinTools({
+    cwd: workspace,
+    async appControl(action, payload) {
+      if (action === 'ensure_aura_home') {
+        return scanAura()
+      }
+      if (action === 'get_settings') {
+        return settings
+      }
+      if (action === 'set_settings') {
+        settings = payload.settings
+        return settings
+      }
+      throw new Error(`Unexpected app action: ${action}`)
+    },
+  }).find(tool => tool.name === 'aura_install_skill')
+
+  const output = JSON.parse(
+    await installSkill.run({
+      content: [
+        '---',
+        'name: Demo Skill',
+        'description: Installed from inline content.',
+        '---',
+        '',
+        '# Demo Skill',
+      ].join('\n'),
+    }),
+  )
+
+  assert.equal(output.skillId, 'demo-skill')
+  assert.equal(output.enabled, true)
+  assert.match(output.usageHint, /aura_read_skill with skillId "demo-skill"/)
+  assert.deepEqual(settings.enabledSkillIds, ['demo-skill'])
+  assert.match(
+    await fs.readFile(path.join(skillsDir, 'demo-skill.md'), 'utf8'),
+    /Installed from inline content/,
+  )
+})

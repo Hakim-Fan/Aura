@@ -21,6 +21,7 @@ import {
 import { createUnifiedExecRuntime } from './editing/unifiedExecRuntime.mjs'
 import { buildShellEnv } from './shellEnv.mjs'
 import { resolveCommandShell } from './shellRuntime.mjs'
+import { resolveAuraSkillInstallSource } from './skillInstaller.mjs'
 
 const ALWAYS_ON_SKILL_IDS = new Set([
   'aura-browser-operator',
@@ -552,18 +553,18 @@ function inferAuraPluginTarget(sourcePath, requestedId = '') {
   }
 }
 
-async function copyIntoAuraDirectory({ cwd, kind, sourcePath, targetId }) {
+async function copyIntoAuraDirectory({ cwd, kind, sourcePath, targetId, targetRoot }) {
   const resolvedSource = resolveUserSuppliedPath(cwd, sourcePath)
   const stats = await fs.stat(resolvedSource)
   const auraHome = resolveAuraHomePath()
-  const targetRoot = path.join(auraHome, kind)
-  await fs.mkdir(targetRoot, { recursive: true })
+  const resolvedTargetRoot = targetRoot || path.join(auraHome, kind)
+  await fs.mkdir(resolvedTargetRoot, { recursive: true })
 
   const inferred =
     kind === 'skills'
       ? inferAuraSkillTarget(resolvedSource, targetId)
       : inferAuraPluginTarget(resolvedSource, targetId)
-  const destinationPath = path.join(targetRoot, inferred.destination)
+  const destinationPath = path.join(resolvedTargetRoot, inferred.destination)
 
   await fs.rm(destinationPath, { recursive: true, force: true })
   if (stats.isDirectory()) {
@@ -609,6 +610,13 @@ async function refreshAuraState(context) {
   const settings = await getLiveSettings(context)
   await saveLiveSettings(context, settings)
   return getAuraState(context)
+}
+
+function buildSkillImmediateUseHint(skillId, enabled) {
+  if (!enabled) {
+    return 'This skill is installed but not enabled, so it will not be included in future task prompts unless enabled later.'
+  }
+  return `This skill is enabled immediately. For the current task, decide whether it matches the user request now; if it does, call aura_read_skill with skillId "${skillId}" before continuing and follow the skill instructions. Do not wait for the user to mention the skill.`
 }
 
 function normalizeStringArray(items) {
@@ -1213,9 +1221,11 @@ export function createBuiltinTools(context) {
           args.skillId,
           args.enabled !== false,
         )
+        const enabled = normalizeStringArray(nextSettings.enabledSkillIds).includes(args.skillId)
         return stringifyOutput({
           skillId: args.skillId,
-          enabled: normalizeStringArray(nextSettings.enabledSkillIds).includes(args.skillId),
+          enabled,
+          usageHint: buildSkillImmediateUseHint(args.skillId, enabled),
         })
       },
     },
@@ -1260,6 +1270,83 @@ export function createBuiltinTools(context) {
     },
     {
       source: 'builtin',
+      name: 'aura_install_skill',
+      aliases: ['installauraskill', 'install_skill', 'skill_install'],
+      approvalCategory: 'file_write',
+      description:
+        'Install a skill into Aura from local path, pasted SKILL.md content, raw URL, GitHub source, npm package, or an npx command without executing third-party installer scripts. Use this whenever the user wants to install a skill for Aura.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          source: {
+            type: 'string',
+            description:
+              'Skill source: local path, URL, github:owner/repo/path, npm package name, or a copied npx install command.',
+          },
+          sourceType: {
+            type: 'string',
+            description:
+              'Optional source hint: auto, local, content, url, github, npm, or npx. Defaults to auto.',
+          },
+          content: {
+            type: 'string',
+            description: 'Optional direct SKILL.md markdown content to install.',
+          },
+          skillId: {
+            type: 'string',
+            description: 'Optional target skill id inside Aura.',
+          },
+          enable: {
+            type: 'boolean',
+            description: 'Enable the installed skill after copying it.',
+          },
+        },
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const aura = await getAuraState(context)
+        const staged = await resolveAuraSkillInstallSource({
+          cwd: context.cwd,
+          source: args.source || '',
+          sourceType: args.sourceType || 'auto',
+          content: args.content || '',
+          skillId: args.skillId || '',
+          signal: runtime.signal,
+        })
+
+        try {
+          const imported = await copyIntoAuraDirectory({
+            cwd: context.cwd,
+            kind: 'skills',
+            sourcePath: staged.stagedPath,
+            targetId: args.skillId || staged.inferredSkillId || '',
+            targetRoot: aura.skillsDir,
+          })
+          if (args.enable !== false) {
+            await updateCapabilityEnabled(context, 'skill', imported.id, true)
+          } else {
+            await refreshAuraState(context)
+          }
+          const refreshedAura = await getAuraState(context)
+          const installedSkill = (refreshedAura.skills || []).find(skill => skill.id === imported.id)
+          return stringifyOutput({
+            installedFrom: staged.sourceDescription || args.source || 'inline content',
+            installedTo: imported.destinationPath,
+            skillId: imported.id,
+            name: staged.name,
+            description: staged.description,
+            enabled: args.enable !== false,
+            note: staged.note || '',
+            usageHint: buildSkillImmediateUseHint(imported.id, args.enable !== false),
+            skill: installedSkill || null,
+          })
+        } finally {
+          await staged.cleanup?.()
+        }
+      },
+    },
+    {
+      source: 'builtin',
       name: 'aura_import_skill',
       aliases: ['importskill', 'installskill'],
       approvalCategory: 'file_write',
@@ -1285,24 +1372,27 @@ export function createBuiltinTools(context) {
       },
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
+        const aura = await getAuraState(context)
         const imported = await copyIntoAuraDirectory({
           cwd: context.cwd,
           kind: 'skills',
           sourcePath: args.sourcePath,
           targetId: args.skillId || '',
+          targetRoot: aura.skillsDir,
         })
         if (args.enable !== false) {
           await updateCapabilityEnabled(context, 'skill', imported.id, true)
         } else {
           await refreshAuraState(context)
         }
-        const aura = await getAuraState(context)
-        const installedSkill = (aura.skills || []).find(skill => skill.id === imported.id)
+        const refreshedAura = await getAuraState(context)
+        const installedSkill = (refreshedAura.skills || []).find(skill => skill.id === imported.id)
         return stringifyOutput({
           importedFrom: imported.sourcePath,
           installedTo: imported.destinationPath,
           skillId: imported.id,
           enabled: args.enable !== false,
+          usageHint: buildSkillImmediateUseHint(imported.id, args.enable !== false),
           skill: installedSkill || null,
         })
       },
@@ -1334,19 +1424,21 @@ export function createBuiltinTools(context) {
       },
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
+        const aura = await getAuraState(context)
         const imported = await copyIntoAuraDirectory({
           cwd: context.cwd,
           kind: 'plugins',
           sourcePath: args.sourcePath,
           targetId: args.pluginId || '',
+          targetRoot: aura.pluginsDir,
         })
         if (args.enable !== false) {
           await updateCapabilityEnabled(context, 'plugin', imported.id, true)
         } else {
           await refreshAuraState(context)
         }
-        const aura = await getAuraState(context)
-        const installedPlugin = (aura.plugins || []).find(plugin => plugin.id === imported.id)
+        const refreshedAura = await getAuraState(context)
+        const installedPlugin = (refreshedAura.plugins || []).find(plugin => plugin.id === imported.id)
         return stringifyOutput({
           importedFrom: imported.sourcePath,
           installedTo: imported.destinationPath,

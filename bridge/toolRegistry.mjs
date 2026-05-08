@@ -67,6 +67,7 @@ function inferBuiltinPrivilege(tool) {
   if (tool.name.startsWith('aura_')) {
     return tool.name === 'aura_enable_skill' ||
       tool.name === 'aura_enable_plugin' ||
+      tool.name === 'aura_install_skill' ||
       tool.name === 'aura_import_skill' ||
       tool.name === 'aura_import_plugin' ||
       tool.name === 'aura_upsert_mcp_server' ||
