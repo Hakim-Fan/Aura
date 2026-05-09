@@ -68,6 +68,51 @@ function normalizeGoogleUsage(usage) {
   }
 }
 
+function attachEstimatedInputTokens(usage, estimatedInputTokens) {
+  if (!usage) {
+    return undefined
+  }
+  const estimate = Math.max(0, Math.round(Number(estimatedInputTokens) || 0))
+  return estimate > 0 ? { ...usage, estimatedInputTokens: estimate } : usage
+}
+
+function buildEstimatedUsage(estimatedInputTokens, outputText = '', settings = {}) {
+  const inputTokens = Math.max(0, Math.round(Number(estimatedInputTokens) || 0))
+  if (inputTokens <= 0) {
+    return undefined
+  }
+  return {
+    inputTokens,
+    outputTokens: estimateTextTokens(outputText || '', settings),
+    estimatedInputTokens: inputTokens,
+  }
+}
+
+function estimateSerializedInputTokens(value, settings = {}) {
+  try {
+    return estimateTextTokens(JSON.stringify(value), settings)
+  } catch {
+    return 0
+  }
+}
+
+function estimateOpenAiRequestInputTokens(transcript, tools = [], settings = {}) {
+  return estimateSerializedInputTokens({
+    messages: transcript,
+    tools: openAiToolDefs(tools),
+  }, settings)
+}
+
+function estimateGoogleRequestInputTokens(systemPrompt, transcript, tools = [], settings = {}) {
+  return estimateSerializedInputTokens({
+    system_instruction: {
+      parts: [{ text: systemPrompt }],
+    },
+    contents: transcript,
+    tools: geminiToolDefs(tools),
+  }, settings)
+}
+
 function openAiToolDefs(tools) {
   return tools.map(tool => ({
     type: 'function',
@@ -329,7 +374,12 @@ function resolveCompactionOutputTokens(targetTokens, recentTokens = 0) {
   )
 }
 
-function chooseRecentMessagesForCompaction(allMessages, requestedRecentCount, targetTokens) {
+function chooseRecentMessagesForCompaction(
+  allMessages,
+  requestedRecentCount,
+  targetTokens,
+  settings = {},
+) {
   const maxRecentCount = Math.min(
     requestedRecentCount,
     Math.max(0, (Array.isArray(allMessages) ? allMessages.length : 0) - 1),
@@ -345,7 +395,7 @@ function chooseRecentMessagesForCompaction(allMessages, requestedRecentCount, ta
   let recentCount = maxRecentCount
   while (recentCount > 0) {
     const recentMessages = allMessages.slice(-recentCount)
-    const recentTokens = estimateMessagesTokens(recentMessages)
+    const recentTokens = estimateMessagesTokens(recentMessages, settings)
     if (recentTokens <= recentTokenBudget) {
       return {
         recentCount,
@@ -414,9 +464,10 @@ function openAiTranscriptEntryText(entry, index) {
   return lines.join('\n\n')
 }
 
-function estimateOpenAiTranscriptTokens(transcript = []) {
+function estimateOpenAiTranscriptTokens(transcript = [], settings = {}) {
   return (Array.isArray(transcript) ? transcript : []).reduce(
-    (total, entry, index) => total + estimateTextTokens(openAiTranscriptEntryText(entry, index)) + 4,
+    (total, entry, index) =>
+      total + estimateTextTokens(openAiTranscriptEntryText(entry, index), settings) + 4,
     0,
   )
 }
@@ -448,9 +499,10 @@ function geminiTranscriptEntryText(entry, index) {
   return lines.join('\n\n')
 }
 
-function estimateGeminiTranscriptTokens(transcript = []) {
+function estimateGeminiTranscriptTokens(transcript = [], settings = {}) {
   return (Array.isArray(transcript) ? transcript : []).reduce(
-    (total, entry, index) => total + estimateTextTokens(geminiTranscriptEntryText(entry, index)) + 4,
+    (total, entry, index) =>
+      total + estimateTextTokens(geminiTranscriptEntryText(entry, index), settings) + 4,
     0,
   )
 }
@@ -508,11 +560,15 @@ async function compactRuntimeTranscript({
   buildSummaryEntry,
   chooseRecentStart,
   systemPrompt = '',
+  toolSchemaTokens = 0,
   hooks,
   providerKind,
 }) {
-  const estimatedTokens = estimateTokens(transcript)
-  const budget = buildContextCompressionBudget(settings, { systemPrompt })
+  const estimatedTokens = estimateTokens(transcript, settings)
+  const budget = buildContextCompressionBudget(settings, {
+    systemPrompt,
+    toolSchemaTokens,
+  })
   if (estimatedTokens <= budget.effectiveThresholdTokens) {
     return transcript
   }
@@ -528,14 +584,17 @@ async function compactRuntimeTranscript({
   const summaryMessages = await compactMessagesWithProvider({
     settings,
     messages: transcriptEntriesToMessages(olderEntries, formatEntry),
-    targetTokens: Math.max(1_500, budget.targetConversationTokens - estimateTokens(recentEntries)),
+    targetTokens: Math.max(
+      1_500,
+      budget.targetConversationTokens - estimateTokens(recentEntries, settings),
+    ),
     keepRecentCount: 0,
     maxInputBatchTokens: budget.compactionInputBatchTokens,
     hooks,
   })
   const summaryText = summaryMessages.map(message => message.content).join('\n\n')
   hooks?.onReasoningDelta?.(
-    `Runtime transcript compression: ${estimatedTokens} estimated tokens -> ${estimateTokens([...preservedPrefix, buildSummaryEntry(summaryText), ...recentEntries])} estimated tokens.`,
+    `Runtime transcript compression: ${estimatedTokens} estimated tokens -> ${estimateTokens([...preservedPrefix, buildSummaryEntry(summaryText), ...recentEntries], settings)} estimated tokens.`,
     {
       blockId: `runtime-transcript-compression-${providerKind}`,
       kind: 'summary',
@@ -545,7 +604,14 @@ async function compactRuntimeTranscript({
   return [...preservedPrefix, buildSummaryEntry(summaryText), ...recentEntries]
 }
 
-function compactOpenAiRuntimeTranscript({ settings, transcript, systemPrompt, hooks }) {
+function compactOpenAiRuntimeTranscript({
+  settings,
+  transcript,
+  systemPrompt,
+  hooks,
+  tools = [],
+}) {
+  const toolSchemaTokens = estimateTextTokens(JSON.stringify(openAiToolDefs(tools)), settings)
   return compactRuntimeTranscript({
     settings,
     transcript,
@@ -559,12 +625,20 @@ function compactOpenAiRuntimeTranscript({ settings, transcript, systemPrompt, ho
     },
     chooseRecentStart: chooseOpenAiRecentTranscriptStart,
     systemPrompt,
+    toolSchemaTokens,
     hooks,
     providerKind: 'openai',
   })
 }
 
-function compactGeminiRuntimeTranscript({ settings, transcript, systemPrompt, hooks }) {
+function compactGeminiRuntimeTranscript({
+  settings,
+  transcript,
+  systemPrompt,
+  hooks,
+  tools = [],
+}) {
+  const toolSchemaTokens = estimateTextTokens(JSON.stringify(geminiToolDefs(tools)), settings)
   return compactRuntimeTranscript({
     settings,
     transcript,
@@ -578,6 +652,7 @@ function compactGeminiRuntimeTranscript({ settings, transcript, systemPrompt, ho
     },
     chooseRecentStart: chooseGeminiRecentTranscriptStart,
     systemPrompt,
+    toolSchemaTokens,
     hooks,
     providerKind: 'gemini',
   })
@@ -588,6 +663,17 @@ async function callOpenAiCompatibleCompaction(
   { systemPrompt, userPrompt, maxOutputTokens, messages, hooks },
 ) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
+  const requestMessages = [
+    {
+      role: 'system',
+      content: systemPrompt,
+    },
+    {
+      role: 'user',
+      content: userPrompt,
+    },
+  ]
+  const estimatedInputTokens = estimateOpenAiRequestInputTokens(requestMessages, [], settings)
   const response = await fetchWithTimeout(
     `${apiBase}/chat/completions`,
     {
@@ -595,16 +681,7 @@ async function callOpenAiCompatibleCompaction(
       headers: openAiCompatibleHeaders(settings),
       body: JSON.stringify({
         model: settings.model,
-        messages: [
-          {
-            role: 'system',
-            content: systemPrompt,
-          },
-          {
-            role: 'user',
-            content: userPrompt,
-          },
-        ],
+        messages: requestMessages,
         max_tokens: maxOutputTokens,
         stream: false,
       }),
@@ -627,8 +704,13 @@ async function callOpenAiCompatibleCompaction(
   }
 
   const data = await parseJsonResponse(response)
-  pushUsage(hooks, normalizeOpenAiUsage(data.usage))
-  return flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
+  const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
+  pushUsage(
+    hooks,
+    normalizeOpenAiUsage(data.usage) ||
+      buildEstimatedUsage(estimatedInputTokens, content, settings),
+  )
+  return content
 }
 
 async function callGoogleCompaction(
@@ -638,6 +720,18 @@ async function callGoogleCompaction(
   const apiBase = normalizeBaseUrl(
     settings.baseUrl,
     'https://generativelanguage.googleapis.com/v1beta',
+  )
+  const requestContents = [
+    {
+      role: 'user',
+      parts: [{ text: userPrompt }],
+    },
+  ]
+  const estimatedInputTokens = estimateGoogleRequestInputTokens(
+    systemPrompt,
+    requestContents,
+    [],
+    settings,
   )
   const response = await fetchWithTimeout(
     `${apiBase}/models/${settings.model}:generateContent`,
@@ -651,12 +745,7 @@ async function callGoogleCompaction(
         system_instruction: {
           parts: [{ text: systemPrompt }],
         },
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: userPrompt }],
-          },
-        ],
+        contents: requestContents,
         generationConfig: {
           maxOutputTokens,
         },
@@ -680,8 +769,13 @@ async function callGoogleCompaction(
   }
 
   const data = await parseJsonResponse(response)
-  pushUsage(hooks, normalizeGoogleUsage(data.usageMetadata))
-  return flattenGeminiTextResponse(data)
+  const content = flattenGeminiTextResponse(data)
+  pushUsage(
+    hooks,
+    normalizeGoogleUsage(data.usageMetadata) ||
+      buildEstimatedUsage(estimatedInputTokens, content, settings),
+  )
+  return content
 }
 
 async function callProviderForCompaction(settings, options) {
@@ -720,18 +814,20 @@ export async function compactMessagesWithProvider({
     return allMessages
   }
 
+  const compactionSettings = resolveCompactionSettings(settings)
   const { recentCount, recentMessages, olderMessages, recentTokens } =
     chooseRecentMessagesForCompaction(
       allMessages,
       requestedRecentCount,
       targetTokens,
+      compactionSettings,
     )
   const maxOutputTokens = resolveCompactionOutputTokens(targetTokens, recentTokens)
-  const compactionSettings = resolveCompactionSettings(settings)
   const compactionBudget = buildContextCompressionBudget(compactionSettings)
   const batches = splitMessagesIntoTokenBatches(
     olderMessages,
     Math.min(maxInputBatchTokens, compactionBudget.compactionInputBatchTokens),
+    compactionSettings,
   )
   let rollingSummary = ''
 
@@ -753,13 +849,16 @@ export async function compactMessagesWithProvider({
     rollingSummary = summary
   }
 
-  const beforeTokens = estimateMessagesTokens(olderMessages)
+  const beforeTokens = estimateMessagesTokens(olderMessages, compactionSettings)
   const summaryMessage = buildCompressedSummaryMessage(
     rollingSummary,
     olderMessages.length,
     {
       beforeTokens,
-      afterTokens: estimateMessagesTokens([{ role: 'assistant', content: rollingSummary }]),
+      afterTokens: estimateMessagesTokens(
+        [{ role: 'assistant', content: rollingSummary }],
+        compactionSettings,
+      ),
     },
   )
 
@@ -1778,6 +1877,18 @@ async function finalizeOpenAiTranscriptAfterStepLimit({
     includeReasoningText: false,
   })
   const attemptResult = await runProviderOperationWithRetry(async () => {
+    const requestMessages = [
+      ...transcript,
+      {
+        role: 'user',
+        content: prompt,
+      },
+    ]
+    const estimatedInputTokens = estimateOpenAiRequestInputTokens(
+      requestMessages,
+      [],
+      settings,
+    )
     const response = await fetchWithTimeout(
       `${apiBase}/chat/completions`,
       {
@@ -1785,13 +1896,7 @@ async function finalizeOpenAiTranscriptAfterStepLimit({
         headers: openAiCompatibleHeaders(settings),
         body: JSON.stringify({
           model: settings.model,
-          messages: [
-            ...transcript,
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
+          messages: requestMessages,
           stream: false,
         }),
       },
@@ -1813,8 +1918,13 @@ async function finalizeOpenAiTranscriptAfterStepLimit({
     }
 
     const data = await parseJsonResponse(response)
-    pushUsage(hooks, normalizeOpenAiUsage(data.usage))
-    return flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
+    const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
+    pushUsage(
+      hooks,
+      normalizeOpenAiUsage(data.usage) ||
+        buildEstimatedUsage(estimatedInputTokens, content, settings),
+    )
+    return content
   }, {
     messages: conversationMessages,
     maxRetries,
@@ -1864,6 +1974,19 @@ async function finalizeGoogleTranscriptAfterStepLimit({
     includeReasoningText: false,
   })
   const attemptResult = await runProviderOperationWithRetry(async () => {
+    const requestContents = [
+      ...transcript,
+      {
+        role: 'user',
+        parts: [{ text: prompt }],
+      },
+    ]
+    const estimatedInputTokens = estimateGoogleRequestInputTokens(
+      systemPrompt,
+      requestContents,
+      [],
+      settings,
+    )
     const response = await fetchWithTimeout(
       `${apiBase}/models/${settings.model}:generateContent`,
       {
@@ -1876,13 +1999,7 @@ async function finalizeGoogleTranscriptAfterStepLimit({
           system_instruction: {
             parts: [{ text: systemPrompt }],
           },
-          contents: [
-            ...transcript,
-            {
-              role: 'user',
-              parts: [{ text: prompt }],
-            },
-          ],
+          contents: requestContents,
         }),
       },
       {
@@ -1903,12 +2020,17 @@ async function finalizeGoogleTranscriptAfterStepLimit({
     }
 
     const data = await parseJsonResponse(response)
-    pushUsage(hooks, normalizeGoogleUsage(data.usageMetadata))
     const parts = data.candidates?.[0]?.content?.parts || []
-    return parts
+    const content = parts
       .map(part => (typeof part.text === 'string' ? part.text : ''))
       .join('\n')
       .trim()
+    pushUsage(
+      hooks,
+      normalizeGoogleUsage(data.usageMetadata) ||
+        buildEstimatedUsage(estimatedInputTokens, content, settings),
+    )
+    return content
   }, {
     messages: conversationMessages,
     maxRetries,
@@ -2011,6 +2133,7 @@ export async function finalizeOpenAiCompatibleAnswer({
         }),
       },
     ])
+    const estimatedInputTokens = estimateOpenAiRequestInputTokens(transcript, [], settings)
 
     const response = await fetchWithTimeout(
       `${apiBase}/chat/completions`,
@@ -2041,9 +2164,14 @@ export async function finalizeOpenAiCompatibleAnswer({
     }
 
     const data = await parseJsonResponse(response)
-    pushUsage(hooks, normalizeOpenAiUsage(data.usage))
     const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content)
-    return content.trim()
+    const trimmedContent = content.trim()
+    pushUsage(
+      hooks,
+      normalizeOpenAiUsage(data.usage) ||
+        buildEstimatedUsage(estimatedInputTokens, trimmedContent, settings),
+    )
+    return trimmedContent
   }, {
     messages,
     maxRetries,
@@ -2077,6 +2205,34 @@ export async function finalizeGoogleAnswer({
       settings.baseUrl,
       'https://generativelanguage.googleapis.com/v1beta',
     )
+    const requestContents = toGeminiContents([
+      ...messages,
+      ...(draftMessage?.trim()
+        ? [
+            {
+              role: 'assistant',
+              content: draftMessage,
+            },
+          ]
+        : []),
+      {
+        role: 'user',
+        content: buildFinalizerPrompt({
+          toolEvents,
+          reasoningText,
+          draftMessage,
+          completionState,
+          deliveryPolicy,
+          responseStyle,
+        }),
+      },
+    ])
+    const estimatedInputTokens = estimateGoogleRequestInputTokens(
+      systemPrompt,
+      requestContents,
+      [],
+      settings,
+    )
     const response = await fetchWithTimeout(
       `${apiBase}/models/${settings.model}:generateContent`,
       {
@@ -2089,28 +2245,7 @@ export async function finalizeGoogleAnswer({
           system_instruction: {
             parts: [{ text: systemPrompt }],
           },
-          contents: toGeminiContents([
-            ...messages,
-            ...(draftMessage?.trim()
-              ? [
-                  {
-                    role: 'assistant',
-                    content: draftMessage,
-                  },
-                ]
-              : []),
-            {
-              role: 'user',
-              content: buildFinalizerPrompt({
-                toolEvents,
-                reasoningText,
-                draftMessage,
-                completionState,
-                deliveryPolicy,
-                responseStyle,
-              }),
-            },
-          ]),
+          contents: requestContents,
         }),
       },
       {
@@ -2131,12 +2266,17 @@ export async function finalizeGoogleAnswer({
     }
 
     const data = await parseJsonResponse(response)
-    pushUsage(hooks, normalizeGoogleUsage(data.usageMetadata))
     const parts = data.candidates?.[0]?.content?.parts || []
-    return parts
+    const content = parts
       .map(part => (typeof part.text === 'string' ? part.text : ''))
       .join('\n')
       .trim()
+    pushUsage(
+      hooks,
+      normalizeGoogleUsage(data.usageMetadata) ||
+        buildEstimatedUsage(estimatedInputTokens, content, settings),
+    )
+    return content
   }, {
     messages,
     maxRetries,
@@ -2194,6 +2334,7 @@ export async function runOpenAiCompatibleAgent({
         transcript,
         systemPrompt,
         hooks,
+        tools: activeTools,
       })
       const reasoningBlockId = `provider-phase-${step + 1}`
       const reasoningOrder = step * 2
@@ -2201,6 +2342,11 @@ export async function runOpenAiCompatibleAgent({
 
       const attemptResult = await runProviderOperationWithRetry(async attemptState => {
         hooks?.onPhaseChange?.('model_connecting')
+        const estimatedInputTokens = estimateOpenAiRequestInputTokens(
+          transcript,
+          activeTools,
+          settings,
+        )
         const response = await fetchWithTimeout(
           `${apiBase}/chat/completions`,
           {
@@ -2272,7 +2418,10 @@ export async function runOpenAiCompatibleAgent({
 
         await readSseStream(response, async payload => {
           const data = JSON.parse(payload)
-          const usage = normalizeOpenAiUsage(data.usage)
+          const usage = attachEstimatedInputTokens(
+            normalizeOpenAiUsage(data.usage),
+            estimatedInputTokens,
+          )
           if (usage) {
             usageForAttempt = usage
           }
@@ -2336,7 +2485,7 @@ export async function runOpenAiCompatibleAgent({
           content,
           phaseReasoning,
           finalizedToolCalls: toolCalls.filter(toolCall => toolCall?.function?.name?.trim()),
-          usage: usageForAttempt,
+          usage: usageForAttempt || buildEstimatedUsage(estimatedInputTokens, content, settings),
         }
       }, {
         messages: conversationMessages,
@@ -2551,6 +2700,7 @@ export async function runGoogleAgent({
         transcript,
         systemPrompt,
         hooks,
+        tools: activeTools,
       })
       const reasoningBlockId = `provider-phase-${step + 1}`
       const reasoningOrder = step * 2
@@ -2558,6 +2708,12 @@ export async function runGoogleAgent({
 
       const attemptResult = await runProviderOperationWithRetry(async attemptState => {
         hooks?.onPhaseChange?.('model_connecting')
+        const estimatedInputTokens = estimateGoogleRequestInputTokens(
+          systemPrompt,
+          transcript,
+          activeTools,
+          settings,
+        )
         const response = await fetchWithTimeout(
           `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
           {
@@ -2621,7 +2777,10 @@ export async function runGoogleAgent({
 
         await readSseStream(response, async payload => {
           const data = JSON.parse(payload)
-          const usage = normalizeGoogleUsage(data.usageMetadata)
+          const usage = attachEstimatedInputTokens(
+            normalizeGoogleUsage(data.usageMetadata),
+            estimatedInputTokens,
+          )
           if (usage) {
             usageForAttempt = usage
           }
@@ -2658,7 +2817,7 @@ export async function runGoogleAgent({
           content,
           phaseReasoning,
           functionCalls,
-          usage: usageForAttempt,
+          usage: usageForAttempt || buildEstimatedUsage(estimatedInputTokens, content, settings),
         }
       }, {
         messages: conversationMessages,

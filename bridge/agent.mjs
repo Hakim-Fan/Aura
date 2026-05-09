@@ -202,11 +202,13 @@ async function maybeCompressMessagesForContext({
   messages,
   settings,
   systemPrompt = '',
+  toolSchemaTokens = 0,
   hooks,
   stage,
 }) {
   const compressionState = shouldCompressMessages(messages, settings, {
     systemPrompt,
+    toolSchemaTokens,
     keepRecentCount: CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
   })
 
@@ -228,7 +230,7 @@ async function maybeCompressMessagesForContext({
     maxInputBatchTokens: compressionState.budget.compactionInputBatchTokens,
     hooks,
   })
-  const afterTokens = estimateMessagesTokens(compactedMessages)
+  const afterTokens = estimateMessagesTokens(compactedMessages, settings)
   hooks?.onReasoningDelta?.(
     [
       `Context compression (${stage || 'runtime'}):`,
@@ -400,7 +402,7 @@ function buildRouteDecisionSnapshot({
   }
 }
 
-function estimateMountedToolSchemaTokens(tools = []) {
+function estimateMountedToolSchemaTokens(tools = [], settings = {}) {
   const toolDefs = (Array.isArray(tools) ? tools : []).map(tool => ({
     type: 'function',
     function: {
@@ -413,19 +415,39 @@ function estimateMountedToolSchemaTokens(tools = []) {
     },
   }))
 
-  return estimateTextTokens(JSON.stringify(toolDefs))
+  return estimateTextTokens(JSON.stringify(toolDefs), settings)
 }
 
-function buildPromptContextSnapshot(settings, systemPrompt, tools) {
-  const budget = buildContextCompressionBudget(settings, { systemPrompt })
-  const toolSchemaTokens = estimateMountedToolSchemaTokens(tools)
+function buildPromptContextSnapshot(
+  settings,
+  systemPrompt,
+  tools,
+  conversationTokens = 0,
+  toolSchemaTokensOverride,
+) {
+  const toolSchemaTokens =
+    typeof toolSchemaTokensOverride === 'number' && Number.isFinite(toolSchemaTokensOverride)
+      ? Math.max(0, Math.round(toolSchemaTokensOverride))
+      : estimateMountedToolSchemaTokens(tools, settings)
+  const budget = buildContextCompressionBudget(settings, {
+    systemPrompt,
+    toolSchemaTokens,
+  })
+  const normalizedConversationTokens = Math.max(
+    0,
+    Math.round(Number(conversationTokens) || 0),
+  )
+  const promptEnvelopeTokens = budget.systemPromptTokens + toolSchemaTokens
 
   return {
     systemPromptTokens: budget.systemPromptTokens,
     toolSchemaTokens,
-    promptEnvelopeTokens: budget.systemPromptTokens + toolSchemaTokens,
+    promptEnvelopeTokens,
+    conversationTokens: normalizedConversationTokens,
+    promptTokens: promptEnvelopeTokens + normalizedConversationTokens,
     contextWindowTokens: budget.contextWindowTokens,
     compressionThresholdTokens: budget.compressionThresholdTokens,
+    effectiveThresholdTokens: budget.effectiveThresholdTokens,
   }
 }
 
@@ -438,11 +460,23 @@ function normalizeUsage(usage) {
   return {
     inputTokens,
     outputTokens,
+    estimatedInputTokens: Math.max(
+      0,
+      Math.round(Number(usage?.estimatedInputTokens) || 0),
+    ),
   }
 }
 
 function createUsageTrackingHooks(baseHooks = {}) {
   let totals = {
+    inputTokens: 0,
+    outputTokens: 0,
+  }
+  let latest = {
+    inputTokens: 0,
+    outputTokens: 0,
+  }
+  let latestContext = {
     inputTokens: 0,
     outputTokens: 0,
   }
@@ -455,6 +489,13 @@ function createUsageTrackingHooks(baseHooks = {}) {
         if (!normalized) {
           return
         }
+        latest = {
+          inputTokens: normalized.inputTokens,
+          outputTokens: normalized.outputTokens,
+        }
+        if (normalized.estimatedInputTokens > 0 || latestContext.inputTokens <= 0) {
+          latestContext = latest
+        }
         totals = {
           inputTokens: totals.inputTokens + normalized.inputTokens,
           outputTokens: totals.outputTokens + normalized.outputTokens,
@@ -462,11 +503,25 @@ function createUsageTrackingHooks(baseHooks = {}) {
         baseHooks?.onUsage?.({
           inputTokens: totals.inputTokens,
           outputTokens: totals.outputTokens,
+          latestInputTokens: latestContext.inputTokens || latest.inputTokens,
+          latestOutputTokens: latest.outputTokens,
         })
       },
     },
     getAccumulatedUsage() {
-      return normalizeUsage(totals)
+      const normalizedTotals = normalizeUsage(totals)
+      if (!normalizedTotals) {
+        return undefined
+      }
+      const latestInputTokens = Math.max(
+        0,
+        Math.round(Number(latestContext.inputTokens || latest.inputTokens) || 0),
+      )
+      return {
+        ...normalizedTotals,
+        latestInputTokens,
+        latestOutputTokens: Math.max(0, Math.round(Number(latest.outputTokens) || 0)),
+      }
     },
   }
 }
@@ -1314,10 +1369,22 @@ export async function runRouteFirstAgent(request) {
       const allTools = escalationTool
         ? [...selectedCapabilities.selectedTools, escalationTool]
         : selectedCapabilities.selectedTools
+      const toolSchemaTokens = estimateMountedToolSchemaTokens(allTools, effectiveRunSettings)
+      const runtimeCompression = await maybeCompressMessagesForContext({
+        messages,
+        settings: effectiveRunSettings,
+        systemPrompt: lastSystemPrompt,
+        toolSchemaTokens,
+        hooks,
+        stage: `pass-${pass + 1}`,
+      })
+      messages = runtimeCompression.messages
       const promptContextSnapshot = buildPromptContextSnapshot(
         effectiveRunSettings,
         lastSystemPrompt,
         allTools,
+        runtimeCompression.afterTokens,
+        toolSchemaTokens,
       )
       lastRouteDecision = buildRouteDecisionSnapshot({
         routeState: promptRouteState,
@@ -1332,14 +1399,7 @@ export async function runRouteFirstAgent(request) {
         classificationReason: classificationResult?.reason,
         strategy,
       })
-      const runtimeCompression = await maybeCompressMessagesForContext({
-        messages,
-        settings: effectiveRunSettings,
-        systemPrompt: lastSystemPrompt,
-        hooks,
-        stage: `pass-${pass + 1}`,
-      })
-      messages = runtimeCompression.messages
+      hooks?.onRouteDecision?.(lastRouteDecision)
       const turnToolEventStart = toolEvents.length
 
       let turnResult

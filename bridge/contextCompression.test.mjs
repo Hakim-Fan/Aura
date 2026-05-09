@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   buildCompressedSummaryMessage,
   buildContextCompressionBudget,
+  estimateMessageTokens,
   estimateMessagesTokens,
   estimateTextTokens,
   formatMessagesForCompaction,
@@ -11,9 +12,29 @@ import {
   splitMessagesIntoTokenBatches,
 } from './contextCompression.mjs'
 
-test('estimateTextTokens counts CJK text more densely than ASCII text', () => {
-  assert.ok(estimateTextTokens('hello world '.repeat(100)) < 400)
-  assert.ok(estimateTextTokens('你好世界'.repeat(100)) >= 560)
+test('estimateTextTokens uses the local tokenizer', () => {
+  assert.equal(estimateTextTokens('hello world '.repeat(100)), 201)
+  assert.equal(estimateTextTokens('你好世界'.repeat(100)), 500)
+  assert.equal(estimateTextTokens('你好世界'.repeat(100), { model: 'gpt-4o' }), 200)
+})
+
+test('estimateMessageTokens counts distinct content and non-text parts together', () => {
+  const textOnly = estimateMessageTokens({
+    role: 'user',
+    content: '请检查这个截图并总结问题。',
+  })
+  const imageOnly = estimateMessageTokens({
+    role: 'user',
+    parts: [{ type: 'image', name: 'screen.png', mimeType: 'image/png' }],
+  })
+  const combined = estimateMessageTokens({
+    role: 'user',
+    content: '请检查这个截图并总结问题。',
+    parts: [{ type: 'image', name: 'screen.png', mimeType: 'image/png' }],
+  })
+
+  assert.ok(combined > textOnly)
+  assert.ok(combined > imageOnly)
 })
 
 test('formatMessagesForCompaction preserves text and summarizes binary parts without data URLs', () => {
@@ -66,16 +87,40 @@ test('buildContextCompressionBudget uses model metadata when available', () => {
   assert.ok(budget.effectiveThresholdTokens < budget.compressionThresholdTokens)
 })
 
-test('buildContextCompressionBudget honors a smaller configured compression threshold', () => {
+test('buildContextCompressionBudget uses configured budget when model metadata is absent', () => {
   const budget = buildContextCompressionBudget({
     provider: 'google',
     model: 'gemini-1.5-pro',
     contextCompressionThresholdTokens: 64_000,
   })
 
-  assert.equal(budget.contextWindowTokens, 1_000_000)
+  assert.equal(budget.contextWindowTokens, 64_000)
   assert.equal(budget.configuredThresholdTokens, 64_000)
-  assert.equal(budget.compressionThresholdTokens, 64_000)
+  assert.equal(budget.compressionThresholdTokens, Math.floor(64_000 * 0.85))
+})
+
+test('buildContextCompressionBudget subtracts tool schema tokens from effective threshold', () => {
+  const baseBudget = buildContextCompressionBudget({
+    provider: 'openai',
+    model: 'gpt-4o',
+    contextCompressionThresholdTokens: 80_000,
+  })
+  const budgetWithTools = buildContextCompressionBudget(
+    {
+      provider: 'openai',
+      model: 'gpt-4o',
+      contextCompressionThresholdTokens: 80_000,
+    },
+    {
+      toolSchemaTokens: 12_000,
+    },
+  )
+
+  assert.equal(budgetWithTools.toolSchemaTokens, 12_000)
+  assert.equal(
+    budgetWithTools.effectiveThresholdTokens,
+    baseBudget.effectiveThresholdTokens - 12_000,
+  )
 })
 
 test('resolveContextWindowTokens infers large Gemini windows when metadata is absent', () => {
@@ -85,6 +130,16 @@ test('resolveContextWindowTokens infers large Gemini windows when metadata is ab
       model: 'gemini-1.5-pro',
     }),
     1_000_000,
+  )
+})
+
+test('resolveContextWindowTokens defaults to 256k when no model budget is available', () => {
+  assert.equal(
+    resolveContextWindowTokens({
+      provider: 'openai',
+      model: 'unknown-model',
+    }),
+    256_000,
   )
 })
 
@@ -113,7 +168,7 @@ test('shouldCompressMessages can trigger for short conversations with oversized 
   const messages = [
     {
       role: 'user',
-      content: 'old oversized context '.repeat(4000),
+      content: 'old oversized context '.repeat(16_000),
     },
     {
       role: 'user',

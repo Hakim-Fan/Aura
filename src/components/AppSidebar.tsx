@@ -32,7 +32,6 @@ type Props = {
   onSessionFilterChange: (value: string) => void
   sessions: Session[]
   sessionFolders: SessionFolder[]
-  auraWorkspaceDir: string
   runningSessionIds: string[]
   activeSessionId: string | null
   onOpenSession: (sessionId: string) => void
@@ -40,7 +39,7 @@ type Props = {
   onCreateSessionFolder: (name: string) => void
   onRenameSession: (sessionId: string, title: string) => void
   onRenameSessionFolder: (folderId: string, title: string) => void
-  onDeleteSession: (sessionId: string, deleteWorkspace: boolean) => void
+  onDeleteSession: (sessionId: string) => void
   onDeleteSessionFolder: (folderId: string) => void
   onToggleSessionFolder: (folderId: string) => void
   onMoveSessionToFolder: (sessionId: string, folderId?: string) => void
@@ -48,19 +47,6 @@ type Props = {
   settingsOpen: boolean
   updateRelease?: { version: string } | null
   onShowUpdate?: () => void
-}
-
-function normalizePath(value: string) {
-  return value.replace(/\\/g, '/').replace(/\/+$/, '')
-}
-
-function canDeleteWorkspacePath(workspacePath: string, auraWorkspaceDir: string) {
-  const normalizedWorkspace = normalizePath(workspacePath.trim())
-  const normalizedAuraRoot = normalizePath(auraWorkspaceDir.trim())
-  if (!normalizedWorkspace || !normalizedAuraRoot || normalizedWorkspace === normalizedAuraRoot) {
-    return false
-  }
-  return normalizedWorkspace.startsWith(`${normalizedAuraRoot}/`)
 }
 
 function DroppableSection({
@@ -189,7 +175,6 @@ export function AppSidebar({
   onSessionFilterChange,
   sessions,
   sessionFolders,
-  auraWorkspaceDir,
   runningSessionIds,
   activeSessionId,
   onOpenSession,
@@ -210,9 +195,7 @@ export function AppSidebar({
     id: string
     title: string
     workspacePath: string
-    canDeleteWorkspace: boolean
   } | null>(null)
-  const [deleteWorkspace, setDeleteWorkspace] = useState(false)
   const [renameSession, setRenameSession] = useState<{ id: string; title: string } | null>(null)
   const [editingTitle, setEditingTitle] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
@@ -295,12 +278,10 @@ export function AppSidebar({
   }
 
   function handleSessionDeleteRequest(session: Session) {
-    setDeleteWorkspace(false)
     setDeleteConfirmation({
       id: session.id,
       title: session.title,
       workspacePath: session.workspacePath || '',
-      canDeleteWorkspace: canDeleteWorkspacePath(session.workspacePath || '', auraWorkspaceDir),
     })
   }
 
@@ -588,49 +569,21 @@ export function AppSidebar({
 
       <ConfirmModal
         isOpen={!!deleteConfirmation}
-        title="确认删除会话？"
-        description={`确定要删除“${deleteConfirmation?.title}”吗？此操作不可撤销。`}
-        confirmText="彻底删除"
-        cancelText="不删了"
-        variant="danger"
+        title="移入回收站？"
+        description={`“${deleteConfirmation?.title}”会从当前列表移除，并可在回收站中找回。`}
+        confirmText="移入回收站"
+        cancelText="保留会话"
+        variant="warning"
         onConfirm={() => {
           if (deleteConfirmation) {
-            onDeleteSession(deleteConfirmation.id, deleteWorkspace)
+            onDeleteSession(deleteConfirmation.id)
             setDeleteConfirmation(null)
-            setDeleteWorkspace(false)
           }
         }}
         onCancel={() => {
           setDeleteConfirmation(null)
-          setDeleteWorkspace(false)
         }}
-      >
-        {deleteConfirmation?.workspacePath.trim() ? (
-          deleteConfirmation.canDeleteWorkspace ? (
-            <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-3 py-3">
-              <input
-                type="checkbox"
-                className="mt-1 h-4 w-4 rounded border-gray-300 text-red-500 focus:ring-red-200"
-                checked={deleteWorkspace}
-                onChange={event => setDeleteWorkspace(event.target.checked)}
-              />
-              <div className="min-w-0">
-                <div className="text-13px font-600 text-[var(--text-primary)]">同时删除工作区</div>
-                <div className="mt-1 break-all text-12px leading-relaxed text-[var(--text-secondary)] opacity-80">
-                  {deleteConfirmation.workspacePath}
-                </div>
-              </div>
-            </label>
-          ) : (
-            <div className="rounded-xl border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-3 py-3">
-              <div className="text-13px font-600 text-[var(--text-primary)]">外部工作区不会被删除</div>
-              <div className="mt-1 break-all text-12px leading-relaxed text-[var(--text-secondary)] opacity-80">
-                {deleteConfirmation.workspacePath}
-              </div>
-            </div>
-          )
-        ) : null}
-      </ConfirmModal>
+      />
     </aside>
   )
 }

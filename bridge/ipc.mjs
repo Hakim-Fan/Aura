@@ -340,6 +340,10 @@ rl.on('line', (line) => {
       executionMonitor.markProgress()
       emit({ type: 'task_tree', tree })
     },
+    onRouteDecision(routeDecision) {
+      executionMonitor.markProgress()
+      emit({ type: 'route_decision', routeDecision })
+    },
     onProgress() {
       executionMonitor.markProgress()
     },

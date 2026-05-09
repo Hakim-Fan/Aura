@@ -35,7 +35,7 @@ async function runManualContextCompression(payload = {}) {
     throw new Error('当前会话中可压缩的历史消息太少。')
   }
 
-  const originalTokens = estimateMessagesTokens(messages)
+  const originalTokens = estimateMessagesTokens(messages, settings)
   const budget = buildContextCompressionBudget(settings)
   const compactedMessages = await compactMessagesWithProvider({
     settings,
@@ -48,7 +48,7 @@ async function runManualContextCompression(payload = {}) {
     throw new Error('模型没有返回可用的上下文压缩摘要。')
   }
 
-  const compressedTokens = estimateMessagesTokens(compactedMessages)
+  const compressedTokens = estimateMessagesTokens(compactedMessages, settings)
   return {
     ok: true,
     message: `已压缩背景上下文，估算从 ${originalTokens} tokens 降至 ${compressedTokens} tokens。`,

@@ -23,11 +23,14 @@ import {
   getWorkspaceCapabilityOverrides,
   hydrateStorageFromAuraHome,
   hydrateProjectCapabilityOverridesFromAuraHome,
+  isSessionMessagesLoaded,
+  loadSessionMessages,
   loadSessions,
   loadSessionFolders,
   loadSettings,
   loadProjectCapabilityOverrides,
   resolveCapabilitiesForWorkspace,
+  searchSessionIds,
   saveSessionFolders,
   saveSessions,
   saveSettings,
@@ -42,7 +45,6 @@ import {
   readImagePreview,
   readTextFile,
   readWorkspaceTree,
-  deleteWorkspaceDirectory,
   writeAttachmentBytes,
 } from './lib/workspace'
 import type {
@@ -1321,6 +1323,7 @@ export function MainWindowApp() {
     useState<ProjectCapabilityOverrides>(() => loadProjectCapabilityOverrides())
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sessionFilter, setSessionFilter] = useState('')
+  const [sessionFilterMatches, setSessionFilterMatches] = useState<Set<string> | null>(null)
   const [composerStates, setComposerStates] = useState<Record<string, ComposerState>>({})
   const [error, setError] = useState('')
   const [agentTasksBySession, setAgentTasksBySession] = useState<
@@ -1329,6 +1332,7 @@ export function MainWindowApp() {
   const [runningTasksBySession, setRunningTasksBySession] = useState<
     Record<string, RunningTaskBinding>
   >({})
+  const [sessionMessagesLoading, setSessionMessagesLoading] = useState<Record<string, boolean>>({})
   const [contextCompressionSessionId, setContextCompressionSessionId] = useState<string | null>(null)
 
   // --- Update Check Logic ---
@@ -1427,6 +1431,9 @@ export function MainWindowApp() {
     }
     return sessions.find(session => session.id === activeSessionId) ?? null
   }, [activeSessionId, sessions])
+  const activeSessionMessagesLoading = activeSession
+    ? sessionMessagesLoading[activeSession.id] === true
+    : false
 
   const activeComposerState = activeSession
     ? composerStates[activeSession.id] || createEmptyComposerState()
@@ -1442,12 +1449,124 @@ export function MainWindowApp() {
     if (!keyword) {
       return sessions
     }
+    if (sessionFilterMatches) {
+      return sessions.filter(
+        session =>
+          sessionFilterMatches.has(session.id) || session.title.toLowerCase().includes(keyword),
+      )
+    }
     return sessions.filter(session =>
-      `${session.title} ${session.messages.map(message => message.content).join(' ')}`
-        .toLowerCase()
-        .includes(keyword),
+      session.title.toLowerCase().includes(keyword),
     )
-  }, [sessionFilter, sessions])
+  }, [sessionFilter, sessionFilterMatches, sessions])
+
+  useEffect(() => {
+    const keyword = sessionFilter.trim()
+    if (!keyword) {
+      setSessionFilterMatches(null)
+      return
+    }
+
+    setSessionFilterMatches(null)
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void searchSessionIds(keyword)
+        .then(ids => {
+          if (!cancelled) {
+            setSessionFilterMatches(new Set(ids))
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setSessionFilterMatches(null)
+          }
+        })
+    }, 160)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [sessionFilter])
+
+  useEffect(() => {
+    if (!storageReady) {
+      return
+    }
+    if (!activeSessionId) {
+      return
+    }
+
+    if (sessionMessagesLoading[activeSessionId]) {
+      return
+    }
+    if (isSessionMessagesLoaded(activeSessionId)) {
+      setSessionMessagesLoading(current => {
+        if (!current[activeSessionId]) {
+          return current
+        }
+        const next = { ...current }
+        delete next[activeSessionId]
+        return next
+      })
+      return
+    }
+
+    let cancelled = false
+    const loadingSessionId = activeSessionId
+    setSessionMessagesLoading(current => ({
+      ...current,
+      [loadingSessionId]: true,
+    }))
+
+    void loadSessionMessages(loadingSessionId)
+      .then(messages => {
+        if (cancelled) {
+          return
+        }
+        setSessions(current =>
+          sortSessionsByRecentActivity(
+            current.map(session =>
+              session.id === loadingSessionId
+                ? {
+                  ...session,
+                  messages,
+                }
+                : session,
+            ),
+          ),
+        )
+      })
+      .catch(caught => {
+        if (!cancelled) {
+          setError(getErrorMessage(caught, '加载会话历史失败。'))
+        }
+      })
+      .finally(() => {
+        // Always clear the loading flag for this session id.
+        // Otherwise dependency re-runs can cancel this effect and leave UI stuck forever.
+        setSessionMessagesLoading(current => {
+          if (!current[loadingSessionId]) {
+            return current
+          }
+          const next = { ...current }
+          delete next[loadingSessionId]
+          return next
+        })
+      })
+
+    return () => {
+      cancelled = true
+      setSessionMessagesLoading(current => {
+        if (!current[loadingSessionId]) {
+          return current
+        }
+        const next = { ...current }
+        delete next[loadingSessionId]
+        return next
+      })
+    }
+  }, [activeSessionId, storageReady])
 
   const isRunning =
     agentTask?.status === 'queued' ||
@@ -2253,7 +2372,7 @@ export function MainWindowApp() {
     }))
   }
 
-  async function deleteSession(sessionId: string, deleteWorkspace = false) {
+  async function deleteSession(sessionId: string) {
     if (runningTasksBySession[sessionId]) {
       setError('当前会话仍在执行中，请等待完成后再删除。')
       return
@@ -2262,15 +2381,6 @@ export function MainWindowApp() {
     const target = sessions.find(session => session.id === sessionId)
     if (!target) {
       return
-    }
-
-    if (deleteWorkspace && target.workspacePath.trim()) {
-      try {
-        await deleteWorkspaceDirectory(target.workspacePath)
-      } catch (caught) {
-        setError(getErrorMessage(caught, '删除会话工作区失败。'))
-        return
-      }
     }
 
     const remaining = sessions.filter(session => session.id !== sessionId)
@@ -3512,7 +3622,6 @@ export function MainWindowApp() {
           onSessionFilterChange={setSessionFilter}
           sessions={filteredSessions}
           sessionFolders={sessionFolders}
-          auraWorkspaceDir={auraHome?.workspaceDir || ''}
           runningSessionIds={Object.keys(runningTasksBySession)}
           activeSessionId={activeSession?.id || null}
           onOpenSession={openSession}
@@ -3523,9 +3632,7 @@ export function MainWindowApp() {
           onToggleSessionFolder={toggleSessionFolder}
           onMoveSessionToFolder={moveSessionToFolder}
           onRenameSession={renameSession}
-          onDeleteSession={(sessionId, deleteWorkspace) =>
-            void deleteSession(sessionId, deleteWorkspace)
-          }
+          onDeleteSession={sessionId => void deleteSession(sessionId)}
           onOpenSettings={() =>
             void openSettingsWindow('general').catch(caught => {
               setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')
@@ -3543,100 +3650,106 @@ export function MainWindowApp() {
 
         <main className="flex-1 flex flex-col min-w-0">
           {activeSession ? (
-            <ChatView
-              messages={activeSession.messages}
-              displayedToolEvents={displayedToolEvents}
-              displayedTaskTree={displayedTaskTree}
-              settings={effectiveSettings}
-              contextCompression={activeSession.contextCompression}
-              draft={draft}
-              error={error}
-              isRunning={isRunning}
-              agentTask={agentTask}
-              workspaceRootPath={activeWorkspacePath}
-              workspaceTree={workspaceTree}
-              workspaceLoading={workspaceLoading}
-              workspaceError={workspaceError}
-              expandedPaths={expandedPaths}
-              selectedFilePath={selectedFilePath}
-              previewContent={previewContent}
-              previewImage={previewImage}
-              previewLoading={previewLoading}
-              previewError={previewError}
-              canChangeWorkspace={activeSession.messages.length === 0 && !isRunning}
-              inspectorWidth={inspectorWidth}
-              attachments={draftAttachments}
-              capabilityItems={currentCapabilityItems}
-              capabilitySnapshot={currentResolvedCapabilityUsage}
-              modelGroups={enabledModelGroups}
-              activeModelProfileId={activeProviderProfile?.id || ''}
-              researchMode={draftResearchMode}
-              onDraftChange={value => {
-                if (!activeSession) {
-                  return
+            activeSessionMessagesLoading ? (
+              <section className="flex h-full items-center justify-center text-sm text-[var(--text-secondary)]">
+                正在加载会话历史...
+              </section>
+            ) : (
+              <ChatView
+                messages={activeSession.messages}
+                displayedToolEvents={displayedToolEvents}
+                displayedTaskTree={displayedTaskTree}
+                settings={effectiveSettings}
+                contextCompression={activeSession.contextCompression}
+                draft={draft}
+                error={error}
+                isRunning={isRunning}
+                agentTask={agentTask}
+                workspaceRootPath={activeWorkspacePath}
+                workspaceTree={workspaceTree}
+                workspaceLoading={workspaceLoading}
+                workspaceError={workspaceError}
+                expandedPaths={expandedPaths}
+                selectedFilePath={selectedFilePath}
+                previewContent={previewContent}
+                previewImage={previewImage}
+                previewLoading={previewLoading}
+                previewError={previewError}
+                canChangeWorkspace={activeSession.messages.length === 0 && !isRunning}
+                inspectorWidth={inspectorWidth}
+                attachments={draftAttachments}
+                capabilityItems={currentCapabilityItems}
+                capabilitySnapshot={currentResolvedCapabilityUsage}
+                modelGroups={enabledModelGroups}
+                activeModelProfileId={activeProviderProfile?.id || ''}
+                researchMode={draftResearchMode}
+                onDraftChange={value => {
+                  if (!activeSession) {
+                    return
+                  }
+                  updateComposerState(activeSession.id, current => ({
+                    ...current,
+                    draft: value,
+                  }))
+                }}
+                onToggleResearchMode={() => {
+                  if (!activeSession) {
+                    return
+                  }
+                  updateComposerState(activeSession.id, current => ({
+                    ...current,
+                    researchMode: current.researchMode === 'deep' ? 'auto' : 'deep',
+                  }))
+                }}
+                onSetCapabilityOverride={setProjectCapabilityOverride}
+                onSubmit={() => void submit()}
+                onOpenProviders={() =>
+                  void openSettingsWindow('providers').catch(caught => {
+                    setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')
+                  })
                 }
-                updateComposerState(activeSession.id, current => ({
-                  ...current,
-                  draft: value,
-                }))
-              }}
-              onToggleResearchMode={() => {
-                if (!activeSession) {
-                  return
+                onHandleApproval={decision => void handleApproval(decision)}
+                onOpenWorkspaceExplorer={() => {
+                  if (activeWorkspacePath.trim() && !workspaceTree && !workspaceLoading) {
+                    void refreshWorkspace()
+                  }
+                }}
+                onChooseWorkspace={() => void chooseExplicitWorkspaceForSession()}
+                onPickAttachment={() => void chooseAttachmentForDraft()}
+                onPasteAttachments={files => void appendAttachmentsFromFiles(files)}
+                onSelectModel={(profileId, modelId) => switchSessionModel(profileId, modelId)}
+                onSelectReasoningEffort={updateReasoningEffort}
+                onOpenAttachment={path =>
+                  void openPathInDefaultApp(path).catch(caught => {
+                    setError(caught instanceof Error ? caught.message : '打开文件失败。')
+                  })
                 }
-                updateComposerState(activeSession.id, current => ({
-                  ...current,
-                  researchMode: current.researchMode === 'deep' ? 'auto' : 'deep',
-                }))
-              }}
-              onSetCapabilityOverride={setProjectCapabilityOverride}
-              onSubmit={() => void submit()}
-              onOpenProviders={() =>
-                void openSettingsWindow('providers').catch(caught => {
-                  setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')
-                })
-              }
-              onHandleApproval={decision => void handleApproval(decision)}
-              onOpenWorkspaceExplorer={() => {
-                if (activeWorkspacePath.trim() && !workspaceTree && !workspaceLoading) {
-                  void refreshWorkspace()
+                onRefreshWorkspace={() => void refreshWorkspace()}
+                onToggleWorkspacePath={toggleWorkspacePath}
+                onSelectWorkspaceFile={setSelectedFilePath}
+                onInsertFileReference={insertFileReference}
+                onInspectorWidthChange={setInspectorWidth}
+                onRemoveAttachment={removeDraftAttachment}
+                onCopyPath={path => void copyText(path)}
+                onCopyText={value => void copyText(value)}
+                onEditMessage={applyMessageToDraft}
+                onDeleteMessage={deleteMessage}
+                onSelectMessageVersion={selectMessageVersion}
+                onRegenerateMessage={messageId => void regenerateFromMessage(messageId)}
+                onRegenerateMessageWithModel={(messageId, profileId, modelId) =>
+                  void regenerateFromMessageWithModel(messageId, profileId, modelId)
                 }
-              }}
-              onChooseWorkspace={() => void chooseExplicitWorkspaceForSession()}
-              onPickAttachment={() => void chooseAttachmentForDraft()}
-              onPasteAttachments={files => void appendAttachmentsFromFiles(files)}
-              onSelectModel={(profileId, modelId) => switchSessionModel(profileId, modelId)}
-              onSelectReasoningEffort={updateReasoningEffort}
-              onOpenAttachment={path =>
-                void openPathInDefaultApp(path).catch(caught => {
-                  setError(caught instanceof Error ? caught.message : '打开文件失败。')
-                })
-              }
-              onRefreshWorkspace={() => void refreshWorkspace()}
-              onToggleWorkspacePath={toggleWorkspacePath}
-              onSelectWorkspaceFile={setSelectedFilePath}
-              onInsertFileReference={insertFileReference}
-              onInspectorWidthChange={setInspectorWidth}
-              onRemoveAttachment={removeDraftAttachment}
-              onCopyPath={path => void copyText(path)}
-              onCopyText={value => void copyText(value)}
-              onEditMessage={applyMessageToDraft}
-              onDeleteMessage={deleteMessage}
-              onSelectMessageVersion={selectMessageVersion}
-              onRegenerateMessage={messageId => void regenerateFromMessage(messageId)}
-              onRegenerateMessageWithModel={(messageId, profileId, modelId) =>
-                void regenerateFromMessageWithModel(messageId, profileId, modelId)
-              }
-              onResendMessage={messageId => void resendUserMessage(messageId)}
-              onForceExecuteAppendedInput={(messageId, inputId) =>
-                void forceExecuteAppendedInput(messageId, inputId)
-              }
-              onCancelCurrentStep={() => void handleCancelCurrentStep()}
-              onCompressContext={() => void handleCompressActiveContext()}
-              onToggleMessageActivity={toggleMessageActivity}
-              onStop={() => void handleStopAgentTask()}
-              contextCompressionRunning={contextCompressionSessionId === activeSession.id}
-            />
+                onResendMessage={messageId => void resendUserMessage(messageId)}
+                onForceExecuteAppendedInput={(messageId, inputId) =>
+                  void forceExecuteAppendedInput(messageId, inputId)
+                }
+                onCancelCurrentStep={() => void handleCancelCurrentStep()}
+                onCompressContext={() => void handleCompressActiveContext()}
+                onToggleMessageActivity={toggleMessageActivity}
+                onStop={() => void handleStopAgentTask()}
+                contextCompressionRunning={contextCompressionSessionId === activeSession.id}
+              />
+            )
           ) : (
             <HomeView
               providerConfigured={isProviderReady(activeProviderProfile, settings)}

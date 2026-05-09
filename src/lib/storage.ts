@@ -38,6 +38,8 @@ import {
   deletePersistedMessageVersion,
   deletePersistedSession,
   loadPersistedAppState,
+  loadPersistedSessionMessages,
+  searchPersistedSessionIds,
   savePersistedProjectCapabilityOverrides,
   savePersistedSessionFolders,
   savePersistedSettings,
@@ -693,6 +695,27 @@ function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefin
               0,
               Math.round(routeDecision.contextEstimate.compressionThresholdTokens),
             ),
+            conversationTokens:
+              typeof routeDecision.contextEstimate.conversationTokens === 'number' &&
+                Number.isFinite(routeDecision.contextEstimate.conversationTokens)
+                ? Math.max(
+                  0,
+                  Math.round(routeDecision.contextEstimate.conversationTokens),
+                )
+                : undefined,
+            promptTokens:
+              typeof routeDecision.contextEstimate.promptTokens === 'number' &&
+                Number.isFinite(routeDecision.contextEstimate.promptTokens)
+                ? Math.max(0, Math.round(routeDecision.contextEstimate.promptTokens))
+                : undefined,
+            effectiveThresholdTokens:
+              typeof routeDecision.contextEstimate.effectiveThresholdTokens === 'number' &&
+                Number.isFinite(routeDecision.contextEstimate.effectiveThresholdTokens)
+                ? Math.max(
+                  0,
+                  Math.round(routeDecision.contextEstimate.effectiveThresholdTokens),
+                )
+                : undefined,
           }
         : undefined,
   }
@@ -888,6 +911,14 @@ function normalizeMessageVariant(
             outputTokens:
               typeof variant.usage.outputTokens === 'number'
                 ? variant.usage.outputTokens
+                : undefined,
+            latestInputTokens:
+              typeof variant.usage.latestInputTokens === 'number'
+                ? variant.usage.latestInputTokens
+                : undefined,
+            latestOutputTokens:
+              typeof variant.usage.latestOutputTokens === 'number'
+                ? variant.usage.latestOutputTokens
                 : undefined,
             contextWindow:
               typeof variant.usage.contextWindow === 'number'
@@ -1612,135 +1643,177 @@ function syncLegacyFields(settings: AgentSettings): AgentSettings {
   }
 }
 
-function parseSessions(raw: string | null): Session[] {
+type ParsedSessionRecord = {
+  session: Session
+  messageCount: number
+  messagesLoaded: boolean
+}
+
+function parseSessionMessages(
+  rawMessages: unknown,
+  sessionUpdatedAt: number,
+): Session['messages'] {
+  if (!Array.isArray(rawMessages)) {
+    return []
+  }
+
+  return rawMessages.map(rawMessage => {
+    const message =
+      rawMessage && typeof rawMessage === 'object'
+        ? (rawMessage as Partial<Session['messages'][number]>)
+        : ({} as Partial<Session['messages'][number]>)
+    const createdAt = message.createdAt || sessionUpdatedAt || Date.now()
+    const baseVariant = normalizeMessageVariant(message, createdAt) || {
+      content: message.content || '',
+      parts: [],
+      status: message.status || 'completed',
+      createdAt,
+      researchMode:
+        message.researchMode === 'deep' || message.researchMode === 'auto'
+          ? message.researchMode
+          : undefined,
+      attachments: [],
+      reasoning: [],
+      usage: undefined,
+      capabilitySnapshot: normalizeCapabilityUsageSnapshot(message.capabilitySnapshot),
+      activity: message.activity,
+      events: message.events || [],
+      steps: message.steps || [],
+      phaseOutputs: normalizeMessagePhaseOutputs(message.phaseOutputs),
+      error: message.error,
+      errorInfo:
+        message.errorInfo && typeof message.errorInfo === 'object'
+          ? message.errorInfo
+          : undefined,
+      retryInfo: normalizeProviderRetryInfo(message.retryInfo),
+      agentMode: normalizeAgentMode(message.agentMode),
+      routeDecision: normalizeRouteDecision(message.routeDecision),
+      modelInfo:
+        message.modelInfo &&
+          typeof message.modelInfo === 'object' &&
+          typeof message.modelInfo.providerProfileId === 'string' &&
+          typeof message.modelInfo.providerProfileName === 'string' &&
+          (message.modelInfo.provider === 'openai' ||
+            message.modelInfo.provider === 'google' ||
+            message.modelInfo.provider === 'custom') &&
+          typeof message.modelInfo.modelId === 'string' &&
+          typeof message.modelInfo.label === 'string'
+          ? {
+            providerProfileId: message.modelInfo.providerProfileId,
+            providerProfileName: message.modelInfo.providerProfileName,
+            provider: message.modelInfo.provider,
+            modelId: message.modelInfo.modelId,
+            label: message.modelInfo.label,
+          }
+          : undefined,
+      appendedInputs: [],
+    }
+    const normalizedVersions = Array.isArray(message.versions)
+      ? message.versions
+        .map(variant => normalizeMessageVariant(variant, createdAt))
+        .filter((variant): variant is NonNullable<typeof variant> => Boolean(variant))
+      : []
+    const versions =
+      normalizedVersions.length > 0 ? normalizedVersions : [baseVariant]
+    const safeIndex =
+      typeof message.activeVersionIndex === 'number' &&
+        message.activeVersionIndex >= 0 &&
+        message.activeVersionIndex < versions.length
+        ? message.activeVersionIndex
+        : versions.length - 1
+    const activeVariant = versions[safeIndex] || baseVariant
+
+    return {
+      id: message.id || Math.random().toString(36).slice(2, 10),
+      role: message.role || 'assistant',
+      linkedMessageId:
+        typeof message.linkedMessageId === 'string' ? message.linkedMessageId : undefined,
+      content: activeVariant.content,
+      parts: activeVariant.parts,
+      status: activeVariant.status,
+      createdAt: activeVariant.createdAt,
+      researchMode: activeVariant.researchMode,
+      attachments: activeVariant.attachments,
+      reasoning: activeVariant.reasoning,
+      phaseOutputs: activeVariant.phaseOutputs,
+      usage: activeVariant.usage,
+      capabilitySnapshot: activeVariant.capabilitySnapshot,
+      activity: activeVariant.activity,
+      events: activeVariant.events,
+      steps: activeVariant.steps,
+      error: activeVariant.error,
+      errorInfo: activeVariant.errorInfo,
+      retryInfo: activeVariant.retryInfo,
+      agentMode: activeVariant.agentMode,
+      routeDecision: activeVariant.routeDecision,
+      appendedInputs: activeVariant.appendedInputs,
+      modelInfo: activeVariant.modelInfo,
+      versions,
+      activeVersionIndex: safeIndex,
+    }
+  })
+}
+
+function parseSessions(raw: string | null): ParsedSessionRecord[] {
   if (!raw) {
     return []
   }
 
   try {
-    const parsed = JSON.parse(raw) as Array<Partial<Session> & Pick<Session, 'id' | 'title'>>
+    const parsed = JSON.parse(raw) as Array<
+      Partial<Session> &
+      Pick<Session, 'id' | 'title'> & {
+        messageCount?: number
+        messagesLoaded?: boolean
+      }
+    >
     return parsed
-      .map(session => ({
-        id: session.id,
-        title: session.title || '新会话',
-        providerProfileId:
-          typeof session.providerProfileId === 'string'
-            ? session.providerProfileId
-            : 'profile-legacy',
-        provider: normalizeProvider(session.provider, defaultSettings.provider),
-        model: session.model || defaultSettings.model,
-        folderId: typeof session.folderId === 'string' ? session.folderId : undefined,
-        workspacePath: session.workspacePath || '',
-        workspaceRoot: session.workspaceRoot || '',
-        workspaceMode: session.workspaceMode || 'explicit',
-        contextCompression: normalizeSessionContextCompression(session.contextCompression),
-        messages: (session.messages || []).map(message => {
-          const createdAt = message.createdAt || session.updatedAt || Date.now()
-          const baseVariant = normalizeMessageVariant(message, createdAt) || {
-            content: message.content || '',
-            parts: [],
-            status: message.status || 'completed',
-            createdAt,
-            researchMode:
-              message.researchMode === 'deep' || message.researchMode === 'auto'
-                ? message.researchMode
-                : undefined,
-            attachments: [],
-            reasoning: [],
-            usage: undefined,
-            capabilitySnapshot: normalizeCapabilityUsageSnapshot(message.capabilitySnapshot),
-            activity: message.activity,
-            events: message.events || [],
-            steps: message.steps || [],
-            phaseOutputs: normalizeMessagePhaseOutputs(message.phaseOutputs),
-            error: message.error,
-            errorInfo:
-              message.errorInfo && typeof message.errorInfo === 'object'
-                ? message.errorInfo
-                : undefined,
-            retryInfo: normalizeProviderRetryInfo(message.retryInfo),
-            agentMode: normalizeAgentMode(message.agentMode),
-            routeDecision: normalizeRouteDecision(message.routeDecision),
-            modelInfo:
-              message.modelInfo &&
-              typeof message.modelInfo === 'object' &&
-              typeof message.modelInfo.providerProfileId === 'string' &&
-              typeof message.modelInfo.providerProfileName === 'string' &&
-              (message.modelInfo.provider === 'openai' ||
-                message.modelInfo.provider === 'google' ||
-                message.modelInfo.provider === 'custom') &&
-              typeof message.modelInfo.modelId === 'string' &&
-              typeof message.modelInfo.label === 'string'
-                ? {
-                    providerProfileId: message.modelInfo.providerProfileId,
-                    providerProfileName: message.modelInfo.providerProfileName,
-                    provider: message.modelInfo.provider,
-                    modelId: message.modelInfo.modelId,
-                    label: message.modelInfo.label,
-                  }
-                : undefined,
-            appendedInputs: [],
-          }
-          const normalizedVersions = Array.isArray(message.versions)
-            ? message.versions
-                .map(variant => normalizeMessageVariant(variant, createdAt))
-                .filter((variant): variant is NonNullable<typeof variant> => Boolean(variant))
-            : []
-          const versions =
-            normalizedVersions.length > 0 ? normalizedVersions : [baseVariant]
-          const safeIndex =
-            typeof message.activeVersionIndex === 'number' &&
-            message.activeVersionIndex >= 0 &&
-            message.activeVersionIndex < versions.length
-              ? message.activeVersionIndex
-              : versions.length - 1
-          const activeVariant = versions[safeIndex] || baseVariant
+      .map(session => {
+        const updatedAt = session.updatedAt || Date.now()
+        const messages = parseSessionMessages(session.messages, updatedAt)
+        const messageCount =
+          typeof session.messageCount === 'number' && Number.isFinite(session.messageCount)
+            ? Math.max(0, Math.round(session.messageCount))
+            : messages.length
 
-          return {
-            id: message.id || Math.random().toString(36).slice(2, 10),
-            role: message.role || 'assistant',
-            linkedMessageId:
-              typeof message.linkedMessageId === 'string' ? message.linkedMessageId : undefined,
-            content: activeVariant.content,
-            parts: activeVariant.parts,
-            status: activeVariant.status,
-            createdAt: activeVariant.createdAt,
-            researchMode: activeVariant.researchMode,
-            attachments: activeVariant.attachments,
-            reasoning: activeVariant.reasoning,
-            phaseOutputs: activeVariant.phaseOutputs,
-            usage: activeVariant.usage,
-            capabilitySnapshot: activeVariant.capabilitySnapshot,
-            activity: activeVariant.activity,
-            events: activeVariant.events,
-            steps: activeVariant.steps,
-            error: activeVariant.error,
-            errorInfo: activeVariant.errorInfo,
-            retryInfo: activeVariant.retryInfo,
-            agentMode: activeVariant.agentMode,
-            routeDecision: activeVariant.routeDecision,
-            appendedInputs: activeVariant.appendedInputs,
-            modelInfo: activeVariant.modelInfo,
-            versions,
-            activeVersionIndex: safeIndex,
-          }
-        }),
-        toolEvents: session.toolEvents || [],
-        taskTree: session.taskTree || [],
-        updatedAt: session.updatedAt || Date.now(),
-      }))
-      .filter(session => {
-        if (session.messages.length > 0) {
+        return {
+          session: {
+            id: session.id,
+            title: session.title || '新会话',
+            providerProfileId:
+              typeof session.providerProfileId === 'string'
+                ? session.providerProfileId
+                : 'profile-legacy',
+            provider: normalizeProvider(session.provider, defaultSettings.provider),
+            model: session.model || defaultSettings.model,
+            folderId: typeof session.folderId === 'string' ? session.folderId : undefined,
+            workspacePath: session.workspacePath || '',
+            workspaceRoot: session.workspaceRoot || '',
+            workspaceMode: session.workspaceMode || 'explicit',
+            contextCompression: normalizeSessionContextCompression(session.contextCompression),
+            messages,
+            toolEvents: session.toolEvents || [],
+            taskTree: session.taskTree || [],
+            updatedAt,
+          },
+          messageCount,
+          messagesLoaded:
+            session.messagesLoaded === true ||
+            (Array.isArray(session.messages) && messageCount === messages.length),
+        } satisfies ParsedSessionRecord
+      })
+      .filter(record => {
+        if (record.messageCount > 0) {
           return true
         }
-        return session.title.trim() !== '新会话'
+        return record.session.title.trim() !== '新会话'
       })
       .sort((left, right) => {
-        const timestampDelta = getSessionSortTimestamp(right) - getSessionSortTimestamp(left)
+        const timestampDelta = getSessionSortTimestamp(right.session) - getSessionSortTimestamp(left.session)
         if (timestampDelta !== 0) {
           return timestampDelta
         }
-        return right.updatedAt - left.updatedAt
+        return right.session.updatedAt - left.session.updatedAt
       })
   } catch {
     return []
@@ -1851,12 +1924,17 @@ type PersistedMessageSnapshot = {
   versionSignatures: string[]
 }
 type PersistedSessionSnapshot = Map<string, PersistedMessageSnapshot>
+type SessionLoadState = {
+  loaded: boolean
+  messageCount: number
+}
 
 let cachedSettings: AgentSettings = cloneValue(defaultSettings)
 let cachedSessions: Session[] = []
 let cachedSessionFolders: SessionFolder[] = []
 let cachedProjectCapabilityOverrides: ProjectCapabilityOverrides = {}
 let persistedSessionSnapshots = new Map<string, PersistedSessionSnapshot>()
+let sessionLoadStates = new Map<string, SessionLoadState>()
 let sessionPersistenceQueue = Promise.resolve()
 
 function parsePersistedJson(value: unknown): string | null {
@@ -1994,11 +2072,23 @@ function buildPersistedSessionSnapshot(session: PersistedSessionRecord): Persist
 async function syncPersistedSession(
   session: PersistedSessionRecord,
   previous?: PersistedSessionSnapshot,
-) {
+  syncMessages = true,
+): Promise<boolean> {
   await upsertPersistedSession(session as Session)
+  if (!syncMessages) {
+    return false
+  }
 
   const previousMessages = previous || new Map<string, PersistedMessageSnapshot>()
   const nextMessages = new Map(session.messages.map(message => [message.id, message]))
+
+  // Safety guard:
+  // if in-memory payload is empty while we still have persisted snapshots,
+  // treat it as a potential lazy-load/invalidation mismatch and avoid
+  // destructive full-history deletion.
+  if (nextMessages.size === 0 && previousMessages.size > 0) {
+    return false
+  }
 
   for (const previousMessageId of previousMessages.keys()) {
     if (!nextMessages.has(previousMessageId)) {
@@ -2028,7 +2118,10 @@ async function syncPersistedSession(
         continue
       }
 
-      if (nextVersion && messageVersionSignature(nextVersion as ChatMessageVariant) !== previousVersionSignature) {
+      if (
+        nextVersion &&
+        messageVersionSignature(nextVersion as ChatMessageVariant) !== previousVersionSignature
+      ) {
         await upsertPersistedMessageVersion(
           message.id,
           nextVersion as ChatMessageVariant,
@@ -2037,27 +2130,76 @@ async function syncPersistedSession(
       }
     }
   }
+
+  return true
+}
+
+function shouldSyncSessionMessages(session: PersistedSessionRecord) {
+  const state = sessionLoadStates.get(session.id)
+  const messageLength = session.messages.length
+
+  // Defensive guard: never treat an empty in-memory message array as authoritative
+  // when we have not explicitly loaded this session's full history yet.
+  if (messageLength === 0) {
+    if (!state) {
+      return false
+    }
+    if (!state.loaded || state.messageCount > 0) {
+      return false
+    }
+  }
+
+  if (!state) {
+    return true
+  }
+  if (state.loaded) {
+    return true
+  }
+  if (state.messageCount <= 0) {
+    return true
+  }
+  return messageLength > 0
 }
 
 async function persistSessions(sessions: Session[]) {
   const serializedSessions = serializeSessions(sessions)
   const nextSessionIds = new Set(serializedSessions.map(session => session.id))
 
-  for (const sessionId of Array.from(persistedSessionSnapshots.keys())) {
+  for (const sessionId of Array.from(sessionLoadStates.keys())) {
     if (!nextSessionIds.has(sessionId)) {
       await deletePersistedSession(sessionId)
+      sessionLoadStates.delete(sessionId)
       persistedSessionSnapshots.delete(sessionId)
     }
   }
 
   for (const session of serializedSessions) {
-    if (sessionHasPendingPersistence(session)) {
+    const syncMessages = shouldSyncSessionMessages(session)
+    if (syncMessages && sessionHasPendingPersistence(session)) {
       continue
     }
 
-    const previous = persistedSessionSnapshots.get(session.id)
-    await syncPersistedSession(session, previous)
-    persistedSessionSnapshots.set(session.id, buildPersistedSessionSnapshot(session))
+    const previous = syncMessages ? persistedSessionSnapshots.get(session.id) : undefined
+    const messagesSynced = await syncPersistedSession(session, previous, syncMessages)
+    if (syncMessages && messagesSynced) {
+      persistedSessionSnapshots.set(session.id, buildPersistedSessionSnapshot(session))
+      sessionLoadStates.set(session.id, {
+        loaded: true,
+        messageCount: session.messages.length,
+      })
+      continue
+    }
+
+    const previousState = sessionLoadStates.get(session.id)
+    const preservedMessageCount = Math.max(
+      previousState?.messageCount ?? 0,
+      previous?.size ?? 0,
+      session.messages.length,
+    )
+    sessionLoadStates.set(session.id, {
+      loaded: false,
+      messageCount: preservedMessageCount,
+    })
   }
 }
 
@@ -2092,7 +2234,17 @@ async function readPersistedState() {
   } else {
     settings = normalizedSettings
   }
-  const sessions = parseSessions(parsePersistedJson(persisted.sessions || []))
+  const parsedSessionRecords = parseSessions(parsePersistedJson(persisted.sessions || []))
+  const sessions = parsedSessionRecords.map(record => record.session)
+  const sessionLoadStatesFromPersistence = new Map(
+    parsedSessionRecords.map(record => [
+      record.session.id,
+      {
+        loaded: record.messagesLoaded || record.messageCount <= 0,
+        messageCount: record.messageCount,
+      } satisfies SessionLoadState,
+    ]),
+  )
   const sessionFolders = parseSessionFolders(parsePersistedJson(persisted.sessionFolders || []))
   const validFolderIds = new Set(sessionFolders.map(folder => folder.id))
   const normalizedSessions = sortSessionsByRecentActivity(
@@ -2109,11 +2261,22 @@ async function readPersistedState() {
   cachedSessions = cloneValue(normalizedSessions)
   cachedSessionFolders = cloneValue(sessionFolders)
   cachedProjectCapabilityOverrides = cloneValue(overrides)
+  sessionLoadStates = new Map(
+    normalizedSessions.map(session => {
+      const state = sessionLoadStatesFromPersistence.get(session.id)
+      return [
+        session.id,
+        state || {
+          loaded: true,
+          messageCount: session.messages.length,
+        },
+      ]
+    }),
+  )
   persistedSessionSnapshots = new Map(
-    serializeSessions(normalizedSessions).map(session => [
-      session.id,
-      buildPersistedSessionSnapshot(session),
-    ]),
+    serializeSessions(
+      normalizedSessions.filter(session => sessionLoadStates.get(session.id)?.loaded !== false),
+    ).map(session => [session.id, buildPersistedSessionSnapshot(session)]),
   )
 
   return {
@@ -2131,6 +2294,76 @@ export function loadSettings(): AgentSettings {
 
 export function loadSessions(): Session[] {
   return cloneValue(cachedSessions)
+}
+
+export function isSessionMessagesLoaded(sessionId: string) {
+  const state = sessionLoadStates.get(sessionId)
+  if (!state) {
+    return true
+  }
+  if (!state.loaded) {
+    return false
+  }
+  if (state.messageCount > 0) {
+    const session = cachedSessions.find(entry => entry.id === sessionId)
+    if (session && session.messages.length === 0) {
+      return false
+    }
+  }
+  return true
+}
+
+export async function loadSessionMessages(sessionId: string): Promise<Session['messages']> {
+  const existingSession = cachedSessions.find(session => session.id === sessionId)
+  if (!existingSession) {
+    return []
+  }
+
+  const loadState = sessionLoadStates.get(sessionId)
+  const shouldForceReload =
+    loadState?.loaded === true &&
+    loadState.messageCount > 0 &&
+    existingSession.messages.length === 0
+  if (loadState?.loaded && !shouldForceReload) {
+    return cloneValue(existingSession.messages)
+  }
+
+  const persistedMessages = await loadPersistedSessionMessages(sessionId)
+  const normalizedMessages = parseSessionMessages(persistedMessages, existingSession.updatedAt)
+  const expectedMessageCount = loadState?.messageCount ?? 0
+  if (expectedMessageCount > 0 && normalizedMessages.length === 0) {
+    sessionLoadStates.set(sessionId, {
+      loaded: false,
+      messageCount: expectedMessageCount,
+    })
+    throw new Error('会话元信息显示存在历史消息，但数据库本次返回为空；已阻止空历史覆盖。')
+  }
+  const nextSession: Session = {
+    ...existingSession,
+    messages: normalizedMessages,
+  }
+
+  cachedSessions = cachedSessions.map(session =>
+    session.id === sessionId ? nextSession : session,
+  )
+  sessionLoadStates.set(sessionId, {
+    loaded: true,
+    messageCount: normalizedMessages.length,
+  })
+  persistedSessionSnapshots.set(
+    sessionId,
+    buildPersistedSessionSnapshot(serializeSessions([nextSession])[0]),
+  )
+
+  return cloneValue(normalizedMessages)
+}
+
+export async function searchSessionIds(keyword: string): Promise<string[]> {
+  const normalizedKeyword = keyword.trim()
+  if (!normalizedKeyword) {
+    return []
+  }
+  return searchPersistedSessionIds(normalizedKeyword)
 }
 
 export function loadSessionFolders(): SessionFolder[] {
@@ -2153,6 +2386,21 @@ export async function saveSettingsAndAwaitPersistence(settings: AgentSettings) {
 
 export function saveSessions(sessions: Session[]) {
   const sortedSessions = sortSessionsByRecentActivity(sessions)
+  for (const session of sortedSessions) {
+    const previousState = sessionLoadStates.get(session.id)
+    if (!previousState) {
+      sessionLoadStates.set(session.id, {
+        loaded: true,
+        messageCount: session.messages.length,
+      })
+      continue
+    }
+    const shouldRemainUnloaded = previousState.messageCount > 0 && session.messages.length === 0
+    sessionLoadStates.set(session.id, {
+      loaded: shouldRemainUnloaded ? false : true,
+      messageCount: shouldRemainUnloaded ? previousState.messageCount : session.messages.length,
+    })
+  }
   cachedSessions = cloneValue(sortedSessions)
   const nextSessions = cloneValue(sortedSessions)
   sessionPersistenceQueue = sessionPersistenceQueue

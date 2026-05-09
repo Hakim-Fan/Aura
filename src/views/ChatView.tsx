@@ -48,6 +48,7 @@ import {
   WebSearchEventCard,
 } from '../components/WebToolEventCards'
 import { formatConversationTimestamp } from '../lib/sessionMeta'
+import { countTextTokens } from '../lib/tokenizer'
 import { buildRuntimeMessagesWithContextCompression } from '../lib/agent'
 import { toggleEditTransactionSnapshots } from '../lib/workspace'
 import type {
@@ -169,8 +170,9 @@ const reasoningEffortOptions: Array<{
     { value: 'max', label: '超高', description: '最强推理强度，适合最复杂任务' },
   ]
 
-const MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
-const ESTIMATED_CJK_TOKENS_PER_CHAR = 1.4
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
+const IMAGE_PART_TOKEN_COST = 1_200
+const FILE_PART_TOKEN_COST = 80
 
 function formatTokenCount(value: number) {
   if (value >= 1000) {
@@ -179,43 +181,67 @@ function formatTokenCount(value: number) {
   return String(value)
 }
 
-function estimateTextTokens(value = '') {
-  let cjkCount = 0
-  let otherCount = 0
-  let whitespaceCount = 0
-  for (const char of value) {
-    if (/\s/u.test(char)) {
-      whitespaceCount += 1
-    } else if (/[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u.test(char)) {
-      cjkCount += 1
-    } else {
-      otherCount += 1
-    }
+function resolveConfiguredContextWindowTokens(settings: AgentSettings) {
+  const profiles = Array.isArray(settings.providerProfiles) ? settings.providerProfiles : []
+  const activeProfile =
+    profiles.find(profile => profile.id === settings.activeProviderProfileId) ||
+    profiles.find(profile => profile.provider === settings.provider)
+  const model = activeProfile?.models?.find(entry => entry.id === settings.model)
+  const modelWindow = Number(model?.contextWindowTokens)
+  if (Number.isFinite(modelWindow) && modelWindow > 0) {
+    return Math.round(modelWindow)
   }
-  return Math.ceil(
-    cjkCount * ESTIMATED_CJK_TOKENS_PER_CHAR + otherCount / 3.7 + whitespaceCount / 8,
-  )
+
+  const localBudget = Number(settings.contextCompressionThresholdTokens)
+  if (Number.isFinite(localBudget) && localBudget > 0) {
+    return Math.round(localBudget)
+  }
+
+  return DEFAULT_CONTEXT_WINDOW_TOKENS
 }
 
-function estimateMessageContextTokens(message: ChatMessage) {
-  const contentTokens = estimateTextTokens(message.content || '')
-  const partTokens = (message.parts || []).reduce((total, part) => {
+function estimateTextTokens(value = '', model = '') {
+  return countTextTokens(value, model)
+}
+
+function estimateMessageContextTokens(message: ChatMessage, model = '') {
+  const contentTokens = estimateTextTokens(message.content || '', model)
+  const parts = message.parts || []
+  const partTokens = parts.reduce((total, part) => {
     if (part.type === 'text') {
-      return total + estimateTextTokens(part.text || '')
+      return total + estimateTextTokens(part.text || '', model)
     }
     if (part.type === 'image') {
-      return total + 1_200 + estimateTextTokens([part.name, part.mimeType, part.path].filter(Boolean).join(' '))
+      return total + IMAGE_PART_TOKEN_COST +
+        estimateTextTokens([part.name, part.mimeType, part.path].filter(Boolean).join(' '), model)
     }
     if (part.type === 'file') {
-      return total + 80 + estimateTextTokens([part.name, part.path, part.mimeType].filter(Boolean).join(' '))
+      return total + FILE_PART_TOKEN_COST +
+        estimateTextTokens([part.name, part.path, part.mimeType].filter(Boolean).join(' '), model)
     }
     return total
   }, 0)
-  return 4 + Math.max(contentTokens, partTokens)
+  const textPartContent = parts.reduce<string[]>((entries, part) => {
+    if (part.type === 'text' && typeof part.text === 'string') {
+      const text = part.text.trim()
+      if (text) {
+        entries.push(text)
+      }
+    }
+    return entries
+  }, []).join('\n')
+  const contentMirrorsTextParts =
+    textPartContent &&
+    typeof message.content === 'string' &&
+    textPartContent === message.content.trim()
+  return 4 + (contentMirrorsTextParts ? 0 : contentTokens) + partTokens
 }
 
-function estimateSessionContextTokens(messages: ChatMessage[]) {
-  return messages.reduce((total, message) => total + estimateMessageContextTokens(message), 0)
+function estimateSessionContextTokens(messages: ChatMessage[], model = '') {
+  return messages.reduce(
+    (total, message) => total + estimateMessageContextTokens(message, model),
+    0,
+  )
 }
 
 function getActiveMessageVariant(message: ChatMessage): ChatMessageVariant {
@@ -281,6 +307,19 @@ function collectSessionUsage(messages: ChatMessage[]) {
   }, { inputTokens: 0, outputTokens: 0 })
 }
 
+function findLatestUsage(messages: ChatMessage[]) {
+  for (const message of [...messages].reverse()) {
+    const variant = getActiveMessageVariant(message)
+    if (variant.usage) {
+      return variant.usage
+    }
+    if (message.usage) {
+      return message.usage
+    }
+  }
+  return undefined
+}
+
 function usageRows(usage?: MessageUsage) {
   const inputTokens = usage?.inputTokens || 0
   const outputTokens = usage?.outputTokens || 0
@@ -294,47 +333,26 @@ function usageRows(usage?: MessageUsage) {
 
 function ContextTokenMeter({
   currentTokens,
-  messageTokens,
-  promptEnvelopeTokens,
   cumulativeTokens,
   contextWindowTokens,
-  compressionThresholdTokens,
   contextCompression,
-  running,
-  canCompress,
-  compressing,
-  onCompressNow,
+  compressionRunning,
+  onCompressContext,
 }: {
   currentTokens: number
-  messageTokens: number
-  promptEnvelopeTokens: number
   cumulativeTokens: number
   contextWindowTokens: number
-  compressionThresholdTokens?: number
   contextCompression?: SessionContextCompression
-  running: boolean
-  canCompress: boolean
-  compressing: boolean
-  onCompressNow: () => void
+  compressionRunning?: boolean
+  onCompressContext: () => void
 }) {
   const [open, setOpen] = useState(false)
   const closeTimerRef = useRef<number | null>(null)
-  const safeContextWindow = Math.max(1, contextWindowTokens || 128_000)
+  const safeContextWindow = Math.max(1, contextWindowTokens || DEFAULT_CONTEXT_WINDOW_TOKENS)
   const ratio = Math.max(0, Math.min(1, currentTokens / safeContextWindow))
   const percent = Math.round(ratio * 100)
   const circumference = 2 * Math.PI * 8
   const strokeDashoffset = circumference * (1 - ratio)
-  const actionDisabled = !canCompress || compressing
-  const showPromptEnvelope = promptEnvelopeTokens > 0
-  const showCompressionThreshold =
-    typeof compressionThresholdTokens === 'number' &&
-    compressionThresholdTokens > 0 &&
-    compressionThresholdTokens < safeContextWindow
-  const actionLabel = compressing
-    ? '压缩中...'
-    : contextCompression
-      ? '重新压缩'
-      : '立即压缩'
 
   function openTooltip() {
     if (closeTimerRef.current !== null) {
@@ -375,7 +393,7 @@ function ContextTokenMeter({
       <button
         type="button"
         className="flex items-center gap-1 rounded-full bg-[rgba(15,23,42,0.04)] px-1.5 py-0.5 text-9px font-700 opacity-70 transition-colors hover:bg-[rgba(15,23,42,0.07)] hover:opacity-100"
-        aria-label="当前上下文估算"
+        aria-label="当前上下文"
         onClick={() => setOpen(current => !current)}
       >
         <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
@@ -405,50 +423,32 @@ function ContextTokenMeter({
       {open ? (
         <div className="absolute bottom-full left-1/2 z-[80] w-[240px] -translate-x-1/2 pb-2">
           <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3 py-2.5 text-center shadow-2xl backdrop-blur-md">
-            <div className="text-11px font-500 text-[var(--text-secondary)] opacity-80">当前上下文估算</div>
+            <div className="text-11px font-500 text-[var(--text-secondary)] opacity-80">当前上下文</div>
             <div className="mt-1 text-14px font-700 text-[var(--text-primary)]">{percent}% 已用</div>
             <div className="mt-1 text-12px text-[var(--text-secondary)]">
               {formatTokenCount(currentTokens)} / {formatTokenCount(safeContextWindow)}
             </div>
-            <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-70">
-              消息 {formatTokenCount(messageTokens)}
-              {showPromptEnvelope
-                ? ` + System/工具 ${formatTokenCount(promptEnvelopeTokens)}`
-                : ''}
-            </div>
-            {showCompressionThreshold ? (
-              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-55">
-                自动压缩阈值 {formatTokenCount(compressionThresholdTokens)}
-              </div>
-            ) : null}
-            {running ? (
-              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-55">
-                运行中还会临时加入工具 transcript
-              </div>
-            ) : null}
-            <div className="mt-2.5 border-t border-[var(--border-subtle)] pt-2.5 text-11px text-[var(--text-secondary)] opacity-80">
-              Aura 自动压缩背景信息
+            <div className="mt-2 border-t border-[var(--border-subtle)] pt-2 text-10px text-[var(--text-secondary)] opacity-70">
+              模型总消耗 {formatTokenCount(cumulativeTokens)}
             </div>
             {contextCompression ? (
-              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-60">
-                最近一次手动压缩：{formatTokenCount(contextCompression.originalTokenEstimate)}{' -> '}{formatTokenCount(contextCompression.compressedTokenEstimate)}
+              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-65">
+                上次压缩 {formatTokenCount(contextCompression.originalTokenEstimate)}{' -> '}
+                {formatTokenCount(contextCompression.compressedTokenEstimate)}
               </div>
-            ) : cumulativeTokens > 0 ? (
-              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-50">
-                累计模型 Token {formatTokenCount(cumulativeTokens)}
-              </div>
-            ) : null}
+            ) : (
+              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-50">上次压缩 暂无</div>
+            )}
             <button
               type="button"
-              className="mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--accent-soft-strong)] px-3 py-1.5 text-11px font-700 text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:brightness-100"
-              onClick={event => {
-                event.stopPropagation()
-                onCompressNow()
+              className="mt-2 inline-flex items-center justify-center rounded-lg border border-[rgba(79,123,116,0.2)] bg-white px-2.5 py-1 text-10px font-700 text-[var(--accent-soft-strong)] transition-colors hover:bg-[rgba(79,123,116,0.06)] disabled:cursor-not-allowed disabled:opacity-45"
+              disabled={compressionRunning}
+              onClick={() => {
+                onCompressContext()
+                setOpen(false)
               }}
-              disabled={actionDisabled}
             >
-              <Sparkles size={11} />
-              <span>{actionLabel}</span>
+              {compressionRunning ? '压缩中...' : '立即压缩'}
             </button>
           </div>
         </div>
@@ -4164,25 +4164,56 @@ export function ChatView({
 
   const sessionUsage = useMemo(() => collectSessionUsage(messages), [messages])
   const sessionTotalTokens = sessionUsage.inputTokens + sessionUsage.outputTokens
+  const latestMessageUsage = useMemo(() => findLatestUsage(messages), [messages])
   const sessionContextMessages = useMemo(
     () => buildRuntimeMessagesWithContextCompression(messages, contextCompression),
     [contextCompression, messages],
   )
   const sessionContextTokens = useMemo(
-    () => estimateSessionContextTokens(sessionContextMessages),
-    [sessionContextMessages],
+    () => estimateSessionContextTokens(sessionContextMessages, settings.model),
+    [sessionContextMessages, settings.model],
   )
   const latestRouteDecision = useMemo(
     () => findLatestRouteDecision(messages, agentTask?.routeDecision),
     [agentTask?.routeDecision, messages],
   )
+  const configuredContextWindowTokens = useMemo(
+    () => resolveConfiguredContextWindowTokens(settings),
+    [settings],
+  )
+  const promptContextFromRouteDecision =
+    latestRouteDecision?.contextEstimate?.promptTokens || 0
   const promptEnvelopeTokens =
     latestRouteDecision?.contextEstimate?.promptEnvelopeTokens || 0
+  const livePromptTokensFromUsage =
+    Math.max(0, Math.round(Number(agentTask?.usage?.latestInputTokens) || 0))
+  const persistedPromptTokensFromUsage = Math.max(
+    0,
+    Math.round(
+      Number(
+        latestMessageUsage?.latestInputTokens ||
+          latestMessageUsage?.inputTokens ||
+          0,
+      ),
+    ),
+  )
   const promptContextWindowTokens =
-    latestRouteDecision?.contextEstimate?.contextWindowTokens || 128_000
-  const promptCompressionThresholdTokens =
-    latestRouteDecision?.contextEstimate?.compressionThresholdTokens || 0
-  const currentPromptContextTokens = sessionContextTokens + promptEnvelopeTokens
+    latestMessageUsage?.contextWindow ||
+    configuredContextWindowTokens ||
+    latestRouteDecision?.contextEstimate?.contextWindowTokens ||
+    DEFAULT_CONTEXT_WINDOW_TOKENS
+  const localCurrentPromptContextTokens = sessionContextTokens + promptEnvelopeTokens
+  const hasLocalPromptEnvelope = promptEnvelopeTokens > 0
+  const currentPromptContextTokens =
+    isRunning && livePromptTokensFromUsage > 0
+      ? livePromptTokensFromUsage
+      : localCurrentPromptContextTokens > 0 && hasLocalPromptEnvelope
+      ? localCurrentPromptContextTokens
+      : promptContextFromRouteDecision > 0
+      ? promptContextFromRouteDecision
+      : persistedPromptTokensFromUsage > 0
+      ? persistedPromptTokensFromUsage
+      : localCurrentPromptContextTokens
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isMetaEnter) {
@@ -4656,19 +4687,11 @@ export function ChatView({
                     </div>
                     <ContextTokenMeter
                       currentTokens={currentPromptContextTokens}
-                      messageTokens={sessionContextTokens}
-                      promptEnvelopeTokens={promptEnvelopeTokens}
                       cumulativeTokens={sessionTotalTokens}
                       contextWindowTokens={promptContextWindowTokens}
-                      compressionThresholdTokens={promptCompressionThresholdTokens}
                       contextCompression={contextCompression}
-                      running={isRunning}
-                      canCompress={
-                        !isRunning &&
-                        messages.length > MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES + 1
-                      }
-                      compressing={contextCompressionRunning}
-                      onCompressNow={onCompressContext}
+                      compressionRunning={contextCompressionRunning || isRunning}
+                      onCompressContext={onCompressContext}
                     />
                   </div>
 

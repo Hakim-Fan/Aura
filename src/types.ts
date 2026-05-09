@@ -179,6 +179,8 @@ export type MessagePhaseOutput = {
 export type MessageUsage = {
   inputTokens?: number
   outputTokens?: number
+  latestInputTokens?: number
+  latestOutputTokens?: number
   contextWindow?: number
 }
 
@@ -232,8 +234,11 @@ export type PromptContextSnapshot = {
   systemPromptTokens: number
   toolSchemaTokens: number
   promptEnvelopeTokens: number
+  conversationTokens?: number
+  promptTokens?: number
   contextWindowTokens: number
   compressionThresholdTokens: number
+  effectiveThresholdTokens?: number
 }
 
 export type RouteDecisionSnapshot = {

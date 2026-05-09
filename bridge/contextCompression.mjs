@@ -1,4 +1,6 @@
-const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
+import { countTextTokens } from './tokenizer.mjs'
+
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
 const DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS = 32_000
 export const DEFAULT_CONTEXT_COMPRESSION_THRESHOLD_TOKENS = 256_000
 const DEFAULT_MAX_OUTPUT_TOKENS = 16_000
@@ -7,73 +9,60 @@ const MIN_TOOL_BUFFER_TOKENS = 4_000
 const MAX_TOOL_BUFFER_TOKENS = 20_000
 const DEFAULT_KEEP_RECENT_MESSAGE_COUNT = 6
 const DEFAULT_COMPACTION_INPUT_BATCH_RATIO = 0.45
-const ESTIMATED_CJK_TOKENS_PER_CHAR = 1.4
+const IMAGE_PART_TOKEN_COST = 1_200
+const FILE_PART_TOKEN_COST = 80
 
-function isCjkCharacter(char) {
-  return /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u.test(char)
+export function estimateTextTokens(value = '', options = {}) {
+  return countTextTokens(value, options)
 }
 
-export function estimateTextTokens(value = '') {
-  const text = String(value || '')
-  if (!text) {
-    return 0
-  }
-
-  let cjkCount = 0
-  let otherCount = 0
-  let whitespaceCount = 0
-
-  for (const char of text) {
-    if (/\s/u.test(char)) {
-      whitespaceCount += 1
-      continue
-    }
-    if (isCjkCharacter(char)) {
-      cjkCount += 1
-      continue
-    }
-    otherCount += 1
-  }
-
-  return Math.ceil(
-    cjkCount * ESTIMATED_CJK_TOKENS_PER_CHAR + otherCount / 3.7 + whitespaceCount / 8,
-  )
-}
-
-function estimatePartTokens(part) {
+function estimatePartTokens(part, options = {}) {
   if (!part || typeof part !== 'object') {
     return 0
   }
 
   if (part.type === 'text') {
-    return estimateTextTokens(part.text || '')
+    return estimateTextTokens(part.text || '', options)
   }
 
   if (part.type === 'image') {
-    return 1_200 + estimateTextTokens([part.name, part.mimeType, part.path].filter(Boolean).join(' '))
+    return IMAGE_PART_TOKEN_COST +
+      estimateTextTokens([part.name, part.mimeType, part.path].filter(Boolean).join(' '), options)
   }
 
   if (part.type === 'file') {
-    return 80 + estimateTextTokens([part.name, part.path, part.mimeType].filter(Boolean).join(' '))
+    return FILE_PART_TOKEN_COST +
+      estimateTextTokens([part.name, part.path, part.mimeType].filter(Boolean).join(' '), options)
   }
 
-  return estimateTextTokens(JSON.stringify(part))
+  return estimateTextTokens(JSON.stringify(part), options)
 }
 
-export function estimateMessageTokens(message = {}) {
+export function estimateMessageTokens(message = {}, options = {}) {
   const roleTokens = 4
-  const contentTokens = estimateTextTokens(message.content || '')
-  const partTokens = Array.isArray(message.parts)
-    ? message.parts.reduce((total, part) => total + estimatePartTokens(part), 0)
-    : 0
-  return roleTokens + Math.max(contentTokens, partTokens)
+  const contentTokens = estimateTextTokens(message.content || '', options)
+  const parts = Array.isArray(message.parts) ? message.parts : []
+  const partTokens = parts.reduce((total, part) => total + estimatePartTokens(part, options), 0)
+  const textPartContent = parts
+    .filter(part => part?.type === 'text' && typeof part.text === 'string')
+    .map(part => part.text.trim())
+    .filter(Boolean)
+    .join('\n')
+  const contentMirrorsTextParts =
+    textPartContent &&
+    typeof message.content === 'string' &&
+    textPartContent === message.content.trim()
+  return roleTokens + (contentMirrorsTextParts ? 0 : contentTokens) + partTokens
 }
 
-export function estimateMessagesTokens(messages = []) {
+export function estimateMessagesTokens(messages = [], options = {}) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return 0
   }
-  return messages.reduce((total, message) => total + estimateMessageTokens(message), 0)
+  return messages.reduce(
+    (total, message) => total + estimateMessageTokens(message, options),
+    0,
+  )
 }
 
 function findActiveProviderProfile(settings = {}) {
@@ -105,7 +94,7 @@ function inferContextWindowFromModel(settings = {}) {
     if (model.includes('gemini-1.5') || model.includes('gemini-2')) {
       return 1_000_000
     }
-    return 128_000
+    return DEFAULT_CONTEXT_WINDOW_TOKENS
   }
 
   if (provider === 'custom') {
@@ -123,6 +112,10 @@ export function resolveContextWindowTokens(settings = {}) {
   if (Number.isFinite(configured) && configured > 0) {
     return Math.round(configured)
   }
+  const fallbackBudget = Number(settings.contextCompressionThresholdTokens)
+  if (Number.isFinite(fallbackBudget) && fallbackBudget > 0) {
+    return Math.round(fallbackBudget)
+  }
   return inferContextWindowFromModel(settings)
 }
 
@@ -139,7 +132,11 @@ export function resolveMaxOutputTokens(settings = {}, contextWindowTokens = reso
 
 export function buildContextCompressionBudget(settings = {}, options = {}) {
   const contextWindowTokens = resolveContextWindowTokens(settings)
-  const systemPromptTokens = estimateTextTokens(options.systemPrompt || '')
+  const systemPromptTokens = estimateTextTokens(options.systemPrompt || '', settings)
+  const toolSchemaTokens = Math.max(
+    0,
+    Math.round(Number(options.toolSchemaTokens) || 0),
+  )
   const maxOutputTokens = resolveMaxOutputTokens(settings, contextWindowTokens)
   const configuredThresholdTokens =
     Number.isFinite(Number(settings.contextCompressionThresholdTokens)) &&
@@ -160,6 +157,7 @@ export function buildContextCompressionBudget(settings = {}, options = {}) {
     1_000,
     compressionThresholdTokens -
       systemPromptTokens -
+      toolSchemaTokens -
       maxOutputTokens -
       toolResultBufferTokens,
   )
@@ -176,6 +174,7 @@ export function buildContextCompressionBudget(settings = {}, options = {}) {
     contextWindowTokens,
     configuredThresholdTokens,
     systemPromptTokens,
+    toolSchemaTokens,
     maxOutputTokens,
     toolResultBufferTokens,
     compressionThresholdTokens,
@@ -186,7 +185,7 @@ export function buildContextCompressionBudget(settings = {}, options = {}) {
 }
 
 export function shouldCompressMessages(messages = [], settings = {}, options = {}) {
-  const estimatedTokens = estimateMessagesTokens(messages)
+  const estimatedTokens = estimateMessagesTokens(messages, settings)
   const budget = buildContextCompressionBudget(settings, options)
   return {
     shouldCompress:
@@ -198,7 +197,7 @@ export function shouldCompressMessages(messages = [], settings = {}, options = {
   }
 }
 
-function splitTextIntoTokenChunks(text, maxTokens) {
+function splitTextIntoTokenChunks(text, maxTokens, options = {}) {
   const source = String(text || '')
   if (!source) {
     return []
@@ -210,7 +209,7 @@ function splitTextIntoTokenChunks(text, maxTokens) {
 
   while (start < source.length) {
     let end = Math.min(source.length, start + Math.max(1_000, limit * 3))
-    while (end > start + 200 && estimateTextTokens(source.slice(start, end)) > limit) {
+    while (end > start + 200 && estimateTextTokens(source.slice(start, end), options) > limit) {
       end = start + Math.floor((end - start) * 0.75)
     }
     if (end <= start) {
@@ -223,8 +222,8 @@ function splitTextIntoTokenChunks(text, maxTokens) {
   return chunks
 }
 
-function splitOversizedMessageForBatch(message, maxBatchTokens) {
-  const messageTokens = estimateMessageTokens(message)
+function splitOversizedMessageForBatch(message, maxBatchTokens, options = {}) {
+  const messageTokens = estimateMessageTokens(message, options)
   const limit = Math.max(1_000, Math.floor(maxBatchTokens))
   if (messageTokens <= limit) {
     return [message]
@@ -235,7 +234,7 @@ function splitOversizedMessageForBatch(message, maxBatchTokens) {
     return [message]
   }
 
-  const chunks = splitTextIntoTokenChunks(content, Math.max(500, limit - 200))
+  const chunks = splitTextIntoTokenChunks(content, Math.max(500, limit - 200), options)
   return chunks.map((chunk, index) => ({
     ...message,
     content: [
@@ -306,18 +305,22 @@ export function formatMessagesForCompaction(messages = []) {
     .join('\n\n---\n\n')
 }
 
-export function splitMessagesIntoTokenBatches(messages = [], maxBatchTokens = 40_000) {
+export function splitMessagesIntoTokenBatches(
+  messages = [],
+  maxBatchTokens = 40_000,
+  options = {},
+) {
   const batches = []
   let current = []
   let currentTokens = 0
   const limit = Math.max(1_000, Math.floor(maxBatchTokens))
 
   const expandedMessages = (Array.isArray(messages) ? messages : []).flatMap(message =>
-    splitOversizedMessageForBatch(message, limit),
+    splitOversizedMessageForBatch(message, limit, options),
   )
 
   for (const message of expandedMessages) {
-    const messageTokens = estimateMessageTokens(message)
+    const messageTokens = estimateMessageTokens(message, options)
     if (current.length > 0 && currentTokens + messageTokens > limit) {
       batches.push(current)
       current = []

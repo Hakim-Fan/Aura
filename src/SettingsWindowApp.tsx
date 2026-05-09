@@ -1754,9 +1754,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           <section className="dashboard-card">
-            <div className="section-title">记忆模式</div>
+            <div className="section-title">上下文与压缩</div>
             <p className="muted">
-              Aura 会按背景信息窗口自动压缩历史消息和运行期工具上下文，默认阈值为 256K tokens。
+              当前上下文窗口优先使用模型列表返回的上限；模型没有提供时，使用这里的本地预算。Aura 会在接近窗口前自动压缩历史消息和工具结果，默认 256K tokens。
             </p>
             <div className="settings-preset-row">
               {CONTEXT_COMPRESSION_PRESETS.map(preset => (
@@ -1771,7 +1771,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
               ))}
             </div>
             <label className="settings-number-field">
-              <span>自动压缩阈值</span>
+              <span>本地上下文预算</span>
               <input
                 type="number"
                 min={16_000}

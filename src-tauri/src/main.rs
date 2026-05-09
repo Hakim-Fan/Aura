@@ -23,6 +23,7 @@ const MAX_REASONING_CHARS: usize = 100_000;
 const MAX_PHASE_OUTPUT_CHARS: usize = 100_000;
 const SNAPSHOT_TRUNCATION_MARKER: &str = "\n...(truncated to keep memory bounded)...\n";
 const MAX_INLINE_IMAGE_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TERMINAL_TASK_SNAPSHOTS: usize = 64;
 
 #[derive(Clone, Serialize, Default)]
 struct AgentTaskSnapshot {
@@ -1388,6 +1389,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               workspace_root TEXT NOT NULL,
               workspace_mode TEXT NOT NULL,
               context_compression_json TEXT,
+              deleted_at INTEGER NOT NULL DEFAULT 0,
               updated_at INTEGER NOT NULL
             );
 
@@ -1399,6 +1401,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               sort_index INTEGER NOT NULL,
               active_version_index INTEGER NOT NULL,
               created_at INTEGER NOT NULL,
+              deleted_at INTEGER NOT NULL DEFAULT 0,
               updated_at INTEGER NOT NULL,
               FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -1427,6 +1430,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               evidence_summary_json TEXT,
               delivery_note TEXT,
               model_info_json TEXT,
+              deleted_at INTEGER NOT NULL DEFAULT 0,
               UNIQUE(message_id, version_index),
               FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
             );
@@ -1457,8 +1461,12 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
 
             CREATE INDEX IF NOT EXISTS idx_messages_session_sort
               ON messages(session_id, sort_index);
+            CREATE INDEX IF NOT EXISTS idx_messages_session_deleted_sort
+              ON messages(session_id, deleted_at, sort_index);
             CREATE INDEX IF NOT EXISTS idx_message_versions_message_version
               ON message_versions(message_id, version_index);
+            CREATE INDEX IF NOT EXISTS idx_message_versions_message_deleted_version
+              ON message_versions(message_id, deleted_at, version_index);
             "#,
         )
         .map_err(|error| format!("Failed to initialize SQLite schema: {error}"))?;
@@ -1481,6 +1489,30 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
         if !message.contains("duplicate column name") {
             return Err(format!(
                 "Failed to migrate SQLite sessions context_compression_json column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE sessions ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite sessions deleted_at column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE messages ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite messages deleted_at column: {error}"
             ));
         }
     }
@@ -1541,6 +1573,18 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
         if !message.contains("duplicate column name") {
             return Err(format!(
                 "Failed to migrate SQLite message_versions delivery_note column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions deleted_at column: {error}"
             ));
         }
     }
@@ -2318,6 +2362,37 @@ fn is_terminal_task_status(status: &str) -> bool {
     status == "completed" || status == "failed"
 }
 
+fn parse_task_sequence(task_id: &str) -> u64 {
+    task_id
+        .strip_prefix("task-")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn prune_terminal_task_snapshots(tasks: &mut HashMap<String, AgentTaskHandle>) {
+    let mut terminal_tasks: Vec<(String, u64)> = tasks
+        .iter()
+        .filter_map(|(task_id, handle)| {
+            let snapshot = handle.snapshot.lock().ok()?;
+            if is_terminal_task_status(&snapshot.status) {
+                Some((task_id.clone(), parse_task_sequence(task_id)))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if terminal_tasks.len() <= MAX_TERMINAL_TASK_SNAPSHOTS {
+        return;
+    }
+
+    terminal_tasks.sort_by_key(|(_, sequence)| *sequence);
+    let remove_count = terminal_tasks.len() - MAX_TERMINAL_TASK_SNAPSHOTS;
+    for (task_id, _) in terminal_tasks.into_iter().take(remove_count) {
+        tasks.remove(&task_id);
+    }
+}
+
 fn truncate_snapshot_text(value: &str, max_chars: usize) -> String {
     let total_chars = value.chars().count();
     if total_chars <= max_chars {
@@ -2603,6 +2678,7 @@ fn spawn_agent_task<R: Runtime>(
             .lock()
             .map_err(|_| "Failed to lock task store.".to_string())?;
         tasks.insert(task_id.clone(), handle.clone());
+        prune_terminal_task_snapshots(&mut tasks);
     }
 
     // 共享 stderr 缓冲区：stderr 线程写入，stdout 线程退出时读取
@@ -2725,6 +2801,9 @@ fn spawn_agent_task<R: Runtime>(
                 }),
                 Some("task_tree") => with_snapshot(&stdout_snapshot, |current| {
                     current.task_tree = extract_array(event.get("tree"));
+                }),
+                Some("route_decision") => with_snapshot(&stdout_snapshot, |current| {
+                    current.route_decision = extract_object(event.get("routeDecision"));
                 }),
                 Some("runtime_status") => with_snapshot(&stdout_snapshot, |current| {
                     let next_phase = event
@@ -3336,10 +3415,11 @@ fn get_agent_task(
     state: State<'_, AgentTaskStore>,
     task_id: String,
 ) -> Result<AgentTaskSnapshot, String> {
-    let tasks = state
+    let mut tasks = state
         .tasks
         .lock()
         .map_err(|_| "Failed to lock task store.".to_string())?;
+    prune_terminal_task_snapshots(&mut tasks);
     let Some(handle) = tasks.get(&task_id) else {
         return Err(format!("Agent task not found: {task_id}"));
     };
@@ -3371,6 +3451,7 @@ fn release_agent_task(state: State<'_, AgentTaskStore>, task_id: String) -> Resu
     }
 
     tasks.remove(&task_id);
+    prune_terminal_task_snapshots(&mut tasks);
     Ok(())
 }
 
@@ -3585,156 +3666,42 @@ fn load_persisted_app_state<R: Runtime>(
 
     let mut sessions_statement = connection
         .prepare(
-            "SELECT id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, context_compression_json, updated_at
-             FROM sessions
-             ORDER BY updated_at DESC",
+            "SELECT s.id, s.title, s.provider_profile_id, s.provider, s.model, s.folder_id, s.workspace_path, s.workspace_root, s.workspace_mode, s.context_compression_json, s.updated_at,
+                    COUNT(m.id) AS message_count
+             FROM sessions s
+             LEFT JOIN messages m ON m.session_id = s.id AND m.deleted_at = 0
+             WHERE s.deleted_at = 0
+             GROUP BY s.id
+             ORDER BY s.updated_at DESC",
         )
         .map_err(|error| format!("Failed to prepare sessions query: {error}"))?;
 
     let session_rows = sessions_statement
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, i64>(10)?,
-            ))
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "providerProfileId": row.get::<_, String>(2)?,
+                "provider": row.get::<_, String>(3)?,
+                "model": row.get::<_, String>(4)?,
+                "folderId": row.get::<_, Option<String>>(5)?,
+                "workspacePath": row.get::<_, String>(6)?,
+                "workspaceRoot": row.get::<_, String>(7)?,
+                "workspaceMode": row.get::<_, String>(8)?,
+                "contextCompression": parse_json_object_column(row.get::<_, Option<String>>(9)?),
+                "messages": Vec::<serde_json::Value>::new(),
+                "messagesLoaded": false,
+                "messageCount": row.get::<_, i64>(11)?,
+                "toolEvents": Vec::<serde_json::Value>::new(),
+                "taskTree": Vec::<serde_json::Value>::new(),
+                "updatedAt": row.get::<_, i64>(10)?,
+            }))
         })
         .map_err(|error| format!("Failed to read sessions from SQLite: {error}"))?;
 
     let mut sessions = Vec::new();
-
     for session_row in session_rows {
-        let (
-            session_id,
-            title,
-            provider_profile_id,
-            provider,
-            model,
-            folder_id,
-            workspace_path,
-            workspace_root,
-            workspace_mode,
-            context_compression_json,
-            updated_at,
-        ) = session_row.map_err(|error| format!("Failed to decode session row: {error}"))?;
-
-        let mut messages_statement = connection
-            .prepare(
-                "SELECT id, role, linked_message_id, sort_index, active_version_index, created_at, updated_at
-                 FROM messages
-                 WHERE session_id = ?1
-                 ORDER BY sort_index ASC",
-            )
-            .map_err(|error| format!("Failed to prepare messages query: {error}"))?;
-
-        let message_rows = messages_statement
-            .query_map(params![session_id.clone()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            })
-            .map_err(|error| format!("Failed to read messages from SQLite: {error}"))?;
-
-        let mut messages = Vec::new();
-
-        for message_row in message_rows {
-            let (
-                message_id,
-                role,
-                linked_message_id,
-                _sort_index,
-                active_version_index,
-                created_at,
-                _message_updated_at,
-            ) = message_row.map_err(|error| format!("Failed to decode message row: {error}"))?;
-
-            let mut versions_statement = connection
-                .prepare(
-                    "SELECT version_index, content, parts_json, status, created_at, attachments_json, reasoning_json, usage_json,
-                            capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json, appended_inputs_json,
-                            agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json
-                     FROM message_versions
-                     WHERE message_id = ?1
-                     ORDER BY version_index ASC",
-                )
-                .map_err(|error| format!("Failed to prepare message versions query: {error}"))?;
-
-            let version_rows = versions_statement
-                .query_map(params![message_id.clone()], |row| {
-                    Ok(serde_json::json!({
-                        "content": row.get::<_, String>(1)?,
-                        "parts": parse_json_array_column(row.get::<_, String>(2)?),
-                        "status": row.get::<_, Option<String>>(3)?,
-                        "createdAt": row.get::<_, i64>(4)?,
-                        "attachments": parse_json_array_column(row.get::<_, String>(5)?),
-                        "reasoning": parse_json_array_column(row.get::<_, String>(6)?),
-                        "usage": parse_json_column(row.get::<_, Option<String>>(7)?),
-                        "capabilitySnapshot": parse_json_object_column(row.get::<_, Option<String>>(8)?),
-                        "activity": parse_json_object_column(row.get::<_, Option<String>>(9)?),
-                        "events": parse_json_array_column(row.get::<_, String>(10)?),
-                        "steps": parse_json_array_column(row.get::<_, String>(11)?),
-                        "error": row.get::<_, Option<String>>(12)?,
-                        "errorInfo": parse_json_object_column(row.get::<_, Option<String>>(13)?),
-                        "appendedInputs": parse_json_array_column(row.get::<_, String>(14)?),
-                        "agentMode": row.get::<_, Option<String>>(15)?,
-                        "routeDecision": parse_json_object_column(row.get::<_, Option<String>>(16)?),
-                        "completionState": row.get::<_, Option<String>>(17)?,
-                        "evidenceSummary": parse_json_object_column(row.get::<_, Option<String>>(18)?),
-                        "deliveryNote": row.get::<_, Option<String>>(19)?,
-                        "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(20)?),
-                    }))
-                })
-                .map_err(|error| format!("Failed to read message versions from SQLite: {error}"))?;
-
-            let mut versions = Vec::new();
-            for version_row in version_rows {
-                versions.push(
-                    version_row.map_err(|error| {
-                        format!("Failed to decode message version row: {error}")
-                    })?,
-                );
-            }
-
-            messages.push(serde_json::json!({
-                "id": message_id,
-                "role": role,
-                "linkedMessageId": linked_message_id,
-                "createdAt": created_at,
-                "versions": versions,
-                "activeVersionIndex": active_version_index,
-            }));
-        }
-
-        sessions.push(serde_json::json!({
-            "id": session_id,
-            "title": title,
-            "providerProfileId": provider_profile_id,
-            "provider": provider,
-            "model": model,
-            "folderId": folder_id,
-            "workspacePath": workspace_path,
-            "workspaceRoot": workspace_root,
-            "workspaceMode": workspace_mode,
-            "contextCompression": parse_json_object_column(context_compression_json),
-            "messages": messages,
-            "toolEvents": [],
-            "taskTree": [],
-            "updatedAt": updated_at,
-        }));
+        sessions.push(session_row.map_err(|error| format!("Failed to decode session row: {error}"))?);
     }
 
     Ok(serde_json::json!({
@@ -3743,6 +3710,149 @@ fn load_persisted_app_state<R: Runtime>(
         "sessionFolders": parse_json_column(session_folders_json),
         "projectCapabilityOverrides": parse_json_column(project_overrides_json),
     }))
+}
+
+fn load_session_messages_from_db(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut messages_statement = connection
+        .prepare(
+            "SELECT id, role, linked_message_id, sort_index, active_version_index, created_at, updated_at
+             FROM messages
+             WHERE session_id = ?1 AND deleted_at = 0
+             ORDER BY sort_index ASC",
+        )
+        .map_err(|error| format!("Failed to prepare messages query: {error}"))?;
+
+    let message_rows = messages_statement
+        .query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })
+        .map_err(|error| format!("Failed to read messages from SQLite: {error}"))?;
+
+    let mut versions_statement = connection
+        .prepare(
+            "SELECT version_index, content, parts_json, status, created_at, attachments_json, reasoning_json, usage_json,
+                    capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json, appended_inputs_json,
+                    agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json
+             FROM message_versions
+             WHERE message_id = ?1 AND deleted_at = 0
+             ORDER BY version_index ASC",
+        )
+        .map_err(|error| format!("Failed to prepare message versions query: {error}"))?;
+
+    let mut messages = Vec::new();
+
+    for message_row in message_rows {
+        let (
+            message_id,
+            role,
+            linked_message_id,
+            _sort_index,
+            active_version_index,
+            created_at,
+            _message_updated_at,
+        ) = message_row.map_err(|error| format!("Failed to decode message row: {error}"))?;
+
+        let version_rows = versions_statement
+            .query_map(params![message_id.clone()], |row| {
+                Ok(serde_json::json!({
+                    "content": row.get::<_, String>(1)?,
+                    "parts": parse_json_array_column(row.get::<_, String>(2)?),
+                    "status": row.get::<_, Option<String>>(3)?,
+                    "createdAt": row.get::<_, i64>(4)?,
+                    "attachments": parse_json_array_column(row.get::<_, String>(5)?),
+                    "reasoning": parse_json_array_column(row.get::<_, String>(6)?),
+                    "usage": parse_json_column(row.get::<_, Option<String>>(7)?),
+                    "capabilitySnapshot": parse_json_object_column(row.get::<_, Option<String>>(8)?),
+                    "activity": parse_json_object_column(row.get::<_, Option<String>>(9)?),
+                    "events": parse_json_array_column(row.get::<_, String>(10)?),
+                    "steps": parse_json_array_column(row.get::<_, String>(11)?),
+                    "error": row.get::<_, Option<String>>(12)?,
+                    "errorInfo": parse_json_object_column(row.get::<_, Option<String>>(13)?),
+                    "appendedInputs": parse_json_array_column(row.get::<_, String>(14)?),
+                    "agentMode": row.get::<_, Option<String>>(15)?,
+                    "routeDecision": parse_json_object_column(row.get::<_, Option<String>>(16)?),
+                    "completionState": row.get::<_, Option<String>>(17)?,
+                    "evidenceSummary": parse_json_object_column(row.get::<_, Option<String>>(18)?),
+                    "deliveryNote": row.get::<_, Option<String>>(19)?,
+                    "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(20)?),
+                }))
+            })
+            .map_err(|error| format!("Failed to read message versions from SQLite: {error}"))?;
+
+        let mut versions = Vec::new();
+        for version_row in version_rows {
+            versions.push(
+                version_row
+                    .map_err(|error| format!("Failed to decode message version row: {error}"))?,
+            );
+        }
+
+        messages.push(serde_json::json!({
+            "id": message_id,
+            "role": role,
+            "linkedMessageId": linked_message_id,
+            "createdAt": created_at,
+            "versions": versions,
+            "activeVersionIndex": active_version_index,
+        }));
+    }
+
+    Ok(messages)
+}
+
+#[tauri::command]
+fn load_session_messages_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    let connection = open_app_db(&app)?;
+    let messages = load_session_messages_from_db(&connection, &session_id)?;
+    Ok(serde_json::Value::Array(messages))
+}
+
+#[tauri::command]
+fn search_sessions_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    keyword: String,
+) -> Result<Vec<String>, String> {
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let connection = open_app_db(&app)?;
+    let like_pattern = format!("%{}%", keyword.to_lowercase());
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT s.id
+             FROM sessions s
+             LEFT JOIN messages m ON m.session_id = s.id AND m.deleted_at = 0
+             LEFT JOIN message_versions mv
+               ON mv.message_id = m.id AND mv.version_index = m.active_version_index AND mv.deleted_at = 0
+             WHERE s.deleted_at = 0
+               AND (lower(s.title) LIKE ?1 OR lower(COALESCE(mv.content, '')) LIKE ?1)
+             ORDER BY s.updated_at DESC",
+        )
+        .map_err(|error| format!("Failed to prepare sessions search query: {error}"))?;
+    let rows = statement
+        .query_map(params![like_pattern], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Failed to execute sessions search query: {error}"))?;
+    let mut session_ids = Vec::new();
+    for row in rows {
+        session_ids.push(row.map_err(|error| format!("Failed to decode sessions search row: {error}"))?);
+    }
+    Ok(session_ids)
 }
 
 #[tauri::command]
@@ -3788,8 +3898,8 @@ fn upsert_session_sqlite<R: Runtime>(
     connection
         .execute(
             "INSERT INTO sessions (
-                id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, context_compression_json, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, context_compression_json, deleted_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 provider_profile_id = excluded.provider_profile_id,
@@ -3800,6 +3910,7 @@ fn upsert_session_sqlite<R: Runtime>(
                 workspace_root = excluded.workspace_root,
                 workspace_mode = excluded.workspace_mode,
                 context_compression_json = excluded.context_compression_json,
+                deleted_at = 0,
                 updated_at = excluded.updated_at",
             params![
                 get_json_string_field(&session, "id", ""),
@@ -3825,9 +3936,25 @@ fn delete_session_sqlite<R: Runtime>(
     session_id: String,
 ) -> Result<(), String> {
     let connection = open_app_db(&app)?;
+    let deleted_at = current_timestamp_ms() as i64;
+    connection
+        .execute(
+            "UPDATE sessions SET deleted_at = ?2, updated_at = ?2 WHERE id = ?1 AND deleted_at = 0",
+            params![session_id, deleted_at],
+        )
+        .map_err(|error| format!("Failed to delete session from SQLite: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn purge_session_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    session_id: String,
+) -> Result<(), String> {
+    let connection = open_app_db(&app)?;
     connection
         .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
-        .map_err(|error| format!("Failed to delete session from SQLite: {error}"))?;
+        .map_err(|error| format!("Failed to purge session from SQLite: {error}"))?;
     Ok(())
 }
 
@@ -3842,8 +3969,8 @@ fn upsert_message_sqlite<R: Runtime>(
     connection
         .execute(
             "INSERT INTO messages (
-                id, session_id, role, linked_message_id, sort_index, active_version_index, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                id, session_id, role, linked_message_id, sort_index, active_version_index, created_at, deleted_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 session_id = excluded.session_id,
                 role = excluded.role,
@@ -3851,6 +3978,7 @@ fn upsert_message_sqlite<R: Runtime>(
                 sort_index = excluded.sort_index,
                 active_version_index = excluded.active_version_index,
                 created_at = excluded.created_at,
+                deleted_at = 0,
                 updated_at = excluded.updated_at",
             params![
                 get_json_string_field(&message, "id", ""),
@@ -3873,9 +4001,25 @@ fn delete_message_sqlite<R: Runtime>(
     message_id: String,
 ) -> Result<(), String> {
     let connection = open_app_db(&app)?;
+    let deleted_at = current_timestamp_ms() as i64;
+    connection
+        .execute(
+            "UPDATE messages SET deleted_at = ?2, updated_at = ?2 WHERE id = ?1 AND deleted_at = 0",
+            params![message_id, deleted_at],
+        )
+        .map_err(|error| format!("Failed to delete message from SQLite: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn purge_message_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    message_id: String,
+) -> Result<(), String> {
+    let connection = open_app_db(&app)?;
     connection
         .execute("DELETE FROM messages WHERE id = ?1", params![message_id])
-        .map_err(|error| format!("Failed to delete message from SQLite: {error}"))?;
+        .map_err(|error| format!("Failed to purge message from SQLite: {error}"))?;
     Ok(())
 }
 
@@ -3893,8 +4037,8 @@ fn upsert_message_version_sqlite<R: Runtime>(
             "INSERT INTO message_versions (
                 id, message_id, version_index, content, parts_json, status, created_at, attachments_json, reasoning_json,
                 usage_json, capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json,
-                appended_inputs_json, agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                appended_inputs_json, agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json, deleted_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, 0)
              ON CONFLICT(message_id, version_index) DO UPDATE SET
                 content = excluded.content,
                 parts_json = excluded.parts_json,
@@ -3915,7 +4059,8 @@ fn upsert_message_version_sqlite<R: Runtime>(
                 completion_state = excluded.completion_state,
                 evidence_summary_json = excluded.evidence_summary_json,
                 delivery_note = excluded.delivery_note,
-                model_info_json = excluded.model_info_json",
+                model_info_json = excluded.model_info_json,
+                deleted_at = 0",
             params![
                 version_id,
                 message_id,
@@ -3982,12 +4127,29 @@ fn delete_message_version_sqlite<R: Runtime>(
     version_index: i64,
 ) -> Result<(), String> {
     let connection = open_app_db(&app)?;
+    let deleted_at = current_timestamp_ms() as i64;
+    connection
+        .execute(
+            "UPDATE message_versions SET deleted_at = ?3 WHERE message_id = ?1 AND version_index = ?2 AND deleted_at = 0",
+            params![message_id, version_index, deleted_at],
+        )
+        .map_err(|error| format!("Failed to delete message version from SQLite: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn purge_message_version_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    message_id: String,
+    version_index: i64,
+) -> Result<(), String> {
+    let connection = open_app_db(&app)?;
     connection
         .execute(
             "DELETE FROM message_versions WHERE message_id = ?1 AND version_index = ?2",
             params![message_id, version_index],
         )
-        .map_err(|error| format!("Failed to delete message version from SQLite: {error}"))?;
+        .map_err(|error| format!("Failed to purge message version from SQLite: {error}"))?;
     Ok(())
 }
 
@@ -4495,15 +4657,20 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             load_persisted_app_state,
+            load_session_messages_sqlite,
+            search_sessions_sqlite,
             save_settings_sqlite,
             save_project_capability_overrides_sqlite,
             save_session_folders_sqlite,
             upsert_session_sqlite,
             delete_session_sqlite,
+            purge_session_sqlite,
             upsert_message_sqlite,
             delete_message_sqlite,
+            purge_message_sqlite,
             upsert_message_version_sqlite,
             delete_message_version_sqlite,
+            purge_message_version_sqlite,
             start_agent_task,
             get_agent_task,
             release_agent_task,
