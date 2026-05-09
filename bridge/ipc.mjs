@@ -328,6 +328,10 @@ rl.on('line', (line) => {
       executionMonitor.markProgress()
       emit({ type: 'usage', usage })
     },
+    onContextCompression(contextCompression) {
+      executionMonitor.setPhase('compressing_context')
+      emit({ type: 'context_compression', contextCompression })
+    },
     onRetryProgress(retryInfo) {
       executionMonitor.markProgress()
       emit({ type: 'retry_progress', retryInfo })

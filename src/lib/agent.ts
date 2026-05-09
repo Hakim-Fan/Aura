@@ -405,6 +405,7 @@ async function buildAgentRuntimeMessage(
   }
 
   return {
+    id: message.id,
     role: message.role as ChatRole,
     content: message.content,
     parts: nextParts as ChatContentPart[],

@@ -337,6 +337,7 @@ function ContextTokenMeter({
   contextWindowTokens,
   contextCompression,
   compressionRunning,
+  compressionDisabled,
   onCompressContext,
 }: {
   currentTokens: number
@@ -344,6 +345,7 @@ function ContextTokenMeter({
   contextWindowTokens: number
   contextCompression?: SessionContextCompression
   compressionRunning?: boolean
+  compressionDisabled?: boolean
   onCompressContext: () => void
 }) {
   const [open, setOpen] = useState(false)
@@ -442,7 +444,7 @@ function ContextTokenMeter({
             <button
               type="button"
               className="mt-2 inline-flex items-center justify-center rounded-lg border border-[rgba(79,123,116,0.2)] bg-white px-2.5 py-1 text-10px font-700 text-[var(--accent-soft-strong)] transition-colors hover:bg-[rgba(79,123,116,0.06)] disabled:cursor-not-allowed disabled:opacity-45"
-              disabled={compressionRunning}
+              disabled={compressionRunning || compressionDisabled}
               onClick={() => {
                 onCompressContext()
                 setOpen(false)
@@ -4165,9 +4167,11 @@ export function ChatView({
   const sessionUsage = useMemo(() => collectSessionUsage(messages), [messages])
   const sessionTotalTokens = sessionUsage.inputTokens + sessionUsage.outputTokens
   const latestMessageUsage = useMemo(() => findLatestUsage(messages), [messages])
+  const liveContextCompression = agentTask?.contextCompression || contextCompression
+  const autoCompressionRunning = agentTask?.phase === 'compressing_context'
   const sessionContextMessages = useMemo(
-    () => buildRuntimeMessagesWithContextCompression(messages, contextCompression),
-    [contextCompression, messages],
+    () => buildRuntimeMessagesWithContextCompression(messages, liveContextCompression),
+    [liveContextCompression, messages],
   )
   const sessionContextTokens = useMemo(
     () => estimateSessionContextTokens(sessionContextMessages, settings.model),
@@ -4689,8 +4693,9 @@ export function ChatView({
                       currentTokens={currentPromptContextTokens}
                       cumulativeTokens={sessionTotalTokens}
                       contextWindowTokens={promptContextWindowTokens}
-                      contextCompression={contextCompression}
-                      compressionRunning={contextCompressionRunning || isRunning}
+                      contextCompression={liveContextCompression}
+                      compressionRunning={contextCompressionRunning || autoCompressionRunning}
+                      compressionDisabled={contextCompressionRunning || isRunning}
                       onCompressContext={onCompressContext}
                     />
                   </div>

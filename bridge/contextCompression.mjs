@@ -8,6 +8,7 @@ const MAX_DEFAULT_OUTPUT_TOKENS = 32_000
 const MIN_TOOL_BUFFER_TOKENS = 4_000
 const MAX_TOOL_BUFFER_TOKENS = 20_000
 const DEFAULT_KEEP_RECENT_MESSAGE_COUNT = 6
+export const DEFAULT_RECENT_USER_MESSAGE_TOKEN_BUDGET = 20_000
 const DEFAULT_COMPACTION_INPUT_BATCH_RATIO = 0.45
 const IMAGE_PART_TOKEN_COST = 1_200
 const FILE_PART_TOKEN_COST = 80
@@ -187,12 +188,36 @@ export function buildContextCompressionBudget(settings = {}, options = {}) {
 export function shouldCompressMessages(messages = [], settings = {}, options = {}) {
   const estimatedTokens = estimateMessagesTokens(messages, settings)
   const budget = buildContextCompressionBudget(settings, options)
+  const latestInputTokens = Math.max(
+    0,
+    Math.round(Number(options.latestInputTokens || options.activeInputTokens) || 0),
+  )
+  const estimatedPromptTokens =
+    budget.systemPromptTokens + budget.toolSchemaTokens + estimatedTokens
+  const activePromptTokens = Math.max(latestInputTokens, estimatedPromptTokens)
+  const activePromptLimit = Math.max(
+    1_000,
+    budget.compressionThresholdTokens -
+      budget.maxOutputTokens -
+      budget.toolResultBufferTokens,
+  )
+  const conversationLimitReached = estimatedTokens > budget.effectiveThresholdTokens
+  const activePromptLimitReached = activePromptTokens > activePromptLimit
   return {
     shouldCompress:
-      estimatedTokens > budget.effectiveThresholdTokens &&
+      (conversationLimitReached || activePromptLimitReached) &&
       Array.isArray(messages) &&
       messages.length > 1,
     estimatedTokens,
+    latestInputTokens,
+    activePromptTokens,
+    activePromptLimit,
+    trigger:
+      activePromptLimitReached && !conversationLimitReached
+        ? 'provider_usage'
+        : conversationLimitReached
+          ? 'local_estimate'
+          : 'none',
     budget,
   }
 }
@@ -305,6 +330,93 @@ export function formatMessagesForCompaction(messages = []) {
     .join('\n\n---\n\n')
 }
 
+function userMessageTextForCompaction(message = {}) {
+  const pieces = []
+  if (typeof message.content === 'string' && message.content.trim()) {
+    pieces.push(message.content.trim())
+  }
+  if (Array.isArray(message.parts)) {
+    const textParts = message.parts
+      .filter(part => part?.type === 'text' && typeof part.text === 'string')
+      .map(part => part.text.trim())
+      .filter(Boolean)
+    for (const text of textParts) {
+      if (!pieces.includes(text)) {
+        pieces.push(text)
+      }
+    }
+  }
+  return pieces.join('\n\n').trim()
+}
+
+function truncateTextToTokenBudget(text, maxTokens, options = {}) {
+  const source = String(text || '')
+  const limit = Math.max(0, Math.floor(Number(maxTokens) || 0))
+  if (!source || limit <= 0) {
+    return ''
+  }
+  if (estimateTextTokens(source, options) <= limit) {
+    return source
+  }
+
+  let end = Math.min(source.length, Math.max(200, limit * 4))
+  while (end > 200 && estimateTextTokens(source.slice(0, end), options) > limit) {
+    end = Math.floor(end * 0.75)
+  }
+  return source.slice(0, Math.max(1, end)).trim()
+}
+
+export function selectRecentUserMessagesForCompactionSummary(
+  messages = [],
+  maxTokens = DEFAULT_RECENT_USER_MESSAGE_TOKEN_BUDGET,
+  options = {},
+) {
+  const limit = Math.max(0, Math.floor(Number(maxTokens) || 0))
+  if (!Array.isArray(messages) || messages.length === 0 || limit <= 0) {
+    return []
+  }
+
+  let remaining = limit
+  const selected = []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role !== 'user') {
+      continue
+    }
+    const text = userMessageTextForCompaction(message)
+    if (!text || text.startsWith('[Compressed summary')) {
+      continue
+    }
+
+    const tokens = estimateTextTokens(text, options)
+    if (tokens <= remaining) {
+      selected.push({
+        index,
+        content: text,
+        truncated: false,
+        tokens,
+      })
+      remaining -= tokens
+      continue
+    }
+
+    if (remaining >= 200) {
+      const truncated = truncateTextToTokenBudget(text, remaining, options)
+      if (truncated) {
+        selected.push({
+          index,
+          content: truncated,
+          truncated: true,
+          tokens: estimateTextTokens(truncated, options),
+        })
+      }
+    }
+    break
+  }
+
+  return selected.reverse()
+}
+
 export function splitMessagesIntoTokenBatches(
   messages = [],
   maxBatchTokens = 40_000,
@@ -375,13 +487,32 @@ export function buildCompactionUserPrompt(messages = [], options = {}) {
 }
 
 export function buildCompressedSummaryMessage(summary, originalMessageCount, metadata = {}) {
+  const recentUserMessages = Array.isArray(metadata.recentUserMessages)
+    ? metadata.recentUserMessages
+    : []
+  const recentUserMessageSection = recentUserMessages.length > 0
+    ? [
+        '',
+        '## Recent User Messages Preserved Verbatim',
+        ...recentUserMessages.map((message, index) =>
+          [
+            `### User message ${index + 1}${message.truncated ? ' (truncated)' : ''}`,
+            String(message.content || '').trim(),
+          ].join('\n'),
+        ),
+      ]
+    : []
   const lines = [
     `[Compressed summary of ${originalMessageCount} earlier conversation message(s).]`,
     metadata.beforeTokens && metadata.afterTokens
       ? `Estimated tokens: ${metadata.beforeTokens} -> ${metadata.afterTokens}.`
       : null,
+    metadata.droppedMessageCount
+      ? `Compaction fallback omitted ${metadata.droppedMessageCount} oldest message(s) from the summarization prompt.`
+      : null,
     '',
     String(summary || '').trim(),
+    ...recentUserMessageSection,
   ].filter(line => line !== null)
 
   return {

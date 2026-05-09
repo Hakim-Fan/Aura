@@ -8,6 +8,7 @@ import {
   estimateTextTokens,
   formatMessagesForCompaction,
   resolveContextWindowTokens,
+  selectRecentUserMessagesForCompactionSummary,
   shouldCompressMessages,
   splitMessagesIntoTokenBatches,
 } from './contextCompression.mjs'
@@ -188,6 +189,40 @@ test('shouldCompressMessages can trigger for short conversations with oversized 
   )
 
   assert.equal(result.shouldCompress, true)
+})
+
+test('shouldCompressMessages can trigger from provider usage even when local estimate is low', () => {
+  const result = shouldCompressMessages(
+    [
+      { role: 'user', content: 'small' },
+      { role: 'assistant', content: 'small' },
+    ],
+    {
+      provider: 'openai',
+      model: 'gpt-main',
+      contextCompressionThresholdTokens: 40_000,
+    },
+    {
+      latestInputTokens: 32_000,
+    },
+  )
+
+  assert.equal(result.shouldCompress, true)
+  assert.equal(result.trigger, 'provider_usage')
+})
+
+test('selectRecentUserMessagesForCompactionSummary preserves latest user goals within budget', () => {
+  const selected = selectRecentUserMessagesForCompactionSummary(
+    [
+      { role: 'user', content: 'old goal '.repeat(200) },
+      { role: 'assistant', content: 'large tool result '.repeat(2000) },
+      { role: 'user', content: 'new goal' },
+    ],
+    500,
+  )
+
+  assert.ok(selected.length >= 1)
+  assert.match(selected.at(-1).content, /new goal/)
 })
 
 test('splitMessagesIntoTokenBatches keeps every message without truncating text', () => {

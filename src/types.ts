@@ -644,6 +644,7 @@ export type AgentResponse = {
   taskTree: TaskNode[]
   reasoning?: MessageReasoning[]
   usage?: MessageUsage
+  contextCompression?: SessionContextCompression
   capabilitySnapshot?: CapabilityUsageSnapshot
   retryInfo?: ProviderRetryInfo
   agentMode?: AgentArchitectureMode
@@ -662,6 +663,7 @@ export type AgentTaskSnapshot = {
   reasoning?: MessageReasoning[]
   phaseOutputs?: MessagePhaseOutput[]
   usage?: MessageUsage
+  contextCompression?: SessionContextCompression
   capabilitySnapshot?: CapabilityUsageSnapshot
   pendingApproval?: ApprovalRequest
   pendingUserInput?: UserInputRequest

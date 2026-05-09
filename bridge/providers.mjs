@@ -9,8 +9,10 @@ import {
   buildCompactionSystemPrompt,
   buildCompactionUserPrompt,
   buildCompressedSummaryMessage,
+  DEFAULT_RECENT_USER_MESSAGE_TOKEN_BUDGET,
   estimateTextTokens,
   estimateMessagesTokens,
+  selectRecentUserMessagesForCompactionSummary,
   splitMessagesIntoTokenBatches,
 } from './contextCompression.mjs'
 
@@ -415,6 +417,67 @@ function chooseRecentMessagesForCompaction(
   }
 }
 
+function compactionErrorText(error) {
+  if (error && typeof error === 'object') {
+    return [
+      error.code,
+      error.status,
+      error.rawMessage,
+      error.message,
+      error.stack,
+    ]
+      .filter(value => value !== undefined && value !== null)
+      .join('\n')
+  }
+  return String(error || '')
+}
+
+function isLikelyContextWindowError(error) {
+  const text = compactionErrorText(error).toLowerCase()
+  return (
+    text.includes('context length') ||
+    text.includes('context window') ||
+    text.includes('maximum context') ||
+    text.includes('max context') ||
+    text.includes('too many tokens') ||
+    text.includes('token limit') ||
+    text.includes('input is too long') ||
+    text.includes('request too large') ||
+    text.includes('payload too large') ||
+    text.includes('exceeds the model') ||
+    text.includes('exceed context') ||
+    text.includes('context_length_exceeded') ||
+    text.includes('413')
+  )
+}
+
+function buildCompactionFallbackPlans(maxInputBatchTokens, compactionBudget) {
+  const baseLimit = Math.max(
+    1_000,
+    Math.floor(
+      Math.min(maxInputBatchTokens, compactionBudget.compactionInputBatchTokens),
+    ),
+  )
+  const limits = [
+    baseLimit,
+    Math.floor(baseLimit * 0.5),
+    Math.floor(baseLimit * 0.25),
+  ]
+    .map(limit => Math.max(1_000, limit))
+    .filter((limit, index, all) => all.indexOf(limit) === index)
+
+  return [
+    ...limits.map(limit => ({
+      batchTokenLimit: limit,
+      dropOldestRatio: 0,
+    })),
+    {
+      batchTokenLimit: limits.at(-1) || baseLimit,
+      dropOldestRatio: 0.25,
+    },
+  ]
+}
+
 function flattenGeminiTextResponse(data) {
   const parts = data?.candidates?.[0]?.content?.parts || []
   return parts
@@ -802,6 +865,7 @@ export async function compactMessagesWithProvider({
   targetTokens,
   keepRecentCount = 6,
   maxInputBatchTokens = 48_000,
+  recentUserMessageTokenBudget = DEFAULT_RECENT_USER_MESSAGE_TOKEN_BUDGET,
   hooks,
   callProvider = callProviderForCompaction,
 } = {}) {
@@ -815,54 +879,109 @@ export async function compactMessagesWithProvider({
   }
 
   const compactionSettings = resolveCompactionSettings(settings)
-  const { recentCount, recentMessages, olderMessages, recentTokens } =
-    chooseRecentMessagesForCompaction(
-      allMessages,
-      requestedRecentCount,
-      targetTokens,
-      compactionSettings,
-    )
-  const maxOutputTokens = resolveCompactionOutputTokens(targetTokens, recentTokens)
   const compactionBudget = buildContextCompressionBudget(compactionSettings)
-  const batches = splitMessagesIntoTokenBatches(
-    olderMessages,
-    Math.min(maxInputBatchTokens, compactionBudget.compactionInputBatchTokens),
-    compactionSettings,
+  const fallbackPlans = buildCompactionFallbackPlans(
+    maxInputBatchTokens,
+    compactionBudget,
   )
-  let rollingSummary = ''
+  let lastError
 
-  hooks?.onPhaseChange?.('compressing_context')
+  for (const [attemptIndex, plan] of fallbackPlans.entries()) {
+    try {
+      const { recentMessages, olderMessages, recentTokens } =
+        chooseRecentMessagesForCompaction(
+          allMessages,
+          requestedRecentCount,
+          targetTokens,
+          compactionSettings,
+        )
+      const maxOutputTokens = resolveCompactionOutputTokens(targetTokens, recentTokens)
+      const dropOldestCount =
+        plan.dropOldestRatio > 0
+          ? Math.min(
+              Math.max(0, olderMessages.length - 1),
+              Math.floor(olderMessages.length * plan.dropOldestRatio),
+            )
+          : 0
+      const summarizableMessages =
+        dropOldestCount > 0 ? olderMessages.slice(dropOldestCount) : olderMessages
+      const batches = splitMessagesIntoTokenBatches(
+        summarizableMessages,
+        plan.batchTokenLimit,
+        compactionSettings,
+      )
+      let rollingSummary = ''
 
-  for (const [index, batch] of batches.entries()) {
-    const batchTargetTokens = maxOutputTokens
-    const summary = await callProvider(compactionSettings, {
-      systemPrompt: buildCompactionSystemPrompt(batchTargetTokens),
-      userPrompt: buildCompactionUserPrompt(batch, {
-        batchIndex: index,
-        batchCount: batches.length,
-        previousSummary: rollingSummary,
-      }),
-      maxOutputTokens: batchTargetTokens,
-      messages: allMessages,
-      hooks,
-    })
-    rollingSummary = summary
+      hooks?.onPhaseChange?.('compressing_context')
+
+      for (const [index, batch] of batches.entries()) {
+        const batchTargetTokens = maxOutputTokens
+        const summary = await callProvider(compactionSettings, {
+          systemPrompt: buildCompactionSystemPrompt(batchTargetTokens),
+          userPrompt: buildCompactionUserPrompt(batch, {
+            batchIndex: index,
+            batchCount: batches.length,
+            previousSummary: rollingSummary,
+          }),
+          maxOutputTokens: batchTargetTokens,
+          messages: allMessages,
+          hooks,
+        })
+        rollingSummary = summary
+      }
+
+      const recentUserMessages = selectRecentUserMessagesForCompactionSummary(
+        olderMessages,
+        recentUserMessageTokenBudget,
+        compactionSettings,
+      )
+      const beforeTokens = estimateMessagesTokens(olderMessages, compactionSettings)
+      const summaryMessage = buildCompressedSummaryMessage(
+        rollingSummary || 'No older messages required model summarization.',
+        olderMessages.length,
+        {
+          beforeTokens,
+          recentUserMessages,
+          droppedMessageCount: dropOldestCount,
+        },
+      )
+      summaryMessage.content = buildCompressedSummaryMessage(
+        rollingSummary || 'No older messages required model summarization.',
+        olderMessages.length,
+        {
+          beforeTokens,
+          afterTokens: estimateMessagesTokens([summaryMessage], compactionSettings),
+          recentUserMessages,
+          droppedMessageCount: dropOldestCount,
+        },
+      ).content
+
+      return [summaryMessage, ...recentMessages]
+    } catch (error) {
+      lastError = error
+      const canFallback =
+        attemptIndex < fallbackPlans.length - 1 && isLikelyContextWindowError(error)
+      if (!canFallback) {
+        throw error
+      }
+      const nextPlan = fallbackPlans[attemptIndex + 1]
+      hooks?.onReasoningDelta?.(
+        [
+          'Context compression fallback:',
+          nextPlan.dropOldestRatio > 0
+            ? 'dropping the oldest history slice and retrying with a smaller compaction batch.'
+            : `retrying with smaller compaction batches (${nextPlan.batchTokenLimit} estimated tokens).`,
+        ].join(' '),
+        {
+          blockId: `context-compression-fallback-${attemptIndex + 1}`,
+          kind: 'summary',
+          order: -101,
+        },
+      )
+    }
   }
 
-  const beforeTokens = estimateMessagesTokens(olderMessages, compactionSettings)
-  const summaryMessage = buildCompressedSummaryMessage(
-    rollingSummary,
-    olderMessages.length,
-    {
-      beforeTokens,
-      afterTokens: estimateMessagesTokens(
-        [{ role: 'assistant', content: rollingSummary }],
-        compactionSettings,
-      ),
-    },
-  )
-
-  return [summaryMessage, ...recentMessages]
+  throw lastError || new Error('Context compression failed.')
 }
 
 async function parseJsonResponse(response) {

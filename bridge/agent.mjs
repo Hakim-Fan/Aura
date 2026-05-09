@@ -69,6 +69,11 @@ function createId(prefix = 'task') {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+function normalizeMessageId(message) {
+  const id = typeof message?.id === 'string' ? message.id.trim() : ''
+  return id || ''
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
 }
@@ -198,11 +203,75 @@ function buildPreflightSystemPromptEstimate({
   return appendCarryoverContextToPrompt(estimatedSystemPrompt, carryoverContext)
 }
 
+function findCompressedThroughMessageId(originalMessages, compactedMessages) {
+  const originals = Array.isArray(originalMessages) ? originalMessages : []
+  const compacted = Array.isArray(compactedMessages) ? compactedMessages : []
+  if (originals.length === 0 || compacted.length <= 1) {
+    return ''
+  }
+
+  const firstKeptRecentId = normalizeMessageId(compacted[1])
+  if (firstKeptRecentId) {
+    const firstKeptIndex = originals.findIndex(
+      message => normalizeMessageId(message) === firstKeptRecentId,
+    )
+    if (firstKeptIndex > 0) {
+      return normalizeMessageId(originals[firstKeptIndex - 1])
+    }
+    if (firstKeptIndex === 0) {
+      return ''
+    }
+  }
+
+  const recentCount = Math.max(0, compacted.length - 1)
+  const compressedThroughIndex = originals.length - recentCount - 1
+  if (compressedThroughIndex < 0) {
+    return ''
+  }
+  return normalizeMessageId(originals[compressedThroughIndex])
+}
+
+function buildContextCompressionCheckpoint({
+  messages,
+  compactedMessages,
+  settings,
+  beforeTokens,
+  afterTokens,
+}) {
+  const summary =
+    typeof compactedMessages?.[0]?.content === 'string'
+      ? compactedMessages[0].content.trim()
+      : ''
+  const compressedThroughMessageId = findCompressedThroughMessageId(
+    messages,
+    compactedMessages,
+  )
+  if (!summary || !compressedThroughMessageId) {
+    return undefined
+  }
+
+  return {
+    id: createId('auto-context-compression'),
+    summary,
+    compressedThroughMessageId,
+    originalMessageCount: Array.isArray(messages) ? messages.length : 0,
+    originalTokenEstimate: Math.max(0, Math.round(Number(beforeTokens) || 0)),
+    compressedTokenEstimate: Math.max(0, Math.round(Number(afterTokens) || 0)),
+    createdAt: Date.now(),
+    providerProfileId:
+      typeof settings?.activeProviderProfileId === 'string'
+        ? settings.activeProviderProfileId
+        : undefined,
+    model: typeof settings?.model === 'string' ? settings.model : undefined,
+  }
+}
+
 async function maybeCompressMessagesForContext({
   messages,
   settings,
   systemPrompt = '',
   toolSchemaTokens = 0,
+  latestInputTokens = 0,
   hooks,
   stage,
 }) {
@@ -210,6 +279,7 @@ async function maybeCompressMessagesForContext({
     systemPrompt,
     toolSchemaTokens,
     keepRecentCount: CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
+    latestInputTokens,
   })
 
   if (!compressionState.shouldCompress) {
@@ -231,11 +301,34 @@ async function maybeCompressMessagesForContext({
     hooks,
   })
   const afterTokens = estimateMessagesTokens(compactedMessages, settings)
+  const contextCompression = buildContextCompressionCheckpoint({
+    messages,
+    compactedMessages,
+    settings,
+    beforeTokens: compressionState.estimatedTokens,
+    afterTokens,
+  })
+  if (contextCompression) {
+    hooks?.onContextCompression?.(contextCompression)
+  }
+  const recomputedActiveContextTokens =
+    compressionState.budget.systemPromptTokens +
+    compressionState.budget.toolSchemaTokens +
+    afterTokens
+  hooks?.onActiveContextEstimate?.({
+    latestInputTokens: recomputedActiveContextTokens,
+    contextWindow: compressionState.budget.contextWindowTokens,
+    allowDecrease: true,
+    reason: 'context_compression',
+  })
   hooks?.onReasoningDelta?.(
     [
       `Context compression (${stage || 'runtime'}):`,
       `${compressionState.estimatedTokens} estimated tokens -> ${afterTokens} estimated tokens.`,
-    ].join(' '),
+      compressionState.trigger === 'provider_usage'
+        ? `Triggered by provider usage (${compressionState.latestInputTokens} input tokens).`
+        : '',
+    ].filter(Boolean).join(' '),
     {
       blockId: `context-compression-${stage || 'runtime'}`,
       kind: 'summary',
@@ -249,6 +342,7 @@ async function maybeCompressMessagesForContext({
     beforeTokens: compressionState.estimatedTokens,
     afterTokens,
     budget: compressionState.budget,
+    contextCompression,
   }
 }
 
@@ -464,6 +558,7 @@ function normalizeUsage(usage) {
       0,
       Math.round(Number(usage?.estimatedInputTokens) || 0),
     ),
+    contextWindow: Math.max(0, Math.round(Number(usage?.contextWindow) || 0)),
   }
 }
 
@@ -480,10 +575,29 @@ function createUsageTrackingHooks(baseHooks = {}) {
     inputTokens: 0,
     outputTokens: 0,
   }
+  let latestContextWindow = 0
+  let latestContextCompression
+
+  function publishUsage() {
+    const activeInputTokens = latestContext.inputTokens || latest.inputTokens
+    baseHooks?.onUsage?.({
+      inputTokens: totals.inputTokens,
+      outputTokens: totals.outputTokens,
+      latestInputTokens: activeInputTokens,
+      latestOutputTokens: latest.outputTokens,
+      contextWindow: latestContextWindow || undefined,
+    })
+  }
 
   return {
     hooks: {
       ...baseHooks,
+      onContextCompression(contextCompression) {
+        if (contextCompression) {
+          latestContextCompression = contextCompression
+        }
+        baseHooks?.onContextCompression?.(contextCompression)
+      },
       onUsage(usage) {
         const normalized = normalizeUsage(usage)
         if (!normalized) {
@@ -494,18 +608,43 @@ function createUsageTrackingHooks(baseHooks = {}) {
           outputTokens: normalized.outputTokens,
         }
         if (normalized.estimatedInputTokens > 0 || latestContext.inputTokens <= 0) {
-          latestContext = latest
+          latestContext = {
+            inputTokens: Math.max(latestContext.inputTokens, latest.inputTokens),
+            outputTokens: latest.outputTokens,
+          }
+        }
+        if (normalized.contextWindow > 0) {
+          latestContextWindow = normalized.contextWindow
         }
         totals = {
           inputTokens: totals.inputTokens + normalized.inputTokens,
           outputTokens: totals.outputTokens + normalized.outputTokens,
         }
-        baseHooks?.onUsage?.({
-          inputTokens: totals.inputTokens,
-          outputTokens: totals.outputTokens,
-          latestInputTokens: latestContext.inputTokens || latest.inputTokens,
-          latestOutputTokens: latest.outputTokens,
-        })
+        publishUsage()
+      },
+      onActiveContextEstimate(estimate = {}) {
+        const latestInputTokens = Math.max(
+          0,
+          Math.round(Number(estimate.latestInputTokens || estimate.inputTokens) || 0),
+        )
+        if (latestInputTokens > 0) {
+          const allowDecrease = estimate.allowDecrease === true
+          latestContext = {
+            inputTokens: allowDecrease
+              ? latestInputTokens
+              : Math.max(latestContext.inputTokens, latestInputTokens),
+            outputTokens: 0,
+          }
+        }
+        const contextWindow = Math.max(
+          0,
+          Math.round(Number(estimate.contextWindow) || 0),
+        )
+        if (contextWindow > 0) {
+          latestContextWindow = contextWindow
+        }
+        publishUsage()
+        baseHooks?.onActiveContextEstimate?.(estimate)
       },
     },
     getAccumulatedUsage() {
@@ -521,7 +660,17 @@ function createUsageTrackingHooks(baseHooks = {}) {
         ...normalizedTotals,
         latestInputTokens,
         latestOutputTokens: Math.max(0, Math.round(Number(latest.outputTokens) || 0)),
+        contextWindow: latestContextWindow || undefined,
       }
+    },
+    getLatestContextCompression() {
+      return latestContextCompression
+    },
+    getLatestActiveInputTokens() {
+      return Math.max(
+        0,
+        Math.round(Number(latestContext.inputTokens || latest.inputTokens) || 0),
+      )
     },
   }
 }
@@ -1156,7 +1305,12 @@ export async function runRouteFirstAgent(request) {
     capabilities,
     carryoverContext = '',
   } = request
-  const { hooks, getAccumulatedUsage } = createUsageTrackingHooks(incomingHooks)
+  const {
+    hooks,
+    getAccumulatedUsage,
+    getLatestContextCompression,
+    getLatestActiveInputTokens,
+  } = createUsageTrackingHooks(incomingHooks)
   let messages = Array.isArray(requestedMessages) ? requestedMessages : []
   hooks?.onPhaseChange?.('preparing')
   if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
@@ -1187,6 +1341,7 @@ export async function runRouteFirstAgent(request) {
     messages,
     settings,
     systemPrompt: preflightSystemPrompt,
+    latestInputTokens: getLatestActiveInputTokens(),
     hooks,
     stage: 'preflight',
   })
@@ -1375,6 +1530,7 @@ export async function runRouteFirstAgent(request) {
         settings: effectiveRunSettings,
         systemPrompt: lastSystemPrompt,
         toolSchemaTokens,
+        latestInputTokens: getLatestActiveInputTokens(),
         hooks,
         stage: `pass-${pass + 1}`,
       })
@@ -1565,6 +1721,7 @@ export async function runRouteFirstAgent(request) {
       return {
         ...result,
         usage: getAccumulatedUsage() || result.usage,
+        contextCompression: getLatestContextCompression(),
         agentMode: 'route-first',
         routeDecision: lastRouteDecision,
         capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
@@ -1660,6 +1817,7 @@ export async function runRouteFirstAgent(request) {
                 }
               : undefined,
             usage: getAccumulatedUsage() || recovered.usage,
+            contextCompression: getLatestContextCompression(),
             status: 'completed',
             taskTree: taskTracker.getTree(),
           }
@@ -1700,6 +1858,7 @@ export async function runRouteFirstAgent(request) {
         reasoning: summaryReasoning,
         retryInfo: recoveryRetryInfo || retryInfo,
         usage: getAccumulatedUsage(),
+        contextCompression: getLatestContextCompression(),
         status: 'completed',
         taskTree: taskTracker.getTree(),
       }

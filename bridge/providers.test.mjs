@@ -323,6 +323,60 @@ test('compactMessagesWithProvider carries forward earlier batch summaries into l
   assert.match(result[0]?.content || '', new RegExp(`summary-${prompts.length}`))
 })
 
+test('compactMessagesWithProvider retries with smaller batches after context errors', async () => {
+  const batchSizes = []
+  const messages = [
+    { role: 'user', content: 'older context '.repeat(1_000) },
+    { role: 'assistant', content: 'older reply '.repeat(1_000) },
+    { role: 'user', content: 'latest instruction' },
+  ]
+
+  const result = await compactMessagesWithProvider({
+    settings: {
+      provider: 'openai',
+      apiKey: 'test-key',
+      model: 'gpt-main',
+    },
+    messages,
+    targetTokens: 4_000,
+    keepRecentCount: 0,
+    maxInputBatchTokens: 2_400,
+    callProvider: async (_settings, options) => {
+      batchSizes.push(options.userPrompt.length)
+      if (batchSizes.length === 1) {
+        const error = new Error('context length exceeded')
+        error.status = 400
+        throw error
+      }
+      return `summary-${batchSizes.length}`
+    },
+  })
+
+  assert.ok(batchSizes.length > 1)
+  assert.match(result[0]?.content || '', /summary-\d+/)
+})
+
+test('compactMessagesWithProvider embeds recent user messages into the summary', async () => {
+  const result = await compactMessagesWithProvider({
+    settings: {
+      provider: 'openai',
+      apiKey: 'test-key',
+      model: 'gpt-main',
+    },
+    messages: [
+      { role: 'user', content: 'please remember the exact goal' },
+      { role: 'assistant', content: 'tool output '.repeat(2_000) },
+      { role: 'user', content: 'new exact instruction' },
+    ],
+    targetTokens: 4_000,
+    keepRecentCount: 0,
+    callProvider: async () => 'summary',
+  })
+
+  assert.match(result[0]?.content || '', /Recent User Messages Preserved Verbatim/)
+  assert.match(result[0]?.content || '', /new exact instruction/)
+})
+
 test('tool-error repair state stays unresolved after read-only inspection', () => {
   const events = [
     {

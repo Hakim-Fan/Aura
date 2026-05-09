@@ -68,6 +68,7 @@ import type {
   ReasoningEffort,
   ResearchMode,
   Session,
+  SessionContextCompression,
   SessionFolder,
   TaskNode,
   ToolEvent,
@@ -114,6 +115,44 @@ function shouldInvalidateContextCompressionForMessage(session: Session, messageI
   const changedIndex = session.messages.findIndex(message => message.id === messageId)
   const compressedThroughIndex = findCompressedThroughIndex(session)
   return changedIndex !== -1 && compressedThroughIndex !== -1 && changedIndex <= compressedThroughIndex
+}
+
+function normalizeTaskContextCompression(
+  session: Session,
+  compression?: SessionContextCompression,
+) {
+  if (!compression) {
+    return session.contextCompression
+  }
+  const summary = compression?.summary?.trim()
+  const compressedThroughMessageId = compression?.compressedThroughMessageId?.trim()
+  if (!summary || !compressedThroughMessageId) {
+    return session.contextCompression
+  }
+  if (!session.messages.some(message => message.id === compressedThroughMessageId)) {
+    return session.contextCompression
+  }
+
+  return {
+    id: compression.id?.trim() || createId(),
+    summary,
+    compressedThroughMessageId,
+    originalMessageCount: Math.max(
+      0,
+      Math.round(Number(compression.originalMessageCount) || session.messages.length),
+    ),
+    originalTokenEstimate: Math.max(
+      0,
+      Math.round(Number(compression.originalTokenEstimate) || 0),
+    ),
+    compressedTokenEstimate: Math.max(
+      0,
+      Math.round(Number(compression.compressedTokenEstimate) || 0),
+    ),
+    createdAt: Math.max(0, Math.round(Number(compression.createdAt) || Date.now())),
+    providerProfileId: compression.providerProfileId,
+    model: compression.model,
+  }
 }
 
 function getErrorMessage(caught: unknown, fallback: string) {
@@ -1817,6 +1856,10 @@ export function MainWindowApp() {
 
         updateSession(sessionId, session => ({
           ...session,
+          contextCompression: normalizeTaskContextCompression(
+            session,
+            snapshot.contextCompression,
+          ),
           messages: session.messages.map(message =>
             message.id === binding.messageId
               ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => {
@@ -1880,6 +1923,10 @@ export function MainWindowApp() {
                 session.id === sessionId
                   ? {
                     ...session,
+                    contextCompression: normalizeTaskContextCompression(
+                      session,
+                      snapshot.contextCompression,
+                    ),
                     messages: session.messages.map(message =>
                       message.id === binding.messageId
                         ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => {

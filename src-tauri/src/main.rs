@@ -40,6 +40,8 @@ struct AgentTaskSnapshot {
     task_tree: Vec<serde_json::Value>,
     reasoning: Vec<serde_json::Value>,
     usage: Option<serde_json::Value>,
+    #[serde(rename = "contextCompression")]
+    context_compression: Option<serde_json::Value>,
     #[serde(rename = "capabilitySnapshot")]
     capability_snapshot: Option<serde_json::Value>,
     #[serde(rename = "agentMode")]
@@ -1166,6 +1168,24 @@ fn event_log_details(task_id: &str, event: &serde_json::Value) -> serde_json::Va
             "taskId": task_id,
             "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
         }),
+        "context_compression" => {
+            let compression = event
+                .get("contextCompression")
+                .unwrap_or(&serde_json::Value::Null);
+            serde_json::json!({
+                "taskId": task_id,
+                "compressionId": compression.get("id").and_then(|value| value.as_str()),
+                "compressedThroughMessageId": compression
+                    .get("compressedThroughMessageId")
+                    .and_then(|value| value.as_str()),
+                "originalTokenEstimate": compression
+                    .get("originalTokenEstimate")
+                    .and_then(|value| value.as_u64()),
+                "compressedTokenEstimate": compression
+                    .get("compressedTokenEstimate")
+                    .and_then(|value| value.as_u64()),
+            })
+        }
         "tool_event" => {
             let tool_event = event.get("event").unwrap_or(&serde_json::Value::Null);
             serde_json::json!({
@@ -1461,12 +1481,8 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
 
             CREATE INDEX IF NOT EXISTS idx_messages_session_sort
               ON messages(session_id, sort_index);
-            CREATE INDEX IF NOT EXISTS idx_messages_session_deleted_sort
-              ON messages(session_id, deleted_at, sort_index);
             CREATE INDEX IF NOT EXISTS idx_message_versions_message_version
               ON message_versions(message_id, version_index);
-            CREATE INDEX IF NOT EXISTS idx_message_versions_message_deleted_version
-              ON message_versions(message_id, deleted_at, version_index);
             "#,
         )
         .map_err(|error| format!("Failed to initialize SQLite schema: {error}"))?;
@@ -1588,6 +1604,17 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
             ));
         }
     }
+
+    connection
+        .execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_messages_session_deleted_sort
+              ON messages(session_id, deleted_at, sort_index);
+            CREATE INDEX IF NOT EXISTS idx_message_versions_message_deleted_version
+              ON message_versions(message_id, deleted_at, version_index);
+            "#,
+        )
+        .map_err(|error| format!("Failed to initialize SQLite deleted_at indexes: {error}"))?;
 
     Ok(connection)
 }
@@ -2645,6 +2672,7 @@ fn spawn_agent_task<R: Runtime>(
         task_tree: Vec::new(),
         reasoning: Vec::new(),
         usage: None,
+        context_compression: None,
         capability_snapshot: None,
         agent_mode: None,
         route_decision: None,
@@ -2755,6 +2783,15 @@ fn spawn_agent_task<R: Runtime>(
                 }),
                 Some("usage") => with_snapshot(&stdout_snapshot, |current| {
                     current.usage = extract_object(event.get("usage"));
+                }),
+                Some("context_compression") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "info",
+                        "agent_context_compression",
+                        event_log_details(&stdout_task_id, &event),
+                    );
+                    current.context_compression = extract_object(event.get("contextCompression"));
                 }),
                 Some("retry_progress") => with_snapshot(&stdout_snapshot, |current| {
                     append_app_log(
@@ -2919,6 +2956,11 @@ fn spawn_agent_task<R: Runtime>(
                         current.task_tree = extract_array(result.get("taskTree"));
                         current.reasoning = extract_array(result.get("reasoning"));
                         current.usage = extract_object(result.get("usage"));
+                        if let Some(context_compression) =
+                            extract_object(result.get("contextCompression"))
+                        {
+                            current.context_compression = Some(context_compression);
+                        }
                         current.capability_snapshot =
                             extract_object(result.get("capabilitySnapshot"));
                         current.agent_mode = result
