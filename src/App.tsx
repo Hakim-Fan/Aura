@@ -1,4 +1,5 @@
 import { getInitialSettingsTab, getWindowKind } from './lib/windows'
+import { LogViewerWindowApp } from './LogViewerWindowApp'
 import { MainWindowApp } from './MainWindowApp'
 import { McpEditorWindowApp } from './McpEditorWindowApp'
 import { SettingsWindowApp } from './SettingsWindowApp'
@@ -15,6 +16,10 @@ export default function App() {
 
   if (windowKind === 'mcp-editor') {
     return <McpEditorWindowApp />
+  }
+
+  if (windowKind === 'log-viewer') {
+    return <LogViewerWindowApp />
   }
 
   return <MainWindowApp />

@@ -1,11 +1,14 @@
 import { emit, emitTo } from '@tauri-apps/api/event'
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import type { SettingsTab } from '../views/SettingsView'
+import { openPathInDefaultApp } from './workspace'
+import { loadSettings } from './storage'
 
-export type WindowKind = 'main' | 'settings' | 'mcp-editor'
+export type WindowKind = 'main' | 'settings' | 'mcp-editor' | 'log-viewer'
 
 const SETTINGS_WINDOW_LABEL = 'settings'
 const MCP_EDITOR_WINDOW_LABEL = 'mcp-editor'
+const LOG_VIEWER_WINDOW_LABEL = 'log-viewer'
 
 function createWindowUrl(search: string) {
   return `${window.location.origin}/${search}`
@@ -14,7 +17,7 @@ function createWindowUrl(search: string) {
 export function getWindowKind(): WindowKind {
   const params = new URLSearchParams(window.location.search)
   const kind = params.get('window')
-  if (kind === 'settings' || kind === 'mcp-editor') {
+  if (kind === 'settings' || kind === 'mcp-editor' || kind === 'log-viewer') {
     return kind
   }
   return 'main'
@@ -93,6 +96,33 @@ export async function openMcpEditorWindow(serverId?: string) {
       serverId: serverId || null,
     })
   })
+}
+
+export async function openLogViewerWindow() {
+  const existing = await WebviewWindow.getByLabel(LOG_VIEWER_WINDOW_LABEL)
+  if (existing) {
+    await emitTo(LOG_VIEWER_WINDOW_LABEL, 'log-viewer:reset-live')
+    await existing.show()
+    await existing.setFocus()
+    return
+  }
+
+  new WebviewWindow(LOG_VIEWER_WINDOW_LABEL, {
+    title: '日志看板',
+    width: 1120,
+    height: 760,
+    minWidth: 900,
+    minHeight: 620,
+    resizable: true,
+    url: createWindowUrl('?window=log-viewer'),
+  })
+}
+
+export async function openWorkspaceFolder(path?: string) {
+  const target = path?.trim() || loadSettings().cwd.trim()
+  if (target) {
+    await openPathInDefaultApp(target)
+  }
 }
 
 export async function closeCurrentWindow() {

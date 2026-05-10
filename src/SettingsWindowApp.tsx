@@ -22,7 +22,13 @@ import {
 } from './lib/storage'
 import { openPathInDefaultApp, readTextFile } from './lib/workspace'
 import { ConfirmModal } from './components/ConfirmModal'
-import { broadcastSettingsUpdated, closeCurrentWindow, openMcpEditorWindow } from './lib/windows'
+import {
+  broadcastSettingsUpdated,
+  closeCurrentWindow,
+  openLogViewerWindow,
+  openMcpEditorWindow,
+  openWorkspaceFolder,
+} from './lib/windows'
 import type {
   AgentSettings,
   LightpandaRuntimeStatusRecord,
@@ -1362,6 +1368,20 @@ export function SettingsWindowApp({ initialTab }: Props) {
     }
   }
 
+  async function handleOpenWorkspaceFolder() {
+    setGeneralStatus(null)
+    const path = draftSettings.cwd.trim()
+    if (!path) return
+    try {
+      await openWorkspaceFolder(path)
+    } catch (caught) {
+      setGeneralStatus({
+        tone: 'error',
+        message: formatCaughtMessage(caught, '打开工作目录失败。'),
+      })
+    }
+  }
+
   async function saveDraftSettings() {
     if (browserValidationError) {
       setBrowserStatus({
@@ -1487,28 +1507,32 @@ export function SettingsWindowApp({ initialTab }: Props) {
       <section className="section-shell settings-panel">
         <div className="settings-grid">
           <section className="dashboard-card">
-            <div className="section-title">默认工作目录</div>
-            <p className="muted">
-              {draftSettings.cwd.trim()
-                ? draftSettings.cwd
-                : '新会话没有手动选择目录时，会使用这里作为默认根目录。'}
-            </p>
-            <div className="header-actions">
-              <button className="secondary-button" onClick={() => void chooseDefaultWorkspace()}>
-                选择目录
+            <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,0.02)] p-3">
+              <div className="section-title flex items-center justify-between">
+                <span>默认工作目录</span>
+                <button className="secondary-button" onClick={() => void chooseDefaultWorkspace()}>
+                  选择目录
+                </button>
+              </div>
+              <button className="muted" onClick={() => void handleOpenWorkspaceFolder()}>
+                {draftSettings.cwd.trim()
+                  ? draftSettings.cwd
+                  : '新会话没有手动选择目录时，会使用这里作为默认根目录。'}
               </button>
             </div>
             <div className="mt-5 rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,0.02)] p-3">
               <div className="mb-2 flex items-center justify-between gap-3">
                 <span className="text-13px font-700 text-[var(--text-primary)]">日志目录</span>
-                <button
-                  className="secondary-button"
-                  onClick={() => void openAuraLogsFolder()}
-                  type="button"
-                >
-                  <FolderOpen size={14} />
-                  <span>打开目录</span>
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    className="secondary-button"
+                    onClick={() => void openLogViewerWindow()}
+                    type="button"
+                  >
+                    <Search size={14} />
+                    查看看板
+                  </button>
+                </div>
               </div>
               <button
                 className="block w-full truncate text-left text-12px leading-relaxed text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
@@ -1568,7 +1592,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             ) : null}
           </section>
 
-          <section className="dashboard-card">
+          {/* <section className="dashboard-card">
             <div className="section-title">提供商概览</div>
             <div className="dashboard-list">
               <div className="dashboard-row">
@@ -1587,9 +1611,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 </span>
               </div>
             </div>
-          </section>
+          </section> */}
 
-          <section className="dashboard-card">
+          {/* <section className="dashboard-card">
             <div className="section-title">意图分析模型</div>
             <p className="muted">
               用于前置判断任务是否需要联网、浏览器交互，以及是否属于复杂任务。默认跟随当前聊天模型；只有你想用更便宜或更快的模型做前置分析时，才需要单独指定。
@@ -1663,7 +1687,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 </p>
               )
             ) : null}
-          </section>
+          </section> */}
 
           <section className="dashboard-card">
             <div className="section-title">交互设置</div>
@@ -1880,15 +1904,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <div className="provider-note mt-3">
               <p>这个开关只影响 UI 展示，不会裁剪 reasoning、工具事件、阶段输出或任务树的实际记录。</p>
               <p>切换后当前会话和历史消息都会按新模式重新渲染。</p>
-            </div>
-          </section>
-
-          <section className="dashboard-card">
-            <div className="section-title">失败恢复策略</div>
-            <div className="provider-note">
-              <p>Provider 出现瞬时故障时，Aura 会默认先恢复执行，不再单独配置开关或重试次数。</p>
-              <p>每次可重试的 Provider 请求最多自动重试 5 次：先立即重试，再依次等待 1.2 秒、3 秒、7 秒和 15 秒。</p>
-              <p>聊天页会实时显示当前已经重试到第几次，以及下一次重试前还会等待多久；如果 5 次后仍失败，再结束并展示错误。</p>
             </div>
           </section>
 

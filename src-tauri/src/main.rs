@@ -161,6 +161,26 @@ struct AuraHomeState {
     plugins: Vec<AuraAssetMetadata>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct AppLogEntry {
+    timestamp: String,
+    #[serde(rename = "timestampMs")]
+    timestamp_ms: u64,
+    level: String,
+    event: String,
+    details: serde_json::Value,
+}
+
+#[derive(Clone, Serialize)]
+struct AppLogFile {
+    date: String,
+    name: String,
+    path: String,
+    size: u64,
+    #[serde(rename = "modifiedAt")]
+    modified_at: Option<u64>,
+}
+
 #[derive(Clone, Serialize)]
 struct LightpandaRuntimeStatusRecord {
     detected: bool,
@@ -1100,7 +1120,7 @@ fn append_log_line(path: PathBuf, line: &str) {
 }
 
 fn append_app_log<R: Runtime>(
-    _app: &tauri::AppHandle<R>,
+    app: &tauri::AppHandle<R>,
     level: &str,
     event: &str,
     details: serde_json::Value,
@@ -1114,18 +1134,18 @@ fn append_app_log<R: Runtime>(
     let timestamp = utc_log_timestamp(now_ms);
     let date = utc_log_date(now_ms);
     let human_line = format_app_log_line(&timestamp, level, event, &details);
-    let entry = serde_json::json!({
-        "timestamp": timestamp,
-        "timestampMs": now_ms,
-        "level": level,
-        "event": event,
-        "details": details,
-    });
+    let entry = AppLogEntry {
+        timestamp,
+        timestamp_ms: now_ms,
+        level: level.to_string(),
+        event: event.to_string(),
+        details,
+    };
     append_log_line(logs_dir.join(format!("app-{date}.log")), &human_line);
-    append_log_line(
-        logs_dir.join(format!("app-{date}.jsonl")),
-        &entry.to_string(),
-    );
+    if let Ok(serialized_entry) = serde_json::to_string(&entry) {
+        append_log_line(logs_dir.join(format!("app-{date}.jsonl")), &serialized_entry);
+    }
+    let _ = app.emit("app-log-entry", entry);
 }
 
 fn normalize_app_log_level(level: Option<String>) -> &'static str {
@@ -4410,6 +4430,97 @@ fn ensure_aura_home<R: Runtime>(app: tauri::AppHandle<R>) -> Result<AuraHomeStat
     ensure_aura_layout(&app)
 }
 
+fn system_time_to_timestamp_ms(value: SystemTime) -> Option<u64> {
+    value
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
+
+fn is_valid_app_log_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 {
+        return false;
+    }
+    bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+}
+
+#[tauri::command]
+fn list_app_log_files<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<AppLogFile>, String> {
+    let logs_dir = PathBuf::from(ensure_aura_layout(&app)?.logs_dir);
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(&logs_dir) else {
+        return Ok(files);
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(date) = file_name
+            .strip_prefix("app-")
+            .and_then(|value| value.strip_suffix(".jsonl"))
+        else {
+            continue;
+        };
+        if !is_valid_app_log_date(date) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        files.push(AppLogFile {
+            date: date.to_string(),
+            name: file_name.to_string(),
+            path: path.display().to_string(),
+            size: metadata.len(),
+            modified_at: metadata.modified().ok().and_then(system_time_to_timestamp_ms),
+        });
+    }
+
+    files.sort_by(|left, right| right.date.cmp(&left.date));
+    Ok(files)
+}
+
+#[tauri::command]
+fn read_app_log_file<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    date: String,
+) -> Result<Vec<AppLogEntry>, String> {
+    let date = date.trim();
+    if !is_valid_app_log_date(date) {
+        return Err("Invalid log date.".into());
+    }
+    let logs_dir = PathBuf::from(ensure_aura_layout(&app)?.logs_dir);
+    let path = logs_dir.join(format!("app-{date}.jsonl"));
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = fs::File::open(&path)
+        .map_err(|error| format!("Failed to open log file {}: {error}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<AppLogEntry>(&line) {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
 #[tauri::command]
 fn detect_lightpanda_runtime<R: Runtime>(
     app: tauri::AppHandle<R>,
@@ -4869,6 +4980,8 @@ fn main() {
             compress_agent_context,
             run_mcp_action,
             ensure_aura_home,
+            list_app_log_files,
+            read_app_log_file,
             detect_lightpanda_runtime,
             read_aura_file,
             write_aura_file,
