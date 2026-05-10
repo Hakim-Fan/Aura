@@ -201,6 +201,7 @@ export function buildRouteFirstSystemPrompt(
     'Do not claim that something is fixed, installed, configured, created, or completed unless the current run produced direct evidence.',
     'Do not access paths outside the configured workspace root.',
     'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
+    'When it improves clarity, use enhanced Markdown fences that the UI can render: ```mermaid for diagrams, ```csv or ```tsv for tabular data, ```json for structured data, and LaTeX math with $...$ or $$...$$. Use these only when they make the answer easier to inspect.',
     buildApprovalPolicy(settings),
     buildReasoningInstruction(settings),
   ]

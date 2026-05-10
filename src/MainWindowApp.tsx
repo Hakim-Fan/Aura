@@ -3511,12 +3511,27 @@ export function MainWindowApp() {
     }
   }
 
-  async function copyText(value: string) {
+  async function copyText(value: string, html?: string) {
     try {
-      await navigator.clipboard.writeText(value)
-      showToast('已复制到剪贴板')
+      if (html && 'ClipboardItem' in window && navigator.clipboard.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            'text/html': new Blob([html], { type: 'text/html' }),
+            'text/plain': new Blob([value], { type: 'text/plain' }),
+          }),
+        ])
+        showToast('已复制富文本内容')
+      } else {
+        await navigator.clipboard.writeText(value)
+        showToast(html ? '已复制纯文本，当前环境不支持富文本剪贴板。' : '已复制到剪贴板')
+      }
     } catch {
-      showToast('复制失败，请检查系统剪贴板权限。', 'error')
+      try {
+        await navigator.clipboard.writeText(value)
+        showToast(html ? '已复制纯文本，富文本复制失败。' : '已复制到剪贴板')
+      } catch {
+        showToast('复制失败，请检查系统剪贴板权限。', 'error')
+      }
     }
   }
 
@@ -3992,7 +4007,7 @@ export function MainWindowApp() {
                 onInspectorWidthChange={setInspectorWidth}
                 onRemoveAttachment={removeDraftAttachment}
                 onCopyPath={path => void copyText(path)}
-                onCopyText={value => void copyText(value)}
+                onCopyText={(value, html) => void copyText(value, html)}
                 onEditMessage={applyMessageToDraft}
                 onDeleteMessage={deleteMessage}
                 onSelectMessageVersion={selectMessageVersion}

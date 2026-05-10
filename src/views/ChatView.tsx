@@ -2,16 +2,22 @@ import {
   forwardRef,
   memo,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type ClipboardEvent,
+  type HTMLAttributes,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type RefObject,
   type ReactNode,
 } from 'react'
 import ReactMarkdown from 'react-markdown'
+import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import 'katex/dist/katex.min.css'
 import {
   ArrowDown,
   Bot,
@@ -23,6 +29,7 @@ import {
   ChevronRight,
   ChevronUp,
   Copy,
+  Download,
   Eye,
   FolderOpen,
   LayoutGrid,
@@ -86,6 +93,8 @@ type ModelGroup = {
   models: Array<{ id: string; enabled: boolean }>
 }
 
+type CopyTextHandler = (value: string, html?: string) => void
+
 type Props = {
   sessionId: string
   messages: ChatMessage[]
@@ -144,7 +153,7 @@ type Props = {
   onInsertFileReference: (path: string) => void
   onInspectorWidthChange: (value: number) => void
   onCopyPath: (path: string) => void
-  onCopyText: (value: string) => void
+  onCopyText: CopyTextHandler
   onEditMessage: (messageId: string) => void
   onDeleteMessage: (messageId: string) => void
   onSelectMessageVersion: (messageId: string, nextIndex: number) => void
@@ -1277,26 +1286,895 @@ function sanitizeTaskNodes(nodes: TaskNode[], finalAnswer = ''): TaskNode[] {
   })
 }
 
+const ENHANCED_CODE_LANGUAGES = new Set([
+  'csv',
+  'flowchart',
+  'json',
+  'jsonc',
+  'json5',
+  'mermaid',
+  'mmd',
+  'sequencediagram',
+  'tsv',
+])
+
+let mermaidInitialized = false
+
+function normalizeCodeLanguage(value = '') {
+  const language = String(value || '')
+    .replace(/^language-/u, '')
+    .trim()
+    .split(/\s+/u)[0]
+    .toLowerCase()
+
+  if (
+    language === 'mmd' ||
+    language === 'flowchart' ||
+    language === 'sequencediagram'
+  ) {
+    return 'mermaid'
+  }
+  if (language === 'json5') {
+    return 'jsonc'
+  }
+  return language || 'code'
+}
+
+function getFenceStart(line: string) {
+  const match = line.match(/^ {0,3}(`{3,}|~{3,})\s*([^`]*)$/u)
+  if (!match) {
+    return null
+  }
+  const marker = match[1]
+  return {
+    char: marker[0],
+    length: marker.length,
+    language: normalizeCodeLanguage(match[2] || ''),
+  }
+}
+
+function isFenceClose(line: string, fence: { char: string; length: number }) {
+  const escaped = fence.char === '`' ? '`' : '~'
+  const expression = new RegExp(`^ {0,3}${escaped}{${fence.length},}\\s*$`, 'u')
+  return expression.test(line)
+}
+
+function isCodeFenceClosed(markdown: string, language: string, raw: string) {
+  const normalizedLanguage = normalizeCodeLanguage(language)
+  const normalizedRaw = raw.trimEnd()
+  const lines = markdown.split(/\r?\n/u)
+  let activeFence: { char: string; length: number; language: string } | null = null
+  let activeLines: string[] = []
+
+  for (const line of lines) {
+    if (!activeFence) {
+      const fence = getFenceStart(line)
+      if (fence) {
+        activeFence = fence
+        activeLines = []
+      }
+      continue
+    }
+
+    if (isFenceClose(line, activeFence)) {
+      const blockContent = activeLines.join('\n').trimEnd()
+      if (activeFence.language === normalizedLanguage && blockContent === normalizedRaw) {
+        return true
+      }
+      activeFence = null
+      activeLines = []
+      continue
+    }
+
+    activeLines.push(line)
+  }
+
+  if (
+    activeFence?.language === normalizedLanguage &&
+    activeLines.join('\n').trimEnd() === normalizedRaw
+  ) {
+    return false
+  }
+
+  return true
+}
+
+function hashText(value: string) {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0
+  }
+  return Math.abs(hash).toString(36)
+}
+
+function sanitizeDownloadBasename(value: string, fallback: string) {
+  const cleaned = value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 72)
+  return cleaned || fallback
+}
+
+function timestampedFilename(base: string, extension: string) {
+  return `${sanitizeDownloadBasename(base, 'download')}-${Date.now()}.${extension}`
+}
+
+function codeFileExtension(language: string) {
+  const normalized = normalizeCodeLanguage(language)
+  const extensionByLanguage: Record<string, string> = {
+    bash: 'sh',
+    c: 'c',
+    cpp: 'cpp',
+    csharp: 'cs',
+    css: 'css',
+    diff: 'diff',
+    dockerfile: 'Dockerfile',
+    go: 'go',
+    html: 'html',
+    java: 'java',
+    javascript: 'js',
+    js: 'js',
+    json: 'json',
+    jsonc: 'jsonc',
+    jsx: 'jsx',
+    kotlin: 'kt',
+    markdown: 'md',
+    md: 'md',
+    php: 'php',
+    powershell: 'ps1',
+    py: 'py',
+    python: 'py',
+    rb: 'rb',
+    ruby: 'rb',
+    rust: 'rs',
+    sh: 'sh',
+    shell: 'sh',
+    sql: 'sql',
+    swift: 'swift',
+    toml: 'toml',
+    ts: 'ts',
+    tsx: 'tsx',
+    typescript: 'ts',
+    xml: 'xml',
+    yaml: 'yaml',
+    yml: 'yml',
+  }
+  return extensionByLanguage[normalized] || 'txt'
+}
+
+function mimeTypeForExtension(extension: string) {
+  const normalized = extension.toLowerCase()
+  if (normalized === 'html') {
+    return 'text/html;charset=utf-8'
+  }
+  if (normalized === 'json' || normalized === 'jsonc') {
+    return 'application/json;charset=utf-8'
+  }
+  if (normalized === 'svg') {
+    return 'image/svg+xml;charset=utf-8'
+  }
+  if (normalized === 'csv') {
+    return 'text/csv;charset=utf-8'
+  }
+  if (normalized === 'tsv') {
+    return 'text/tab-separated-values;charset=utf-8'
+  }
+  return 'text/plain;charset=utf-8'
+}
+
+function MarkdownCodeBlock({
+  language,
+  source,
+  onCopyText,
+  pendingLabel,
+}: {
+  language: string
+  source: string
+  onCopyText: CopyTextHandler
+  pendingLabel?: string
+}) {
+  return (
+    <div className="markdown-codeblock">
+      <div className="markdown-codeblock-head">
+        <span>{pendingLabel || language}</span>
+        <div className="markdown-data-actions">
+          <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制代码" aria-label="复制代码" onClick={() => onCopyText(source)}>
+            <Copy size={12} />
+          </button>
+          <button
+            className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+            title="下载代码"
+            aria-label="下载代码"
+            onClick={() => {
+              const extension = codeFileExtension(language)
+              downloadTextFile(
+                timestampedFilename(`code-${language || 'block'}`, extension),
+                source,
+                mimeTypeForExtension(extension),
+              )
+            }}
+          >
+            <Download size={12} />
+          </button>
+        </div>
+      </div>
+      <pre>
+        <code>{source}</code>
+      </pre>
+    </div>
+  )
+}
+
+function parseDelimitedRows(source: string, delimiter: ',' | '\t') {
+  const rows: string[][] = []
+  let row: string[] = []
+  let cell = ''
+  let quoted = false
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]
+    const next = source[index + 1]
+
+    if (char === '"') {
+      if (quoted && next === '"') {
+        cell += '"'
+        index += 1
+      } else {
+        quoted = !quoted
+      }
+      continue
+    }
+
+    if (!quoted && char === delimiter) {
+      row.push(cell)
+      cell = ''
+      continue
+    }
+
+    if (!quoted && (char === '\n' || char === '\r')) {
+      if (char === '\r' && next === '\n') {
+        index += 1
+      }
+      row.push(cell)
+      rows.push(row)
+      row = []
+      cell = ''
+      continue
+    }
+
+    cell += char
+  }
+
+  if (cell || row.length > 0) {
+    row.push(cell)
+    rows.push(row)
+  }
+
+  return rows.filter(cells => cells.some(cellValue => cellValue.trim()))
+}
+
+function escapeDelimitedCell(value: string, delimiter: ',' | '\t') {
+  const text = String(value ?? '')
+  const needsQuotes =
+    delimiter === ','
+      ? /[",\r\n]/u.test(text)
+      : /["\t\r\n]/u.test(text)
+
+  if (!needsQuotes) {
+    return text
+  }
+
+  return `"${text.replace(/"/gu, '""')}"`
+}
+
+function rowsToDelimited(rows: string[][], delimiter: ',' | '\t') {
+  return rows
+    .map(row => row.map(cell => escapeDelimitedCell(cell, delimiter)).join(delimiter))
+    .join('\n')
+}
+
+function escapeHtml(value: string) {
+  return String(value ?? '')
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+    .replace(/'/gu, '&#39;')
+}
+
+function rowsToHtmlTable(rows: string[][]) {
+  const [header = [], ...bodyRows] = rows
+  const columnCount = Math.max(...rows.map(row => row.length), 0)
+  const tableStyle = 'border-collapse:collapse;border:1px solid #d0d7de;'
+  const headerStyle = 'border:1px solid #d0d7de;padding:4px 8px;background:#f6f8fa;font-weight:600;text-align:left;'
+  const cellStyle = 'border:1px solid #d0d7de;padding:4px 8px;text-align:left;'
+  const renderCells = (row: string[], tagName: 'td' | 'th', style: string) =>
+    Array.from({ length: columnCount }, (_, index) =>
+      `<${tagName} style="${style}">${escapeHtml(row[index] || '')}</${tagName}>`,
+    ).join('')
+
+  return [
+    `<table style="${tableStyle}">`,
+    '<thead>',
+    `<tr>${renderCells(header, 'th', headerStyle)}</tr>`,
+    '</thead>',
+    '<tbody>',
+    ...bodyRows.map(row => `<tr>${renderCells(row, 'td', cellStyle)}</tr>`),
+    '</tbody>',
+    '</table>',
+  ].join('')
+}
+
+function copyTableRows(
+  rows: string[][],
+  onCopyText: (value: string, html?: string) => void,
+) {
+  if (rows.length > 0) {
+    onCopyText(rowsToDelimited(rows, '\t'), rowsToHtmlTable(rows))
+  }
+}
+
+function unwrapElement(element: Element) {
+  const parent = element.parentNode
+  if (!parent) {
+    return
+  }
+  while (element.firstChild) {
+    parent.insertBefore(element.firstChild, element)
+  }
+  parent.removeChild(element)
+}
+
+function styleClipboardMarkdownHtml(root: HTMLElement) {
+  root.querySelectorAll('table').forEach(table => {
+    table.setAttribute('style', 'border-collapse:collapse;border:1px solid #d0d7de;margin:12px 0;width:100%;')
+  })
+  root.querySelectorAll('th').forEach(cell => {
+    cell.setAttribute('style', 'border:1px solid #d0d7de;padding:4px 8px;background:#f6f8fa;font-weight:600;text-align:left;')
+  })
+  root.querySelectorAll('td').forEach(cell => {
+    cell.setAttribute('style', 'border:1px solid #d0d7de;padding:4px 8px;text-align:left;')
+  })
+  root.querySelectorAll('pre').forEach(pre => {
+    pre.setAttribute('style', 'background:#f6f8fa;border:1px solid #d0d7de;padding:12px;white-space:pre-wrap;')
+  })
+  root.querySelectorAll('blockquote').forEach(blockquote => {
+    blockquote.setAttribute('style', 'border-left:3px solid #d0d7de;margin:12px 0;padding-left:12px;color:#57606a;')
+  })
+}
+
+function buildMarkdownHtmlFromRenderedBody(body: HTMLElement | null) {
+  if (!body) {
+    return ''
+  }
+
+  const clone = body.cloneNode(true) as HTMLElement
+  clone
+    .querySelectorAll('.markdown-data-head,.markdown-codeblock-head,.assistant-streaming-markdown__veil,button')
+    .forEach(node => node.remove())
+  clone
+    .querySelectorAll('.markdown-data-block,.markdown-table-wrap')
+    .forEach(node => unwrapElement(node))
+  clone.querySelectorAll('svg').forEach(svg => {
+    if (!svg.getAttribute('xmlns')) {
+      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+    }
+  })
+  styleClipboardMarkdownHtml(clone)
+  return `<!doctype html><html><body>${clone.innerHTML}</body></html>`
+}
+
+function copyMarkdownAnswer(
+  content: string,
+  body: HTMLElement | null,
+  onCopyText: CopyTextHandler,
+) {
+  const html = buildMarkdownHtmlFromRenderedBody(body)
+  onCopyText(content, html || undefined)
+}
+
+function downloadMarkdownAnswerHtml(content: string, body: HTMLElement | null, filenameBase: string) {
+  const html =
+    buildMarkdownHtmlFromRenderedBody(body) ||
+    `<!doctype html><html><body><pre>${escapeHtml(content)}</pre></body></html>`
+  downloadTextFile(
+    timestampedFilename(filenameBase, 'html'),
+    html,
+    'text/html;charset=utf-8',
+  )
+}
+
+function downloadTextFile(filename: string, content: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+function readRenderedTableRows(table: HTMLTableElement | null) {
+  if (!table) {
+    return []
+  }
+
+  return Array.from(table.rows)
+    .map(row =>
+      Array.from(row.cells).map(cell =>
+        cell.innerText.replace(/\s+/gu, ' ').trim(),
+      ),
+    )
+    .filter(row => row.some(Boolean))
+}
+
+function DelimitedTableBlock({
+  language,
+  source,
+  onCopyText,
+}: {
+  language: string
+  source: string
+  onCopyText: CopyTextHandler
+}) {
+  const delimiter = language === 'tsv' ? '\t' : ','
+  const rows = useMemo(() => parseDelimitedRows(source, delimiter), [delimiter, source])
+  if (rows.length === 0) {
+    return <MarkdownCodeBlock language={language} source={source} onCopyText={onCopyText} />
+  }
+
+  const [header, ...bodyRows] = rows
+  const columnCount = Math.max(...rows.map(row => row.length))
+  const extension = language === 'tsv' ? 'tsv' : 'csv'
+  const normalizedSource = rowsToDelimited(rows, delimiter)
+  const mimeType =
+    language === 'tsv'
+      ? 'text/tab-separated-values;charset=utf-8'
+      : 'text/csv;charset=utf-8'
+
+  return (
+    <div className="markdown-data-block">
+      <div className="markdown-data-head">
+        <span>{language.toUpperCase()} 表格</span>
+        <div className="markdown-data-actions">
+          <button
+            className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+            title="复制表格"
+            aria-label="复制表格"
+            onClick={() => copyTableRows(rows, onCopyText)}
+          >
+            <Copy size={12} />
+          </button>
+          <button
+            className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+            title={`下载 ${extension.toUpperCase()}`}
+            aria-label={`下载 ${extension.toUpperCase()}`}
+            onClick={() => downloadTextFile(`table-${Date.now()}.${extension}`, normalizedSource, mimeType)}
+          >
+            <Download size={12} />
+          </button>
+        </div>
+      </div>
+      <div className="markdown-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              {Array.from({ length: columnCount }, (_, index) => (
+                <th key={index}>{header[index] || `Column ${index + 1}`}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {bodyRows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {Array.from({ length: columnCount }, (_, columnIndex) => (
+                  <td key={columnIndex}>{row[columnIndex] || ''}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function MarkdownTableBlock({
+  children,
+  onCopyText,
+}: {
+  children: ReactNode
+  onCopyText: CopyTextHandler
+}) {
+  const tableRef = useRef<HTMLTableElement>(null)
+
+  function getRows() {
+    return readRenderedTableRows(tableRef.current)
+  }
+
+  function handleCopy() {
+    const rows = getRows()
+    copyTableRows(rows, onCopyText)
+  }
+
+  function handleDownload() {
+    const rows = getRows()
+    if (rows.length > 0) {
+      downloadTextFile(
+        `markdown-table-${Date.now()}.csv`,
+        rowsToDelimited(rows, ','),
+        'text/csv;charset=utf-8',
+      )
+    }
+  }
+
+  return (
+    <div className="markdown-data-block markdown-table-block">
+      <div className="markdown-data-head">
+        <span>Markdown 表格</span>
+        <div className="markdown-data-actions">
+          <button
+            className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+            title="复制表格"
+            aria-label="复制表格"
+            onClick={handleCopy}
+          >
+            <Copy size={12} />
+          </button>
+          <button
+            className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]"
+            title="下载 CSV"
+            aria-label="下载 CSV"
+            onClick={handleDownload}
+          >
+            <Download size={12} />
+          </button>
+        </div>
+      </div>
+      <div className="markdown-table-wrap">
+        <table ref={tableRef}>{children}</table>
+      </div>
+    </div>
+  )
+}
+
+function renderJsonValue(value: unknown, depth = 0): ReactNode {
+  if (value === null) {
+    return <span className="json-null">null</span>
+  }
+  if (typeof value === 'string') {
+    return <span className="json-string">"{value}"</span>
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return <span className="json-primitive">{String(value)}</span>
+  }
+  if (depth >= 5) {
+    return <span className="json-muted">...</span>
+  }
+  if (Array.isArray(value)) {
+    return (
+      <div className="json-children">
+        <span className="json-muted">[</span>
+        {value.slice(0, 80).map((entry, index) => (
+          <div key={index} className="json-row">
+            <span className="json-key">{index}</span>
+            {renderJsonValue(entry, depth + 1)}
+          </div>
+        ))}
+        {value.length > 80 ? <div className="json-muted">... {value.length - 80} more</div> : null}
+        <span className="json-muted">]</span>
+      </div>
+    )
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+    return (
+      <div className="json-children">
+        <span className="json-muted">{'{'}</span>
+        {entries.slice(0, 80).map(([key, entry]) => (
+          <div key={key} className="json-row">
+            <span className="json-key">{key}</span>
+            {renderJsonValue(entry, depth + 1)}
+          </div>
+        ))}
+        {entries.length > 80 ? <div className="json-muted">... {entries.length - 80} more</div> : null}
+        <span className="json-muted">{'}'}</span>
+      </div>
+    )
+  }
+  return <span>{String(value)}</span>
+}
+
+function normalizeJsonLikeSource(source: string) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//gu, '')
+    .split('\n')
+    .map(line => line.replace(/(^|[^:])\/\/.*$/u, '$1'))
+    .join('\n')
+    .replace(/,\s*([}\]])/gu, '$1')
+}
+
+function JsonBlock({
+  source,
+  onCopyText,
+}: {
+  source: string
+  onCopyText: CopyTextHandler
+}) {
+  const parsed = useMemo(() => {
+    try {
+      return { ok: true as const, value: JSON.parse(normalizeJsonLikeSource(source)) }
+    } catch (error) {
+      return {
+        ok: false as const,
+        message: error instanceof Error ? error.message : 'JSON 解析失败',
+      }
+    }
+  }, [source])
+  const jsonSource = parsed.ok ? JSON.stringify(parsed.value, null, 2) : source
+
+  if (!parsed.ok) {
+    return (
+      <div className="markdown-data-block">
+        <div className="markdown-data-head">
+          <span>JSON 预览失败</span>
+          <div className="markdown-data-actions">
+            <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制 JSON" aria-label="复制 JSON" onClick={() => onCopyText(jsonSource)}>
+              <Copy size={12} />
+            </button>
+            <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="下载 JSON" aria-label="下载 JSON" onClick={() => downloadTextFile(timestampedFilename('json-preview', 'json'), jsonSource, 'application/json;charset=utf-8')}>
+              <Download size={12} />
+            </button>
+          </div>
+        </div>
+        <div className="markdown-render-error">{parsed.message}</div>
+        <MarkdownCodeBlock language="json" source={source} onCopyText={onCopyText} />
+      </div>
+    )
+  }
+
+  return (
+    <div className="markdown-data-block">
+      <div className="markdown-data-head">
+        <span>JSON 预览</span>
+        <div className="markdown-data-actions">
+          <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制 JSON" aria-label="复制 JSON" onClick={() => onCopyText(jsonSource)}>
+            <Copy size={12} />
+          </button>
+          <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="下载 JSON" aria-label="下载 JSON" onClick={() => downloadTextFile(timestampedFilename('json-preview', 'json'), jsonSource, 'application/json;charset=utf-8')}>
+            <Download size={12} />
+          </button>
+        </div>
+      </div>
+      <div className="markdown-json-tree">{renderJsonValue(parsed.value)}</div>
+    </div>
+  )
+}
+
+function MermaidBlock({
+  source,
+  onCopyText,
+}: {
+  source: string
+  onCopyText: CopyTextHandler
+}) {
+  const reactId = useId().replace(/:/gu, '')
+  const [svg, setSvg] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    async function renderMermaid() {
+      const trimmed = source.trim()
+      if (!trimmed) {
+        setSvg('')
+        setError('')
+        return
+      }
+
+      try {
+        const { default: mermaid } = await import('mermaid')
+        if (!mermaidInitialized) {
+          mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: 'strict',
+            theme: 'base',
+            themeVariables: {
+              fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+              primaryColor: '#eef7f4',
+              primaryBorderColor: '#7fb0a7',
+              primaryTextColor: '#10201c',
+              lineColor: '#55756e',
+              secondaryColor: '#f7f8fa',
+              tertiaryColor: '#ffffff',
+            },
+          })
+          mermaidInitialized = true
+        }
+        const result = await mermaid.render(`mermaid-${reactId}-${hashText(trimmed)}`, trimmed)
+        if (!cancelled) {
+          setSvg(result.svg)
+          setError('')
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setSvg('')
+          setError(caught instanceof Error ? caught.message : String(caught))
+        }
+      }
+    }
+
+    void renderMermaid()
+    return () => {
+      cancelled = true
+    }
+  }, [reactId, source])
+
+  return (
+    <div className="markdown-data-block">
+      <div className="markdown-data-head">
+        <span>Mermaid 图表</span>
+        <div className="markdown-data-actions">
+          <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制 Mermaid" aria-label="复制 Mermaid" onClick={() => onCopyText(source)}>
+            <Copy size={12} />
+          </button>
+          <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="下载 MMD" aria-label="下载 MMD" onClick={() => downloadTextFile(timestampedFilename('mermaid-diagram', 'mmd'), source, 'text/plain;charset=utf-8')}>
+            <Download size={12} />
+          </button>
+          <button
+            className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
+            title="下载 SVG"
+            aria-label="下载 SVG"
+            disabled={!svg}
+            onClick={() => {
+              if (svg) {
+                downloadTextFile(timestampedFilename('mermaid-diagram', 'svg'), svg, 'image/svg+xml;charset=utf-8')
+              }
+            }}
+          >
+            <Download size={12} />
+          </button>
+        </div>
+      </div>
+      {error ? (
+        <>
+          <div className="markdown-render-error">{error}</div>
+          <MarkdownCodeBlock language="mermaid" source={source} onCopyText={onCopyText} />
+        </>
+      ) : svg ? (
+        <div className="markdown-mermaid" dangerouslySetInnerHTML={{ __html: svg }} />
+      ) : (
+        <div className="markdown-render-pending">正在生成图表...</div>
+      )}
+    </div>
+  )
+}
+
+function MathDisplayBlock({
+  className,
+  children,
+  onCopyText,
+  ...props
+}: HTMLAttributes<HTMLSpanElement> & {
+  onCopyText: CopyTextHandler
+}) {
+  const mathRef = useRef<HTMLSpanElement>(null)
+  const getTexSource = () =>
+    mathRef.current
+      ?.querySelector('annotation[encoding="application/x-tex"]')
+      ?.textContent?.trim() || ''
+
+  function handleCopy() {
+    const tex = getTexSource()
+    if (tex) {
+      onCopyText(tex)
+    }
+  }
+
+  function handleDownload() {
+    const tex = getTexSource()
+    if (tex) {
+      downloadTextFile(timestampedFilename('formula', 'tex'), tex, 'text/plain;charset=utf-8')
+    }
+  }
+
+  return (
+    <span className="markdown-math-block">
+      <span ref={mathRef} className={className} {...props}>
+        {children}
+      </span>
+      <span className="markdown-math-actions">
+        <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制 TeX" aria-label="复制 TeX" onClick={handleCopy}>
+          <Copy size={12} />
+        </button>
+        <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="下载 TeX" aria-label="下载 TeX" onClick={handleDownload}>
+          <Download size={12} />
+        </button>
+      </span>
+    </span>
+  )
+}
+
+function EnhancedCodeBlock({
+  language,
+  source,
+  isClosed,
+  onCopyText,
+}: {
+  language: string
+  source: string
+  isClosed: boolean
+  onCopyText: CopyTextHandler
+}) {
+  if (!isClosed) {
+    return (
+      <MarkdownCodeBlock
+        language={language}
+        source={source}
+        onCopyText={onCopyText}
+        pendingLabel={`${language} 生成中`}
+      />
+    )
+  }
+
+  if (language === 'mermaid') {
+    return <MermaidBlock source={source} onCopyText={onCopyText} />
+  }
+  if (language === 'csv' || language === 'tsv') {
+    return <DelimitedTableBlock language={language} source={source} onCopyText={onCopyText} />
+  }
+  if (language === 'json' || language === 'jsonc') {
+    return <JsonBlock source={source} onCopyText={onCopyText} />
+  }
+
+  return <MarkdownCodeBlock language={language} source={source} onCopyText={onCopyText} />
+}
+
 function MarkdownAnswer({
   content,
   onCopyText,
+  bodyRef,
+  isStreaming = false,
 }: {
   content: string
-  onCopyText: (value: string) => void
+  onCopyText: CopyTextHandler
+  bodyRef?: RefObject<HTMLDivElement>
+  isStreaming?: boolean
 }) {
   return (
-    <div className="markdown-body">
+    <div className="markdown-body" ref={bodyRef}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
         components={{
           a: ({ href, children }) => (
             <a className="text-[var(--bg-user-bubble)] hover:underline" href={href} target="_blank" rel="noreferrer">
               {children}
             </a>
           ),
+          table: ({ children }) => (
+            <MarkdownTableBlock onCopyText={onCopyText}>{children}</MarkdownTableBlock>
+          ),
+          span: ({ className, children, node: _node, ...props }) => {
+            if (typeof className === 'string' && className.split(/\s+/u).includes('katex-display')) {
+              return (
+                <MathDisplayBlock className={className} onCopyText={onCopyText} {...props}>
+                  {children}
+                </MathDisplayBlock>
+              )
+            }
+            return (
+              <span className={className} {...props}>
+                {children}
+              </span>
+            )
+          },
           code: ({ className, children, ...props }) => {
             const raw = String(children).replace(/\n$/, '')
-            const language = className?.replace('language-', '') || 'code'
+            const language = normalizeCodeLanguage(className || 'code')
             const isBlock = className?.startsWith('language-') || raw.includes('\n')
 
             if (!isBlock) {
@@ -1307,19 +2185,18 @@ function MarkdownAnswer({
               )
             }
 
-            return (
-              <div className="markdown-codeblock">
-                <div className="markdown-codeblock-head">
-                  <span>{language}</span>
-                  <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制代码" onClick={() => onCopyText(raw)}>
-                    <Copy size={12} />
-                  </button>
-                </div>
-                <pre>
-                  <code {...props}>{raw}</code>
-                </pre>
-              </div>
-            )
+            if (ENHANCED_CODE_LANGUAGES.has(language)) {
+              return (
+                <EnhancedCodeBlock
+                  language={language}
+                  source={raw}
+                  isClosed={!isStreaming || isCodeFenceClosed(content, language, raw)}
+                  onCopyText={onCopyText}
+                />
+              )
+            }
+
+            return <MarkdownCodeBlock language={language} source={raw} onCopyText={onCopyText} />
           },
         }}
       >
@@ -1332,9 +2209,11 @@ function MarkdownAnswer({
 function StreamingMarkdownAnswer({
   content,
   onCopyText,
+  bodyRef,
 }: {
   content: string
-  onCopyText: (value: string) => void
+  onCopyText: CopyTextHandler
+  bodyRef?: RefObject<HTMLDivElement>
 }) {
   const previousContentRef = useRef(content)
   const [tailPulseKey, setTailPulseKey] = useState(0)
@@ -1349,7 +2228,7 @@ function StreamingMarkdownAnswer({
 
   return (
     <div className="assistant-streaming-markdown">
-      <MarkdownAnswer content={content} onCopyText={onCopyText} />
+      <MarkdownAnswer content={content} onCopyText={onCopyText} bodyRef={bodyRef} isStreaming />
       {tailPulseKey > 0 ? (
         <div key={tailPulseKey} className="assistant-streaming-markdown__veil" />
       ) : null}
@@ -2460,7 +3339,7 @@ function MessageEventCard({
   event: MessageEvent
   onHandleApproval?: (decision: 'approve' | 'deny') => void
   onCancelCurrentStep?: () => void
-  onCopyText?: (value: string) => void
+  onCopyText?: CopyTextHandler
 }) {
   const isShellLog = event.kind === 'shell'
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
@@ -2514,6 +3393,22 @@ function MessageEventCard({
   const shellTruncationNote =
     parsedShellSnapshot?.truncated === true ? '输出较长，仅保留了最近一部分。' : ''
   const shouldShowGenericSummary = !isShellLog && Boolean(event.summary)
+  const shellLogText = [
+    shellCommand ? `Command\n${shellCommand}` : '',
+    shellOutputText ? `Output\n${shellOutputText}` : '',
+    shellErrorText ? `Error\n${shellErrorText}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  const genericDetailText = !isShellLog
+    ? [
+      event.input ? `Input\n${event.input}` : '',
+      event.output ? `Output\n${event.output}` : '',
+      event.error ? `Error\n${event.error}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+    : ''
 
   if (!isApproval && !isUserInputWait && isSearchControllerDecisionEvent && parsedOutput) {
     return <SearchControllerDecisionCard output={parsedOutput} />
@@ -2632,9 +3527,25 @@ function MessageEventCard({
       ) : null}
       {hasShellDetails ? (
         <div className="mt-2 rounded-xl border border-[rgba(15,23,42,0.06)] bg-[#f4f4f5] p-3">
-          {shellStatusDetail ? (
-            <div className="mb-2 text-11px font-600 text-[var(--text-secondary)] opacity-80">
-              {shellStatusDetail}
+          {shellStatusDetail || shellLogText ? (
+            <div className="mb-2 flex items-center justify-between gap-2">
+              {shellStatusDetail ? (
+                <div className="text-11px font-600 text-[var(--text-secondary)] opacity-80">
+                  {shellStatusDetail}
+                </div>
+              ) : <span />}
+              {shellLogText ? (
+                <div className="markdown-data-actions">
+                  {onCopyText ? (
+                    <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制日志" aria-label="复制日志" onClick={() => onCopyText(shellLogText)}>
+                      <Copy size={12} />
+                    </button>
+                  ) : null}
+                  <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="下载 LOG" aria-label="下载 LOG" onClick={() => downloadTextFile(timestampedFilename('shell-log', 'log'), shellLogText, 'text/plain;charset=utf-8')}>
+                    <Download size={12} />
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : null}
           {shellCommand ? (
@@ -2685,6 +3596,18 @@ function MessageEventCard({
         <details className="mt-1.5 group" open={!isShellLog && event.status === 'error'}>
           <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-55">显示详细信息</summary>
           <div className="mt-2 flex flex-col gap-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3">
+            {genericDetailText ? (
+              <div className="flex items-center justify-end gap-1">
+                {onCopyText ? (
+                  <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制详情" aria-label="复制详情" onClick={() => onCopyText(genericDetailText)}>
+                    <Copy size={12} />
+                  </button>
+                ) : null}
+                <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="下载详情" aria-label="下载详情" onClick={() => downloadTextFile(timestampedFilename('tool-details', 'txt'), genericDetailText, 'text/plain;charset=utf-8')}>
+                  <Download size={12} />
+                </button>
+              </div>
+            ) : null}
             {!isShellLog && event.input && (
               <div className="flex flex-col gap-1">
                 <span className="text-10px font-600 text-gray-400 uppercase">Input</span>
@@ -3402,7 +4325,7 @@ function AssistantMessageCard({
   modelGroups: ModelGroup[]
   activeModelProfileId: string
   activeModelId: string
-  onCopyText: (value: string) => void
+  onCopyText: CopyTextHandler
   onEditMessage: (messageId: string) => void
   onDeleteMessage: (messageId: string) => void
   onSelectMessageVersion: (messageId: string, nextIndex: number) => void
@@ -3415,6 +4338,7 @@ function AssistantMessageCard({
   onToggleActivity: (messageId: string) => void
 }) {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
+  const answerBodyRef = useRef<HTMLDivElement>(null)
   const messageTimeLabel = formatConversationTimestamp(message.createdAt)
   const activity = message.activity
   const duration = activity
@@ -3590,6 +4514,28 @@ function AssistantMessageCard({
   ].filter(group => group.items.length > 0)
   const shouldShowAnswer = Boolean(message.content)
   const canCopyAnswer = Boolean(message.content)
+  const answerFilenameBase = `aura-answer-${message.id.slice(0, 8)}`
+  const answerExportActions = [
+    {
+      key: 'download-answer-markdown',
+      label: '下载 Markdown',
+      icon: Download,
+      disabled: !canCopyAnswer,
+      onClick: () =>
+        downloadTextFile(
+          timestampedFilename(answerFilenameBase, 'md'),
+          message.content,
+          'text/markdown;charset=utf-8',
+        ),
+    },
+    {
+      key: 'download-answer-html',
+      label: '下载 HTML',
+      icon: Download,
+      disabled: !canCopyAnswer,
+      onClick: () => downloadMarkdownAnswerHtml(message.content, answerBodyRef.current, answerFilenameBase),
+    },
+  ]
   const fallbackStatusTitle = !isStreaming && !shouldShowAnswer
     ? (message.events?.length || 0) > 0
       ? '模型执行了操作，但没有生成最终总结回答。'
@@ -3779,9 +4725,9 @@ function AssistantMessageCard({
 
           {shouldShowAnswer && !shouldSuppressStreamingAnswerBody ? (
             isStreaming ? (
-              <StreamingMarkdownAnswer content={message.content} onCopyText={onCopyText} />
+              <StreamingMarkdownAnswer content={message.content} onCopyText={onCopyText} bodyRef={answerBodyRef} />
             ) : (
-              <MarkdownAnswer content={message.content} onCopyText={onCopyText} />
+              <MarkdownAnswer content={message.content} onCopyText={onCopyText} bodyRef={answerBodyRef} />
             )
           ) : isStreaming ? (
             shouldSuppressStreamingAnswerBody || isRetryInProgress ? null : (
@@ -3826,9 +4772,10 @@ function AssistantMessageCard({
                 ) : null}
                 <button
                   className="p-1.5 rounded-md hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
-                  title="复制"
+                  title="复制富文本"
+                  aria-label="复制富文本"
                   disabled={!canCopyAnswer}
-                  onClick={() => onCopyText(message.content)}
+                  onClick={() => copyMarkdownAnswer(message.content, answerBodyRef.current, onCopyText)}
                 >
                   <Copy size={14} />
                 </button>
@@ -3852,6 +4799,7 @@ function AssistantMessageCard({
                   messageId={message.id}
                   onDeleteMessage={onDeleteMessage}
                   extraActions={[
+                    ...answerExportActions,
                     ...identifierActions,
                     {
                       key: 'switch-model-regenerate',
@@ -3908,7 +4856,7 @@ function UserMessageCard({
   onOpenAttachment,
 }: {
   message: ChatMessage
-  onCopyText: (value: string) => void
+  onCopyText: CopyTextHandler
   onEditMessage: (messageId: string) => void
   onDeleteMessage: (messageId: string) => void
   onSelectMessageVersion: (messageId: string, nextIndex: number) => void
