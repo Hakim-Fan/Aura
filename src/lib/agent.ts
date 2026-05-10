@@ -13,6 +13,12 @@ import { readImageDataUrl } from './workspace'
 
 const DEFAULT_MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
 
+type AgentTaskLogContext = {
+  sessionId?: string
+  userMessageId?: string
+  assistantMessageId?: string
+}
+
 function collapseWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
 }
@@ -495,10 +501,12 @@ export async function startAgentTask(
   messages: ChatMessage[],
   capabilities?: ResolvedAgentCapabilities,
   extraCarryoverContext?: string,
+  logContext?: AgentTaskLogContext,
 ): Promise<string> {
   const payload = {
     settings,
     capabilities,
+    logContext,
     carryoverContext: mergeCarryoverContext(
       buildCarryoverWebContext(messages),
       extraCarryoverContext,

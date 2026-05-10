@@ -80,9 +80,46 @@ import { checkForUpdates, type ReleaseInfo } from './lib/updater'
 import { UpdateModal } from './components/UpdateModal'
 import { getVersion } from '@tauri-apps/api/app'
 import { sortSessionsByRecentActivity } from './lib/sessionMeta'
+import { setRendererLogContext } from './lib/logging'
+import {
+  generateSessionTitle as generateSessionTitleWithProvider,
+  type TitleGenerationContext,
+} from './lib/provider'
 
 function createId() {
   return Math.random().toString(36).slice(2, 10)
+}
+
+function randomIdPart(length = 8) {
+  return Math.random().toString(36).slice(2, 2 + length)
+}
+
+function timestampIdPart(includeSeconds = false) {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const parts = [
+    pad(now.getFullYear() % 100),
+    pad(now.getMonth() + 1),
+    pad(now.getDate()),
+    pad(now.getHours()),
+    pad(now.getMinutes()),
+  ]
+  if (includeSeconds) {
+    parts.push(pad(now.getSeconds()))
+  }
+  return parts.join('')
+}
+
+function createSessionId() {
+  return `${timestampIdPart()}-${randomIdPart()}`
+}
+
+function sessionRandomPart(sessionId: string) {
+  return sessionId.split('-').filter(Boolean).at(-1) || randomIdPart()
+}
+
+function createMessageId(sessionId: string) {
+  return `${sessionRandomPart(sessionId)}-${timestampIdPart(true)}-${randomIdPart()}`
 }
 
 const MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
@@ -186,6 +223,7 @@ function getErrorMessage(caught: unknown, fallback: string) {
 }
 
 function createSession(settings: AgentSettings): Session {
+  const sessionId = createSessionId()
   const activeProfile =
     settings.providerProfiles.find(profile => profile.id === settings.activeProviderProfileId) ||
     settings.providerProfiles[0] ||
@@ -196,7 +234,7 @@ function createSession(settings: AgentSettings): Session {
       : activeProfile?.models.find(model => model.enabled)?.id || ''
 
   return {
-    id: createId(),
+    id: sessionId,
     title: '新会话',
     providerProfileId: settings.activeProviderProfileId,
     provider: settings.provider,
@@ -217,6 +255,73 @@ function summarizeTitle(input: string) {
     return '新会话'
   }
   return compact.length > 28 ? `${compact.slice(0, 28)}...` : compact
+}
+
+function clipTitleContextText(value = '', limit = 500) {
+  const compact = value
+    .replace(/```[\s\S]*?```/g, block => `${block.slice(0, 260)}\n[代码块已截断]`)
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!compact) {
+    return ''
+  }
+  return compact.length > limit ? `${compact.slice(0, Math.max(0, limit - 3)).trim()}...` : compact
+}
+
+function pathBaseName(path = '') {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) || path
+}
+
+function collectMessageAttachmentHints(message: ChatMessage) {
+  const hints = new Set<string>()
+  for (const attachment of message.attachments || []) {
+    const label = attachment.name || pathBaseName(attachment.path)
+    if (label) {
+      hints.add(`- ${label}`)
+    }
+  }
+  for (const part of message.parts || []) {
+    if ((part.type === 'file' || part.type === 'image') && (part.name || part.path)) {
+      hints.add(`- ${part.name || pathBaseName(part.path || '')}`)
+    }
+  }
+  return Array.from(hints)
+}
+
+function titleContextMessage(message: ChatMessage, limit: number) {
+  const partText = (message.parts || [])
+    .filter(part => part.type === 'text')
+    .map(part => part.text)
+    .join('\n')
+  return {
+    id: message.id,
+    role: message.role,
+    content: clipTitleContextText(message.content || partText, limit),
+  }
+}
+
+function buildTitleGenerationContext(session: Session): TitleGenerationContext {
+  const messages = session.messages
+  const openingMessages = messages
+    .filter(message => message.role === 'user')
+    .slice(0, 2)
+    .map(message => titleContextMessage(message, 500))
+    .filter(message => message.content)
+  const recentMessages = messages
+    .slice(-8)
+    .map(message => titleContextMessage(message, message.role === 'user' ? 600 : 420))
+    .filter(message => message.content)
+  const attachments = messages.flatMap(collectMessageAttachmentHints).slice(0, 12)
+
+  return {
+    currentTitle: session.title,
+    compressedSummary: session.contextCompression?.summary
+      ? clipTitleContextText(session.contextCompression.summary, 1200)
+      : undefined,
+    openingMessages,
+    recentMessages,
+    attachments,
+  }
 }
 
 function collectExpandablePaths(tree: WorkspaceNode | null) {
@@ -448,6 +553,12 @@ type RunningTaskBinding = {
   taskId: string
   messageId: string
   variantIndex: number
+}
+
+type ToastState = {
+  id: number
+  message: string
+  tone: 'success' | 'error'
 }
 
 function createEmptyComposerState(): ComposerState {
@@ -1373,12 +1484,37 @@ export function MainWindowApp() {
   >({})
   const [sessionMessagesLoading, setSessionMessagesLoading] = useState<Record<string, boolean>>({})
   const [contextCompressionSessionId, setContextCompressionSessionId] = useState<string | null>(null)
+  const [toast, setToast] = useState<ToastState | null>(null)
+  const toastTimerRef = useRef<number | null>(null)
 
   // --- Update Check Logic ---
   const [currentVersion, setCurrentVersion] = useState('')
   const [updateRelease, setUpdateRelease] = useState<ReleaseInfo | null>(null)
   const [isUpdateModalOpen, setUpdateModalOpen] = useState(false)
   const lastCheckTime = useRef<number>(0)
+
+  function showToast(message: string, tone: ToastState['tone'] = 'success') {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current)
+    }
+    setToast({
+      id: Date.now(),
+      message,
+      tone,
+    })
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null)
+      toastTimerRef.current = null
+    }, 1800)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current)
+      }
+    }
+  }, [])
 
   const handleCheckUpdate = async (force = false) => {
     const now = Date.now()
@@ -1482,6 +1618,14 @@ export function MainWindowApp() {
   const draftResearchMode = activeComposerState.researchMode
   const agentTask = activeSession ? agentTasksBySession[activeSession.id] || null : null
   const activeRunningTask = activeSession ? runningTasksBySession[activeSession.id] || null : null
+
+  useEffect(() => {
+    setRendererLogContext({
+      sessionId: activeSession?.id,
+      taskId: activeRunningTask?.taskId,
+      messageId: activeRunningTask?.messageId,
+    })
+  }, [activeSession?.id, activeRunningTask?.messageId, activeRunningTask?.taskId])
 
   const filteredSessions = useMemo(() => {
     const keyword = sessionFilter.trim().toLowerCase()
@@ -2419,6 +2563,59 @@ export function MainWindowApp() {
     }))
   }
 
+  async function generateTitleForSession(sessionId: string) {
+    const latestSettings = loadSettings()
+    setSettings(latestSettings)
+    const target = sessions.find(session => session.id === sessionId)
+    if (!target) {
+      throw new Error('会话不存在，无法生成标题。')
+    }
+
+    const messages = target.messages.length > 0
+      ? target.messages
+      : await loadSessionMessages(sessionId)
+    if (messages.length === 0) {
+      throw new Error('当前会话还没有可用于总结的消息。')
+    }
+
+    const hydratedSession: Session = {
+      ...target,
+      messages,
+    }
+    const providerProfile = getSessionProviderProfile(latestSettings, hydratedSession)
+    const effectiveProvider = providerProfile?.provider || hydratedSession.provider || latestSettings.provider
+    const effectiveModel =
+      hydratedSession.model ||
+      resolvePreferredModelId(providerProfile, latestSettings.model) ||
+      latestSettings.model
+
+    if (
+      providerModeRequiresApiKey(effectiveProvider) &&
+      !providerProfile?.apiKey.trim() &&
+      !latestSettings.apiKey.trim()
+    ) {
+      throw new Error('请先在设置窗口里完成 Provider 配置。')
+    }
+
+    const runtimeSettings: AgentSettings = {
+      ...latestSettings,
+      activeProviderProfileId:
+        providerProfile?.id || hydratedSession.providerProfileId || latestSettings.activeProviderProfileId,
+      provider: effectiveProvider,
+      apiKey: providerProfile?.apiKey || latestSettings.apiKey,
+      baseUrl: providerProfile?.baseUrl || latestSettings.baseUrl,
+      model: effectiveModel,
+      cwd:
+        hydratedSession.workspacePath ||
+        hydratedSession.workspaceRoot ||
+        latestSettings.cwd,
+    }
+    return generateSessionTitleWithProvider(
+      runtimeSettings,
+      buildTitleGenerationContext(hydratedSession),
+    )
+  }
+
   async function deleteSession(sessionId: string) {
     if (runningTasksBySession[sessionId]) {
       setError('当前会话仍在执行中，请等待完成后再删除。')
@@ -2474,7 +2671,7 @@ export function MainWindowApp() {
 
   async function ensureSessionWorkspace(
     session: Session,
-    prompt: string,
+    _prompt: string,
     fallbackWorkspaceRoot = '',
   ) {
     if (session.workspacePath.trim()) {
@@ -2482,7 +2679,7 @@ export function MainWindowApp() {
     }
     const workspaceRoot = session.workspaceRoot.trim() || fallbackWorkspaceRoot.trim()
 
-    const workspacePath = await createSessionWorkspace(workspaceRoot, prompt)
+    const workspacePath = await createSessionWorkspace(workspaceRoot, session.id)
     updateSession(session.id, current => ({
       ...current,
       workspacePath,
@@ -2789,6 +2986,11 @@ export function MainWindowApp() {
         ),
         resolvedCapabilities.runtime,
         buildVariantCarryoverContext(currentAssistantVariant),
+        {
+          sessionId: activeSession.id,
+          userMessageId: assistantMessage.linkedMessageId,
+          assistantMessageId: assistantMessage.id,
+        },
       )
 
       setRunningTasksBySession(current => ({
@@ -3077,7 +3279,9 @@ export function MainWindowApp() {
       : null
 
     let runtimeMessages: ChatMessage[] = []
-    let pendingAssistantMessageId = targetAssistantMessage?.id || createId()
+    const pendingUserMessageId = targetUserMessage?.id || createMessageId(sessionId)
+    let pendingAssistantMessageId =
+      targetAssistantMessage?.id || createMessageId(sessionId)
     let nextContextCompression = activeSession.contextCompression
 
     const updatedMessages = (() => {
@@ -3093,7 +3297,7 @@ export function MainWindowApp() {
         )
         const userMessage = applyMessageVariant(
           {
-            id: createId(),
+            id: pendingUserMessageId,
             role: 'user',
             linkedMessageId: assistantMessage.id,
             content: userMessageVariant.content,
@@ -3220,6 +3424,12 @@ export function MainWindowApp() {
         runtimeSettings,
         buildRuntimeMessagesWithContextCompression(runtimeMessages, nextContextCompression),
         resolvedCapabilities.runtime,
+        undefined,
+        {
+          sessionId,
+          userMessageId: pendingUserMessageId,
+          assistantMessageId: pendingAssistantBindingMessageId,
+        },
       )
       setRunningTasksBySession(current => ({
         ...current,
@@ -3304,8 +3514,9 @@ export function MainWindowApp() {
   async function copyText(value: string) {
     try {
       await navigator.clipboard.writeText(value)
+      showToast('已复制到剪贴板')
     } catch {
-      setError('复制失败，请检查系统剪贴板权限。')
+      showToast('复制失败，请检查系统剪贴板权限。', 'error')
     }
   }
 
@@ -3679,6 +3890,8 @@ export function MainWindowApp() {
           onToggleSessionFolder={toggleSessionFolder}
           onMoveSessionToFolder={moveSessionToFolder}
           onRenameSession={renameSession}
+          onGenerateSessionTitle={generateTitleForSession}
+          onShowToast={showToast}
           onDeleteSession={sessionId => void deleteSession(sessionId)}
           onOpenSettings={() =>
             void openSettingsWindow('general').catch(caught => {
@@ -3703,6 +3916,7 @@ export function MainWindowApp() {
               </section>
             ) : (
               <ChatView
+                sessionId={activeSession.id}
                 messages={activeSession.messages}
                 displayedToolEvents={displayedToolEvents}
                 displayedTaskTree={displayedTaskTree}
@@ -3822,6 +4036,16 @@ export function MainWindowApp() {
         release={updateRelease}
         onClose={() => setUpdateModalOpen(false)}
       />
+      {toast ? (
+        <div
+          key={toast.id}
+          className={`app-toast ${toast.tone === 'error' ? 'app-toast--error' : 'app-toast--success'}`}
+          role="status"
+          aria-live="polite"
+        >
+          {toast.message}
+        </div>
+      ) : null}
     </>
   )
 }

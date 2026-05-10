@@ -1903,3 +1903,46 @@ textarea:focus {
     transform: translateY(-1px) scale(1);
   }
 }
+
+.app-toast {
+  position: fixed;
+  left: 50%;
+  top: 18px;
+  z-index: 10050;
+  min-width: 160px;
+  max-width: min(420px, calc(100vw - 40px));
+  transform: translateX(-50%);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  backdrop-filter: blur(16px);
+  animation: appToastIn 180ms ease-out;
+}
+
+.app-toast--success {
+  color: var(--accent-soft-strong);
+}
+
+.app-toast--error {
+  border-color: rgba(220, 38, 38, 0.18);
+  color: #dc2626;
+}
+
+@keyframes appToastIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}

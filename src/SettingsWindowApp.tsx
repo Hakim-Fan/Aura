@@ -166,6 +166,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
     loadSettings().activeProviderProfileId,
   )
   const [saveState, setSaveState] = useState<'idle' | 'saved'>('idle')
+  const [generalStatus, setGeneralStatus] = useState<ProviderStatusState | null>(null)
   const [providerStatus, setProviderStatus] = useState<ProviderStatusState | null>(null)
   const [browserStatus, setBrowserStatus] = useState<ProviderStatusState | null>(null)
   const [proxyStatus, setProxyStatus] = useState<ProviderStatusState | null>(null)
@@ -321,6 +322,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
     const timer = window.setTimeout(() => setProxyStatus(null), 2600)
     return () => window.clearTimeout(timer)
   }, [proxyStatus])
+
+  useEffect(() => {
+    if (!generalStatus) {
+      return
+    }
+
+    const timer = window.setTimeout(() => setGeneralStatus(null), 2600)
+    return () => window.clearTimeout(timer)
+  }, [generalStatus])
 
   useEffect(() => {
     if (!isAwaitingLightpandaSelection) {
@@ -626,8 +636,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
         const models = profile.models.some(model => model.id === modelId)
           ? profile.models.map(model =>
-              model.id === modelId ? { ...model, enabled: true } : model,
-            )
+            model.id === modelId ? { ...model, enabled: true } : model,
+          )
           : [{ id: modelId, enabled: true }, ...profile.models]
 
         return {
@@ -672,7 +682,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
         const defaultModel =
           profile.defaultModel !== modelId &&
-          models.some(model => model.enabled && model.id === profile.defaultModel)
+            models.some(model => model.enabled && model.id === profile.defaultModel)
             ? profile.defaultModel
             : models.find(model => model.enabled)?.id || ''
 
@@ -1338,6 +1348,20 @@ export function SettingsWindowApp({ initialTab }: Props) {
     }
   }
 
+  async function openAuraLogsFolder() {
+    setGeneralStatus(null)
+    try {
+      const nextAura = auraHome || (await ensureAuraHome())
+      setAuraHome(nextAura)
+      await openPathInDefaultApp(nextAura.logsDir)
+    } catch (caught) {
+      setGeneralStatus({
+        tone: 'error',
+        message: formatCaughtMessage(caught, '打开日志目录失败。'),
+      })
+    }
+  }
+
   async function saveDraftSettings() {
     if (browserValidationError) {
       setBrowserStatus({
@@ -1474,6 +1498,32 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 选择目录
               </button>
             </div>
+            <div className="mt-5 rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,0.02)] p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <span className="text-13px font-700 text-[var(--text-primary)]">日志目录</span>
+                <button
+                  className="secondary-button"
+                  onClick={() => void openAuraLogsFolder()}
+                  type="button"
+                >
+                  <FolderOpen size={14} />
+                  <span>打开目录</span>
+                </button>
+              </div>
+              <button
+                className="block w-full truncate text-left text-12px leading-relaxed text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                onClick={() => void openAuraLogsFolder()}
+                title={auraHome?.logsDir || '正在初始化 Aura 数据目录…'}
+                type="button"
+              >
+                {auraHome?.logsDir || '正在初始化 Aura 数据目录…'}
+              </button>
+            </div>
+            {generalStatus ? (
+              <div className={`provider-feedback ${generalStatus.tone === 'success' ? 'success' : 'error'} mt-3`}>
+                <span>{generalStatus.message}</span>
+              </div>
+            ) : null}
           </section>
 
           <section className="dashboard-card">

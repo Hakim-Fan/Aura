@@ -6,6 +6,8 @@ const MAX_STRING_LENGTH = 4000
 const MAX_ARRAY_ITEMS = 20
 const MAX_OBJECT_KEYS = 30
 
+let rendererLogContext: Record<string, unknown> = {}
+
 function trimString(value: string) {
   return value.length > MAX_STRING_LENGTH
     ? `${value.slice(0, MAX_STRING_LENGTH)}...`
@@ -51,11 +53,22 @@ export async function writeAppLog(
     await invoke('write_app_log', {
       level,
       event,
-      details: sanitizeLogValue(details),
+      details: sanitizeLogValue({
+        ...rendererLogContext,
+        ...details,
+      }),
     })
   } catch {
     // Logging must never break the app path it is trying to observe.
   }
+}
+
+export function setRendererLogContext(context: Record<string, unknown>) {
+  rendererLogContext = Object.fromEntries(
+    Object.entries(context).filter(
+      ([, value]) => typeof value === 'string' && value.trim().length > 0,
+    ),
+  )
 }
 
 export function installRendererLogging() {

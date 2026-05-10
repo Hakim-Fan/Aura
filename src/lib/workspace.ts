@@ -30,9 +30,9 @@ export async function openPathInDefaultApp(path: string): Promise<void> {
 
 export async function createSessionWorkspace(
   rootPath: string,
-  hint: string,
+  directoryName: string,
 ): Promise<string> {
-  return invoke<string>('create_session_workspace', { rootPath, hint })
+  return invoke<string>('create_session_workspace', { rootPath, hint: directoryName })
 }
 
 export async function importAttachmentFromPath(

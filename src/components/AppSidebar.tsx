@@ -16,11 +16,13 @@ import {
   ChevronRight,
   Folder,
   FolderPlus,
+  Loader2,
   Pencil,
   Plus,
   Search,
   Settings2,
   Trash2,
+  Wand2,
 } from 'lucide-react'
 import type { Session, SessionFolder } from '../types'
 import { formatConversationTimestamp } from '../lib/sessionMeta'
@@ -38,6 +40,8 @@ type Props = {
   onCreateSession: () => void
   onCreateSessionFolder: (name: string) => void
   onRenameSession: (sessionId: string, title: string) => void
+  onGenerateSessionTitle: (sessionId: string) => Promise<string>
+  onShowToast?: (message: string, tone?: 'success' | 'error') => void
   onRenameSessionFolder: (folderId: string, title: string) => void
   onDeleteSession: (sessionId: string) => void
   onDeleteSessionFolder: (folderId: string) => void
@@ -181,6 +185,8 @@ export function AppSidebar({
   onCreateSession,
   onCreateSessionFolder,
   onRenameSession,
+  onGenerateSessionTitle,
+  onShowToast,
   onRenameSessionFolder,
   onDeleteSession,
   onDeleteSessionFolder,
@@ -198,6 +204,7 @@ export function AppSidebar({
   } | null>(null)
   const [renameSession, setRenameSession] = useState<{ id: string; title: string } | null>(null)
   const [editingTitle, setEditingTitle] = useState('')
+  const [titleGenerating, setTitleGenerating] = useState(false)
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [folderDraft, setFolderDraft] = useState('')
   const [renameFolder, setRenameFolder] = useState<{ id: string; title: string } | null>(null)
@@ -234,6 +241,7 @@ export function AppSidebar({
   function startRename(session: Session) {
     setRenameSession({ id: session.id, title: session.title })
     setEditingTitle(session.title)
+    setTitleGenerating(false)
   }
 
   function startRenameFolder(folder: SessionFolder) {
@@ -242,6 +250,9 @@ export function AppSidebar({
   }
 
   function cancelRename() {
+    if (titleGenerating) {
+      return
+    }
     setRenameSession(null)
     setEditingTitle('')
   }
@@ -253,6 +264,9 @@ export function AppSidebar({
   }
 
   function confirmRename(sessionId: string) {
+    if (titleGenerating) {
+      return
+    }
     const nextTitle = editingTitle.trim()
     if (!nextTitle) {
       cancelRename()
@@ -260,6 +274,24 @@ export function AppSidebar({
     }
     onRenameSession(sessionId, nextTitle)
     cancelRename()
+  }
+
+  async function generateTitleForRename() {
+    if (!renameSession || titleGenerating) {
+      return
+    }
+    setTitleGenerating(true)
+    try {
+      const nextTitle = await onGenerateSessionTitle(renameSession.id)
+      setEditingTitle(nextTitle)
+    } catch (caught) {
+      const message = caught instanceof Error && caught.message.trim()
+        ? caught.message
+        : 'AI 生成标题失败。'
+      onShowToast?.(message, 'error')
+    } finally {
+      setTitleGenerating(false)
+    }
   }
 
   function confirmFolderSave() {
@@ -503,8 +535,29 @@ export function AppSidebar({
         }}
         onCancel={cancelRename}
       >
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <button
+            className="inline-flex h-9 w-[124px] shrink-0 items-center justify-center gap-2 overflow-hidden whitespace-nowrap rounded-xl border border-[rgba(79,123,116,0.18)] bg-[rgba(79,123,116,0.05)] px-3 text-12px font-700 text-[var(--accent-soft-strong)] hover:bg-[rgba(79,123,116,0.09)] disabled:cursor-not-allowed disabled:opacity-55"
+            disabled={!renameSession || titleGenerating}
+            onClick={() => void generateTitleForRename()}
+            type="button"
+          >
+            {titleGenerating ? (
+              <>
+                <Loader2 size={14} className="shrink-0 animate-spin" />
+                <span>生成中</span>
+              </>
+            ) : (
+              <>
+                <Wand2 size={14} className="shrink-0" />
+                <span>AI 总结生成</span>
+              </>
+            )}
+          </button>
+        </div>
         <textarea
           autoFocus
+          disabled={titleGenerating}
           value={editingTitle}
           onChange={event => setEditingTitle(event.target.value)}
           onKeyDown={event => {

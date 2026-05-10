@@ -87,6 +87,7 @@ type ModelGroup = {
 }
 
 type Props = {
+  sessionId: string
   messages: ChatMessage[]
   displayedToolEvents: ToolEvent[]
   displayedTaskTree: TaskNode[]
@@ -3546,6 +3547,14 @@ function AssistantMessageCard({
     isStreaming &&
     !showDetailedExecutionDetails &&
     ((message.events?.length || 0) > 0 || visiblePhaseOutputs.length > 0 || visibleSteps.length > 0)
+  const identifierActions = [
+    {
+      key: 'copy-message-id',
+      label: '复制 message_id',
+      icon: Copy,
+      onClick: () => onCopyText(message.id),
+    },
+  ]
 
   const usedTools = Array.from(
     new Set(
@@ -3843,6 +3852,7 @@ function AssistantMessageCard({
                   messageId={message.id}
                   onDeleteMessage={onDeleteMessage}
                   extraActions={[
+                    ...identifierActions,
                     {
                       key: 'switch-model-regenerate',
                       label: '切换模型重新回答',
@@ -3906,6 +3916,14 @@ function UserMessageCard({
   onOpenAttachment: (path: string) => void
 }) {
   const messageTimeLabel = formatConversationTimestamp(message.createdAt)
+  const identifierActions = [
+    {
+      key: 'copy-message-id',
+      label: '复制 message_id',
+      icon: Copy,
+      onClick: () => onCopyText(message.id),
+    },
+  ]
 
   return (
     <article className="group flex flex-col items-end gap-2">
@@ -3953,6 +3971,7 @@ function UserMessageCard({
           <MessageOverflowMenu
             messageId={message.id}
             onDeleteMessage={onDeleteMessage}
+            extraActions={identifierActions}
           />
           <MessageVersionSwitcher
             message={message}
@@ -3966,6 +3985,7 @@ function UserMessageCard({
 }
 
 export function ChatView({
+  sessionId,
   messages,
   displayedToolEvents,
   displayedTaskTree,
@@ -4284,6 +4304,15 @@ export function ChatView({
           <span>·</span>
           <button
             className="relative z-10 flex items-center gap-1 hover:text-[var(--text-primary)] cursor-pointer transition-colors bg-transparent border-none p-0 text-12px text-[var(--text-secondary)] opacity-100"
+            title="复制 session_id"
+            onClick={() => onCopyText(sessionId)}
+            type="button"
+          >
+            <span>{sessionId}</span>
+          </button>
+          {/* <span>·</span>
+          <button
+            className="relative z-10 flex items-center gap-1 hover:text-[var(--text-primary)] cursor-pointer transition-colors bg-transparent border-none p-0 text-12px text-[var(--text-secondary)] opacity-100"
             title={settings.cwd || '未设置工作区'}
             onClick={() => {
               setInspectorOpen(true)
@@ -4292,7 +4321,7 @@ export function ChatView({
           >
             <FolderOpen size={12} />
             {summarizePath(settings.cwd)}
-          </button>
+          </button> */}
         </div>
 
         {hasInspectorContent && (

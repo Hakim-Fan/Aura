@@ -84,6 +84,7 @@ struct AgentTaskHandle {
     child: Arc<Mutex<Option<std::process::Child>>>,
     stdin: Arc<Mutex<ChildStdin>>,
     snapshot: Arc<Mutex<AgentTaskSnapshot>>,
+    log_context: serde_json::Value,
 }
 
 #[derive(Clone, Deserialize)]
@@ -902,6 +903,49 @@ fn current_timestamp_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn mix_u64(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn create_task_id() -> String {
+    let counter = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id() as u64;
+    let high_seed = (now_nanos >> 64) as u64 ^ now_nanos as u64 ^ counter;
+    let low_seed = (now_nanos as u64).rotate_left(17) ^ counter.rotate_left(32) ^ pid;
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(&mix_u64(high_seed).to_be_bytes());
+    bytes[8..].copy_from_slice(&mix_u64(low_seed).to_be_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
+}
+
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -1102,6 +1146,56 @@ fn sanitize_url_for_log(value: &str) -> String {
         .to_string()
 }
 
+fn insert_log_string(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<&str>,
+) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    fields.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+}
+
+fn agent_log_context_details(task_id: &str, payload: &serde_json::Value) -> serde_json::Value {
+    let log_context = payload
+        .get("logContext")
+        .unwrap_or(&serde_json::Value::Null);
+    let assistant_message_id = log_context
+        .get("assistantMessageId")
+        .and_then(|value| value.as_str());
+    let mut fields = serde_json::Map::new();
+    insert_log_string(&mut fields, "taskId", Some(task_id));
+    insert_log_string(
+        &mut fields,
+        "sessionId",
+        log_context.get("sessionId").and_then(|value| value.as_str()),
+    );
+    insert_log_string(
+        &mut fields,
+        "userMessageId",
+        log_context
+            .get("userMessageId")
+            .and_then(|value| value.as_str()),
+    );
+    insert_log_string(&mut fields, "assistantMessageId", assistant_message_id);
+    insert_log_string(&mut fields, "messageId", assistant_message_id);
+    serde_json::Value::Object(fields)
+}
+
+fn agent_log_details(
+    context: &serde_json::Value,
+    details: serde_json::Value,
+) -> serde_json::Value {
+    let mut fields = context.as_object().cloned().unwrap_or_default();
+    if let serde_json::Value::Object(details) = details {
+        for (key, value) in details {
+            fields.insert(key, value);
+        }
+    }
+    serde_json::Value::Object(fields)
+}
+
 fn agent_payload_log_details(task_id: &str, payload: &serde_json::Value) -> serde_json::Value {
     let settings = payload.get("settings").unwrap_or(&serde_json::Value::Null);
     let message_count = payload
@@ -1109,8 +1203,7 @@ fn agent_payload_log_details(task_id: &str, payload: &serde_json::Value) -> serd
         .and_then(|value| value.as_array())
         .map(|value| value.len())
         .unwrap_or(0);
-    serde_json::json!({
-        "taskId": task_id,
+    agent_log_details(&agent_log_context_details(task_id, payload), serde_json::json!({
         "provider": settings.get("provider").and_then(|value| value.as_str()),
         "model": settings.get("model").and_then(|value| value.as_str()),
         "baseUrl": settings
@@ -1127,7 +1220,7 @@ fn agent_payload_log_details(task_id: &str, payload: &serde_json::Value) -> serd
             .unwrap_or(false),
         "cwd": settings.get("cwd").and_then(|value| value.as_str()),
         "messageCount": message_count,
-    })
+    }))
 }
 
 fn provider_action_log_details(payload: &serde_json::Value) -> serde_json::Value {
@@ -1151,29 +1244,26 @@ fn provider_action_log_details(payload: &serde_json::Value) -> serde_json::Value
     })
 }
 
-fn event_log_details(task_id: &str, event: &serde_json::Value) -> serde_json::Value {
+fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> serde_json::Value {
     let event_type = event
         .get("type")
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
     match event_type {
-        "runtime_status" => serde_json::json!({
-            "taskId": task_id,
+        "runtime_status" => agent_log_details(context, serde_json::json!({
             "phase": event.get("phase").and_then(|value| value.as_str()),
             "stalled": event.get("stalled").and_then(|value| value.as_bool()),
             "lastHeartbeatAt": event.get("lastHeartbeatAt").and_then(|value| value.as_u64()),
             "lastProgressAt": event.get("lastProgressAt").and_then(|value| value.as_u64()),
-        }),
-        "retry_progress" => serde_json::json!({
-            "taskId": task_id,
+        })),
+        "retry_progress" => agent_log_details(context, serde_json::json!({
             "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
-        }),
+        })),
         "context_compression" => {
             let compression = event
                 .get("contextCompression")
                 .unwrap_or(&serde_json::Value::Null);
-            serde_json::json!({
-                "taskId": task_id,
+            agent_log_details(context, serde_json::json!({
                 "compressionId": compression.get("id").and_then(|value| value.as_str()),
                 "compressedThroughMessageId": compression
                     .get("compressedThroughMessageId")
@@ -1184,12 +1274,11 @@ fn event_log_details(task_id: &str, event: &serde_json::Value) -> serde_json::Va
                 "compressedTokenEstimate": compression
                     .get("compressedTokenEstimate")
                     .and_then(|value| value.as_u64()),
-            })
+            }))
         }
         "tool_event" => {
             let tool_event = event.get("event").unwrap_or(&serde_json::Value::Null);
-            serde_json::json!({
-                "taskId": task_id,
+            agent_log_details(context, serde_json::json!({
                 "toolEventId": tool_event.get("id").and_then(|value| value.as_str()),
                 "source": tool_event.get("source").and_then(|value| value.as_str()),
                 "toolName": tool_event.get("name").and_then(|value| value.as_str()),
@@ -1198,21 +1287,19 @@ fn event_log_details(task_id: &str, event: &serde_json::Value) -> serde_json::Va
                 "status": tool_event.get("status").and_then(|value| value.as_str()),
                 "error": tool_event.get("error").and_then(|value| value.as_str()),
                 "errorInfo": tool_event.get("errorInfo").cloned().unwrap_or(serde_json::Value::Null),
-            })
+            }))
         }
-        "failed" => serde_json::json!({
-            "taskId": task_id,
+        "failed" => agent_log_details(context, serde_json::json!({
             "message": event.get("message").and_then(|value| value.as_str()),
             "code": event.get("code").and_then(|value| value.as_str()),
             "source": event.get("source").and_then(|value| value.as_str()),
             "rawMessage": event.get("rawMessage").and_then(|value| value.as_str()),
             "errorInfo": event.get("errorInfo").cloned().unwrap_or(serde_json::Value::Null),
             "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
-        }),
+        })),
         "completed" => {
             let result = event.get("result").unwrap_or(&serde_json::Value::Null);
-            serde_json::json!({
-                "taskId": task_id,
+            agent_log_details(context, serde_json::json!({
                 "status": "completed",
                 "usage": result.get("usage").cloned().unwrap_or(serde_json::Value::Null),
                 "agentMode": result.get("agentMode").and_then(|value| value.as_str()),
@@ -1222,12 +1309,11 @@ fn event_log_details(task_id: &str, event: &serde_json::Value) -> serde_json::Va
                     .and_then(|value| value.as_array())
                     .map(|value| value.len())
                     .unwrap_or(0),
-            })
+            }))
         }
-        _ => serde_json::json!({
-            "taskId": task_id,
+        _ => agent_log_details(context, serde_json::json!({
             "type": event_type,
-        }),
+        })),
     }
 }
 
@@ -2582,7 +2668,8 @@ fn spawn_agent_task<R: Runtime>(
     store: &AgentTaskStore,
     payload: serde_json::Value,
 ) -> Result<String, String> {
-    let task_id = format!("task-{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
+    let task_id = create_task_id();
+    let log_context = agent_log_context_details(&task_id, &payload);
     let bridge_path = resolve_bridge_script_path(&app, "ipc.mjs")?;
     let bridge_cwd = resolve_bridge_cwd(&app)?;
     let augmented_path = build_augmented_path();
@@ -2598,10 +2685,9 @@ fn spawn_agent_task<R: Runtime>(
         &app,
         "info",
         "bridge_launch_prepared",
-        serde_json::json!({
-            "taskId": task_id.as_str(),
+        agent_log_details(&log_context, serde_json::json!({
             "launch": launch_details.clone(),
-        }),
+        })),
     );
     let (mut child, used_system_node_fallback) = spawn_node_command_with_fallback(
         &app,
@@ -2620,11 +2706,10 @@ fn spawn_agent_task<R: Runtime>(
                 &app,
                 "error",
                 "bridge_launch_failed",
-                serde_json::json!({
-                    "taskId": task_id.as_str(),
+                agent_log_details(&log_context, serde_json::json!({
                     "error": message,
                     "launch": launch_details_for_error.clone(),
-                }),
+                })),
             );
             message
     })?;
@@ -2633,10 +2718,9 @@ fn spawn_agent_task<R: Runtime>(
             &app,
             "warn",
             "bridge_launch_system_node_fallback_used",
-            serde_json::json!({
-                "taskId": task_id.as_str(),
+            agent_log_details(&log_context, serde_json::json!({
                 "launch": launch_details.clone(),
-            }),
+            })),
         );
     }
 
@@ -2698,6 +2782,7 @@ fn spawn_agent_task<R: Runtime>(
         child: Arc::new(Mutex::new(Some(child))),
         stdin: Arc::new(Mutex::new(stdin)),
         snapshot: snapshot.clone(),
+        log_context: log_context.clone(),
     };
 
     {
@@ -2717,7 +2802,7 @@ fn spawn_agent_task<R: Runtime>(
     let stdout_stdin = handle.stdin.clone();
     let stdout_app = app.clone();
     let stdout_log_app = app.clone();
-    let stdout_task_id = task_id.clone();
+    let stdout_log_context = log_context.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut last_logged_phase: Option<String> = None;
@@ -2734,10 +2819,9 @@ fn spawn_agent_task<R: Runtime>(
                     &stdout_log_app,
                     "error",
                     "bridge_event_parse_failed",
-                    serde_json::json!({
-                        "taskId": stdout_task_id.as_str(),
+                    agent_log_details(&stdout_log_context, serde_json::json!({
                         "line": line,
-                    }),
+                    })),
                 );
                 with_snapshot(&stdout_snapshot, |current| {
                     current.status = "failed".into();
@@ -2752,7 +2836,7 @@ fn spawn_agent_task<R: Runtime>(
                         &stdout_log_app,
                         "info",
                         "agent_task_started",
-                        event_log_details(&stdout_task_id, &event),
+                        event_log_details(&stdout_log_context, &event),
                     );
                     current.status = "running".into();
                     current.phase = Some("preparing".into());
@@ -2789,7 +2873,7 @@ fn spawn_agent_task<R: Runtime>(
                         &stdout_log_app,
                         "info",
                         "agent_context_compression",
-                        event_log_details(&stdout_task_id, &event),
+                        event_log_details(&stdout_log_context, &event),
                     );
                     current.context_compression = extract_object(event.get("contextCompression"));
                 }),
@@ -2798,7 +2882,7 @@ fn spawn_agent_task<R: Runtime>(
                         &stdout_log_app,
                         "warn",
                         "agent_retry_progress",
-                        event_log_details(&stdout_task_id, &event),
+                        event_log_details(&stdout_log_context, &event),
                     );
                     current.retry_info = extract_object(event.get("retryInfo"));
                 }),
@@ -2826,7 +2910,7 @@ fn spawn_agent_task<R: Runtime>(
                                 "info"
                             },
                             "agent_tool_event",
-                            event_log_details(&stdout_task_id, &event),
+                            event_log_details(&stdout_log_context, &event),
                         );
                     }
                     if let Some(tool_event) = event.get("event") {
@@ -2856,7 +2940,7 @@ fn spawn_agent_task<R: Runtime>(
                             &stdout_log_app,
                             if stalled { "warn" } else { "info" },
                             "agent_runtime_status",
-                            event_log_details(&stdout_task_id, &event),
+                            event_log_details(&stdout_log_context, &event),
                         );
                         last_logged_phase = next_phase.clone();
                     }
@@ -2932,7 +3016,7 @@ fn spawn_agent_task<R: Runtime>(
                         &stdout_log_app,
                         "info",
                         "agent_task_completed",
-                        event_log_details(&stdout_task_id, &event),
+                        event_log_details(&stdout_log_context, &event),
                     );
                     current.status = "completed".into();
                     current.pending_approval = None;
@@ -2985,7 +3069,7 @@ fn spawn_agent_task<R: Runtime>(
                         &stdout_log_app,
                         "error",
                         "agent_task_failed",
-                        event_log_details(&stdout_task_id, &event),
+                        event_log_details(&stdout_log_context, &event),
                     );
                     current.status = "failed".into();
                     current.pending_approval = None;
@@ -3046,10 +3130,9 @@ fn spawn_agent_task<R: Runtime>(
                     &stdout_log_app,
                     "error",
                     "bridge_process_disconnected",
-                    serde_json::json!({
-                        "taskId": stdout_task_id.as_str(),
+                    agent_log_details(&stdout_log_context, serde_json::json!({
                         "stderr": stderr_message,
-                    }),
+                    })),
                 );
                 current.error = Some(if stderr_message.is_empty() {
                     "Node 桥接进程已断开。这可能是由于网络错误或脚本执行异常导致的崩溃。".into()
@@ -3062,7 +3145,7 @@ fn spawn_agent_task<R: Runtime>(
 
     let stderr_buf_for_thread = stderr_buffer_for_stderr.clone();
     let stderr_log_app = app.clone();
-    let stderr_task_id = task_id.clone();
+    let stderr_log_context = log_context.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -3076,10 +3159,9 @@ fn spawn_agent_task<R: Runtime>(
                 &stderr_log_app,
                 "warn",
                 "bridge_stderr",
-                serde_json::json!({
-                    "taskId": stderr_task_id.as_str(),
+                agent_log_details(&stderr_log_context, serde_json::json!({
                     "line": line.as_str(),
-                }),
+                })),
             );
             // 实时追加每行 stderr 到共享 buffer，上限 8KB
             if let Ok(mut buf) = stderr_buf_for_thread.lock() {
@@ -3130,7 +3212,7 @@ fn write_app_log<R: Runtime>(
 }
 
 #[tauri::command]
-fn run_provider_action<R: Runtime>(
+async fn run_provider_action<R: Runtime>(
     app: tauri::AppHandle<R>,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -3156,28 +3238,35 @@ fn run_provider_action<R: Runtime>(
     let launch_details_for_error = launch_details.clone();
     let payload_json = serde_json::to_string(&payload)
         .map_err(|error| format!("Failed to serialize provider action payload: {error}"))?;
-    let (output, used_system_node_fallback) = output_node_command_with_fallback(
-        &app,
-        &bridge_cwd,
-        &augmented_path,
-        |command| {
-            command.arg(&script_path).arg(&payload_json);
-        },
-    )
-    .map_err(|error| {
-            let message = format!("Failed to run provider action bridge: {error}");
-            append_app_log(
-                &app,
-                "error",
-                "provider_action_launch_failed",
-                serde_json::json!({
-                    "request": provider_action_log_details(&payload),
-                    "error": message,
-                    "launch": launch_details_for_error.clone(),
-                }),
-            );
-            message
-    })?;
+    let app_handle = app.clone();
+    let payload_for_blocking = payload.clone();
+    let (output, used_system_node_fallback) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(std::process::Output, bool), String> {
+            output_node_command_with_fallback(
+                &app_handle,
+                &bridge_cwd,
+                &augmented_path,
+                |command| {
+                    command.arg(&script_path).arg(&payload_json);
+                },
+            )
+            .map_err(|error| {
+                let message = format!("Failed to run provider action bridge: {error}");
+                append_app_log(
+                    &app_handle,
+                    "error",
+                    "provider_action_launch_failed",
+                    serde_json::json!({
+                        "request": provider_action_log_details(&payload_for_blocking),
+                        "error": message,
+                        "launch": launch_details_for_error.clone(),
+                    }),
+                );
+                message
+            })
+        })
+        .await
+        .map_err(|error| format!("Failed to join provider action task: {error}"))??;
     if used_system_node_fallback {
         append_app_log(
             &app,
@@ -3498,7 +3587,8 @@ fn release_agent_task(state: State<'_, AgentTaskStore>, task_id: String) -> Resu
 }
 
 #[tauri::command]
-fn respond_to_agent_approval(
+fn respond_to_agent_approval<R: Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, AgentTaskStore>,
     task_id: String,
     decision: String,
@@ -3510,6 +3600,7 @@ fn respond_to_agent_approval(
     let Some(handle) = tasks.get(&task_id) else {
         return Err(format!("Agent task not found: {task_id}"));
     };
+    let log_context = handle.log_context.clone();
 
     {
         let mut snapshot = handle
@@ -3522,7 +3613,7 @@ fn respond_to_agent_approval(
 
     let approval_message = serde_json::json!({
         "type": "approval",
-        "decision": decision,
+        "decision": decision.as_str(),
     });
 
     let mut stdin = handle
@@ -3537,11 +3628,24 @@ fn respond_to_agent_approval(
     )
     .map_err(|error| format!("Failed to write approval payload to Node bridge: {error}"))?;
 
+    append_app_log(
+        &app,
+        "info",
+        "agent_approval_submitted",
+        agent_log_details(
+            &log_context,
+            serde_json::json!({
+                "decision": decision.as_str(),
+            }),
+        ),
+    );
+
     Ok(())
 }
 
 #[tauri::command]
-fn append_input_to_agent_task(
+fn append_input_to_agent_task<R: Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, AgentTaskStore>,
     task_id: String,
     input: serde_json::Value,
@@ -3553,6 +3657,7 @@ fn append_input_to_agent_task(
     let Some(handle) = tasks.get(&task_id) else {
         return Err(format!("Agent task not found: {task_id}"));
     };
+    let log_context = handle.log_context.clone();
 
     {
         let mut snapshot = handle
@@ -3586,7 +3691,7 @@ fn append_input_to_agent_task(
 
     let append_message = serde_json::json!({
         "type": "append_input",
-        "input": input,
+        "input": input.clone(),
     });
 
     let mut stdin = handle
@@ -3601,11 +3706,37 @@ fn append_input_to_agent_task(
     )
     .map_err(|error| format!("Failed to write appended input payload to Node bridge: {error}"))?;
 
+    append_app_log(
+        &app,
+        "info",
+        "agent_appended_input_submitted",
+        agent_log_details(
+            &log_context,
+            serde_json::json!({
+                "inputId": input.get("id").and_then(|value| value.as_str()),
+                "contentLength": input
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.chars().count())
+                    .unwrap_or(0),
+                "attachmentCount": input
+                    .get("attachments")
+                    .and_then(|value| value.as_array())
+                    .map(|value| value.len())
+                    .unwrap_or(0),
+            }),
+        ),
+    );
+
     Ok(())
 }
 
 #[tauri::command]
-fn cancel_agent_task_step(state: State<'_, AgentTaskStore>, task_id: String) -> Result<(), String> {
+fn cancel_agent_task_step<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AgentTaskStore>,
+    task_id: String,
+) -> Result<(), String> {
     let tasks = state
         .tasks
         .lock()
@@ -3613,6 +3744,7 @@ fn cancel_agent_task_step(state: State<'_, AgentTaskStore>, task_id: String) -> 
     let Some(handle) = tasks.get(&task_id) else {
         return Err(format!("Agent task not found: {task_id}"));
     };
+    let log_context = handle.log_context.clone();
 
     let cancel_message = serde_json::json!({
         "type": "cancel_current_step",
@@ -3630,11 +3762,22 @@ fn cancel_agent_task_step(state: State<'_, AgentTaskStore>, task_id: String) -> 
     )
     .map_err(|error| format!("Failed to write step cancel payload to Node bridge: {error}"))?;
 
+    append_app_log(
+        &app,
+        "warn",
+        "agent_step_cancel_requested",
+        agent_log_details(&log_context, serde_json::json!({})),
+    );
+
     Ok(())
 }
 
 #[tauri::command]
-fn abort_agent_task(state: State<'_, AgentTaskStore>, task_id: String) -> Result<(), String> {
+fn abort_agent_task<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AgentTaskStore>,
+    task_id: String,
+) -> Result<(), String> {
     let tasks = state
         .tasks
         .lock()
@@ -3642,6 +3785,7 @@ fn abort_agent_task(state: State<'_, AgentTaskStore>, task_id: String) -> Result
     let Some(handle) = tasks.get(&task_id) else {
         return Err(format!("Agent task not found: {task_id}"));
     };
+    let log_context = handle.log_context.clone();
 
     {
         let mut child_guard = handle
@@ -3667,6 +3811,13 @@ fn abort_agent_task(state: State<'_, AgentTaskStore>, task_id: String) -> Result
             snapshot.error = Some("任务已被用户强行终止。".into());
         }
     }
+
+    append_app_log(
+        &app,
+        "warn",
+        "agent_task_abort_requested",
+        agent_log_details(&log_context, serde_json::json!({})),
+    );
 
     Ok(())
 }
@@ -4454,29 +4605,26 @@ fn open_path_in_default_app(path: String) -> Result<(), String> {
     Ok(())
 }
 
-fn slugify(value: &str) -> String {
-    let mut slug = String::new();
-    let mut previous_dash = false;
-    const MAX_SESSION_SLUG_LEN: usize = 80;
+fn sanitize_workspace_directory_name(value: &str) -> String {
+    let mut name = String::new();
+    const MAX_WORKSPACE_DIR_NAME_LEN: usize = 80;
 
     for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-            previous_dash = false;
-        } else if !previous_dash {
-            slug.push('-');
-            previous_dash = true;
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+            name.push(character);
+        } else {
+            name.push('-');
         }
 
-        if slug.len() >= MAX_SESSION_SLUG_LEN {
+        if name.len() >= MAX_WORKSPACE_DIR_NAME_LEN {
             break;
         }
     }
 
-    let trimmed = slug
+    let trimmed = name
         .trim_matches('-')
         .chars()
-        .take(MAX_SESSION_SLUG_LEN)
+        .take(MAX_WORKSPACE_DIR_NAME_LEN)
         .collect::<String>();
     if trimmed.is_empty() {
         "session".into()
@@ -4563,19 +4711,15 @@ fn create_session_workspace<R: Runtime>(
         ));
     }
 
-    let slug = slugify(&hint);
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| format!("Failed to resolve current time: {error}"))?
-        .as_secs();
+    let directory_name = sanitize_workspace_directory_name(&hint);
 
     for attempt in 0..100_u32 {
-        let suffix = if attempt == 0 {
-            format!("{timestamp}")
+        let candidate_name = if attempt == 0 {
+            directory_name.clone()
         } else {
-            format!("{timestamp}-{attempt}")
+            format!("{directory_name}-{attempt}")
         };
-        let candidate = root.join(format!("{slug}-{suffix}"));
+        let candidate = root.join(candidate_name);
         if candidate.exists() {
             continue;
         }

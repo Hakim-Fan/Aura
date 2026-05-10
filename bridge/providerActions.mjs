@@ -98,6 +98,178 @@ function openAiCompatibleHeaders(settings = {}) {
   return headers
 }
 
+function flattenOpenAiMessageContent(content) {
+  if (typeof content === 'string') {
+    return content
+  }
+  if (!Array.isArray(content)) {
+    return ''
+  }
+  return content
+    .map(block => {
+      if (!block || typeof block !== 'object') {
+        return ''
+      }
+      if (typeof block.text === 'string') {
+        return block.text
+      }
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+function flattenGeminiTextResponse(data) {
+  const parts = data?.candidates?.[0]?.content?.parts || []
+  return parts
+    .map(part => (typeof part.text === 'string' ? part.text : ''))
+    .join('\n')
+    .trim()
+}
+
+function normalizeGeneratedTitle(value) {
+  return String(value || '')
+    .replace(/<think>[\s\S]*?<\/think>/giu, '')
+    .replace(/^["'“”‘’「」『』\s]+|["'“”‘’「」『』\s]+$/gu, '')
+    .replace(/^标题\s*[:：]\s*/u, '')
+    .replace(/[。.!！?？；;，,、]+$/u, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 48)
+}
+
+function buildTitleGenerationPrompts(titleContext = {}) {
+  const systemPrompt = [
+    '你是一个会话标题生成器。',
+    '根据给定的精简会话上下文，生成一个简短中文标题。',
+    '要求：12 到 24 个汉字左右，准确反映任务主题，不要标点，不要解释，不要输出多行。',
+    '如果上下文主要是代码或产品问题，标题要包含核心对象和动作。',
+  ].join('\n')
+  const userPrompt = [
+    `当前标题：${titleContext.currentTitle || '新会话'}`,
+    titleContext.compressedSummary
+      ? `已有会话摘要：\n${titleContext.compressedSummary}`
+      : '',
+    Array.isArray(titleContext.openingMessages) && titleContext.openingMessages.length > 0
+      ? `开头信息：\n${titleContext.openingMessages
+          .map((entry, index) => `${index + 1}. [${entry.role}] ${entry.content}`)
+          .join('\n')}`
+      : '',
+    Array.isArray(titleContext.recentMessages) && titleContext.recentMessages.length > 0
+      ? `最近上下文：\n${titleContext.recentMessages
+          .map((entry, index) => `${index + 1}. [${entry.role}] ${entry.content}`)
+          .join('\n')}`
+      : '',
+    Array.isArray(titleContext.attachments) && titleContext.attachments.length > 0
+      ? `附件和文件线索：\n${titleContext.attachments.join('\n')}`
+      : '',
+    '请只返回一个标题。',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  return { systemPrompt, userPrompt }
+}
+
+async function generateOpenAiTitle(settings, titleContext) {
+  const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
+  const { systemPrompt, userPrompt } = buildTitleGenerationPrompts(titleContext)
+  const response = await guardedFetch(
+    `${apiBase}/chat/completions`,
+    {
+      method: 'POST',
+      headers: {
+        ...openAiCompatibleHeaders(settings),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: settings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        max_tokens: 80,
+        temperature: 0.2,
+        stream: false,
+      }),
+    },
+    {
+      settings,
+      proxyMode: 'provider-explicit',
+      allowLocal: true,
+      timeoutMs: 30_000,
+      timeoutMessage: 'Timed out while generating session title.',
+    },
+  )
+  const data = await parseJsonResponse(response)
+  if (!response.ok) {
+    throw new Error(data.error?.message || 'OpenAI-compatible title generation failed')
+  }
+  return normalizeGeneratedTitle(
+    flattenOpenAiMessageContent(data.choices?.[0]?.message?.content),
+  )
+}
+
+async function generateGoogleTitle(settings, titleContext) {
+  const apiBase = normalizeBaseUrl(
+    settings.baseUrl,
+    'https://generativelanguage.googleapis.com/v1beta',
+  )
+  const { systemPrompt, userPrompt } = buildTitleGenerationPrompts(titleContext)
+  const response = await guardedFetch(
+    `${apiBase}/models/${settings.model}:generateContent`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': settings.apiKey,
+      },
+      body: JSON.stringify({
+        system_instruction: {
+          parts: [{ text: systemPrompt }],
+        },
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: userPrompt }],
+          },
+        ],
+        generationConfig: {
+          maxOutputTokens: 80,
+          temperature: 0.2,
+        },
+      }),
+    },
+    {
+      settings,
+      proxyMode: 'provider-explicit',
+      allowLocal: true,
+      timeoutMs: 30_000,
+      timeoutMessage: 'Timed out while generating session title.',
+    },
+  )
+  const data = await parseJsonResponse(response)
+  if (!response.ok) {
+    throw new Error(data.error?.message || 'Google title generation failed')
+  }
+  return normalizeGeneratedTitle(flattenGeminiTextResponse(data))
+}
+
+async function generateSessionTitle(settings, titleContext) {
+  const title =
+    settings.provider === 'google'
+      ? await generateGoogleTitle(settings, titleContext)
+      : await generateOpenAiTitle(settings, titleContext)
+  if (!title) {
+    throw new Error('模型没有返回可用标题。')
+  }
+  return {
+    ok: true,
+    message: '已生成会话标题。',
+    models: [],
+    title,
+  }
+}
+
 async function fetchOpenAiModels(settings) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
   const response = await guardedFetch(
@@ -233,6 +405,10 @@ async function runAction(payload) {
     return settings.provider === 'google'
       ? fetchGoogleModels(settings)
       : fetchOpenAiModels(settings)
+  }
+
+  if (action === 'generate-title') {
+    return generateSessionTitle(settings, payload.titleContext || {})
   }
 
   throw new Error(`Unsupported provider action: ${action}`)
