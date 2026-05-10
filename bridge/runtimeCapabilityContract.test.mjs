@@ -14,3 +14,18 @@ test('runtime capability contract no longer steers tool retries from natural-lan
 
   assert.equal(result, null)
 })
+
+test('runtime capability contract flags tools outside the current capability tier', () => {
+  const result = evaluateRuntimeCapabilityContract({
+    routeState: {
+      capabilityTier: 'local-readonly',
+    },
+    selectedTools: [
+      { name: 'read_file' },
+      { name: 'exec_command', approvalCategory: 'shell' },
+    ],
+  })
+
+  assert.match(result.note, /exec_command:execute/)
+  assert.equal(result.violations[0].name, 'exec_command')
+})

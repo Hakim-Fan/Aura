@@ -56,6 +56,35 @@ test('createToolRouter keeps local write tools visible even on advise turns', ()
   assert.ok(visibleToolNames.includes('exec_command'))
 })
 
+test('createToolRouter mounts Aura admin tools only for capability admin turns', () => {
+  const registry = createToolRegistry({
+    builtinTools: [
+      buildTool('read_file'),
+      buildTool('aura_install_skill'),
+    ],
+  })
+
+  const ordinaryRouter = createToolRouter(registry, {
+    answerMode: 'advise',
+    workspaceRelated: false,
+    isCapabilityAdminTask: false,
+  })
+  const adminRouter = createToolRouter(registry, {
+    answerMode: 'execute',
+    workspaceRelated: false,
+    isCapabilityAdminTask: true,
+  })
+
+  assert.equal(
+    ordinaryRouter.modelVisibleTools.some(tool => tool.name === 'aura_install_skill'),
+    false,
+  )
+  assert.equal(
+    adminRouter.modelVisibleTools.some(tool => tool.name === 'aura_install_skill'),
+    true,
+  )
+})
+
 test('tool_search can find already-mounted direct tools', async () => {
   const registry = createToolRegistry({
     builtinTools: [

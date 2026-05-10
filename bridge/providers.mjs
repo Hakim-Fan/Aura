@@ -1936,6 +1936,14 @@ const TOOL_ERROR_REPAIR_CLEARING_TOOLS = new Set([
   'edit_file',
   'multi_edit_file',
   'replace_line_range',
+  'aura_install_skill',
+  'aura_import_skill',
+  'aura_enable_skill',
+  'aura_install_plugin',
+  'aura_import_plugin',
+  'aura_enable_plugin',
+  'aura_upsert_mcp_server',
+  'aura_remove_mcp_server',
 ])
 
 function hasWriteRepairAttemptSince(toolEvents, startIndex) {

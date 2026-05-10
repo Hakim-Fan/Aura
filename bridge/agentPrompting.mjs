@@ -267,6 +267,14 @@ export function buildRouteFirstSystemPrompt(
     sections.push(
       'For skill installation requests, first identify the target application. If the user wants to install a skill for Aura, use aura_install_skill or aura_import_skill and do not execute third-party npx/Claude/Codex installer commands directly. Treat those commands as source clues. If the user appears to be installing a skill for another application, ask for confirmation before running that app-specific installer.',
     )
+    if (capabilityProfile.hasCapabilityAdminTools) {
+      sections.push(
+        'Capability management tools are mounted. For Aura skill installation from a URL, GitHub path, npm package, npx command, local path, or pasted SKILL.md, call aura_install_skill directly with that source; use aura_import_skill only when you already have a local skill file/directory. Do not pre-download, git clone, mkdir, cp, or mv into ~/.aura/skills by shell.',
+      )
+    }
+    sections.push(
+      'Shell commands run under an execution policy. Do not use shell as a workaround for workspace file-tool boundaries: if read_file cannot access an external path, import or copy the file into the workspace, or use the dedicated Aura capability tool. Accessing /tmp, the user home directory, ~/.aura, elevated commands, package installers, and system automation may require explicit approval or be blocked.',
+    )
 
     if (capabilityProfile.hasWorkspaceWriteTools) {
       sections.push('Workspace read and write tools are mounted for this turn. Keep changes focused and verify before claiming completion.')

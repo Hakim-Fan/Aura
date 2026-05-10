@@ -22,6 +22,11 @@ import { createUnifiedExecRuntime } from './editing/unifiedExecRuntime.mjs'
 import { buildShellEnv } from './shellEnv.mjs'
 import { resolveCommandShell } from './shellRuntime.mjs'
 import { resolveAuraSkillInstallSource } from './skillInstaller.mjs'
+import {
+  evaluateToolExecutionPolicy,
+  formatExecutionPolicyPreview,
+  looksLikeShellFileMutation,
+} from './execPolicy.mjs'
 
 const ALWAYS_ON_SKILL_IDS = new Set([
   'aura-browser-operator',
@@ -150,23 +155,6 @@ function resolveShellPatchInterception(tool, args, hooks = {}) {
     summary:
       'Intercepted a shell apply_patch command and routed it through the verified patch tool.',
   }
-}
-
-const SHELL_SCRIPT_FILE_WRITE_PATTERN =
-  /\b(?:python3?|node|ruby|perl|php)\b[\s\S]*(?:\.write_text\s*\(|\.write_bytes\s*\(|\bopen\s*\([^)]*,\s*['"][wa]\b|\bwriteFile(?:Sync)?\s*\(|\bcreateWriteStream\s*\()/i
-
-const SHELL_IN_PLACE_EDIT_PATTERN =
-  /\b(?:sed|perl)\b[\s\S]*(?:\s-i(?:\s|$|['"])|--in-place\b)/i
-
-const SHELL_REDIRECT_SOURCE_WRITE_PATTERN =
-  /\b(?:cat|tee|printf|echo)\b[\s\S]*(?:>|>>)\s*['"]?[^'"\s]+\.(?:cjs|css|go|html|java|js|jsx|json|kt|mjs|md|py|rs|scss|svelte|swift|toml|ts|tsx|vue|ya?ml)\b/i
-
-function looksLikeShellFileMutation(command) {
-  return (
-    SHELL_SCRIPT_FILE_WRITE_PATTERN.test(command) ||
-    SHELL_IN_PLACE_EDIT_PATTERN.test(command) ||
-    SHELL_REDIRECT_SOURCE_WRITE_PATTERN.test(command)
-  )
 }
 
 function resolveShellFileMutationInterception(tool, args) {
@@ -1274,7 +1262,7 @@ export function createBuiltinTools(context) {
       aliases: ['installauraskill', 'install_skill', 'skill_install'],
       approvalCategory: 'file_write',
       description:
-        'Install a skill into Aura from local path, pasted SKILL.md content, raw URL, GitHub source, npm package, or an npx command without executing third-party installer scripts. Use this whenever the user wants to install a skill for Aura.',
+        'Install a skill into Aura from a local path, pasted SKILL.md content, raw URL, GitHub source such as https://github.com/owner/repo/tree/ref/path, npm package, or npx command without executing third-party installer scripts. Use this directly whenever the user wants to install a skill for Aura; do not pre-download or shell-copy into ~/.aura/skills.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1671,21 +1659,81 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   const approvalSettings = effectiveTool.approvalCategory
     ? await resolveApprovalSettings(hooks)
     : hooks.settings || {}
+  const executionPolicy = evaluateToolExecutionPolicy({
+    tool: effectiveTool,
+    args: effectiveArgs,
+    settings: approvalSettings,
+    routeState: hooks.routeState,
+  })
 
-  if (effectiveTool.approvalCategory && !isAutoApproved(effectiveTool, approvalSettings)) {
+  if (executionPolicy.action === 'deny') {
+    const policyError = createStructuredError(executionPolicy.summary, {
+      source: 'tool',
+      category: 'permission_denied',
+      code: executionPolicy.code,
+      detail: executionPolicy.reason,
+      retryable: false,
+      suggestedAction: executionPolicy.suggestedAction,
+      riskLevel: executionPolicy.riskLevel,
+      guardian: executionPolicy.guardian,
+      details: executionPolicy.details,
+    })
+    updateEvent({
+      summary: executionPolicy.summary,
+      status: 'error',
+      error: policyError.rawMessage,
+      errorInfo: policyError.errorInfo,
+    })
+    return [
+      executionPolicy.summary,
+      executionPolicy.suggestedAction || null,
+      executionPolicy.reason ? `原因：${executionPolicy.reason}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+  }
+
+  const requiresPolicyApproval = executionPolicy.action === 'prompt'
+
+  const approvalCategory = effectiveTool.approvalCategory || executionPolicy.approvalCategory
+  if (
+    approvalCategory &&
+    (requiresPolicyApproval || !isAutoApproved(effectiveTool, approvalSettings))
+  ) {
     const approvalPreview = await buildEditingApprovalPreview(
       effectiveTool,
       effectiveArgs,
       hooks,
       shellPatchInterception?.patchRoot,
     )
+    const policyPreview = requiresPolicyApproval
+      ? formatExecutionPolicyPreview(
+        executionPolicy,
+        effectiveTool.name === 'exec_command'
+          ? effectiveArgs?.cmd
+          : effectiveTool.name === 'run_shell'
+            ? effectiveArgs?.command
+            : effectiveArgs?.chars,
+      )
+      : undefined
     const decision = await hooks.requestApproval?.({
       id: eventId,
-      category: effectiveTool.approvalCategory,
+      category: approvalCategory,
       toolName: effectiveTool.name,
-      summary: effectiveTool.description,
+      summary: requiresPolicyApproval
+        ? executionPolicy.summary
+        : effectiveTool.description,
       input: stringifyOutput(effectiveArgs ?? {}),
-      output: approvalPreview,
+      output: [policyPreview, approvalPreview].filter(Boolean).join('\n\n'),
+      policy: requiresPolicyApproval
+        ? {
+          code: executionPolicy.code,
+          riskLevel: executionPolicy.riskLevel,
+          reason: executionPolicy.reason,
+          suggestedAction: executionPolicy.suggestedAction,
+          guardian: executionPolicy.guardian,
+        }
+        : undefined,
     })
 
     if (decision !== 'approve') {

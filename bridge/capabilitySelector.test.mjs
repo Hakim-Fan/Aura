@@ -132,6 +132,45 @@ test('selectTurnCapabilities prioritizes web tools from route semantics without 
   )
 })
 
+test('selectTurnCapabilities prioritizes Aura skill tools for capability admin tasks', () => {
+  const result = selectTurnCapabilities({
+    messages: [
+      {
+        content: '安装这个 Aura skill',
+      },
+    ],
+    runtimeCapabilities: { workspaceRoot: '/tmp/workspace' },
+    skillEntries: [],
+    tools: [
+      buildTool('web_fetch', ['fetch']),
+      buildTool('exec_command', ['exec']),
+      buildTool('aura_enable_skill', ['enable']),
+      buildTool('aura_install_skill', ['install']),
+      buildTool('aura_import_skill', ['import']),
+    ],
+    classification: {
+      answerMode: 'execute',
+      workspaceRelated: false,
+      needsExternalFacts: true,
+      webInteractionRequired: false,
+      isCapabilityAdmin: true,
+      systemBrowserRequested: false,
+    },
+    routeState: {
+      answerMode: 'execute',
+      workspaceRelated: false,
+      needsExternalFacts: true,
+      isCapabilityAdminTask: true,
+    },
+  })
+
+  assert.equal(result.selectedTools[0].name, 'aura_install_skill')
+  assert.ok(
+    result.selectedTools.findIndex(tool => tool.name === 'aura_import_skill') <
+      result.selectedTools.findIndex(tool => tool.name === 'exec_command'),
+  )
+})
+
 test('selectTurnCapabilities exposes all enabled skills instead of prefiltering by text match', () => {
   const result = selectTurnCapabilities({
     messages: [

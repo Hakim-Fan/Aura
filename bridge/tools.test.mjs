@@ -264,6 +264,77 @@ test('invokeTool blocks shell scripts that write source files', async () => {
   assert.equal(events.at(-1)?.errorInfo?.code, 'SHELL_FILE_MUTATION_BLOCKED')
 })
 
+test('invokeTool forces approval for shell commands that access external paths', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-external-policy-'))
+  let shellRan = false
+  let approvalRequest
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'exec_command',
+      approvalCategory: 'shell',
+      description: 'Run a shell command.',
+      async run() {
+        shellRan = true
+        return { ok: true }
+      },
+    },
+    {
+      cmd: 'cat /tmp/anthropics-skills/skills/docx/SKILL.md',
+    },
+    [],
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: false,
+      },
+      async requestApproval(request) {
+        approvalRequest = request
+        return 'deny'
+      },
+    },
+  )
+
+  assert.equal(shellRan, false)
+  assert.match(output, /denied by the user/)
+  assert.equal(approvalRequest.policy.code, 'SHELL_EXTERNAL_PATH_ACCESS')
+})
+
+test('invokeTool blocks dangerous shell commands even when shell is auto approved', async () => {
+  let shellRan = false
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'exec_command',
+      approvalCategory: 'shell',
+      description: 'Run a shell command.',
+      async run() {
+        shellRan = true
+        return { ok: true }
+      },
+    },
+    {
+      cmd: 'rm -rf /',
+    },
+    [],
+    {
+      settings: {
+        cwd: process.cwd(),
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: false,
+      },
+    },
+  )
+
+  assert.equal(shellRan, false)
+  assert.match(output, /危险 shell 命令/)
+})
+
 test('invokeTool still allows shell commands used for verification', async () => {
   let shellRan = false
 

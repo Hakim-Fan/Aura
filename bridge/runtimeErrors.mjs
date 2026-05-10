@@ -244,6 +244,9 @@ export function createStructuredError(summary, extras = {}) {
       suggestedAction: extras.suggestedAction,
       repairHint: extras.repairHint,
       retryable: extras.retryable,
+      riskLevel: extras.riskLevel,
+      guardian: extras.guardian,
+      details: extras.details,
     },
   })
   return error

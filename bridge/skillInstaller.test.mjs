@@ -57,3 +57,67 @@ test('resolveAuraSkillInstallSource treats npx commands as source clues instead 
     await staged.cleanup()
   }
 })
+
+test('resolveAuraSkillInstallSource stages a GitHub tree URL through the contents API', async () => {
+  const requestedUrls = []
+  const skillContent = [
+    '---',
+    'name: Docx Skill',
+    'description: GitHub tree install.',
+    '---',
+    '',
+    '# Docx Skill',
+  ].join('\n')
+  const staged = await resolveAuraSkillInstallSource({
+    cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-skill-installer-')),
+    source: 'https://github.com/anthropics/skills/tree/main/skills/docx',
+    fetchImpl: async url => {
+      requestedUrls.push(url)
+      if (String(url).includes('/contents/skills/docx?ref=main')) {
+        return new Response(
+          JSON.stringify([
+            {
+              type: 'file',
+              path: 'skills/docx/SKILL.md',
+              url: 'https://api.github.com/file/skill',
+            },
+            {
+              type: 'file',
+              path: 'skills/docx/LICENSE.txt',
+              url: 'https://api.github.com/file/license',
+            },
+          ]),
+          { status: 200 },
+        )
+      }
+      if (String(url).endsWith('/file/skill')) {
+        return new Response(
+          JSON.stringify({
+            type: 'file',
+            path: 'skills/docx/SKILL.md',
+            encoding: 'base64',
+            content: Buffer.from(skillContent, 'utf8').toString('base64'),
+          }),
+          { status: 200 },
+        )
+      }
+      return new Response(
+        JSON.stringify({
+          type: 'file',
+          path: 'skills/docx/LICENSE.txt',
+          encoding: 'base64',
+          content: Buffer.from('license', 'utf8').toString('base64'),
+        }),
+        { status: 200 },
+      )
+    },
+  })
+
+  try {
+    assert.equal(staged.inferredSkillId, 'docx-skill')
+    assert.equal(staged.name, 'Docx Skill')
+    assert.ok(requestedUrls.some(url => String(url).includes('/contents/skills/docx?ref=main')))
+  } finally {
+    await staged.cleanup()
+  }
+})

@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   Circle,
+  Copy,
   FolderOpen,
   Pause,
   Play,
@@ -127,12 +128,14 @@ function safeJson(value: unknown) {
 function summarizeEntry(entry: AppLogEntry) {
   const details = entry.details || {}
   const fields = [
-    'message',
-    'error',
-    'rawMessage',
-    'line',
-    'phase',
+    'toolName',
     'status',
+    'phase',
+    'error',
+    'message',
+    'rawMessage',
+    'summary',
+    'line',
     'code',
     'provider',
     'model',
@@ -173,15 +176,44 @@ function logEntryKey(entry: AppLogEntry, index: number) {
   return `${entry.timestampMs}-${entry.event}-${index}`
 }
 
+function getCorrelationId(entry: AppLogEntry) {
+  return (
+    findStringByKey(entry.details, 'taskId') ||
+    findStringByKey(entry.details, 'messageId') ||
+    findStringByKey(entry.details, 'sessionId') ||
+    ''
+  )
+}
+
+function isTroubleshootingEntry(entry: AppLogEntry) {
+  const level = normalizeLevel(entry.level)
+  const event = entry.event.toLowerCase()
+  const status = findStringByKey(entry.details, 'status')?.toLowerCase()
+  return (
+    level === 'warn' ||
+    level === 'error' ||
+    event.includes('failed') ||
+    event.includes('error') ||
+    status === 'error' ||
+    status === 'failed' ||
+    Boolean(findStringByKey(entry.details, 'error')) ||
+    Boolean(findStringByKey(entry.details, 'errorInfo'))
+  )
+}
+
 function LogEntryRow({
   entry,
   index,
   expanded,
+  relatedEntries,
+  onCopy,
   onToggle,
 }: {
   entry: AppLogEntry
   index: number
   expanded: boolean
+  relatedEntries: AppLogEntry[]
+  onCopy: (value: string, label: string) => void
   onToggle: () => void
 }) {
   const level = normalizeLevel(entry.level)
@@ -189,12 +221,24 @@ function LogEntryRow({
   const messageId = findStringByKey(entry.details, 'messageId')
   const taskId = findStringByKey(entry.details, 'taskId')
   const summary = summarizeEntry(entry)
+  const troubleshootingEntries = relatedEntries.filter(isTroubleshootingEntry)
+  const contextEntries = troubleshootingEntries.length > 0
+    ? troubleshootingEntries
+    : relatedEntries.filter(item => item !== entry).slice(-8)
+  const contextLabel = taskId ? '同任务排障上下文' : '相关日志上下文'
 
   return (
-    <button
+    <div
       className={`log-entry log-entry--${level}`}
       onClick={onToggle}
-      type="button"
+      role="button"
+      tabIndex={0}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onToggle()
+        }
+      }}
     >
       <div className="log-entry__main">
         <span className="log-entry__index">{index + 1}</span>
@@ -211,9 +255,72 @@ function LogEntryRow({
       </div>
       <div className="log-entry__summary">{summary}</div>
       {expanded ? (
-        <pre className="log-entry__details">{safeJson(entry.details)}</pre>
+        <div className="log-entry__expanded" onClick={event => event.stopPropagation()}>
+          <div className="log-entry__actions">
+            <button
+              onClick={() => onCopy(safeJson(entry), '整条日志')}
+              type="button"
+            >
+              <Copy size={13} />
+              <span>复制整条</span>
+            </button>
+            <button
+              onClick={() => onCopy(safeJson(entry.details), 'details')}
+              type="button"
+            >
+              <Copy size={13} />
+              <span>复制 details</span>
+            </button>
+            {relatedEntries.length > 1 ? (
+              <button
+                onClick={() => onCopy(safeJson(relatedEntries), '排障上下文')}
+                type="button"
+              >
+                <Copy size={13} />
+                <span>复制上下文</span>
+              </button>
+            ) : null}
+          </div>
+          {relatedEntries.length > 1 ? (
+            <div className="log-entry__context">
+              <div className="log-entry__context-title">
+                {contextLabel}
+                <span>
+                  {contextEntries.length} / {relatedEntries.length} 条
+                </span>
+              </div>
+              {contextEntries.length > 0 ? (
+                <div className="log-entry__context-list">
+                  {contextEntries.map((contextEntry, contextIndex) => {
+                    const contextLevel = normalizeLevel(contextEntry.level)
+                    return (
+                      <div
+                        className={`log-entry__context-item log-entry__context-item--${contextLevel}`}
+                        key={`${contextEntry.timestampMs}-${contextEntry.event}-${contextIndex}`}
+                      >
+                        <span className="log-entry__context-time">
+                          {formatTime(contextEntry.timestamp)}
+                        </span>
+                        <span className={`log-entry__level log-entry__level--${contextLevel}`}>
+                          {contextLevel.toUpperCase()}
+                        </span>
+                        <span className="log-entry__context-event">{contextEntry.event}</span>
+                        <span className="log-entry__context-summary">
+                          {summarizeEntry(contextEntry)}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="log-entry__context-empty">同一上下文里暂时没有错误或警告。</div>
+              )}
+            </div>
+          ) : null}
+          <pre className="log-entry__details">{safeJson(entry)}</pre>
+        </div>
       ) : null}
-    </button>
+    </div>
   )
 }
 
@@ -245,6 +352,20 @@ export function LogViewerWindowApp() {
       return logSearchText(entry).includes(normalizedSearch)
     })
   }, [levelFilter, search, sourceEntries])
+
+  const relatedEntriesById = useMemo(() => {
+    const groups = new Map<string, AppLogEntry[]>()
+    for (const entry of sourceEntries) {
+      const correlationId = getCorrelationId(entry)
+      if (!correlationId) {
+        continue
+      }
+      const group = groups.get(correlationId) || []
+      group.push(entry)
+      groups.set(correlationId, group)
+    }
+    return groups
+  }, [sourceEntries])
 
   const rowVirtualizer = useVirtualizer({
     count: filteredEntries.length,
@@ -297,6 +418,21 @@ export function LogViewerWindowApp() {
       setStatus({
         tone: 'error',
         message: caught instanceof Error ? caught.message : '打开日志目录失败。',
+      })
+    }
+  }
+
+  async function copyLogText(value: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(value)
+      setStatus({
+        tone: 'success',
+        message: `已复制${label}。`,
+      })
+    } catch {
+      setStatus({
+        tone: 'error',
+        message: `复制${label}失败，请检查剪贴板权限。`,
       })
     }
   }
@@ -385,8 +521,12 @@ export function LogViewerWindowApp() {
           <button
             className={mode === 'history' ? 'active' : ''}
             onClick={() => {
-              setMode('history')
               setExpandedKey('')
+              if (historyEntries.length === 0 && selectedDate) {
+                void loadHistory(selectedDate)
+              } else {
+                setMode('history')
+              }
             }}
             type="button"
           >
@@ -448,7 +588,13 @@ export function LogViewerWindowApp() {
           <>
             <select
               className="log-viewer-select"
-              onChange={event => setSelectedDate(event.target.value)}
+              onChange={event => {
+                const nextDate = event.target.value
+                setSelectedDate(nextDate)
+                if (mode === 'history' && nextDate) {
+                  void loadHistory(nextDate)
+                }
+              }}
               value={selectedDate}
             >
               {logFiles.length === 0 ? (
@@ -510,6 +656,7 @@ export function LogViewerWindowApp() {
               {virtualItems.map(virtualItem => {
                 const entry = filteredEntries[virtualItem.index]
                 const key = logEntryKey(entry, virtualItem.index)
+                const relatedEntries = relatedEntriesById.get(getCorrelationId(entry)) || [entry]
                 return (
                   <div
                     className="log-viewer-virtual-row"
@@ -524,6 +671,8 @@ export function LogViewerWindowApp() {
                       entry={entry}
                       expanded={expandedKey === key}
                       index={virtualItem.index}
+                      relatedEntries={relatedEntries}
+                      onCopy={(value, label) => void copyLogText(value, label)}
                       onToggle={() => setExpandedKey(current => (current === key ? '' : key))}
                     />
                   </div>

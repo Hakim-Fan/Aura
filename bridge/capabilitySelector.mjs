@@ -94,7 +94,13 @@ function scoreToolOrdering(tool, context, originalIndex) {
   }
 
   if (context.routeState?.isCapabilityAdminTask === true && tool.name.startsWith('aura_')) {
-    score += 70
+    score += 150
+    if (tool.name === 'aura_install_skill' || tool.name === 'aura_import_skill') {
+      score += 35
+    }
+    if (tool.name === 'aura_enable_skill') {
+      score += 12
+    }
   }
 
   if (isWorkspaceExecute) {

@@ -118,6 +118,33 @@ function resolveFallbackPlanningHints(messages, latestUserMessage) {
   }
 }
 
+function latestUserText(messages) {
+  return normalizeText(collectMessageText(getLatestUserMessage(messages))).toLowerCase()
+}
+
+function latestUserRequestsCapabilityAdmin(messages) {
+  const text = latestUserText(messages)
+  if (!text) {
+    return false
+  }
+
+  const adminVerb =
+    /(?:安装|导入|添加|启用|禁用|开启|关闭|卸载|删除|移除|更新|管理|配置|\binstall\b|\bimport\b|\badd\b|\benable\b|\bdisable\b|\bremove\b|\bdelete\b|\buninstall\b|\bupdate\b|\bmanage\b|\bconfigure\b)/iu
+  const capabilityNoun =
+    /(?:\bskills?\b|技能|\bplugins?\b|插件|\bmcp\b|\bcapabilit(?:y|ies)\b|能力|agent\s+capabilit(?:y|ies)|工具能力)/iu
+
+  return (
+    (adminVerb.test(text) && capabilityNoun.test(text)) ||
+    /\baura_(?:install|import|enable|disable|remove|upsert)_(?:skill|plugin|mcp)/iu.test(text) ||
+    /(?:~\/|\$home\/)?\.aura\/(?:skills|plugins|mcp)/iu.test(text)
+  )
+}
+
+function latestUserHasRemoteCapabilitySource(messages) {
+  const text = latestUserText(messages)
+  return /(?:https?:\/\/|github:|npm:|\bnpx\b|github\.com|raw\.githubusercontent\.com|npmjs\.com)/iu.test(text)
+}
+
 function flattenOpenAiMessageContent(content) {
   if (typeof content === 'string') {
     return content
@@ -341,6 +368,22 @@ function inferFallbackClassification(messages, options = {}) {
 }
 
 export function inferDeterministicClassification(messages, options = {}) {
+  if (latestUserRequestsCapabilityAdmin(messages)) {
+    const latestUserMessage = getLatestUserMessage(messages)
+    const planningHints = resolveFallbackPlanningHints(messages, latestUserMessage)
+    return parseAndValidateClassification({
+      answerMode: 'execute',
+      needsExternalFacts: latestUserHasRemoteCapabilitySource(messages),
+      webInteractionRequired: false,
+      workspaceRelated: countLatestUserFileParts(latestUserMessage) > 0,
+      isCapabilityAdmin: true,
+      systemBrowserRequested: false,
+      taskComplexity: planningHints.taskComplexity === 'low' ? 'medium' : planningHints.taskComplexity,
+      planDepth: planningHints.planDepth === 'single_step' ? 'multi_step' : planningHints.planDepth,
+      confidence: 'high',
+    })
+  }
+
   return null
 }
 
@@ -454,6 +497,15 @@ export async function classifyIntent(messages, settings) {
 }
 
 export async function resolveIntentClassification(messages, settings, options = {}) {
+  const deterministicClassification = inferDeterministicClassification(messages, options)
+  if (deterministicClassification) {
+    return {
+      classification: deterministicClassification,
+      source: 'deterministic',
+      reason: 'capability-admin-keyword',
+    }
+  }
+
   try {
     return {
       classification: await classifyIntent(messages, settings),
