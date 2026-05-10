@@ -99,6 +99,30 @@ test('artifact verification can verify shell-produced office outputs', () => {
   )
 })
 
+test('successful read-only shell command is verified by exit code', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'run_shell',
+      source: 'builtin',
+      status: 'success',
+      input: '$ node --version',
+      output: JSON.stringify({
+        status: 'exited',
+        running: false,
+        exitCode: 0,
+        output: 'v24.14.0',
+      }),
+    },
+  ])
+
+  assert.equal(evidence.hasSuccessfulCommand, true)
+  assert.equal(evidence.hasWriteEffect, false)
+  assert.equal(
+    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    'executed_verified',
+  )
+})
+
 test('structured tool output provides verification even when display output is truncated', () => {
   const evidence = collectEvidenceFromToolEvents([
     {

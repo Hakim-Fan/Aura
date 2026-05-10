@@ -2521,6 +2521,136 @@ textarea:focus {
   }
 }
 
+.shell-event-details {
+  margin-top: 8px;
+}
+
+.shell-event-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
+  cursor: pointer;
+  color: rgba(39, 39, 42, 0.72);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.shell-event-summary::-webkit-details-marker {
+  display: none;
+}
+
+.shell-event-summary__label {
+  min-width: 0;
+}
+
+.shell-event-summary__chevron {
+  color: rgba(63, 63, 70, 0.58);
+  transition: transform 140ms ease;
+}
+
+.shell-event-details[open] .shell-event-summary__chevron {
+  transform: rotate(180deg);
+}
+
+.shell-event-body {
+  position: relative;
+  margin-top: 8px;
+}
+
+.shell-event-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+
+.shell-event-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(63, 63, 70, 0.68);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.shell-event-action:hover {
+  background: rgba(39, 39, 42, 0.08);
+  color: rgba(39, 39, 42, 0.92);
+}
+
+.shell-terminal-frame {
+  overflow: hidden;
+  border-radius: 9px;
+  background: #eeeeef;
+}
+
+.shell-terminal-surface {
+  height: min(250px, 38vh);
+  min-height: 150px;
+  box-sizing: border-box;
+  padding: 10px 12px 18px;
+}
+
+.shell-terminal-surface .xterm {
+  height: 100%;
+}
+
+.shell-terminal-surface .xterm-viewport {
+  background: transparent !important;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(39, 39, 42, 0.18) transparent;
+}
+
+.shell-terminal-surface .xterm-scrollable-element > .scrollbar {
+  width: 6px !important;
+  background: transparent !important;
+}
+
+.shell-terminal-surface .xterm-scrollable-element > .scrollbar > .slider,
+.shell-terminal-surface .xterm-scrollable-element > .scrollbar > .scra {
+  width: 6px !important;
+  border-radius: 999px !important;
+  background: rgba(39, 39, 42, 0.16) !important;
+}
+
+.shell-terminal-surface .xterm-scrollable-element > .scrollbar > .slider:hover,
+.shell-terminal-surface .xterm-scrollable-element > .scrollbar > .scra:hover {
+  background: rgba(39, 39, 42, 0.24) !important;
+}
+
+.shell-terminal-surface .xterm-viewport::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.shell-terminal-surface .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.shell-terminal-surface .xterm-viewport::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(39, 39, 42, 0.16);
+}
+
+.shell-terminal-surface .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(39, 39, 42, 0.26);
+}
+
+.shell-terminal-surface .xterm-screen {
+  width: 100% !important;
+}
+
+.shell-terminal-surface .xterm-rows {
+  letter-spacing: 0;
+}
+
 .app-toast {
   position: fixed;
   left: 50%;

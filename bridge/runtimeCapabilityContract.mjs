@@ -11,6 +11,17 @@ function inferToolPrivilege(tool) {
     return 'execute'
   }
   if (
+    tool.name === 'aura_enable_skill' ||
+    tool.name === 'aura_enable_plugin' ||
+    tool.name === 'aura_install_skill' ||
+    tool.name === 'aura_import_skill' ||
+    tool.name === 'aura_import_plugin' ||
+    tool.name === 'aura_upsert_mcp_server' ||
+    tool.name === 'aura_remove_mcp_server'
+  ) {
+    return 'admin'
+  }
+  if (
     tool.approvalCategory === 'file_write' ||
     tool.name === 'write_file' ||
     tool.name === 'apply_patch' ||
@@ -33,17 +44,6 @@ function inferToolPrivilege(tool) {
   ) {
     return 'computer'
   }
-  if (
-    tool.name === 'aura_enable_skill' ||
-    tool.name === 'aura_enable_plugin' ||
-    tool.name === 'aura_install_skill' ||
-    tool.name === 'aura_import_skill' ||
-    tool.name === 'aura_import_plugin' ||
-    tool.name === 'aura_upsert_mcp_server' ||
-    tool.name === 'aura_remove_mcp_server'
-  ) {
-    return 'admin'
-  }
   return 'read'
 }
 
@@ -54,13 +54,9 @@ function allowedPrivilegesForTier(routeState = {}) {
     routeState.webInteractionRequired === true ||
     routeState.explicitSystemBrowserRequest === true
   const allowAdmin = routeState.isCapabilityAdminTask === true
-  const privileges = new Set(['read'])
+  const privileges = new Set(['read', 'write', 'execute'])
 
-  if (tier === 'local-write' || tier === 'web-lookup' || tier === 'browser-interactive') {
-    privileges.add('write')
-    privileges.add('execute')
-  }
-  if (allowWeb && (tier === 'web-lookup' || tier === 'browser-interactive')) {
+  if (allowWeb) {
     privileges.add('web')
   }
   if (allowBrowser && tier === 'browser-interactive') {

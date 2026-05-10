@@ -366,6 +366,34 @@ test('invokeTool still allows shell commands used for verification', async () =>
   assert.match(output, /"ok": true/)
 })
 
+test('builtin run_shell returns structured exit evidence for successful commands', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-run-shell-'))
+  const runShellTool = createBuiltinTools({ cwd: workspace }).find(tool => tool.name === 'run_shell')
+  const events = []
+
+  const output = await invokeTool(
+    runShellTool,
+    {
+      command: 'node --version',
+    },
+    events,
+    {
+      settings: {
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: false,
+      },
+    },
+  )
+  const parsed = JSON.parse(output)
+
+  assert.equal(parsed.status, 'exited')
+  assert.equal(parsed.running, false)
+  assert.equal(parsed.exitCode, 0)
+  assert.match(parsed.output, /^v\d+\./)
+  assert.equal(events[0].structuredOutput, undefined)
+})
+
 test('read_file can return a line-numbered range without shell awk', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-read-file-'))
   await fs.writeFile(path.join(workspace, 'sample.ts'), 'one\ntwo\nthree\nfour\n')

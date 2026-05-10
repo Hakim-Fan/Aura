@@ -17,7 +17,10 @@ import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
 import 'katex/dist/katex.min.css'
+import '@xterm/xterm/css/xterm.css'
 import {
   ArrowDown,
   Bot,
@@ -3330,6 +3333,202 @@ function ShellOutputViewport({
   )
 }
 
+function normalizeTerminalWrite(value: string) {
+  return value.replace(/\r?\n/g, '\r\n')
+}
+
+function sanitizeXtermWrite(value: string) {
+  return value
+    .replace(ANSI_OSC_PATTERN, '')
+    .replace(/\uFFFD/g, '')
+}
+
+function stripDisplayPrompt(value: string) {
+  return value.replace(/^\$\s*/u, '').trim()
+}
+
+function summarizeShellCommand(command: string) {
+  const commandText = sanitizeTerminalOutput(stripDisplayPrompt(command))
+  return commandText || 'Shell'
+}
+
+function shellCollapsedLabel({
+  command,
+  status,
+  duration,
+}: {
+  command: string
+  status: MessageEvent['status']
+  duration: string
+}) {
+  const commandText = summarizeShellCommand(command)
+  if (status === 'running') {
+    return `正在运行 ${commandText}${duration ? ` · ${duration}` : ''}`
+  }
+  if (status === 'error') {
+    return `运行失败 ${commandText}${duration ? ` · ${duration}` : ''}`
+  }
+  return `已运行 ${commandText}${duration ? ` · ${duration}` : ''}`
+}
+
+function buildTerminalTranscript({
+  command,
+  output,
+  error,
+  status,
+  truncated,
+}: {
+  command: string
+  output: string
+  error: string
+  status: MessageEvent['status']
+  truncated: boolean
+}) {
+  const lines: string[] = []
+  const commandText = sanitizeTerminalOutput(stripDisplayPrompt(command))
+
+  if (commandText) {
+    lines.push(`\x1b[38;2;24;24;27m$\x1b[0m ${commandText}`)
+    lines.push('')
+  }
+  if (output) {
+    lines.push(sanitizeXtermWrite(output))
+  } else if (status === 'running') {
+    lines.push('\x1b[38;2;113;113;122m等待命令输出...\x1b[0m')
+  }
+  if (error) {
+    if (output) {
+      lines.push('')
+    }
+    lines.push('\x1b[1;38;2;220;38;38mError\x1b[0m')
+    lines.push(`\x1b[38;2;220;38;38m${sanitizeXtermWrite(error)}\x1b[0m`)
+  }
+  if (truncated) {
+    lines.push('')
+    lines.push('\x1b[38;2;180;83;9m输出较长，仅展示最近缓冲内容。\x1b[0m')
+  }
+
+  const transcript = lines.join('\n').trimEnd()
+  return normalizeTerminalWrite(transcript ? `${transcript}\n\n` : '')
+}
+
+function ShellTerminalPanel({
+  command,
+  output,
+  error,
+  status,
+  isLive,
+  truncated,
+  exitCode,
+}: {
+  command: string
+  output: string
+  error: string
+  status: MessageEvent['status']
+  isLive: boolean
+  truncated: boolean
+  exitCode?: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const terminalRef = useRef<Terminal | null>(null)
+  const fitAddonRef = useRef<FitAddon | null>(null)
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) {
+      return
+    }
+
+    const terminal = new Terminal({
+      allowProposedApi: false,
+      convertEol: true,
+      cursorBlink: isLive,
+      cursorStyle: 'bar',
+      disableStdin: true,
+      fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+      fontSize: 12.5,
+      lineHeight: 1.5,
+      overviewRuler: {
+        showBottomBorder: false,
+        showTopBorder: false,
+        width: 6,
+      },
+      scrollback: 3000,
+      theme: {
+        background: '#eeeeef',
+        foreground: '#27272a',
+        cursor: '#71717a',
+        black: '#18181b',
+        blue: '#2563eb',
+        cyan: '#0891b2',
+        green: '#15803d',
+        magenta: '#7c3aed',
+        red: '#dc2626',
+        overviewRulerBorder: '#eeeeef',
+        scrollbarSliderActiveBackground: 'rgba(39, 39, 42, 0.28)',
+        scrollbarSliderBackground: 'rgba(39, 39, 42, 0.16)',
+        scrollbarSliderHoverBackground: 'rgba(39, 39, 42, 0.24)',
+        white: '#f4f4f5',
+        yellow: '#b45309',
+      },
+    })
+    const fitAddon = new FitAddon()
+    terminal.loadAddon(fitAddon)
+    terminal.open(container)
+    fitAddon.fit()
+
+    terminalRef.current = terminal
+    fitAddonRef.current = fitAddon
+
+    const resizeObserver = new ResizeObserver(() => {
+      try {
+        fitAddon.fit()
+      } catch {
+        // xterm can briefly report zero-size geometry during collapsed layout transitions.
+      }
+    })
+    resizeObserver.observe(container)
+
+    return () => {
+      resizeObserver.disconnect()
+      terminal.dispose()
+      terminalRef.current = null
+      fitAddonRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const terminal = terminalRef.current
+    if (!terminal) {
+      return
+    }
+    terminal.options.cursorBlink = isLive
+  }, [isLive])
+
+  useEffect(() => {
+    const terminal = terminalRef.current
+    if (!terminal) {
+      return
+    }
+    terminal.reset()
+    terminal.write(buildTerminalTranscript({
+      command,
+      output,
+      error,
+      status,
+      truncated,
+    }), () => {
+      terminal.scrollToBottom()
+    })
+  }, [command, output, error, status, truncated, exitCode])
+
+  return (
+    <div className="shell-terminal-frame">
+      <div ref={containerRef} className="shell-terminal-surface" />
+    </div>
+  )
+}
+
 function MessageEventCard({
   event,
   onHandleApproval,
@@ -3369,13 +3568,15 @@ function MessageEventCard({
   const shellCommand =
     event.input ||
     (parsedShellSnapshot?.command ? `$ ${parsedShellSnapshot.command}` : '')
+  const shellRawOutputText = parsedShellSnapshot
+    ? parsedShellSnapshot.output ||
+    [parsedShellSnapshot.stdout, parsedShellSnapshot.stderr].filter(Boolean).join('\n\n')
+    : event.output || ''
+  const shellRawErrorText = event.error || ''
   const shellOutputText = sanitizeTerminalOutput(
-    parsedShellSnapshot
-      ? parsedShellSnapshot.output ||
-      [parsedShellSnapshot.stdout, parsedShellSnapshot.stderr].filter(Boolean).join('\n\n')
-      : event.output,
+    shellRawOutputText,
   )
-  const shellErrorText = sanitizeTerminalOutput(event.error)
+  const shellErrorText = sanitizeTerminalOutput(shellRawErrorText)
   const shellDuration =
     typeof parsedShellSnapshot?.wallTimeMs === 'number'
       ? formatDuration(parsedShellSnapshot.wallTimeMs)
@@ -3392,6 +3593,13 @@ function MessageEventCard({
     : ''
   const shellTruncationNote =
     parsedShellSnapshot?.truncated === true ? '输出较长，仅保留了最近一部分。' : ''
+  const shellSummaryLabel = isShellLog
+    ? shellCollapsedLabel({
+      command: shellCommand,
+      status: event.status,
+      duration: shellDuration,
+    })
+    : ''
   const shouldShowGenericSummary = !isShellLog && Boolean(event.summary)
   const shellLogText = [
     shellCommand ? `Command\n${shellCommand}` : '',
@@ -3526,71 +3734,60 @@ function MessageEventCard({
         </div>
       ) : null}
       {hasShellDetails ? (
-        <div className="mt-2 rounded-xl border border-[rgba(15,23,42,0.06)] bg-[#f4f4f5] p-3">
-          {shellStatusDetail || shellLogText ? (
-            <div className="mb-2 flex items-center justify-between gap-2">
-              {shellStatusDetail ? (
-                <div className="text-11px font-600 text-[var(--text-secondary)] opacity-80">
-                  {shellStatusDetail}
-                </div>
-              ) : <span />}
-              {shellLogText ? (
-                <div className="markdown-data-actions">
-                  {onCopyText ? (
-                    <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制日志" aria-label="复制日志" onClick={() => onCopyText(shellLogText)}>
-                      <Copy size={12} />
-                    </button>
-                  ) : null}
-                  <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="下载 LOG" aria-label="下载 LOG" onClick={() => downloadTextFile(timestampedFilename('shell-log', 'log'), shellLogText, 'text/plain;charset=utf-8')}>
-                    <Download size={12} />
+        <details className="shell-event-details" open={event.status === 'running' || event.status === 'error'}>
+          <summary className="shell-event-summary">
+            <span className="shell-event-summary__label">{shellSummaryLabel || shellStatusDetail}</span>
+            <ChevronDown size={14} className="shell-event-summary__chevron" />
+            {shellLogText ? (
+              <span className="shell-event-actions">
+                {onCopyText ? (
+                  <button
+                    className="shell-event-action"
+                    title="复制日志"
+                    aria-label="复制日志"
+                    onClick={clickEvent => {
+                      clickEvent.preventDefault()
+                      clickEvent.stopPropagation()
+                      onCopyText(shellLogText)
+                    }}
+                    type="button"
+                  >
+                    <Copy size={13} />
                   </button>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          {shellCommand ? (
-            <div className="mb-2 rounded-lg border border-[rgba(15,23,42,0.06)] bg-white/80 px-3 py-2">
-              <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--text-secondary)] opacity-70">
-                命令
+                ) : null}
+                <button
+                  className="shell-event-action"
+                  title="下载 LOG"
+                  aria-label="下载 LOG"
+                  onClick={clickEvent => {
+                    clickEvent.preventDefault()
+                    clickEvent.stopPropagation()
+                    downloadTextFile(timestampedFilename('shell-log', 'log'), shellLogText, 'text/plain;charset=utf-8')
+                  }}
+                  type="button"
+                >
+                  <Download size={13} />
+                </button>
+              </span>
+            ) : null}
+          </summary>
+          <div className="shell-event-body">
+            <ShellTerminalPanel
+              command={shellCommand}
+              output={shellRawOutputText}
+              error={shellRawErrorText}
+              status={event.status}
+              isLive={event.status === 'running'}
+              truncated={parsedShellSnapshot?.truncated === true}
+              exitCode={parsedShellSnapshot?.exitCode}
+            />
+            {shellTruncationNote ? (
+              <div className="mt-2 text-11px text-[var(--text-secondary)] opacity-70">
+                {shellTruncationNote}
               </div>
-              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-12px leading-6 text-[var(--text-primary)] custom-scrollbar">
-                {shellCommand}
-              </pre>
-            </div>
-          ) : null}
-          {shellOutputText ? (
-            <div className="rounded-lg border border-[rgba(15,23,42,0.06)] bg-white/65 px-3 py-2">
-              <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--text-secondary)] opacity-70">
-                输出
-              </div>
-              <ShellOutputViewport
-                content={shellOutputText}
-                isLive={event.status === 'running'}
-              />
-            </div>
-          ) : event.status === 'running' ? (
-            <div className="rounded-lg border border-[rgba(15,23,42,0.06)] bg-white/65 px-3 py-2 font-[SFMono-Regular,Menlo,monospace] text-12px text-[#71717a]">
-              正在等待命令输出...
-            </div>
-          ) : null}
-          {shellTruncationNote ? (
-            <div className="mt-2 text-11px text-[var(--text-secondary)] opacity-70">
-              {shellTruncationNote}
-            </div>
-          ) : null}
-          {shellErrorText ? (
-            <div className="mt-2 rounded-lg border border-red-100 bg-red-50/75 px-3 py-2">
-              <div className="mb-1 text-10px font-700 uppercase tracking-wider text-red-500/80">
-                Error
-              </div>
-              <ShellOutputViewport
-                content={shellErrorText}
-                isLive={false}
-                tone="error"
-              />
-            </div>
-          ) : null}
-        </div>
+            ) : null}
+          </div>
+        </details>
       ) : null}
       {!isApproval && !isUserInputWait && !isShellLog && (event.input || event.output || event.error) && (
         <details className="mt-1.5 group" open={!isShellLog && event.status === 'error'}>

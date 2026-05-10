@@ -257,6 +257,7 @@ async function runShellStreaming(
 
     const env = buildShellEnv()
     const commandShell = resolveCommandShell({ env })
+    const startedAt = Date.now()
     const child = spawn(commandShell.file, commandShell.args(command), {
       cwd,
       env,
@@ -283,6 +284,31 @@ async function runShellStreaming(
         return
       }
       flushTimer = setTimeout(flush, 60)
+    }
+
+    function buildResult(code) {
+      const stdoutText = stdout.trim()
+      const stderrText = stderr.trim()
+      const output = [stdoutText, stderrText].filter(Boolean).join('\n\n') ||
+        'Command completed with no output'
+
+      return {
+        status: 'exited',
+        running: false,
+        exitCode: typeof code === 'number' ? code : null,
+        stdout: truncate(stdoutText),
+        stderr: truncate(stderrText),
+        output: truncate(output),
+        truncated:
+          stdoutText.length > 12_000 ||
+          stderrText.length > 12_000 ||
+          output.length > 12_000,
+        wallTimeMs: Date.now() - startedAt,
+        command,
+        shell: commandShell.file,
+        cwd,
+        pid: typeof child.pid === 'number' ? child.pid : null,
+      }
     }
 
     const timer = setTimeout(() => {
@@ -342,12 +368,7 @@ async function runShellStreaming(
       signal?.removeEventListener('abort', handleAbort)
       flush()
       if (code === 0) {
-        resolve(
-          truncate(
-            [stdout.trim(), stderr.trim()].filter(Boolean).join('\n\n') ||
-              'Command completed with no output',
-          ),
-        )
+        resolve(buildResult(code))
         return
       }
 
