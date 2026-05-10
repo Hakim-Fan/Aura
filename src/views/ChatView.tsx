@@ -65,6 +65,7 @@ import type {
   AgentExecutionPhase,
   AgentSettings,
   AgentTaskSnapshot,
+  ApprovalDecision,
   AppendedInput,
   CapabilityOverrideMode,
   CapabilityPanelItem,
@@ -141,7 +142,7 @@ type Props = {
   ) => void
   onSubmit: () => void
   onOpenProviders: () => void
-  onHandleApproval: (decision: 'approve' | 'deny') => void
+  onHandleApproval: (decision: ApprovalDecision) => void
   onOpenWorkspaceExplorer: () => void
   onChooseWorkspace: () => void
   onPickAttachment: () => void
@@ -3352,6 +3353,96 @@ function summarizeShellCommand(command: string) {
   return commandText || 'Shell'
 }
 
+function dockedApprovalCategoryLabel(category?: string) {
+  switch (category) {
+    case 'shell':
+      return 'Shell 命令'
+    case 'file_write':
+      return '文件写入'
+    case 'computer_use':
+      return '桌面操作'
+    default:
+      return '工具执行'
+  }
+}
+
+function dockedApprovalGrantLabel(category?: string) {
+  switch (category) {
+    case 'shell':
+      return '本轮 Shell 都允许'
+    case 'file_write':
+      return '本轮文件写入都允许'
+    case 'computer_use':
+      return '本轮桌面操作都允许'
+    default:
+      return '本轮同类都允许'
+  }
+}
+
+function readStringField(record: Record<string, unknown> | null, keys: string[]) {
+  if (!record) {
+    return ''
+  }
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+  return ''
+}
+
+type DockedApprovalViewModel = {
+  eyebrow: string
+  primaryLabel: string
+  primaryText: string
+  summary: string
+}
+
+function buildDockedApprovalViewModel(
+  approval: NonNullable<AgentTaskSnapshot['pendingApproval']>,
+): DockedApprovalViewModel {
+  const inputRecord = parseJsonOutput(approval.input)
+  const command = readStringField(inputRecord, ['command', 'cmd', 'script'])
+  const path = readStringField(inputRecord, ['path', 'filePath', 'targetPath', 'target'])
+  const action = readStringField(inputRecord, ['action', 'operation'])
+  const fallbackInput = sanitizeTerminalOutput(approval.input).trim()
+
+  if (approval.category === 'shell') {
+    return {
+      eyebrow: 'Shell 命令',
+      primaryLabel: '将执行',
+      primaryText: command || stripDisplayPrompt(fallbackInput) || approval.toolName || 'Shell 命令',
+      summary: approval.summary,
+    }
+  }
+
+  if (approval.category === 'file_write') {
+    return {
+      eyebrow: '文件写入',
+      primaryLabel: path ? '将写入' : '将执行文件写入',
+      primaryText: path || fallbackInput || approval.toolName || '文件写入',
+      summary: approval.summary,
+    }
+  }
+
+  if (approval.category === 'computer_use') {
+    return {
+      eyebrow: '桌面操作',
+      primaryLabel: action ? '将操作' : '将执行桌面操作',
+      primaryText: action || fallbackInput || approval.toolName || '桌面操作',
+      summary: approval.summary,
+    }
+  }
+
+  return {
+    eyebrow: dockedApprovalCategoryLabel(approval.category),
+    primaryLabel: '将执行',
+    primaryText: fallbackInput || approval.toolName || approval.summary || '工具执行',
+    summary: approval.summary,
+  }
+}
+
 function shellCollapsedLabel({
   command,
   status,
@@ -3529,6 +3620,118 @@ function ShellTerminalPanel({
   )
 }
 
+function DockedAwaitingActionPanel({
+  task,
+  onHandleApproval,
+}: {
+  task?: AgentTaskSnapshot | null
+  onHandleApproval: (decision: ApprovalDecision) => void
+}) {
+  const approval = task?.pendingApproval
+  const userInput = task?.pendingUserInput
+
+  if (approval) {
+    const approvalView = buildDockedApprovalViewModel(approval)
+    return (
+      <section
+        aria-live="polite"
+        className="mb-3 w-full pointer-events-auto overflow-hidden rounded-2xl border border-amber-200/80 bg-white/98 shadow-[0_18px_50px_-22px_rgba(15,23,42,0.5)] ring-1 ring-amber-100/60 backdrop-blur-xl"
+      >
+        <div className="flex flex-col gap-3 p-3.5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="rounded-lg bg-amber-50 px-2 py-1 text-11px font-700 text-amber-700">
+                待审批
+              </span>
+              <span className="truncate text-13px font-700 text-[var(--text-primary)]">
+                {approvalView.eyebrow}
+              </span>
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+              <button
+                className="rounded-xl border border-[rgba(15,23,42,0.08)] bg-white px-3 py-2 text-13px font-600 text-[var(--text-secondary)] transition-colors hover:bg-[rgba(15,23,42,0.04)]"
+                onClick={() => onHandleApproval('deny')}
+                type="button"
+              >
+                拒绝
+              </button>
+              <button
+                className="rounded-xl border border-[rgba(79,123,116,0.20)] bg-white px-3 py-2 text-13px font-700 text-[var(--accent-soft-strong)] transition-colors hover:bg-[rgba(79,123,116,0.06)]"
+                onClick={() => onHandleApproval('approve')}
+                type="button"
+              >
+                允许一次
+              </button>
+              <button
+                className="rounded-xl bg-[var(--accent-soft-strong)] px-3 py-2 text-13px font-700 text-white shadow-sm transition-all hover:brightness-110"
+                onClick={() => onHandleApproval('approve_for_task')}
+                type="button"
+              >
+                {dockedApprovalGrantLabel(approval.category)}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.025)] px-3 py-2.5">
+            <div className="mb-1 text-11px font-700 text-[var(--text-secondary)] opacity-70">
+              {approvalView.primaryLabel}
+            </div>
+            <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-words font-[SFMono-Regular,Menlo,monospace] text-13px leading-relaxed text-[var(--text-primary)] custom-scrollbar">
+              {approval.category === 'shell' ? `$ ${approvalView.primaryText}` : approvalView.primaryText}
+            </pre>
+          </div>
+        </div>
+
+        {approvalView.summary ? (
+          <details className="border-t border-amber-100/80 bg-amber-50/40">
+            <summary className="cursor-pointer px-4 py-2 text-11px font-700 text-amber-700/90">
+              查看说明
+            </summary>
+            <div className="border-t border-amber-100/80 px-4 py-3">
+              {approvalView.summary ? (
+                <p className="mb-3 text-12px leading-relaxed text-[var(--text-secondary)]">
+                  {approvalView.summary}
+                </p>
+              ) : null}
+            </div>
+          </details>
+        ) : null}
+      </section>
+    )
+  }
+
+  if (userInput) {
+    return (
+      <section
+        aria-live="polite"
+        className="mb-3 w-full pointer-events-auto rounded-2xl border border-[rgba(79,123,116,0.18)] bg-white/98 p-4 shadow-[0_18px_50px_-22px_rgba(15,23,42,0.45)] ring-1 ring-[rgba(79,123,116,0.08)] backdrop-blur-xl"
+      >
+        <div className="mb-1.5 flex items-center gap-2">
+          <span className="rounded-lg bg-[rgba(79,123,116,0.08)] px-2 py-1 text-11px font-700 text-[var(--accent-soft-strong)]">
+            等待回复
+          </span>
+          <span className="text-12px text-[var(--text-secondary)]">请在下方输入框补充信息</span>
+        </div>
+        <p className="text-13px leading-relaxed text-[var(--text-primary)]">
+          {userInput.question}
+        </p>
+        {userInput.context ? (
+          <details className="mt-3 rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.02)]">
+            <summary className="cursor-pointer px-3 py-2 text-11px font-700 text-[var(--text-secondary)]">
+              查看上下文
+            </summary>
+            <pre className="max-h-40 overflow-auto border-t border-[rgba(15,23,42,0.06)] px-3 py-2 text-11px leading-relaxed text-[var(--text-secondary)] custom-scrollbar">
+              {userInput.context}
+            </pre>
+          </details>
+        ) : null}
+      </section>
+    )
+  }
+
+  return null
+}
+
 function MessageEventCard({
   event,
   onHandleApproval,
@@ -3536,7 +3739,7 @@ function MessageEventCard({
   onCopyText,
 }: {
   event: MessageEvent
-  onHandleApproval?: (decision: 'approve' | 'deny') => void
+  onHandleApproval?: (decision: ApprovalDecision) => void
   onCancelCurrentStep?: () => void
   onCopyText?: CopyTextHandler
 }) {
@@ -3716,7 +3919,7 @@ function MessageEventCard({
               onClick={() => onHandleApproval?.('approve')}
               type="button"
             >
-              允许
+              允许一次
             </button>
           </div>
         </div>
@@ -3735,41 +3938,45 @@ function MessageEventCard({
       ) : null}
       {hasShellDetails ? (
         <details className="shell-event-details" open={event.status === 'running' || event.status === 'error'}>
-          <summary className="shell-event-summary">
-            <span className="shell-event-summary__label">{shellSummaryLabel || shellStatusDetail}</span>
-            <ChevronDown size={14} className="shell-event-summary__chevron" />
-            {shellLogText ? (
-              <span className="shell-event-actions">
-                {onCopyText ? (
+          <summary className="shell-event-summary flex items-center justify-between w-full">
+            <div className="flex items-center gap-2">
+              <span className="shell-event-summary__label">{shellSummaryLabel || shellStatusDetail}</span>
+              <ChevronDown size={14} className="shell-event-summary__chevron" />
+            </div>
+            <div className="flex items-center gap-2">
+              {shellLogText ? (
+                <span className="shell-event-actions">
+                  {onCopyText ? (
+                    <button
+                      className="shell-event-action"
+                      title="复制日志"
+                      aria-label="复制日志"
+                      onClick={clickEvent => {
+                        clickEvent.preventDefault()
+                        clickEvent.stopPropagation()
+                        onCopyText(shellLogText)
+                      }}
+                      type="button"
+                    >
+                      <Copy size={13} />
+                    </button>
+                  ) : null}
                   <button
                     className="shell-event-action"
-                    title="复制日志"
-                    aria-label="复制日志"
+                    title="下载 LOG"
+                    aria-label="下载 LOG"
                     onClick={clickEvent => {
                       clickEvent.preventDefault()
                       clickEvent.stopPropagation()
-                      onCopyText(shellLogText)
+                      downloadTextFile(timestampedFilename('shell-log', 'log'), shellLogText, 'text/plain;charset=utf-8')
                     }}
                     type="button"
                   >
-                    <Copy size={13} />
+                    <Download size={13} />
                   </button>
-                ) : null}
-                <button
-                  className="shell-event-action"
-                  title="下载 LOG"
-                  aria-label="下载 LOG"
-                  onClick={clickEvent => {
-                    clickEvent.preventDefault()
-                    clickEvent.stopPropagation()
-                    downloadTextFile(timestampedFilename('shell-log', 'log'), shellLogText, 'text/plain;charset=utf-8')
-                  }}
-                  type="button"
-                >
-                  <Download size={13} />
-                </button>
-              </span>
-            ) : null}
+                </span>
+              ) : null}
+            </div>
           </summary>
           <div className="shell-event-body">
             <ShellTerminalPanel
@@ -4531,7 +4738,7 @@ function AssistantMessageCard({
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
   showDetailedExecutionDetails: boolean
   onCancelCurrentStep: () => void
-  onHandleApproval: (decision: 'approve' | 'deny') => void
+  onHandleApproval: (decision: ApprovalDecision) => void
   onToggleActivity: (messageId: string) => void
 }) {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
@@ -4563,6 +4770,7 @@ function AssistantMessageCard({
   )
   const appendedInputs = message.appendedInputs || []
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
+  const activeVariantId = getActiveMessageVariant(message).id || message.id
   const isRetryInProgress = isStreaming && message.retryInfo?.inProgress === true
   const isContextCompressionInProgress =
     isStreaming && activity?.phase === 'compressing_context'
@@ -4643,10 +4851,6 @@ function AssistantMessageCard({
     () => collectFinalChangeSummary(message.events || []),
     [message.events],
   )
-  const approvalEvents = executionTimeline.filter(
-    (item): item is Extract<ExecutionTimelineItem, { kind: 'event' }> =>
-      isExecutionEventItem(item) && isAwaitingUserResponseEvent(item.event),
-  )
   const nonApprovalTimeline = executionTimeline.filter(
     item => !(isExecutionEventItem(item) && isAwaitingUserResponseEvent(item.event)),
   )
@@ -4663,7 +4867,6 @@ function AssistantMessageCard({
     activity?.expanded === true &&
     !showDetailedExecutionDetails &&
     executionDigestEntries.length > 0
-  const shouldShowApprovalEvents = approvalEvents.length > 0
   const shouldSuppressStreamingAnswerBody =
     isStreaming &&
     !showDetailedExecutionDetails &&
@@ -4673,7 +4876,7 @@ function AssistantMessageCard({
       key: 'copy-message-id',
       label: '复制 message_id',
       icon: Copy,
-      onClick: () => onCopyText(message.id),
+      onClick: () => onCopyText(activeVariantId),
     },
   ]
 
@@ -4847,20 +5050,6 @@ function AssistantMessageCard({
               </div>
             ) : null}
           </div>
-
-          {shouldShowApprovalEvents ? (
-            <section className="flex flex-col gap-2.5">
-              {approvalEvents.map(item => (
-                <MessageEventCard
-                  key={item.key}
-                  event={item.event}
-                  onHandleApproval={onHandleApproval}
-                  onCancelCurrentStep={onCancelCurrentStep}
-                  onCopyText={onCopyText}
-                />
-              ))}
-            </section>
-          ) : null}
 
           {shouldShowDetailedTimeline ? (
             <section className="flex flex-col gap-3 border-l border-[rgba(15,23,42,0.08)] pl-4">
@@ -5361,8 +5550,8 @@ export function ChatView({
     Math.round(
       Number(
         latestMessageUsage?.latestInputTokens ||
-          latestMessageUsage?.inputTokens ||
-          0,
+        latestMessageUsage?.inputTokens ||
+        0,
       ),
     ),
   )
@@ -5377,12 +5566,12 @@ export function ChatView({
     isRunning && livePromptTokensFromUsage > 0
       ? livePromptTokensFromUsage
       : localCurrentPromptContextTokens > 0 && hasLocalPromptEnvelope
-      ? localCurrentPromptContextTokens
-      : promptContextFromRouteDecision > 0
-      ? promptContextFromRouteDecision
-      : persistedPromptTokensFromUsage > 0
-      ? persistedPromptTokensFromUsage
-      : localCurrentPromptContextTokens
+        ? localCurrentPromptContextTokens
+        : promptContextFromRouteDecision > 0
+          ? promptContextFromRouteDecision
+          : persistedPromptTokensFromUsage > 0
+            ? persistedPromptTokensFromUsage
+            : localCurrentPromptContextTokens
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isMetaEnter) {
@@ -5578,6 +5767,11 @@ export function ChatView({
                   <ArrowDown size={18} strokeWidth={2.5} className="text-[var(--text-secondary)] group-hover:text-[var(--accent-soft-strong)] transition-colors" />
                 </button>
               )}
+
+              <DockedAwaitingActionPanel
+                task={agentTask}
+                onHandleApproval={onHandleApproval}
+              />
 
               <div className="w-full pointer-events-auto bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none relative">
                 <textarea

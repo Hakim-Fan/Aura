@@ -169,6 +169,25 @@ export type MessageReasoning = {
   order?: number
 }
 
+export type WorkMemoryStatus = 'draft' | 'confirmed' | 'assumption'
+
+export type WorkMemorySourceRef = Record<string, string | number>
+
+export type WorkMemory = {
+  id: string
+  sessionId: string
+  taskId?: string
+  assistantMessageId?: string
+  kind: string
+  title: string
+  summary: string
+  status: WorkMemoryStatus
+  content: Record<string, unknown>
+  sourceRefs: WorkMemorySourceRef[]
+  nextUse?: string
+  createdAt: number
+}
+
 export type MessagePhaseOutput = {
   id: string
   blockId: string
@@ -360,6 +379,7 @@ export type MessageModelInfo = {
 }
 
 export type ChatMessageVariant = {
+  id?: string
   content: string
   parts?: ChatContentPart[]
   status?: MessageStatus
@@ -446,6 +466,11 @@ export type ApprovalCategory =
   | 'shell'
   | 'file_write'
   | 'computer_use'
+
+export type ApprovalDecision =
+  | 'approve'
+  | 'approve_for_task'
+  | 'deny'
 
 export type ApprovalRequest = {
   id: string
@@ -661,6 +686,7 @@ export type AgentTaskSnapshot = {
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]
   reasoning?: MessageReasoning[]
+  workMemories?: WorkMemory[]
   phaseOutputs?: MessagePhaseOutput[]
   usage?: MessageUsage
   contextCompression?: SessionContextCompression

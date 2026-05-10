@@ -156,8 +156,10 @@ function createExecutionMonitor() {
 }
 
 let pendingApprovalResolve = null
+let pendingApprovalRequest = null
 let pendingUserInputResolve = null
 const pendingAppActionRequests = new Map()
+const taskApprovalGrants = new Set()
 let started = false
 const appendedInputs = []
 let currentStepAbortController = null
@@ -213,10 +215,22 @@ rl.on('line', (line) => {
 
   if (message.type === 'approval') {
     if (pendingApprovalResolve) {
-      pendingApprovalResolve(
-        message.decision === 'approve' ? 'approve' : 'deny',
-      )
+      const decision =
+        message.decision === 'approve' || message.decision === 'approve_for_task'
+          ? message.decision
+          : 'deny'
+      if (decision === 'approve_for_task') {
+        const category =
+          typeof pendingApprovalRequest?.category === 'string'
+            ? pendingApprovalRequest.category
+            : ''
+        if (category) {
+          taskApprovalGrants.add(category)
+        }
+      }
+      pendingApprovalResolve(decision === 'deny' ? 'deny' : 'approve')
       pendingApprovalResolve = null
+      pendingApprovalRequest = null
     }
     return
   }
@@ -348,6 +362,10 @@ rl.on('line', (line) => {
       executionMonitor.markProgress()
       emit({ type: 'route_decision', routeDecision })
     },
+    onWorkMemory(memory) {
+      executionMonitor.markProgress()
+      emit({ type: 'work_memory', memory })
+    },
     onProgress() {
       executionMonitor.markProgress()
     },
@@ -355,11 +373,21 @@ rl.on('line', (line) => {
       executionMonitor.setPhase(phase, meta)
     },
     requestApproval(request) {
+      if (
+        typeof request?.category === 'string' &&
+        taskApprovalGrants.has(request.category)
+      ) {
+        return Promise.resolve('approve')
+      }
       executionMonitor.setPhase('awaiting_approval', { markProgress: false })
       emit({ type: 'approval_required', request })
       return new Promise((resolve) => {
+        pendingApprovalRequest = request
         pendingApprovalResolve = resolve
       })
+    },
+    isApprovalGranted(category) {
+      return typeof category === 'string' && taskApprovalGrants.has(category)
     },
     requestUserInput(request) {
       executionMonitor.setPhase('awaiting_user_input', { markProgress: false })

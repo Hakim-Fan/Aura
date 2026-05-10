@@ -50,6 +50,7 @@ import {
 import type {
   AgentSettings,
   AgentTaskSnapshot,
+  ApprovalDecision,
   AppendedInput,
   CapabilityOverrideMode,
   CapabilityPanelItem,
@@ -1112,6 +1113,7 @@ function buildAppendedInputPhaseOutput(input: AppendedInput, order?: number): Me
 
 function toMessageVariant(message: ChatMessage): ChatMessageVariant {
   return {
+    id: message.versions?.[message.activeVersionIndex || 0]?.id || message.id,
     content: message.content,
     parts: message.parts,
     status: message.status,
@@ -1332,6 +1334,39 @@ function appendMessageVariant(
 ): ChatMessage {
   const variants = [...ensureMessageVariants(message), variant]
   return applyMessageVariant(message, variants, variants.length - 1)
+}
+
+function getMessageVariantId(message: ChatMessage, variantIndex?: number) {
+  const variants = ensureMessageVariants(message)
+  const safeIndex =
+    typeof variantIndex === 'number'
+      ? Math.max(0, Math.min(variantIndex, variants.length - 1))
+      : typeof message.activeVersionIndex === 'number'
+        ? Math.max(0, Math.min(message.activeVersionIndex, variants.length - 1))
+        : variants.length - 1
+  return variants[safeIndex]?.id || message.id
+}
+
+function retryInfoForSnapshot(snapshot: AgentTaskSnapshot) {
+  const retryInfo = snapshot.retryInfo
+  if (!retryInfo) {
+    return undefined
+  }
+  if (snapshot.status === 'completed' || snapshot.status === 'failed') {
+    return clearRetryProgressInfo(retryInfo)
+  }
+  if (
+    retryInfo.inProgress === true &&
+    (
+      snapshot.phase === 'model_streaming' ||
+      snapshot.phase === 'tool_running' ||
+      snapshot.phase === 'finalizing' ||
+      snapshot.phase === 'recovering'
+    )
+  ) {
+    return clearRetryProgressInfo(retryInfo)
+  }
+  return retryInfo
 }
 
 function updateActiveMessageVariant(
@@ -2042,10 +2077,7 @@ export function MainWindowApp() {
                       ? buildSnapshotErrorMessage(snapshot)
                       : snapshot.error,
                   errorInfo: snapshot.errorInfo,
-                  retryInfo:
-                    snapshot.status === 'completed' || snapshot.status === 'failed'
-                      ? clearRetryProgressInfo(snapshot.retryInfo)
-                      : snapshot.retryInfo || undefined,
+                  retryInfo: retryInfoForSnapshot(snapshot),
                   agentMode: snapshot.agentMode || currentVariant.agentMode,
                   routeDecision: snapshot.routeDecision || currentVariant.routeDecision,
                   completionState:
@@ -2115,10 +2147,7 @@ export function MainWindowApp() {
                               snapshot.status === 'failed'
                                 ? snapshot.errorInfo
                                 : undefined,
-                            retryInfo:
-                              snapshot.status === 'completed' || snapshot.status === 'failed'
-                                ? clearRetryProgressInfo(snapshot.retryInfo)
-                                : snapshot.retryInfo || undefined,
+                            retryInfo: retryInfoForSnapshot(snapshot),
                             agentMode: snapshot.agentMode || currentVariant.agentMode,
                             routeDecision:
                               snapshot.routeDecision || currentVariant.routeDecision,
@@ -2902,8 +2931,10 @@ export function MainWindowApp() {
       createdAt: input.createdAt,
       researchMode: input.researchMode,
     }))
+    const pendingAssistantVersionId = createMessageId(activeSession.id)
     const pendingAssistantVariant: ChatMessageVariant = {
       ...toMessageVariant(createPendingAssistantMessage()),
+      id: pendingAssistantVersionId,
       reasoning: archiveReasoningEntries(currentAssistantVariant.reasoning || []),
       phaseOutputs: mergeEntriesById(
         archivePhaseOutputs(currentAssistantVariant.phaseOutputs || []),
@@ -2989,7 +3020,7 @@ export function MainWindowApp() {
         {
           sessionId: activeSession.id,
           userMessageId: assistantMessage.linkedMessageId,
-          assistantMessageId: assistantMessage.id,
+          assistantMessageId: pendingAssistantVersionId,
         },
       )
 
@@ -3219,8 +3250,26 @@ export function MainWindowApp() {
     const storedUserMessageParts = stripInlineImageDataFromParts(userMessageParts)
     const storedUserMessageAttachments = stripAttachmentPreviews(materializedAttachments)
 
+    const sessionId = activeSession.id
+    const targetUserMessage = options?.targetUserMessageId
+      ? activeSession.messages.find(message => message.id === options.targetUserMessageId)
+      : null
+    const targetAssistantMessage = options?.targetAssistantMessageId
+      ? activeSession.messages.find(message => message.id === options.targetAssistantMessageId)
+      : null
+    const pendingUserMessageId = targetUserMessage?.id || createMessageId(sessionId)
+    let pendingAssistantMessageId =
+      targetAssistantMessage?.id || createMessageId(sessionId)
+    const pendingAssistantVersionId = targetAssistantMessage
+      ? createMessageId(sessionId)
+      : pendingAssistantMessageId
+
     const messageCreatedAt = Date.now()
     const userMessageVariant: ChatMessageVariant = {
+      id:
+        targetUserMessage && options?.appendUserVersion === false
+          ? getMessageVariantId(targetUserMessage)
+          : pendingUserMessageId,
       content: contentForDisplay,
       parts: storedUserMessageParts,
       status: 'completed',
@@ -3253,12 +3302,6 @@ export function MainWindowApp() {
           mcpServers: [],
         },
       }
-    const pendingAssistantVariant: ChatMessageVariant = {
-      ...toMessageVariant(createPendingAssistantMessage()),
-      capabilitySnapshot: resolvedCapabilities.usage,
-      modelInfo: buildMessageModelInfo(latestProviderProfile, latestEffectiveModel),
-    }
-
     const runtimeSettings: AgentSettings = {
       ...latestSettings,
       activeProviderProfileId:
@@ -3270,18 +3313,13 @@ export function MainWindowApp() {
       cwd: workspacePath,
     }
 
-    const sessionId = activeSession.id
-    const targetUserMessage = options?.targetUserMessageId
-      ? activeSession.messages.find(message => message.id === options.targetUserMessageId)
-      : null
-    const targetAssistantMessage = options?.targetAssistantMessageId
-      ? activeSession.messages.find(message => message.id === options.targetAssistantMessageId)
-      : null
-
     let runtimeMessages: ChatMessage[] = []
-    const pendingUserMessageId = targetUserMessage?.id || createMessageId(sessionId)
-    let pendingAssistantMessageId =
-      targetAssistantMessage?.id || createMessageId(sessionId)
+    const pendingAssistantVariant: ChatMessageVariant = {
+      ...toMessageVariant(createPendingAssistantMessage()),
+      id: pendingAssistantVersionId,
+      capabilitySnapshot: resolvedCapabilities.usage,
+      modelInfo: buildMessageModelInfo(latestProviderProfile, latestEffectiveModel),
+    }
     let nextContextCompression = activeSession.contextCompression
 
     const updatedMessages = (() => {
@@ -3428,7 +3466,7 @@ export function MainWindowApp() {
         {
           sessionId,
           userMessageId: pendingUserMessageId,
-          assistantMessageId: pendingAssistantBindingMessageId,
+          assistantMessageId: pendingAssistantVersionId,
         },
       )
       setRunningTasksBySession(current => ({
@@ -3482,7 +3520,7 @@ export function MainWindowApp() {
     await submitPrompt(draft)
   }
 
-  async function handleApproval(decision: 'approve' | 'deny') {
+  async function handleApproval(decision: ApprovalDecision) {
     if (!activeSession || !agentTask?.id) {
       return
     }

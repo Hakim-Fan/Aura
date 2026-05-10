@@ -887,6 +887,7 @@ function normalizeMessageVariant(
       ? variant.researchMode
       : undefined
   return {
+    id: typeof variant.id === 'string' && variant.id.trim() ? variant.id : undefined,
     content: typeof variant.content === 'string' ? variant.content : '',
     parts: normalizeMessageParts(variant.parts),
     status:
@@ -1955,6 +1956,7 @@ function sessionHasPendingPersistence(session: PersistedSessionRecord) {
         ? message.versions
         : [
             {
+              id: message.id,
               content: message.content || '',
               parts: message.parts || [],
               status: message.status || 'completed',
@@ -1998,6 +2000,7 @@ function persistedMessageVersions(message: PersistedSessionRecord['messages'][nu
 
   return [
     {
+      id: message.id,
       content: message.content || '',
       parts: message.parts || [],
       status: message.status || 'completed',

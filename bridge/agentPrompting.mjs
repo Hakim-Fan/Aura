@@ -204,6 +204,12 @@ export function buildRouteFirstSystemPrompt(
     'When it improves clarity, use enhanced Markdown fences that the UI can render: ```mermaid for diagrams, ```csv or ```tsv for tabular data, ```json for structured data, and LaTeX math with $...$ or $$...$$. Use these only when they make the answer easier to inspect.',
     buildApprovalPolicy(settings),
     buildReasoningInstruction(settings),
+    [
+      'Work memory discipline: reasoning and scratchpad text are temporary process, not reusable task memory.',
+      'When a stage produces reusable outcomes such as file/repo facts, schema drafts, implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
+      'The runtime may also save compact progress/tool checkpoints automatically; treat those checkpoints as handoff hints and avoid repeating already successful extraction or setup steps.',
+      'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
+    ].join('\n'),
   ]
 
   if (routeState) {

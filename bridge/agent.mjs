@@ -1351,7 +1351,9 @@ export async function runRouteFirstAgent(request) {
   const context = {
     cwd: settings.cwd,
     appControl: hooks.appControl,
+    logContext: request.logContext || {},
     todoState: runtime.todoState || { items: [] },
+    workMemories: runtime.workMemories || [],
     settings,
     cleanupHandlers: [],
   }
@@ -1569,6 +1571,7 @@ export async function runRouteFirstAgent(request) {
           routeState: promptRouteState,
           hooks: {
             ...hooks,
+            workMemoryContext: context,
             rethrowToolError(error) {
               return extractRouteEscalationRequest(error) !== null
             },
@@ -1726,6 +1729,7 @@ export async function runRouteFirstAgent(request) {
         routeDecision: lastRouteDecision,
         capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
         reasoning,
+        workMemories: context.workMemories,
         retryInfo: result.retryInfo,
         status: 'completed',
         taskTree: taskTracker.getTree(),
@@ -1810,6 +1814,7 @@ export async function runRouteFirstAgent(request) {
             routeDecision: lastRouteDecision,
             capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
             reasoning: summaryReasoning,
+            workMemories: context.workMemories,
             retryInfo: recovered.retryInfo
               ? {
                   ...recovered.retryInfo,
@@ -1856,6 +1861,7 @@ export async function runRouteFirstAgent(request) {
         routeDecision: lastRouteDecision,
         capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
         reasoning: summaryReasoning,
+        workMemories: context.workMemories,
         retryInfo: recoveryRetryInfo || retryInfo,
         usage: getAccumulatedUsage(),
         contextCompression: getLatestContextCompression(),

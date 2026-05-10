@@ -21,6 +21,12 @@ const APP_LOG_RETENTION_DAYS: u64 = 14;
 const EDIT_TRANSACTION_SNAPSHOT_KEY_PREFIX: &str = "edit_transaction_snapshot:";
 const MAX_REASONING_CHARS: usize = 100_000;
 const MAX_PHASE_OUTPUT_CHARS: usize = 100_000;
+const MAX_WORK_MEMORY_KIND_CHARS: usize = 80;
+const MAX_WORK_MEMORY_TITLE_CHARS: usize = 160;
+const MAX_WORK_MEMORY_SUMMARY_CHARS: usize = 1_200;
+const MAX_WORK_MEMORY_NEXT_USE_CHARS: usize = 600;
+const MAX_WORK_MEMORY_CONTENT_JSON_CHARS: usize = 8_000;
+const MAX_WORK_MEMORY_SOURCE_REFS_JSON_CHARS: usize = 2_400;
 const SNAPSHOT_TRUNCATION_MARKER: &str = "\n...(truncated to keep memory bounded)...\n";
 const MAX_INLINE_IMAGE_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TERMINAL_TASK_SNAPSHOTS: usize = 64;
@@ -39,6 +45,8 @@ struct AgentTaskSnapshot {
     #[serde(rename = "taskTree")]
     task_tree: Vec<serde_json::Value>,
     reasoning: Vec<serde_json::Value>,
+    #[serde(rename = "workMemories")]
+    work_memories: Vec<serde_json::Value>,
     usage: Option<serde_json::Value>,
     #[serde(rename = "contextCompression")]
     context_compression: Option<serde_json::Value>,
@@ -376,6 +384,9 @@ fn infer_skill_support(content: &str) -> (bool, Option<String>) {
         "plan",
         "tasklist",
         "todowrite",
+        "recordworkmemory",
+        "recordphaseartifact",
+        "writeworkmemory",
         "capabilities",
         "listcapabilities",
         "auralistcapabilities",
@@ -1484,6 +1495,76 @@ fn resolve_app_db_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf,
     Ok(PathBuf::from(aura.config_dir).join("app.db"))
 }
 
+fn work_memories_has_session_fk(connection: &Connection) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_list(work_memories)")
+        .map_err(|error| format!("Failed to inspect work_memories foreign keys: {error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(2))
+        .map_err(|error| format!("Failed to query work_memories foreign keys: {error}"))?;
+
+    for row in rows {
+        let table = row.map_err(|error| format!("Failed to decode work_memories foreign key: {error}"))?;
+        if table == "sessions" {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn migrate_work_memories_without_session_fk(connection: &Connection) -> Result<(), String> {
+    if !work_memories_has_session_fk(connection)? {
+        return Ok(());
+    }
+
+    connection
+        .execute_batch(
+            r#"
+            PRAGMA foreign_keys = OFF;
+
+            CREATE TABLE IF NOT EXISTS work_memories_without_fk (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              task_id TEXT,
+              assistant_message_id TEXT,
+              kind TEXT NOT NULL,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              status TEXT NOT NULL,
+              content_json TEXT NOT NULL,
+              source_refs_json TEXT NOT NULL,
+              next_use TEXT,
+              created_at INTEGER NOT NULL
+            );
+
+            INSERT OR REPLACE INTO work_memories_without_fk (
+              id, session_id, task_id, assistant_message_id, kind, title, summary, status,
+              content_json, source_refs_json, next_use, created_at
+            )
+            SELECT
+              id, session_id, task_id, assistant_message_id, kind, title, summary, status,
+              content_json, source_refs_json, next_use, created_at
+            FROM work_memories;
+
+            DROP TABLE work_memories;
+            ALTER TABLE work_memories_without_fk RENAME TO work_memories;
+
+            CREATE INDEX IF NOT EXISTS idx_work_memories_session_created
+              ON work_memories(session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_work_memories_session_assistant
+              ON work_memories(session_id, assistant_message_id);
+
+            PRAGMA foreign_keys = ON;
+            "#,
+        )
+        .map_err(|error| {
+            format!("Failed to migrate work_memories away from session foreign key: {error}")
+        })?;
+
+    Ok(())
+}
+
 fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, String> {
     let db_path = resolve_app_db_path(app)?;
     let connection = Connection::open(&db_path).map_err(|error| {
@@ -1572,6 +1653,21 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS work_memories (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              task_id TEXT,
+              assistant_message_id TEXT,
+              kind TEXT NOT NULL,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              status TEXT NOT NULL,
+              content_json TEXT NOT NULL,
+              source_refs_json TEXT NOT NULL,
+              next_use TEXT,
+              created_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS user_memory (
               id TEXT PRIMARY KEY,
               scope TEXT NOT NULL,
@@ -1589,9 +1685,15 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               ON messages(session_id, sort_index);
             CREATE INDEX IF NOT EXISTS idx_message_versions_message_version
               ON message_versions(message_id, version_index);
+            CREATE INDEX IF NOT EXISTS idx_work_memories_session_created
+              ON work_memories(session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_work_memories_session_assistant
+              ON work_memories(session_id, assistant_message_id);
             "#,
         )
         .map_err(|error| format!("Failed to initialize SQLite schema: {error}"))?;
+
+    migrate_work_memories_without_session_fk(&connection)?;
 
     if let Err(error) = connection.execute(
         "ALTER TABLE sessions ADD COLUMN folder_id TEXT NOT NULL DEFAULT ''",
@@ -1743,6 +1845,149 @@ fn parse_json_object_column(raw: Option<String>) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+fn truncate_work_memory_text(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    if max_chars <= 3 {
+        return normalized.chars().take(max_chars).collect();
+    }
+    let clipped: String = normalized.chars().take(max_chars - 3).collect();
+    format!("{}...", clipped.trim_end())
+}
+
+fn get_work_memory_string_field(
+    value: &serde_json::Value,
+    key: &str,
+    fallback: &str,
+    max_chars: usize,
+) -> String {
+    let raw = value
+        .get(key)
+        .and_then(|entry| entry.as_str())
+        .unwrap_or(fallback);
+    truncate_work_memory_text(raw, max_chars)
+}
+
+fn normalize_work_memory_status(value: &serde_json::Value) -> &'static str {
+    match value
+        .get("status")
+        .and_then(|entry| entry.as_str())
+        .unwrap_or("draft")
+    {
+        "confirmed" => "confirmed",
+        "assumption" => "assumption",
+        _ => "draft",
+    }
+}
+
+fn bounded_json_value(value: serde_json::Value, max_chars: usize) -> serde_json::Value {
+    let serialized = value.to_string();
+    if serialized.chars().count() <= max_chars {
+        return value;
+    }
+    serde_json::json!({
+        "truncated": true,
+        "preview": truncate_work_memory_text(&serialized, max_chars),
+    })
+}
+
+fn normalize_work_memory_source_refs(value: &serde_json::Value) -> serde_json::Value {
+    let refs = value
+        .get("sourceRefs")
+        .or_else(|| value.get("sources"))
+        .and_then(|entry| entry.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_object())
+                .take(12)
+                .map(|entry| {
+                    let mut normalized = serde_json::Map::new();
+                    for (key, value) in entry {
+                        if let Some(raw) = value.as_str() {
+                            let clipped = truncate_work_memory_text(raw, 240);
+                            if !clipped.is_empty() {
+                                normalized.insert(key.clone(), serde_json::Value::String(clipped));
+                            }
+                        } else if value.is_number() {
+                            normalized.insert(key.clone(), value.clone());
+                        }
+                    }
+                    serde_json::Value::Object(normalized)
+                })
+                .filter(|entry| entry.as_object().map(|map| !map.is_empty()).unwrap_or(false))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    bounded_json_value(
+        serde_json::Value::Array(refs),
+        MAX_WORK_MEMORY_SOURCE_REFS_JSON_CHARS,
+    )
+}
+
+fn normalize_work_memory_payload(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let session_id = get_work_memory_string_field(payload, "sessionId", "", 120);
+    if session_id.is_empty() {
+        return Err("Work memory requires a sessionId.".into());
+    }
+
+    let now = current_timestamp_ms() as i64;
+    let kind = get_work_memory_string_field(
+        payload,
+        "kind",
+        "phase_artifact",
+        MAX_WORK_MEMORY_KIND_CHARS,
+    );
+    let title = get_work_memory_string_field(
+        payload,
+        "title",
+        kind.as_str(),
+        MAX_WORK_MEMORY_TITLE_CHARS,
+    );
+    let summary = get_work_memory_string_field(
+        payload,
+        "summary",
+        "",
+        MAX_WORK_MEMORY_SUMMARY_CHARS,
+    );
+    if summary.is_empty() {
+        return Err("Work memory requires a summary.".into());
+    }
+
+    let content = payload
+        .get("content")
+        .cloned()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Ok(serde_json::json!({
+        "id": get_work_memory_string_field(
+            payload,
+            "id",
+            &format!("work-memory-{}", create_task_id()),
+            180,
+        ),
+        "sessionId": session_id,
+        "taskId": get_work_memory_string_field(payload, "taskId", "", 120),
+        "assistantMessageId": get_work_memory_string_field(payload, "assistantMessageId", "", 120),
+        "kind": if kind.is_empty() { "phase_artifact".to_string() } else { kind },
+        "title": if title.is_empty() { "phase_artifact".to_string() } else { title },
+        "summary": summary,
+        "status": normalize_work_memory_status(payload),
+        "content": bounded_json_value(content, MAX_WORK_MEMORY_CONTENT_JSON_CHARS),
+        "sourceRefs": normalize_work_memory_source_refs(payload),
+        "nextUse": get_work_memory_string_field(payload, "nextUse", "", MAX_WORK_MEMORY_NEXT_USE_CHARS),
+        "createdAt": payload
+            .get("createdAt")
+            .and_then(|value| value.as_i64())
+            .filter(|value| *value > 0)
+            .unwrap_or(now),
+    }))
+}
+
 fn value_to_json_string(value: &serde_json::Value) -> Result<String, String> {
     serde_json::to_string(value)
         .map_err(|error| format!("Failed to serialize JSON payload: {error}"))
@@ -1788,6 +2033,68 @@ fn upsert_kv(connection: &Connection, key: &str, value: &serde_json::Value) -> R
         )
         .map_err(|error| format!("Failed to persist app state for key {key}: {error}"))?;
     Ok(())
+}
+
+fn store_work_memory<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let memory = normalize_work_memory_payload(payload)?;
+    let connection = open_app_db(app)?;
+    let content = memory
+        .get("content")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let source_refs = memory
+        .get("sourceRefs")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+
+    connection
+        .execute(
+            "INSERT INTO work_memories (
+                id, session_id, task_id, assistant_message_id, kind, title, summary, status,
+                content_json, source_refs_json, next_use, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+                session_id = excluded.session_id,
+                task_id = excluded.task_id,
+                assistant_message_id = excluded.assistant_message_id,
+                kind = excluded.kind,
+                title = excluded.title,
+                summary = excluded.summary,
+                status = excluded.status,
+                content_json = excluded.content_json,
+                source_refs_json = excluded.source_refs_json,
+                next_use = excluded.next_use,
+                created_at = excluded.created_at",
+            params![
+                memory.get("id").and_then(|value| value.as_str()).unwrap_or_default(),
+                memory.get("sessionId").and_then(|value| value.as_str()).unwrap_or_default(),
+                memory
+                    .get("taskId")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty()),
+                memory
+                    .get("assistantMessageId")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty()),
+                memory.get("kind").and_then(|value| value.as_str()).unwrap_or("phase_artifact"),
+                memory.get("title").and_then(|value| value.as_str()).unwrap_or("phase_artifact"),
+                memory.get("summary").and_then(|value| value.as_str()).unwrap_or_default(),
+                memory.get("status").and_then(|value| value.as_str()).unwrap_or("draft"),
+                value_to_json_string(&content)?,
+                value_to_json_string(&source_refs)?,
+                memory
+                    .get("nextUse")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty()),
+                memory.get("createdAt").and_then(|value| value.as_i64()).unwrap_or(0),
+            ],
+        )
+        .map_err(|error| format!("Failed to persist work memory: {error}"))?;
+
+    Ok(memory)
 }
 
 fn edit_transaction_snapshot_key(transaction_id: &str) -> String {
@@ -1940,6 +2247,10 @@ fn handle_bridge_app_action<R: Runtime>(
             Ok(settings)
         }
         "record_edit_transaction_snapshot" => store_edit_transaction_snapshot(app, payload),
+        "record_work_memory" => {
+            let memory_payload = payload.get("memory").unwrap_or(payload);
+            store_work_memory(app, memory_payload)
+        }
         "ensure_aura_home" => {
             let aura = ensure_aura_layout(app)?;
             serde_json::to_value(aura)
@@ -2683,12 +2994,68 @@ fn merge_tool_event(current: &mut AgentTaskSnapshot, tool_event: &serde_json::Va
     current.tool_events.push(tool_event.clone());
 }
 
+fn clear_retry_progress_if_connected(current: &mut AgentTaskSnapshot) {
+    let Some(retry_info) = current.retry_info.as_mut() else {
+        return;
+    };
+    let Some(retry_object) = retry_info.as_object_mut() else {
+        return;
+    };
+    if retry_object
+        .get("inProgress")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return;
+    }
+    retry_object.insert("inProgress".into(), serde_json::Value::Bool(false));
+    retry_object.remove("nextRetryDelayMs");
+    retry_object.remove("nextAttemptNumber");
+}
+
+fn merge_work_memory(current: &mut AgentTaskSnapshot, memory: &serde_json::Value) {
+    let memory_id = memory
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    if memory_id.is_empty() {
+        current.work_memories.push(memory.clone());
+        return;
+    }
+
+    if let Some(existing) = current.work_memories.iter_mut().find(|entry| {
+        entry
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(|value| value == memory_id)
+            .unwrap_or(false)
+    }) {
+        *existing = memory.clone();
+        return;
+    }
+
+    current.work_memories.push(memory.clone());
+}
+
 fn spawn_agent_task<R: Runtime>(
     app: tauri::AppHandle<R>,
     store: &AgentTaskStore,
     payload: serde_json::Value,
 ) -> Result<String, String> {
     let task_id = create_task_id();
+    let mut payload = payload;
+    if let Some(payload_object) = payload.as_object_mut() {
+        let log_context = payload_object
+            .entry("logContext")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(log_context_object) = log_context.as_object_mut() {
+            log_context_object.insert(
+                "taskId".into(),
+                serde_json::Value::String(task_id.clone()),
+            );
+        }
+    }
     let log_context = agent_log_context_details(&task_id, &payload);
     let bridge_path = resolve_bridge_script_path(&app, "ipc.mjs")?;
     let bridge_cwd = resolve_bridge_cwd(&app)?;
@@ -2775,6 +3142,7 @@ fn spawn_agent_task<R: Runtime>(
         appended_inputs: Vec::new(),
         task_tree: Vec::new(),
         reasoning: Vec::new(),
+        work_memories: Vec::new(),
         usage: None,
         context_compression: None,
         capability_snapshot: None,
@@ -2873,6 +3241,7 @@ fn spawn_agent_task<R: Runtime>(
                     if delta.is_empty() {
                         return;
                     }
+                    clear_retry_progress_if_connected(current);
                     match event.get("target").and_then(|value| value.as_str()) {
                         Some("phase") => append_phase_output_delta(current, &event),
                         _ => {
@@ -2883,6 +3252,7 @@ fn spawn_agent_task<R: Runtime>(
                     }
                 }),
                 Some("reasoning_delta") => with_snapshot(&stdout_snapshot, |current| {
+                    clear_retry_progress_if_connected(current);
                     append_reasoning_delta(current, &event);
                 }),
                 Some("usage") => with_snapshot(&stdout_snapshot, |current| {
@@ -2907,6 +3277,7 @@ fn spawn_agent_task<R: Runtime>(
                     current.retry_info = extract_object(event.get("retryInfo"));
                 }),
                 Some("tool_event") => with_snapshot(&stdout_snapshot, |current| {
+                    clear_retry_progress_if_connected(current);
                     let tool_event = event.get("event").unwrap_or(&serde_json::Value::Null);
                     let tool_status = tool_event
                         .get("status")
@@ -2935,6 +3306,17 @@ fn spawn_agent_task<R: Runtime>(
                     }
                     if let Some(tool_event) = event.get("event") {
                         merge_tool_event(current, tool_event);
+                    }
+                }),
+                Some("work_memory") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "info",
+                        "agent_work_memory_recorded",
+                        event_log_details(&stdout_log_context, &event),
+                    );
+                    if let Some(memory) = event.get("memory") {
+                        merge_work_memory(current, memory);
                     }
                 }),
                 Some("appended_inputs") => with_snapshot(&stdout_snapshot, |current| {
@@ -2968,6 +3350,15 @@ fn spawn_agent_task<R: Runtime>(
                         .get("phase")
                         .and_then(|value| value.as_str())
                         .map(|value| value.to_string());
+                    if matches!(
+                        current.phase.as_deref(),
+                        Some("model_streaming")
+                            | Some("tool_running")
+                            | Some("finalizing")
+                            | Some("recovering")
+                    ) {
+                        clear_retry_progress_if_connected(current);
+                    }
                     current.phase_started_at =
                         event.get("phaseStartedAt").and_then(|value| value.as_u64());
                     current.last_heartbeat_at = event
@@ -3059,6 +3450,10 @@ fn spawn_agent_task<R: Runtime>(
                         current.tool_events = extract_array(result.get("toolEvents"));
                         current.task_tree = extract_array(result.get("taskTree"));
                         current.reasoning = extract_array(result.get("reasoning"));
+                        let work_memories = extract_array(result.get("workMemories"));
+                        if !work_memories.is_empty() {
+                            current.work_memories = work_memories;
+                        }
                         current.usage = extract_object(result.get("usage"));
                         if let Some(context_compression) =
                             extract_object(result.get("contextCompression"))
@@ -3954,7 +4349,7 @@ fn load_session_messages_from_db(
 
     let mut versions_statement = connection
         .prepare(
-            "SELECT version_index, content, parts_json, status, created_at, attachments_json, reasoning_json, usage_json,
+            "SELECT id, version_index, content, parts_json, status, created_at, attachments_json, reasoning_json, usage_json,
                     capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json, appended_inputs_json,
                     agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json
              FROM message_versions
@@ -3979,26 +4374,27 @@ fn load_session_messages_from_db(
         let version_rows = versions_statement
             .query_map(params![message_id.clone()], |row| {
                 Ok(serde_json::json!({
-                    "content": row.get::<_, String>(1)?,
-                    "parts": parse_json_array_column(row.get::<_, String>(2)?),
-                    "status": row.get::<_, Option<String>>(3)?,
-                    "createdAt": row.get::<_, i64>(4)?,
-                    "attachments": parse_json_array_column(row.get::<_, String>(5)?),
-                    "reasoning": parse_json_array_column(row.get::<_, String>(6)?),
-                    "usage": parse_json_column(row.get::<_, Option<String>>(7)?),
-                    "capabilitySnapshot": parse_json_object_column(row.get::<_, Option<String>>(8)?),
-                    "activity": parse_json_object_column(row.get::<_, Option<String>>(9)?),
-                    "events": parse_json_array_column(row.get::<_, String>(10)?),
-                    "steps": parse_json_array_column(row.get::<_, String>(11)?),
-                    "error": row.get::<_, Option<String>>(12)?,
-                    "errorInfo": parse_json_object_column(row.get::<_, Option<String>>(13)?),
-                    "appendedInputs": parse_json_array_column(row.get::<_, String>(14)?),
-                    "agentMode": row.get::<_, Option<String>>(15)?,
-                    "routeDecision": parse_json_object_column(row.get::<_, Option<String>>(16)?),
-                    "completionState": row.get::<_, Option<String>>(17)?,
-                    "evidenceSummary": parse_json_object_column(row.get::<_, Option<String>>(18)?),
-                    "deliveryNote": row.get::<_, Option<String>>(19)?,
-                    "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(20)?),
+                    "id": row.get::<_, String>(0)?,
+                    "content": row.get::<_, String>(2)?,
+                    "parts": parse_json_array_column(row.get::<_, String>(3)?),
+                    "status": row.get::<_, Option<String>>(4)?,
+                    "createdAt": row.get::<_, i64>(5)?,
+                    "attachments": parse_json_array_column(row.get::<_, String>(6)?),
+                    "reasoning": parse_json_array_column(row.get::<_, String>(7)?),
+                    "usage": parse_json_column(row.get::<_, Option<String>>(8)?),
+                    "capabilitySnapshot": parse_json_object_column(row.get::<_, Option<String>>(9)?),
+                    "activity": parse_json_object_column(row.get::<_, Option<String>>(10)?),
+                    "events": parse_json_array_column(row.get::<_, String>(11)?),
+                    "steps": parse_json_array_column(row.get::<_, String>(12)?),
+                    "error": row.get::<_, Option<String>>(13)?,
+                    "errorInfo": parse_json_object_column(row.get::<_, Option<String>>(14)?),
+                    "appendedInputs": parse_json_array_column(row.get::<_, String>(15)?),
+                    "agentMode": row.get::<_, Option<String>>(16)?,
+                    "routeDecision": parse_json_object_column(row.get::<_, Option<String>>(17)?),
+                    "completionState": row.get::<_, Option<String>>(18)?,
+                    "evidenceSummary": parse_json_object_column(row.get::<_, Option<String>>(19)?),
+                    "deliveryNote": row.get::<_, Option<String>>(20)?,
+                    "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(21)?),
                 }))
             })
             .map_err(|error| format!("Failed to read message versions from SQLite: {error}"))?;
@@ -4066,6 +4462,58 @@ fn search_sessions_sqlite<R: Runtime>(
         session_ids.push(row.map_err(|error| format!("Failed to decode sessions search row: {error}"))?);
     }
     Ok(session_ids)
+}
+
+#[tauri::command]
+fn load_work_memories_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    session_id: String,
+    limit: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    let normalized_session_id = session_id.trim();
+    if normalized_session_id.is_empty() {
+        return Ok(serde_json::Value::Array(Vec::new()));
+    }
+
+    let safe_limit = limit.unwrap_or(8).clamp(1, 24);
+    let connection = open_app_db(&app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, session_id, task_id, assistant_message_id, kind, title, summary, status,
+                    content_json, source_refs_json, next_use, created_at
+             FROM work_memories
+             WHERE session_id = ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )
+        .map_err(|error| format!("Failed to prepare work memories query: {error}"))?;
+
+    let rows = statement
+        .query_map(params![normalized_session_id, safe_limit], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "sessionId": row.get::<_, String>(1)?,
+                "taskId": row.get::<_, Option<String>>(2)?,
+                "assistantMessageId": row.get::<_, Option<String>>(3)?,
+                "kind": row.get::<_, String>(4)?,
+                "title": row.get::<_, String>(5)?,
+                "summary": row.get::<_, String>(6)?,
+                "status": row.get::<_, String>(7)?,
+                "content": parse_json_column(Some(row.get::<_, String>(8)?)),
+                "sourceRefs": parse_json_array_column(row.get::<_, String>(9)?),
+                "nextUse": row.get::<_, Option<String>>(10)?,
+                "createdAt": row.get::<_, i64>(11)?,
+            }))
+        })
+        .map_err(|error| format!("Failed to read work memories from SQLite: {error}"))?;
+
+    let mut memories = Vec::new();
+    for row in rows {
+        memories.push(row.map_err(|error| format!("Failed to decode work memory row: {error}"))?);
+    }
+    memories.reverse();
+
+    Ok(serde_json::Value::Array(memories))
 }
 
 #[tauri::command]
@@ -4166,6 +4614,12 @@ fn purge_session_sqlite<R: Runtime>(
 ) -> Result<(), String> {
     let connection = open_app_db(&app)?;
     connection
+        .execute(
+            "DELETE FROM work_memories WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|error| format!("Failed to purge session work memories from SQLite: {error}"))?;
+    connection
         .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
         .map_err(|error| format!("Failed to purge session from SQLite: {error}"))?;
     Ok(())
@@ -4244,7 +4698,8 @@ fn upsert_message_version_sqlite<R: Runtime>(
     version_index: i64,
 ) -> Result<(), String> {
     let connection = open_app_db(&app)?;
-    let version_id = format!("{message_id}:{version_index}");
+    let fallback_version_id = format!("{message_id}:v{version_index}");
+    let version_id = get_json_string_field(&version, "id", &fallback_version_id);
     connection
         .execute(
             "INSERT INTO message_versions (
@@ -4273,6 +4728,7 @@ fn upsert_message_version_sqlite<R: Runtime>(
                 evidence_summary_json = excluded.evidence_summary_json,
                 delivery_note = excluded.delivery_note,
                 model_info_json = excluded.model_info_json,
+                id = excluded.id,
                 deleted_at = 0",
             params![
                 version_id,
@@ -4956,6 +5412,7 @@ fn main() {
             load_persisted_app_state,
             load_session_messages_sqlite,
             search_sessions_sqlite,
+            load_work_memories_sqlite,
             save_settings_sqlite,
             save_project_capability_overrides_sqlite,
             save_session_folders_sqlite,

@@ -137,6 +137,225 @@ test('invokeTool falls back to task-start settings when live settings are unavai
   assert.match(output, /"ok": true/)
 })
 
+test('invokeTool honors task-scoped approval grants for matching categories', async () => {
+  let approvalRequested = false
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'run_shell',
+      approvalCategory: 'shell',
+      description: 'Run a shell command.',
+      async run() {
+        return { ok: true }
+      },
+    },
+    {
+      command: 'echo hello',
+    },
+    [],
+    {
+      settings: {
+        autoApproveFileWrite: false,
+        autoApproveShell: false,
+        autoApproveComputerUse: false,
+      },
+      isApprovalGranted(category) {
+        return category === 'shell'
+      },
+      async requestApproval() {
+        approvalRequested = true
+        return 'deny'
+      },
+    },
+  )
+
+  assert.equal(approvalRequested, false)
+  assert.match(output, /"ok": true/)
+})
+
+test('todo_write accepts todos JSON string compatibility input', async () => {
+  const context = { cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-todo-')) }
+  const todoWrite = createBuiltinTools(context).find(tool => tool.name === 'todo_write')
+
+  const output = await invokeTool(
+    todoWrite,
+    {
+      todos: JSON.stringify([
+        {
+          id: '1',
+          content: '编写 Node.js 脚本生成 17 个数据实体表的 Word 文档',
+          status: 'in_progress',
+        },
+        {
+          id: '2',
+          content: '运行脚本生成 docx 文件',
+          status: 'pending',
+        },
+      ]),
+    },
+    [],
+    {},
+  )
+
+  assert.match(output, /\[~\] 编写 Node\.js 脚本生成 17 个数据实体表的 Word 文档/)
+  assert.match(output, /\[ \] 运行脚本生成 docx 文件/)
+  assert.equal(context.todoState.items.length, 2)
+})
+
+test('todo_write records a reusable task progress checkpoint', async () => {
+  const context = {
+    cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-todo-memory-')),
+    logContext: {
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      assistantMessageId: 'assistant-1',
+    },
+    async appControl(action, payload) {
+      assert.equal(action, 'record_work_memory')
+      assert.equal(payload.memory.kind, 'task_progress')
+      return {
+        ...payload.memory,
+        createdAt: 456,
+      }
+    },
+  }
+  const todoWrite = createBuiltinTools(context).find(tool => tool.name === 'todo_write')
+  let emittedMemory
+
+  await invokeTool(
+    todoWrite,
+    {
+      items: [
+        {
+          id: '1',
+          content: '解析文档 XML 并提取子标题',
+          status: 'completed',
+        },
+        {
+          id: '2',
+          content: '生成数据实体表',
+          status: 'in_progress',
+        },
+      ],
+    },
+    [],
+    {
+      onWorkMemory(memory) {
+        emittedMemory = memory
+      },
+    },
+  )
+
+  assert.equal(context.workMemories.length, 1)
+  assert.equal(context.workMemories[0].kind, 'task_progress')
+  assert.match(context.workMemories[0].summary, /1\/2 steps completed/)
+  assert.deepEqual(context.workMemories[0].content.completed, ['解析文档 XML 并提取子标题'])
+  assert.equal(emittedMemory.id, context.workMemories[0].id)
+})
+
+test('record_work_memory stores a normalized phase artifact without a visible tool event', async () => {
+  const context = {
+    cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-work-memory-')),
+    logContext: {
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      assistantMessageId: 'assistant-1',
+    },
+    async appControl(action, payload) {
+      assert.equal(action, 'record_work_memory')
+      assert.equal(payload.memory.sessionId, 'session-1')
+      return {
+        ...payload.memory,
+        id: 'work-memory-1',
+        createdAt: 123,
+      }
+    },
+  }
+  const recordWorkMemory = createBuiltinTools(context).find(
+    tool => tool.name === 'record_work_memory',
+  )
+  const toolEvents = []
+  let emittedMemory
+
+  const output = await invokeTool(
+    recordWorkMemory,
+    {
+      kind: 'schema_design',
+      title: 'Schema draft',
+      summary: 'Extracted reusable schema sections for the document generation step.',
+      status: 'draft',
+      content: {
+        sections: ['users', 'roles'],
+      },
+      sourceRefs: [
+        {
+          type: 'file',
+          path: 'requirements.md',
+        },
+      ],
+      nextUse: 'Reuse these sections when generating the final artifact.',
+    },
+    toolEvents,
+    {
+      onWorkMemory(memory) {
+        emittedMemory = memory
+      },
+    },
+  )
+
+  const parsed = JSON.parse(output)
+  assert.equal(parsed.recorded, true)
+  assert.equal(parsed.persisted, true)
+  assert.equal(parsed.memory.id, 'work-memory-1')
+  assert.equal(context.workMemories.length, 1)
+  assert.equal(emittedMemory.id, 'work-memory-1')
+  assert.equal(toolEvents.length, 0)
+})
+
+test('successful context-gathering tools record a tool evidence checkpoint', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-tool-memory-'))
+  await fs.writeFile(path.join(workspace, 'requirements.md'), '# Title\nReusable facts\n', 'utf8')
+  const context = {
+    cwd: workspace,
+    logContext: {
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      assistantMessageId: 'assistant-1',
+    },
+    async appControl(action, payload) {
+      assert.equal(action, 'record_work_memory')
+      assert.equal(payload.memory.kind, 'tool_evidence')
+      return {
+        ...payload.memory,
+        createdAt: 789,
+      }
+    },
+  }
+  const readFile = createBuiltinTools(context).find(tool => tool.name === 'read_file')
+  let emittedMemory
+
+  await invokeTool(
+    readFile,
+    {
+      path: 'requirements.md',
+    },
+    [],
+    {
+      workMemoryContext: context,
+      onWorkMemory(memory) {
+        emittedMemory = memory
+      },
+    },
+  )
+
+  assert.equal(context.workMemories.length, 1)
+  assert.equal(context.workMemories[0].kind, 'tool_evidence')
+  assert.equal(context.workMemories[0].content.recentSuccesses[0].tool, 'read_file')
+  assert.equal(context.workMemories[0].content.recentSuccesses[0].input.path, 'requirements.md')
+  assert.equal(emittedMemory.id, context.workMemories[0].id)
+})
+
 test('invokeTool includes editing transaction preview in apply_patch approval requests', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-apply-patch-approval-'))
   await fs.mkdir(path.join(workspace, 'src'), { recursive: true })

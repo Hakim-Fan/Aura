@@ -27,6 +27,10 @@ import {
   formatExecutionPolicyPreview,
   looksLikeShellFileMutation,
 } from './execPolicy.mjs'
+import {
+  normalizeWorkMemoryInput,
+  upsertWorkMemory,
+} from './workMemory.mjs'
 
 const ALWAYS_ON_SKILL_IDS = new Set([
   'aura-browser-operator',
@@ -42,6 +46,19 @@ const STRUCTURED_EVENT_OUTPUT_TOOLS = new Set([
   'edit_file',
   'multi_edit_file',
   'replace_line_range',
+])
+
+const AUTO_WORK_MEMORY_TOOL_NAMES = new Set([
+  'exec_command',
+  'aura_read_skill',
+  'glob_files',
+  'list_files',
+  'read_block',
+  'read_file',
+  'run_shell',
+  'search_code',
+  'verify_artifact',
+  'write_file',
 ])
 
 function structuredEventOutputForTool(toolName, value) {
@@ -389,7 +406,22 @@ function createTodoId() {
   return `todo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-function normalizeTodoItems(items) {
+function normalizeTodoItems(input) {
+  let items = input
+  if (typeof items === 'string' && items.trim()) {
+    try {
+      items = JSON.parse(items)
+    } catch {
+      items = []
+    }
+  }
+  if (items && typeof items === 'object' && !Array.isArray(items)) {
+    items = Array.isArray(items.items)
+      ? items.items
+      : Array.isArray(items.todos)
+        ? items.todos
+        : []
+  }
   if (!Array.isArray(items)) {
     return []
   }
@@ -425,6 +457,223 @@ function normalizeTodoItems(items) {
       }
     })
     .filter(Boolean)
+}
+
+function normalizeWorkMemoryIdPart(value, fallback = 'task') {
+  const normalized = String(value || fallback)
+    .trim()
+    .replace(/[^a-zA-Z0-9_.:-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return (normalized || fallback).slice(0, 96)
+}
+
+function stableWorkMemoryId(context, suffix) {
+  const logContext = context?.logContext || {}
+  const sessionId = normalizeWorkMemoryIdPart(logContext.sessionId, 'session')
+  const taskId = normalizeWorkMemoryIdPart(logContext.taskId, 'task')
+  const messageId = normalizeWorkMemoryIdPart(logContext.assistantMessageId, 'message')
+  return `work-memory-${sessionId}-${taskId}-${messageId}-${suffix}`
+}
+
+function workMemoryDefaults(context) {
+  return {
+    sessionId: context?.logContext?.sessionId,
+    taskId: context?.logContext?.taskId,
+    assistantMessageId: context?.logContext?.assistantMessageId,
+  }
+}
+
+async function persistContextWorkMemory(context, memory, runtime = {}) {
+  let persisted = false
+  let storedMemory = memory
+  let persistError = ''
+
+  if (memory.sessionId && typeof context?.appControl === 'function') {
+    try {
+      const result = await context.appControl('record_work_memory', { memory })
+      if (result && typeof result === 'object') {
+        storedMemory = result
+        persisted = true
+      }
+    } catch (error) {
+      persistError = formatToolError(error)
+    }
+  }
+
+  context.workMemories = upsertWorkMemory(context.workMemories, storedMemory)
+  runtime.onWorkMemory?.(storedMemory)
+
+  return {
+    persisted,
+    memory: storedMemory,
+    warning: persistError || undefined,
+  }
+}
+
+async function recordContextWorkMemory(context, args, runtime = {}) {
+  const memory = normalizeWorkMemoryInput(args, workMemoryDefaults(context))
+  return persistContextWorkMemory(context, memory, runtime)
+}
+
+function buildTodoProgressSummary(items) {
+  const completed = items.filter(item => item.status === 'completed')
+  const inProgress = items.filter(item => item.status === 'in_progress')
+  const pending = items.filter(item => item.status === 'pending')
+  const completedText = completed.map(item => item.content).slice(0, 6).join('; ')
+  const activeText = inProgress.map(item => item.content).slice(0, 3).join('; ')
+  return [
+    `Task progress checkpoint: ${completed.length}/${items.length} steps completed.`,
+    completedText ? `Completed: ${completedText}.` : '',
+    activeText ? `In progress: ${activeText}.` : '',
+    pending.length ? `Pending steps: ${pending.length}.` : '',
+  ].filter(Boolean).join(' ')
+}
+
+function buildTodoProgressMemory(context, items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return null
+  }
+  const completed = items.filter(item => item.status === 'completed')
+  const inProgress = items.filter(item => item.status === 'in_progress')
+  const pending = items.filter(item => item.status === 'pending')
+  return {
+    id: stableWorkMemoryId(context, 'todo-progress'),
+    kind: 'task_progress',
+    title: 'Task progress checkpoint',
+    summary: buildTodoProgressSummary(items),
+    status: 'draft',
+    content: {
+      completed: completed.map(item => item.content),
+      inProgress: inProgress.map(item => item.content),
+      pending: pending.map(item => item.content),
+    },
+    sourceRefs: [
+      {
+        tool: 'todo_write',
+        taskId: context?.logContext?.taskId || '',
+      },
+    ],
+    nextUse:
+      'Continue from completed and in-progress checklist items instead of repeating finished setup or extraction steps.',
+  }
+}
+
+function compactToolInput(toolName, args = {}) {
+  if (toolName === 'read_file' || toolName === 'read_block') {
+    return {
+      path: args.path || args.filePath || '',
+      startLine: args.startLine,
+      endLine: args.endLine,
+      mode: args.mode,
+    }
+  }
+  if (toolName === 'glob_files') {
+    return {
+      pattern: args.pattern || '',
+      path: args.path || '',
+    }
+  }
+  if (toolName === 'list_files') {
+    return {
+      path: args.path || '.',
+      depth: args.depth,
+    }
+  }
+  if (toolName === 'search_code') {
+    return {
+      query: args.query || args.pattern || '',
+      path: args.path || '',
+    }
+  }
+  if (toolName === 'run_shell' || toolName === 'exec_command') {
+    return {
+      command: truncate(String(args.command || args.cmd || ''), 500),
+    }
+  }
+  if (toolName === 'write_file') {
+    const content = typeof args.content === 'string' ? args.content : ''
+    return {
+      path: args.path || args.filePath || '',
+      contentChars: content.length,
+      contentPreview: content ? truncate(content, 180) : undefined,
+    }
+  }
+  if (toolName === 'aura_read_skill') {
+    return {
+      skillId: args.skillId || args.id || '',
+    }
+  }
+  if (toolName === 'verify_artifact') {
+    return {
+      path: args.path || args.filePath || '',
+    }
+  }
+  return args && typeof args === 'object' ? args : {}
+}
+
+function outputPreview(value) {
+  const serialized = stringifyOutput(value)
+  return truncate(serialized, 260)
+}
+
+function buildToolEvidenceSummary(entries) {
+  const recent = entries.slice(-6)
+  return [
+    `Tool evidence checkpoint: ${entries.length} successful context-gathering steps recorded for this task.`,
+    ...recent.map(entry => {
+      const input = entry.input || {}
+      const target =
+        input.path ||
+        input.pattern ||
+        input.skillId ||
+        input.query ||
+        input.command ||
+        ''
+      return `${entry.tool}${target ? `(${truncate(String(target), 120)})` : ''} succeeded.`
+    }),
+  ].join(' ')
+}
+
+async function recordToolEvidenceCheckpoint(context, tool, args, output, runtime = {}) {
+  if (!context || !tool || tool.internalOnly === true || !AUTO_WORK_MEMORY_TOOL_NAMES.has(tool.name)) {
+    return null
+  }
+
+  context.autoToolEvidence ||= []
+  const entry = {
+    tool: tool.name,
+    input: compactToolInput(tool.name, args),
+    outputPreview: outputPreview(output),
+    recordedAt: Date.now(),
+  }
+  context.autoToolEvidence = [...context.autoToolEvidence, entry].slice(-12)
+
+  try {
+    return await recordContextWorkMemory(
+      context,
+      {
+        id: stableWorkMemoryId(context, 'tool-evidence'),
+        kind: 'tool_evidence',
+        title: 'Tool evidence checkpoint',
+        summary: buildToolEvidenceSummary(context.autoToolEvidence),
+        status: 'draft',
+        content: {
+          recentSuccesses: context.autoToolEvidence,
+        },
+        sourceRefs: [
+          {
+            tool: tool.name,
+            taskId: context?.logContext?.taskId || '',
+          },
+        ],
+        nextUse:
+          'Reuse these successful tool results before re-reading the same files or rerunning the same extraction commands.',
+      },
+      runtime,
+    )
+  } catch {
+    return null
+  }
 }
 
 function formatTodoList(items) {
@@ -821,6 +1070,7 @@ async function removeMcpServer(context, serverId) {
 
 export function createBuiltinTools(context) {
   context.todoState ||= { items: [] }
+  context.workMemories ||= []
   const unifiedExec = createUnifiedExecRuntime()
   context.cleanupHandlers ||= []
   context.cleanupHandlers.push(() => unifiedExec.closeAllSessions())
@@ -903,14 +1153,88 @@ export function createBuiltinTools(context) {
               required: ['content'],
             },
           },
+          todos: {
+            description:
+              'Compatibility alias for items. Accepts an array of todo objects or a JSON string containing that array.',
+          },
         },
-        required: ['items'],
       },
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
-        const nextItems = normalizeTodoItems(args.items)
+        const nextItems = normalizeTodoItems(args.items ?? args.todos)
         context.todoState.items = nextItems
+        const todoMemory = buildTodoProgressMemory(context, nextItems)
+        if (todoMemory) {
+          await recordContextWorkMemory(context, todoMemory, runtime)
+        }
         return formatTodoList(nextItems)
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'record_work_memory',
+      aliases: ['record_phase_artifact', 'write_work_memory'],
+      internalOnly: true,
+      description:
+        'Record a compact reusable phase artifact for this session. Use only after a stage has produced durable facts, decisions, schemas, implementation notes, verification results, or open questions that future steps should reuse. Do not record raw reasoning, scratchpad text, transient guesses, or generic plans.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          kind: {
+            type: 'string',
+            description:
+              'Short category such as schema_design, repo_orientation, implementation_decision, verification_result, or open_questions.',
+          },
+          title: {
+            type: 'string',
+            description: 'Short human-readable title for the artifact.',
+          },
+          summary: {
+            type: 'string',
+            description:
+              'Concise reusable conclusion. This is what future turns will see first.',
+          },
+          status: {
+            type: 'string',
+            enum: ['draft', 'confirmed', 'assumption'],
+            description:
+              'Use confirmed for verified facts, draft for useful but incomplete artifacts, and assumption for explicitly unverified assumptions.',
+          },
+          content: {
+            type: 'object',
+            additionalProperties: true,
+            description:
+              'Optional structured details that future turns can reuse, kept compact.',
+          },
+          sourceRefs: {
+            type: 'array',
+            description:
+              'Optional compact source references, for example user message ids, file paths, tool names, or evidence notes.',
+            items: {
+              type: 'object',
+              additionalProperties: true,
+            },
+          },
+          nextUse: {
+            type: 'string',
+            description:
+              'Optional note explaining when or how the next model step should reuse this artifact.',
+          },
+        },
+        required: ['summary'],
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const result = await recordContextWorkMemory(context, args, runtime)
+
+        return {
+          recorded: true,
+          persisted: result.persisted,
+          memory: result.memory,
+          warning: result.warning,
+          usageHint:
+            'This work memory will be injected into later turns as a compact phase artifact; verify draft or assumption items when they matter.',
+        }
       },
     },
     {
@@ -1717,8 +2041,17 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   const requiresPolicyApproval = executionPolicy.action === 'prompt'
 
   const approvalCategory = effectiveTool.approvalCategory || executionPolicy.approvalCategory
+  const hasTaskScopedApproval =
+    approvalCategory &&
+    typeof hooks.isApprovalGranted === 'function' &&
+    hooks.isApprovalGranted(approvalCategory, {
+      tool: effectiveTool,
+      args: effectiveArgs,
+      executionPolicy,
+    })
   if (
     approvalCategory &&
+    !hasTaskScopedApproval &&
     (requiresPolicyApproval || !isAutoApproved(effectiveTool, approvalSettings))
   ) {
     const approvalPreview = await buildEditingApprovalPreview(
@@ -1819,6 +2152,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
           requestUserInput(request) {
             return hooks.requestUserInput?.(request)
           },
+          onWorkMemory(memory) {
+            hooks.onWorkMemory?.(memory)
+          },
         }),
       ),
       abortController?.signal,
@@ -1831,6 +2167,17 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       structuredOutput,
       error: undefined,
     })
+    await recordToolEvidenceCheckpoint(
+      hooks.workMemoryContext,
+      effectiveTool,
+      effectiveArgs,
+      output,
+      {
+        onWorkMemory(memory) {
+          hooks.onWorkMemory?.(memory)
+        },
+      },
+    )
     return stringifyOutput(output)
   } catch (error) {
     const detail = formatToolError(error)

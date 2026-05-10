@@ -6,6 +6,7 @@ import type {
   ProjectCapabilityOverrides,
   Session,
   SessionFolder,
+  WorkMemory,
 } from '../types'
 
 type PersistedAppState = {
@@ -25,6 +26,10 @@ export function loadPersistedSessionMessages(sessionId: string) {
 
 export function searchPersistedSessionIds(keyword: string) {
   return invoke<string[]>('search_sessions_sqlite', { keyword })
+}
+
+export function loadPersistedWorkMemories(sessionId: string, limit = 8) {
+  return invoke<WorkMemory[]>('load_work_memories_sqlite', { sessionId, limit })
 }
 
 export function savePersistedSettings(settings: AgentSettings) {

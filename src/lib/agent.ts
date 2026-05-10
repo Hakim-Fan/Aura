@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  ApprovalDecision,
   ResolvedAgentCapabilities,
   AgentTaskSnapshot,
   ChatContentPart,
@@ -8,7 +9,9 @@ import type {
   AgentSettings,
   MessageAttachment,
   SessionContextCompression,
+  WorkMemory,
 } from '../types'
+import { loadPersistedWorkMemories } from './persistence'
 import { readImageDataUrl } from './workspace'
 
 const DEFAULT_MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
@@ -232,6 +235,83 @@ function buildCarryoverWebContext(messages: ChatMessage[]): string | undefined {
     ].join('\n\n'),
     2_800,
   )
+}
+
+function stringifyWorkMemoryContentPreview(content: WorkMemory['content']): string {
+  if (!content || typeof content !== 'object' || Object.keys(content).length === 0) {
+    return ''
+  }
+
+  try {
+    return clipText(JSON.stringify(content), 700)
+  } catch {
+    return ''
+  }
+}
+
+function formatWorkMemorySourceRefs(memory: WorkMemory): string {
+  const refs = Array.isArray(memory.sourceRefs) ? memory.sourceRefs : []
+  return refs
+    .slice(0, 3)
+    .map(ref => {
+      const values = Object.entries(ref)
+        .map(([key, value]) => `${key}:${String(value)}`)
+        .join(', ')
+      return clipText(values, 180)
+    })
+    .filter(Boolean)
+    .join(' | ')
+}
+
+function buildWorkMemoryCarryoverContext(memories: WorkMemory[]): string | undefined {
+  const usableMemories = (Array.isArray(memories) ? memories : [])
+    .filter(memory => memory?.summary?.trim())
+    .slice(-8)
+
+  if (usableMemories.length === 0) {
+    return undefined
+  }
+
+  const lines = [
+    'Prior work memory is available below. These are compact phase artifacts explicitly recorded by earlier agent steps, not raw reasoning.',
+    'Reuse them before repeating the same analysis. Treat draft and assumption items as useful but requiring verification when they are central to the answer.',
+  ]
+
+  for (const memory of usableMemories) {
+    const header = [
+      `[${memory.status || 'draft'}]`,
+      memory.kind ? `${memory.kind}:` : '',
+      memory.title || 'Work memory',
+    ].filter(Boolean).join(' ')
+    lines.push(`- ${clipText(header, 220)}`)
+    lines.push(`  Summary: ${clipText(memory.summary, 520)}`)
+    if (memory.nextUse?.trim()) {
+      lines.push(`  Next use: ${clipText(memory.nextUse, 260)}`)
+    }
+    const contentPreview = stringifyWorkMemoryContentPreview(memory.content)
+    if (contentPreview) {
+      lines.push(`  Structured details: ${contentPreview}`)
+    }
+    const sourceRefs = formatWorkMemorySourceRefs(memory)
+    if (sourceRefs) {
+      lines.push(`  Sources: ${sourceRefs}`)
+    }
+  }
+
+  return clipText(lines.join('\n'), 5_200)
+}
+
+async function loadWorkMemoryCarryoverContext(logContext?: AgentTaskLogContext) {
+  const sessionId = typeof logContext?.sessionId === 'string' ? logContext.sessionId.trim() : ''
+  if (!sessionId) {
+    return undefined
+  }
+
+  try {
+    return buildWorkMemoryCarryoverContext(await loadPersistedWorkMemories(sessionId, 8))
+  } catch {
+    return undefined
+  }
 }
 
 function mergeCarryoverContext(...sections: Array<string | undefined>): string | undefined {
@@ -503,15 +583,20 @@ export async function startAgentTask(
   extraCarryoverContext?: string,
   logContext?: AgentTaskLogContext,
 ): Promise<string> {
+  const [runtimeMessages, workMemoryCarryoverContext] = await Promise.all([
+    buildAgentRuntimeMessages(messages),
+    loadWorkMemoryCarryoverContext(logContext),
+  ])
   const payload = {
     settings,
     capabilities,
     logContext,
     carryoverContext: mergeCarryoverContext(
+      workMemoryCarryoverContext,
       buildCarryoverWebContext(messages),
       extraCarryoverContext,
     ),
-    messages: await buildAgentRuntimeMessages(messages),
+    messages: runtimeMessages,
   }
 
   return invoke<string>('start_agent_task', { payload })
@@ -527,7 +612,7 @@ export async function releaseAgentTask(taskId: string): Promise<void> {
 
 export async function respondToApproval(
   taskId: string,
-  decision: 'approve' | 'deny',
+  decision: ApprovalDecision,
 ): Promise<void> {
   return invoke('respond_to_agent_approval', { taskId, decision })
 }

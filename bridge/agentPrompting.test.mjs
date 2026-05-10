@@ -96,3 +96,27 @@ test('route-first prompt frames skills as enabled options rather than preselecte
   assert.match(prompt, /even if the user does not mention a skill/i)
   assert.match(prompt, /aura_read_skill with the exact skill id/i)
 })
+
+test('route-first prompt separates scratchpad reasoning from reusable work memory', () => {
+  const prompt = buildRouteFirstSystemPrompt(
+    {
+      cwd: '/tmp/workspace',
+      autoApproveShell: false,
+      autoApproveFileWrite: false,
+      autoApproveComputerUse: false,
+      reasoningEffort: 'medium',
+    },
+    '',
+    '',
+    {
+      answerMode: 'advise',
+      needsExternalFacts: false,
+      researchMode: 'auto',
+      responseStyle: 'adaptive-default',
+    },
+  )
+
+  assert.match(prompt, /reasoning and scratchpad text are temporary process/i)
+  assert.match(prompt, /record_work_memory/i)
+  assert.match(prompt, /draft, and mark unverified assumptions as assumption/i)
+})
