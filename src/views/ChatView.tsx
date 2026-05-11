@@ -365,6 +365,19 @@ function ContextTokenMeter({
   const [open, setOpen] = useState(false)
   const closeTimerRef = useRef<number | null>(null)
   const safeContextWindow = Math.max(1, contextWindowTokens || DEFAULT_CONTEXT_WINDOW_TOKENS)
+  const effectiveWindow = contextCompression?.contextWindowTokens || safeContextWindow
+  const effectiveThreshold =
+    contextCompression?.effectiveThresholdTokens ||
+    contextCompression?.compressionThresholdTokens ||
+    0
+  const windowSourceLabel =
+    contextCompression?.windowSource === 'model_metadata'
+      ? '模型配置'
+      : contextCompression?.windowSource === 'settings'
+        ? '本地设置'
+        : contextCompression?.windowSource === 'inferred'
+          ? '系统推断'
+          : contextCompression?.windowSource || ''
   const ratio = Math.max(0, Math.min(1, currentTokens / safeContextWindow))
   const percent = Math.round(ratio * 100)
   const circumference = 2 * Math.PI * 8
@@ -444,6 +457,17 @@ function ContextTokenMeter({
             <div className="mt-1 text-12px text-[var(--text-secondary)]">
               {formatTokenCount(currentTokens)} / {formatTokenCount(safeContextWindow)}
             </div>
+            {contextCompression?.contextWindowTokens || contextCompression?.windowSource ? (
+              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-65">
+                实际窗口 {formatTokenCount(effectiveWindow)}
+                {windowSourceLabel ? ` · ${windowSourceLabel}` : ''}
+              </div>
+            ) : null}
+            {effectiveThreshold > 0 ? (
+              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-65">
+                有效压缩阈值 {formatTokenCount(effectiveThreshold)}
+              </div>
+            ) : null}
             <div className="mt-2 border-t border-[var(--border-subtle)] pt-2 text-10px text-[var(--text-secondary)] opacity-70">
               模型总消耗 {formatTokenCount(cumulativeTokens)}
             </div>
@@ -451,6 +475,7 @@ function ContextTokenMeter({
               <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-65">
                 上次压缩 {formatTokenCount(contextCompression.originalTokenEstimate)}{' -> '}
                 {formatTokenCount(contextCompression.compressedTokenEstimate)}
+                {contextCompression.kind ? ` · ${contextCompression.kind}` : ''}
               </div>
             ) : (
               <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-50">上次压缩 暂无</div>
@@ -5556,6 +5581,7 @@ export function ChatView({
     ),
   )
   const promptContextWindowTokens =
+    liveContextCompression?.contextWindowTokens ||
     latestMessageUsage?.contextWindow ||
     configuredContextWindowTokens ||
     latestRouteDecision?.contextEstimate?.contextWindowTokens ||

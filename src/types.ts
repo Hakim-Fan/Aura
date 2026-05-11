@@ -256,6 +256,8 @@ export type PromptContextSnapshot = {
   conversationTokens?: number
   promptTokens?: number
   contextWindowTokens: number
+  configuredContextWindowTokens?: number
+  windowSource?: 'model_metadata' | 'settings' | 'inferred' | string
   compressionThresholdTokens: number
   effectiveThresholdTokens?: number
 }
@@ -439,11 +441,27 @@ export type ChatMessage = {
 export type SessionContextCompression = {
   id: string
   summary: string
-  compressedThroughMessageId: string
+  compressedThroughMessageId?: string
   originalMessageCount: number
   originalTokenEstimate: number
   compressedTokenEstimate: number
   createdAt: number
+  kind?: 'agent_preflight' | 'agent_runtime' | 'provider_runtime_transcript' | string
+  trigger?: string
+  activePromptTokens?: number
+  activePromptLimit?: number
+  contextWindowTokens?: number
+  configuredContextWindowTokens?: number
+  configuredThresholdTokens?: number
+  compressionThresholdTokens?: number
+  effectiveThresholdTokens?: number
+  systemPromptTokens?: number
+  toolSchemaTokens?: number
+  maxOutputTokens?: number
+  toolResultBufferTokens?: number
+  summaryTokens?: number
+  windowSource?: 'model_metadata' | 'settings' | 'inferred' | string
+  preserved?: string[]
   providerProfileId?: string
   model?: string
 }

@@ -5,6 +5,8 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   appendRuntimeToolEvidenceToSystemPrompt,
+  buildRuntimeArtifactPrompt,
+  buildRuntimeProgressPrompt,
   buildRuntimeToolEvidencePrompt,
   createBuiltinTools,
   invokeTool,
@@ -409,6 +411,137 @@ test('successful context-gathering tools record a tool evidence checkpoint', asy
     appendRuntimeToolEvidenceToSystemPrompt('base prompt', context),
     /base prompt[\s\S]*Runtime tool evidence from this ongoing task/,
   )
+})
+
+test('update_progress records and injects a current-task progress ledger', async () => {
+  const context = {
+    cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-progress-ledger-')),
+    logContext: {
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      assistantMessageId: 'assistant-1',
+    },
+    async appControl(action, payload) {
+      assert.equal(action, 'record_work_memory')
+      assert.equal(payload.memory.kind, 'task_progress')
+      return {
+        ...payload.memory,
+        createdAt: 990,
+      }
+    },
+  }
+  const updateProgress = createBuiltinTools(context).find(tool => tool.name === 'update_progress')
+
+  const output = await invokeTool(
+    updateProgress,
+    {
+      goal: 'Generate a table from document headings',
+      phase: 'append_rows',
+      completed: ['heading-1', 'heading-2'],
+      current: 'heading-3',
+      pending: ['heading-4'],
+      totalItems: 4,
+      nextAction: 'Process heading-3 and append rows to the table artifact.',
+      artifactRefs: [{ id: 'table-1', rows: 2 }],
+    },
+    [],
+    {
+      onWorkMemory() {},
+    },
+  )
+
+  const parsed = JSON.parse(output)
+  assert.equal(parsed.updated, true)
+  assert.equal(context.progressLedger.phase, 'append_rows')
+  assert.match(buildRuntimeProgressPrompt(context), /heading-3/)
+  assert.match(
+    appendRuntimeToolEvidenceToSystemPrompt('base prompt', context),
+    /Runtime progress ledger from this ongoing task/,
+  )
+  assert.equal(context.workMemories.length, 1)
+  assert.equal(context.workMemories[0].id, 'work-memory-session-1-task-1-long-task-progress')
+})
+
+test('read_file repeat guard avoids returning an unchanged full file twice', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-repeat-read-'))
+  await fs.writeFile(path.join(workspace, 'notes.md'), '# Notes\nReusable facts\n', 'utf8')
+  const context = { cwd: workspace }
+  const readFile = createBuiltinTools(context).find(tool => tool.name === 'read_file')
+
+  const firstOutput = await invokeTool(
+    readFile,
+    {
+      path: 'notes.md',
+    },
+    [],
+    {
+      workMemoryContext: context,
+    },
+  )
+  const secondOutput = await invokeTool(
+    readFile,
+    {
+      path: 'notes.md',
+    },
+    [],
+    {
+      workMemoryContext: context,
+    },
+  )
+
+  assert.match(firstOutput, /Reusable facts/)
+  assert.match(secondOutput, /repeat_full_read_guard/)
+  assert.doesNotMatch(secondOutput, /^# Notes\nReusable facts/m)
+})
+
+test('runtime artifact tools keep large intermediate chunks out of tool output', async () => {
+  const context = { cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-artifacts-')) }
+  const tools = createBuiltinTools(context)
+  const createArtifact = tools.find(tool => tool.name === 'create_artifact')
+  const appendChunk = tools.find(tool => tool.name === 'append_artifact_chunk')
+  const summarizeArtifact = tools.find(tool => tool.name === 'summarize_artifact')
+  const readSlice = tools.find(tool => tool.name === 'read_artifact_slice')
+
+  const created = JSON.parse(await invokeTool(
+    createArtifact,
+    {
+      type: 'table',
+      title: 'Document table',
+      schema: { columns: ['heading', 'entity'] },
+    },
+    [],
+    {},
+  ))
+  const artifactId = created.artifact.id
+  const largeRows = Array.from({ length: 5 }, (_, index) => ({
+    heading: `heading-${index + 1}`,
+    entity: `entity-${index + 1}`,
+  }))
+  const appended = await invokeTool(
+    appendChunk,
+    {
+      artifactId,
+      chunk: { rows: largeRows },
+      summary: 'Rows for headings 1-5.',
+    },
+    [],
+    {},
+  )
+  const parsedAppend = JSON.parse(appended)
+
+  assert.equal(parsedAppend.appended, true)
+  assert.equal(parsedAppend.artifact.itemCount, 5)
+  assert.doesNotMatch(appended, /entity-5/)
+  assert.match(buildRuntimeArtifactPrompt(context), /Document table/)
+  assert.match(
+    appendRuntimeToolEvidenceToSystemPrompt('base prompt', context),
+    /Runtime artifact summaries from this ongoing task/,
+  )
+
+  const summary = JSON.parse(await invokeTool(summarizeArtifact, { artifactId }, [], {}))
+  assert.equal(summary.artifact.chunkCount, 1)
+  const slice = JSON.parse(await invokeTool(readSlice, { artifactId, limit: 1 }, [], {}))
+  assert.equal(slice.chunks[0].content.rows.length, 5)
 })
 
 test('invokeTool includes editing transaction preview in apply_patch approval requests', async () => {

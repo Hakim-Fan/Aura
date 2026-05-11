@@ -30,6 +30,12 @@ const CORE_WORKSPACE_TOOLS = new Set([
   'read_file',
   'search_code',
   'todo_write',
+  'update_progress',
+  'read_progress',
+  'create_artifact',
+  'append_artifact_chunk',
+  'read_artifact_slice',
+  'summarize_artifact',
 ])
 
 const LOCAL_EXECUTION_TOOLS = new Set([

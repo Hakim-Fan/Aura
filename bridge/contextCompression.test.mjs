@@ -83,6 +83,8 @@ test('buildContextCompressionBudget uses model metadata when available', () => {
   })
 
   assert.equal(budget.contextWindowTokens, 200_000)
+  assert.equal(budget.windowSource, 'model_metadata')
+  assert.equal(budget.configuredContextWindowTokens, 256_000)
   assert.equal(budget.configuredThresholdTokens, 256_000)
   assert.equal(budget.maxOutputTokens, 20_000)
   assert.ok(budget.effectiveThresholdTokens < budget.compressionThresholdTokens)
@@ -96,6 +98,7 @@ test('buildContextCompressionBudget uses configured budget when model metadata i
   })
 
   assert.equal(budget.contextWindowTokens, 64_000)
+  assert.equal(budget.windowSource, 'settings')
   assert.equal(budget.configuredThresholdTokens, 64_000)
   assert.equal(budget.compressionThresholdTokens, Math.floor(64_000 * 0.85))
 })

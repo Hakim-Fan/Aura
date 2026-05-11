@@ -240,6 +240,11 @@ function buildContextCompressionCheckpoint({
   settings,
   beforeTokens,
   afterTokens,
+  budget,
+  trigger,
+  activePromptTokens,
+  activePromptLimit,
+  stage,
 }) {
   const summary =
     typeof compactedMessages?.[0]?.content === 'string'
@@ -261,6 +266,37 @@ function buildContextCompressionCheckpoint({
     originalTokenEstimate: Math.max(0, Math.round(Number(beforeTokens) || 0)),
     compressedTokenEstimate: Math.max(0, Math.round(Number(afterTokens) || 0)),
     createdAt: Date.now(),
+    kind: stage === 'preflight' ? 'agent_preflight' : 'agent_runtime',
+    trigger: trigger || 'local_estimate',
+    activePromptTokens: Math.max(0, Math.round(Number(activePromptTokens) || 0)),
+    activePromptLimit: Math.max(0, Math.round(Number(activePromptLimit) || 0)),
+    contextWindowTokens: Math.max(0, Math.round(Number(budget?.contextWindowTokens) || 0)),
+    configuredContextWindowTokens: Math.max(
+      0,
+      Math.round(Number(budget?.configuredContextWindowTokens) || 0),
+    ) || undefined,
+    configuredThresholdTokens: Math.max(
+      0,
+      Math.round(Number(budget?.configuredThresholdTokens) || 0),
+    ) || undefined,
+    compressionThresholdTokens: Math.max(
+      0,
+      Math.round(Number(budget?.compressionThresholdTokens) || 0),
+    ) || undefined,
+    effectiveThresholdTokens: Math.max(
+      0,
+      Math.round(Number(budget?.effectiveThresholdTokens) || 0),
+    ) || undefined,
+    systemPromptTokens: Math.max(0, Math.round(Number(budget?.systemPromptTokens) || 0)),
+    toolSchemaTokens: Math.max(0, Math.round(Number(budget?.toolSchemaTokens) || 0)),
+    maxOutputTokens: Math.max(0, Math.round(Number(budget?.maxOutputTokens) || 0)),
+    toolResultBufferTokens: Math.max(
+      0,
+      Math.round(Number(budget?.toolResultBufferTokens) || 0),
+    ),
+    summaryTokens: estimateTextTokens(summary, settings),
+    windowSource: budget?.windowSource,
+    preserved: ['compressed_summary', 'recent_messages', 'runtime_tool_evidence'],
     providerProfileId:
       typeof settings?.activeProviderProfileId === 'string'
         ? settings.activeProviderProfileId
@@ -310,6 +346,11 @@ async function maybeCompressMessagesForContext({
     settings,
     beforeTokens: compressionState.estimatedTokens,
     afterTokens,
+    budget: compressionState.budget,
+    trigger: compressionState.trigger,
+    activePromptTokens: compressionState.activePromptTokens,
+    activePromptLimit: compressionState.activePromptLimit,
+    stage,
   })
   if (contextCompression) {
     hooks?.onContextCompression?.(contextCompression)
@@ -543,6 +584,8 @@ function buildPromptContextSnapshot(
     conversationTokens: normalizedConversationTokens,
     promptTokens: promptEnvelopeTokens + normalizedConversationTokens,
     contextWindowTokens: budget.contextWindowTokens,
+    configuredContextWindowTokens: budget.configuredContextWindowTokens,
+    windowSource: budget.windowSource,
     compressionThresholdTokens: budget.compressionThresholdTokens,
     effectiveThresholdTokens: budget.effectiveThresholdTokens,
   }

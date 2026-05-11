@@ -108,16 +108,35 @@ function inferContextWindowFromModel(settings = {}) {
 }
 
 export function resolveContextWindowTokens(settings = {}) {
+  return resolveContextWindowInfo(settings).contextWindowTokens
+}
+
+export function resolveContextWindowInfo(settings = {}) {
   const modelMetadata = findModelMetadata(settings)
-  const configured = Number(modelMetadata?.contextWindowTokens)
-  if (Number.isFinite(configured) && configured > 0) {
-    return Math.round(configured)
+  const modelContextWindowTokens = Number(modelMetadata?.contextWindowTokens)
+  const configuredContextWindowTokens = Number(settings.contextCompressionThresholdTokens)
+  if (Number.isFinite(modelContextWindowTokens) && modelContextWindowTokens > 0) {
+    return {
+      contextWindowTokens: Math.round(modelContextWindowTokens),
+      windowSource: 'model_metadata',
+      modelContextWindowTokens: Math.round(modelContextWindowTokens),
+      configuredContextWindowTokens:
+        Number.isFinite(configuredContextWindowTokens) && configuredContextWindowTokens > 0
+          ? Math.round(configuredContextWindowTokens)
+          : undefined,
+    }
   }
-  const fallbackBudget = Number(settings.contextCompressionThresholdTokens)
-  if (Number.isFinite(fallbackBudget) && fallbackBudget > 0) {
-    return Math.round(fallbackBudget)
+  if (Number.isFinite(configuredContextWindowTokens) && configuredContextWindowTokens > 0) {
+    return {
+      contextWindowTokens: Math.round(configuredContextWindowTokens),
+      windowSource: 'settings',
+      configuredContextWindowTokens: Math.round(configuredContextWindowTokens),
+    }
   }
-  return inferContextWindowFromModel(settings)
+  return {
+    contextWindowTokens: inferContextWindowFromModel(settings),
+    windowSource: 'inferred',
+  }
 }
 
 export function resolveMaxOutputTokens(settings = {}, contextWindowTokens = resolveContextWindowTokens(settings)) {
@@ -132,7 +151,8 @@ export function resolveMaxOutputTokens(settings = {}, contextWindowTokens = reso
 }
 
 export function buildContextCompressionBudget(settings = {}, options = {}) {
-  const contextWindowTokens = resolveContextWindowTokens(settings)
+  const contextWindowInfo = resolveContextWindowInfo(settings)
+  const contextWindowTokens = contextWindowInfo.contextWindowTokens
   const systemPromptTokens = estimateTextTokens(options.systemPrompt || '', settings)
   const toolSchemaTokens = Math.max(
     0,
@@ -173,6 +193,9 @@ export function buildContextCompressionBudget(settings = {}, options = {}) {
 
   return {
     contextWindowTokens,
+    windowSource: contextWindowInfo.windowSource,
+    modelContextWindowTokens: contextWindowInfo.modelContextWindowTokens,
+    configuredContextWindowTokens: contextWindowInfo.configuredContextWindowTokens,
     configuredThresholdTokens,
     systemPromptTokens,
     toolSchemaTokens,

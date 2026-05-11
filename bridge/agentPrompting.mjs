@@ -208,6 +208,8 @@ export function buildRouteFirstSystemPrompt(
       'Work memory discipline: reasoning and scratchpad text are temporary process, not reusable task memory.',
       'When a stage produces reusable synthesized outcomes that are not already obvious from a tool result, such as schema drafts, implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
       'The runtime may also save compact progress/tool checkpoints automatically; treat those checkpoints as handoff hints and avoid repeating already successful extraction or setup steps.',
+      'For long tasks, treat context as a working window rather than durable storage. Process one bounded chunk at a time, call update_progress after durable chunks, and keep ordinary assistant text short until final delivery.',
+      'Do not write full intermediate tables, large drafts, long logs, or raw reasoning into assistant content. If a large result must persist, write or update a file/artifact and keep only its reference, counts, decisions, open questions, and next action in progress/work memory.',
       'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
     ].join('\n'),
   ]

@@ -421,6 +421,17 @@ function normalizeSessionContextCompression(value: unknown): SessionContextCompr
     return undefined
   }
 
+  const numberField = (key: keyof SessionContextCompression) => {
+    const raw = compression[key]
+    return typeof raw === 'number' && Number.isFinite(raw)
+      ? Math.max(0, Math.round(raw))
+      : undefined
+  }
+  const stringField = (key: keyof SessionContextCompression) => {
+    const raw = compression[key]
+    return typeof raw === 'string' ? raw.trim() || undefined : undefined
+  }
+
   return {
     id: id || `context-compression-${createdAt}`,
     summary,
@@ -441,6 +452,27 @@ function normalizeSessionContextCompression(value: unknown): SessionContextCompr
         ? Math.max(0, Math.round(compression.compressedTokenEstimate))
         : 0,
     createdAt,
+    kind: stringField('kind'),
+    trigger: stringField('trigger'),
+    activePromptTokens: numberField('activePromptTokens'),
+    activePromptLimit: numberField('activePromptLimit'),
+    contextWindowTokens: numberField('contextWindowTokens'),
+    configuredContextWindowTokens: numberField('configuredContextWindowTokens'),
+    configuredThresholdTokens: numberField('configuredThresholdTokens'),
+    compressionThresholdTokens: numberField('compressionThresholdTokens'),
+    effectiveThresholdTokens: numberField('effectiveThresholdTokens'),
+    systemPromptTokens: numberField('systemPromptTokens'),
+    toolSchemaTokens: numberField('toolSchemaTokens'),
+    maxOutputTokens: numberField('maxOutputTokens'),
+    toolResultBufferTokens: numberField('toolResultBufferTokens'),
+    summaryTokens: numberField('summaryTokens'),
+    windowSource: stringField('windowSource'),
+    preserved: Array.isArray(compression.preserved)
+      ? compression.preserved
+        .map(item => (typeof item === 'string' ? item.trim() : ''))
+        .filter(Boolean)
+        .slice(0, 8)
+      : undefined,
     providerProfileId:
       typeof compression.providerProfileId === 'string'
         ? compression.providerProfileId.trim() || undefined
@@ -691,6 +723,18 @@ function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefin
               0,
               Math.round(routeDecision.contextEstimate.contextWindowTokens),
             ),
+            configuredContextWindowTokens:
+              typeof routeDecision.contextEstimate.configuredContextWindowTokens === 'number' &&
+                Number.isFinite(routeDecision.contextEstimate.configuredContextWindowTokens)
+                ? Math.max(
+                  0,
+                  Math.round(routeDecision.contextEstimate.configuredContextWindowTokens),
+                )
+                : undefined,
+            windowSource:
+              typeof routeDecision.contextEstimate.windowSource === 'string'
+                ? routeDecision.contextEstimate.windowSource.trim() || undefined
+                : undefined,
             compressionThresholdTokens: Math.max(
               0,
               Math.round(routeDecision.contextEstimate.compressionThresholdTokens),

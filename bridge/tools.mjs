@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
@@ -62,6 +63,13 @@ const AUTO_WORK_MEMORY_TOOL_NAMES = new Set([
 ])
 
 const MAX_AUTO_TOOL_EVIDENCE_ENTRIES = 24
+const MAX_PROGRESS_LIST_ITEMS = 12
+const MAX_ARTIFACT_CHUNKS = 500
+const MAX_ARTIFACT_SLICE_LIMIT = 20
+
+function sha256String(value = '') {
+  return createHash('sha256').update(String(value), 'utf8').digest('hex')
+}
 
 function structuredEventOutputForTool(toolName, value) {
   if (!STRUCTURED_EVENT_OUTPUT_TOOLS.has(toolName)) {
@@ -559,6 +567,218 @@ function buildTodoProgressMemory(context, items) {
   }
 }
 
+function normalizeStringList(value, limit = MAX_PROGRESS_LIST_ITEMS) {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === 'string' && value.trim()
+      ? value.split(/\r?\n|,/u)
+      : []
+  return source
+    .map(item => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, limit)
+}
+
+function normalizeObjectList(value, limit = MAX_PROGRESS_LIST_ITEMS) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value
+    .filter(item => item && typeof item === 'object')
+    .map(item => ({ ...item }))
+    .slice(0, limit)
+}
+
+function normalizeProgressLedgerInput(args = {}) {
+  const completed = normalizeStringList(args.completed ?? args.completedItems)
+  const pending = normalizeStringList(args.pending ?? args.pendingItems)
+  const artifactRefs = normalizeObjectList(args.artifactRefs ?? args.artifacts, 8)
+  const sourceRefs = normalizeObjectList(args.sourceRefs, 8)
+  const completedCount = Math.max(
+    completed.length,
+    Math.round(Number(args.completedCount) || 0),
+  )
+  const totalItems = Math.max(
+    completedCount + pending.length,
+    Math.round(Number(args.totalItems) || 0),
+  )
+
+  return {
+    goal: truncate(String(args.goal || '').trim(), 240),
+    phase: truncate(String(args.phase || '').trim(), 120),
+    current: truncate(String(args.current || args.currentItem || '').trim(), 240),
+    completed,
+    pending,
+    completedCount,
+    totalItems,
+    nextAction: truncate(String(args.nextAction || '').trim(), 320),
+    notes: truncate(String(args.notes || args.summary || '').trim(), 520),
+    artifactRefs,
+    sourceRefs,
+    updatedAt: Date.now(),
+  }
+}
+
+function mergeProgressLedger(previous = {}, next = {}) {
+  return {
+    ...previous,
+    ...next,
+    goal: next.goal || previous.goal || '',
+    phase: next.phase || previous.phase || '',
+    current: next.current || previous.current || '',
+    completed: next.completed.length > 0 ? next.completed : previous.completed || [],
+    pending: next.pending.length > 0 ? next.pending : previous.pending || [],
+    completedCount:
+      next.completedCount > 0 ? next.completedCount : previous.completedCount || 0,
+    totalItems: next.totalItems > 0 ? next.totalItems : previous.totalItems || 0,
+    nextAction: next.nextAction || previous.nextAction || '',
+    notes: next.notes || previous.notes || '',
+    artifactRefs:
+      next.artifactRefs.length > 0 ? next.artifactRefs : previous.artifactRefs || [],
+    sourceRefs: next.sourceRefs.length > 0 ? next.sourceRefs : previous.sourceRefs || [],
+    updatedAt: next.updatedAt || Date.now(),
+  }
+}
+
+function formatProgressLedger(ledger = {}) {
+  const lines = []
+  if (ledger.goal) lines.push(`Goal: ${ledger.goal}`)
+  if (ledger.phase) lines.push(`Phase: ${ledger.phase}`)
+  const completedCount = Math.max(0, Math.round(Number(ledger.completedCount) || 0))
+  const totalItems = Math.max(0, Math.round(Number(ledger.totalItems) || 0))
+  if (totalItems > 0 || completedCount > 0) {
+    lines.push(`Progress: ${completedCount}/${totalItems || '?'} items completed.`)
+  }
+  if (ledger.current) lines.push(`Current: ${ledger.current}`)
+  if (Array.isArray(ledger.completed) && ledger.completed.length > 0) {
+    lines.push(`Completed: ${ledger.completed.slice(0, MAX_PROGRESS_LIST_ITEMS).join('; ')}`)
+  }
+  if (Array.isArray(ledger.pending) && ledger.pending.length > 0) {
+    lines.push(`Pending: ${ledger.pending.slice(0, MAX_PROGRESS_LIST_ITEMS).join('; ')}`)
+  }
+  if (Array.isArray(ledger.artifactRefs) && ledger.artifactRefs.length > 0) {
+    lines.push(`Artifacts: ${truncate(stringifyOutput(ledger.artifactRefs), 520)}`)
+  }
+  if (ledger.notes) lines.push(`Notes: ${ledger.notes}`)
+  if (ledger.nextAction) lines.push(`Next action: ${ledger.nextAction}`)
+  return lines.join('\n') || 'Progress ledger is empty.'
+}
+
+function buildProgressMemory(context, ledger) {
+  return {
+    id: stableWorkMemoryId(context, 'long-task-progress'),
+    kind: 'task_progress',
+    title: 'Long task progress ledger',
+    summary: truncate(formatProgressLedger(ledger).replace(/\s+/g, ' '), 1_000),
+    status: 'draft',
+    content: ledger,
+    sourceRefs: [
+      {
+        tool: 'update_progress',
+        taskId: context?.logContext?.taskId || '',
+      },
+    ],
+    nextUse:
+      'Continue from this current-task progress ledger before following historical nextAction hints or repeating completed chunks.',
+  }
+}
+
+export function buildRuntimeProgressPrompt(context) {
+  const ledger = context?.progressLedger
+  if (!ledger || typeof ledger !== 'object') {
+    return ''
+  }
+  return [
+    'Runtime progress ledger from this ongoing task:',
+    formatProgressLedger(ledger),
+    'Treat this ledger as the current task state. Do not repeat completed chunks; continue from the next action unless the user changed the goal.',
+  ].join('\n')
+}
+
+export function buildRuntimeArtifactPrompt(context) {
+  const artifacts = Array.isArray(context?.artifactStore?.artifacts)
+    ? context.artifactStore.artifacts
+    : []
+  if (artifacts.length === 0) {
+    return ''
+  }
+  return [
+    'Runtime artifact summaries from this ongoing task:',
+    ...artifacts.slice(-6).map(formatArtifactSummary),
+    'Artifacts hold larger intermediate outputs outside the prompt. Read only bounded slices when exact content is needed.',
+  ].join('\n')
+}
+
+function normalizeArtifactType(value) {
+  const type = String(value || 'draft')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/gu, '_')
+    .replace(/^_+|_+$/gu, '')
+  return type || 'draft'
+}
+
+function createRuntimeArtifactId(type = 'artifact') {
+  return `${normalizeArtifactType(type)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function ensureArtifactStore(context) {
+  context.artifactStore ||= { artifacts: [] }
+  if (!Array.isArray(context.artifactStore.artifacts)) {
+    context.artifactStore.artifacts = []
+  }
+  return context.artifactStore
+}
+
+function findRuntimeArtifact(context, artifactId) {
+  const id = String(artifactId || '').trim()
+  if (!id) {
+    return null
+  }
+  return ensureArtifactStore(context).artifacts.find(artifact => artifact.id === id) || null
+}
+
+function estimateArtifactChunkItems(chunk) {
+  if (Array.isArray(chunk)) {
+    return chunk.length
+  }
+  if (chunk && typeof chunk === 'object') {
+    if (Array.isArray(chunk.rows)) return chunk.rows.length
+    if (Array.isArray(chunk.items)) return chunk.items.length
+    if (Array.isArray(chunk.entries)) return chunk.entries.length
+  }
+  return chunk === undefined || chunk === null ? 0 : 1
+}
+
+function artifactSummary(artifact) {
+  const chunks = Array.isArray(artifact?.chunks) ? artifact.chunks : []
+  const itemCount = chunks.reduce(
+    (total, chunk) => total + Math.max(0, Math.round(Number(chunk.itemCount) || 0)),
+    0,
+  )
+  return {
+    id: artifact.id,
+    type: artifact.type,
+    title: artifact.title,
+    chunkCount: chunks.length,
+    itemCount,
+    schema: artifact.schema,
+    metadata: artifact.metadata,
+    updatedAt: artifact.updatedAt,
+  }
+}
+
+function formatArtifactSummary(artifact) {
+  const summary = artifactSummary(artifact)
+  return [
+    `Artifact ${summary.id} (${summary.type})`,
+    summary.title ? `Title: ${summary.title}` : null,
+    `Chunks: ${summary.chunkCount}`,
+    `Items: ${summary.itemCount}`,
+    summary.metadata ? `Metadata: ${truncate(stringifyOutput(summary.metadata), 360)}` : null,
+  ].filter(Boolean).join('\n')
+}
+
 function compactToolInput(toolName, args = {}) {
   if (toolName === 'read_file' || toolName === 'read_block') {
     return {
@@ -631,6 +851,27 @@ function outputRecall(toolName, value) {
   return normalized ? truncate(normalized, 900) : ''
 }
 
+async function fileEvidenceMetadata(context, toolName, input = {}, output) {
+  if (toolName !== 'read_file' && toolName !== 'read_block') {
+    return undefined
+  }
+  const relativePath = input.path
+  if (!relativePath || typeof context?.cwd !== 'string') {
+    return undefined
+  }
+  try {
+    const target = resolveWorkspacePath(context.cwd, relativePath)
+    const stat = await fs.stat(target)
+    return {
+      size: stat.size,
+      mtimeMs: Math.round(stat.mtimeMs),
+      outputSha256: sha256String(stringifyOutput(output)),
+    }
+  } catch {
+    return undefined
+  }
+}
+
 function toolEvidenceKey(entry) {
   try {
     return `${entry?.tool || ''}:${JSON.stringify(entry?.input || {})}`
@@ -667,7 +908,12 @@ function formatToolEvidenceTarget(entry) {
 
 function formatToolEvidenceLine(entry) {
   const target = formatToolEvidenceTarget(entry)
-  return `${entry.tool}${target ? `(${target})` : ''} succeeded.`
+  const file = entry?.file || {}
+  const freshness =
+    Number.isFinite(Number(file.mtimeMs)) && Number.isFinite(Number(file.size))
+      ? ` file=size:${file.size} mtime:${file.mtimeMs}`
+      : ''
+  return `${entry.tool}${target ? `(${target})` : ''} succeeded.${freshness}`
 }
 
 function buildToolEvidenceSummary(entries) {
@@ -703,16 +949,20 @@ export function buildRuntimeToolEvidencePrompt(context) {
 }
 
 export function appendRuntimeToolEvidenceToSystemPrompt(systemPrompt, context) {
+  const progressPrompt = buildRuntimeProgressPrompt(context)
+  const artifactPrompt = buildRuntimeArtifactPrompt(context)
   const evidencePrompt = buildRuntimeToolEvidencePrompt(context)
-  if (!evidencePrompt) {
+  if (!progressPrompt && !artifactPrompt && !evidencePrompt) {
     return systemPrompt
   }
 
   return [
     systemPrompt,
-    'Ongoing task checkpoints are available below. They summarize successful tools already run in this task so compressed history does not cause duplicate reads or searches.',
+    'Ongoing task checkpoints are available below. They summarize current progress and successful tools already run in this task so compressed history does not cause duplicate work.',
+    progressPrompt,
+    artifactPrompt,
     evidencePrompt,
-  ].join('\n\n')
+  ].filter(Boolean).join('\n\n')
 }
 
 async function recordToolEvidenceCheckpoint(context, tool, args, output, runtime = {}) {
@@ -721,11 +971,13 @@ async function recordToolEvidenceCheckpoint(context, tool, args, output, runtime
   }
 
   context.autoToolEvidence ||= []
+  const input = compactToolInput(tool.name, args)
   const entry = {
     tool: tool.name,
-    input: compactToolInput(tool.name, args),
+    input,
     outputPreview: outputPreview(output),
     outputRecall: outputRecall(tool.name, output),
+    file: await fileEvidenceMetadata(context, tool.name, input, output),
     recordedAt: Date.now(),
   }
   context.autoToolEvidence = upsertAutoToolEvidence(context.autoToolEvidence, entry)
@@ -755,6 +1007,76 @@ async function recordToolEvidenceCheckpoint(context, tool, args, output, runtime
     )
   } catch {
     return null
+  }
+}
+
+function isFullReadFileInput(input = {}) {
+  return (
+    input?.path &&
+    !Number.isFinite(Number(input.startLine)) &&
+    !Number.isFinite(Number(input.endLine))
+  )
+}
+
+async function buildRepeatedFullReadGuardOutput(context, toolName, args = {}) {
+  if (toolName !== 'read_file' || !context) {
+    return null
+  }
+  const input = compactToolInput(toolName, args)
+  if (!isFullReadFileInput(input)) {
+    return null
+  }
+  const entries = Array.isArray(context.autoToolEvidence) ? context.autoToolEvidence : []
+  const prior = [...entries]
+    .reverse()
+    .find(entry =>
+      entry?.tool === 'read_file' &&
+      entry?.input?.path === input.path &&
+      isFullReadFileInput(entry.input),
+    )
+  if (!prior) {
+    return null
+  }
+
+  let currentFile
+  if (typeof context.cwd === 'string') {
+    try {
+      const stat = await fs.stat(resolveWorkspacePath(context.cwd, input.path))
+      currentFile = {
+        size: stat.size,
+        mtimeMs: Math.round(stat.mtimeMs),
+      }
+    } catch {
+      currentFile = undefined
+    }
+  }
+  const priorFile = prior.file || {}
+  const hasPriorFileMetadata =
+    Number.isFinite(Number(priorFile.size)) &&
+    Number.isFinite(Number(priorFile.mtimeMs))
+  const fileUnchanged =
+    currentFile &&
+    hasPriorFileMetadata &&
+    currentFile.size === priorFile.size &&
+    currentFile.mtimeMs === priorFile.mtimeMs
+
+  if (hasPriorFileMetadata && !fileUnchanged) {
+    return null
+  }
+
+  return {
+    skipped: true,
+    reason: 'repeat_full_read_guard',
+    path: input.path,
+    message:
+      'This file was already read in full during the current task. The runtime is avoiding another full read so compressed context does not loop.',
+    priorRead: {
+      recordedAt: prior.recordedAt,
+      file: prior.file,
+      outputRecall: prior.outputRecall,
+    },
+    suggestedAction:
+      'Reuse the current transcript, compressed summary, or runtime evidence first. If more detail is needed, call read_file with startLine/endLine or use search_code/read_block for a narrower slice.',
   }
 }
 
@@ -1153,6 +1475,8 @@ async function removeMcpServer(context, serverId) {
 export function createBuiltinTools(context) {
   context.todoState ||= { items: [] }
   context.workMemories ||= []
+  context.progressLedger ||= null
+  ensureArtifactStore(context)
   const unifiedExec = createUnifiedExecRuntime()
   context.cleanupHandlers ||= []
   context.cleanupHandlers.push(() => unifiedExec.closeAllSessions())
@@ -1250,6 +1574,311 @@ export function createBuiltinTools(context) {
           await recordContextWorkMemory(context, todoMemory, runtime)
         }
         return formatTodoList(nextItems)
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'update_progress',
+      aliases: ['progress_update', 'set_progress', 'record_progress'],
+      description:
+        'Update the current long-task progress ledger. Use this after each durable chunk so compressed context can continue from the right step. Keep entries compact and do not store raw reasoning or large artifacts here.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          goal: {
+            type: 'string',
+            description: 'Short task goal. Keep stable across chunks.',
+          },
+          phase: {
+            type: 'string',
+            description:
+              'Current phase, for example extract_outline, design_schema, append_rows, edit_files, verify.',
+          },
+          current: {
+            type: 'string',
+            description: 'Current chunk or item being processed.',
+          },
+          completed: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Compact identifiers for completed chunks/items.',
+          },
+          pending: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Compact identifiers for pending chunks/items.',
+          },
+          completedCount: {
+            type: 'number',
+            description: 'Number of completed items/chunks.',
+          },
+          totalItems: {
+            type: 'number',
+            description: 'Total number of items/chunks when known.',
+          },
+          nextAction: {
+            type: 'string',
+            description: 'Concrete next step. This is current-state guidance.',
+          },
+          notes: {
+            type: 'string',
+            description: 'Compact durable decisions, blockers, or open questions.',
+          },
+          artifactRefs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: true,
+            },
+            description:
+              'Optional compact artifact references, such as table id, row count, file path, or output format.',
+          },
+          sourceRefs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: true,
+            },
+            description: 'Optional source references for this progress update.',
+          },
+        },
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const nextLedger = normalizeProgressLedgerInput(args)
+        context.progressLedger = mergeProgressLedger(context.progressLedger || {}, nextLedger)
+        const progressMemory = buildProgressMemory(context, context.progressLedger)
+        await recordContextWorkMemory(context, progressMemory, runtime)
+        return {
+          updated: true,
+          progress: context.progressLedger,
+          display: formatProgressLedger(context.progressLedger),
+          usageHint:
+            'The progress ledger will be injected into later model steps. Continue from nextAction and avoid repeating completed chunks.',
+        }
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'read_progress',
+      aliases: ['progress_read', 'get_progress'],
+      description:
+        'Read the current long-task progress ledger before deciding whether to repeat a chunk or continue.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        return {
+          progress: context.progressLedger || null,
+          display: formatProgressLedger(context.progressLedger || {}),
+        }
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'create_artifact',
+      aliases: ['artifact_create'],
+      description:
+        'Create a runtime artifact for large intermediate results such as tables, outlines, patch plans, analyses, verification summaries, or drafts. Use this instead of carrying large results in assistant text.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          type: {
+            type: 'string',
+            description: 'Artifact type, for example table, outline, analysis, patch_plan, verification, or draft.',
+          },
+          title: {
+            type: 'string',
+            description: 'Short human-readable artifact title.',
+          },
+          schema: {
+            type: 'object',
+            additionalProperties: true,
+            description: 'Optional compact schema, for example table columns.',
+          },
+          metadata: {
+            type: 'object',
+            additionalProperties: true,
+            description: 'Optional compact metadata.',
+          },
+        },
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const store = ensureArtifactStore(context)
+        const type = normalizeArtifactType(args.type)
+        const artifact = {
+          id: createRuntimeArtifactId(type),
+          type,
+          title: truncate(String(args.title || `${type} artifact`).trim(), 160),
+          schema: args.schema && typeof args.schema === 'object' ? args.schema : undefined,
+          metadata: args.metadata && typeof args.metadata === 'object' ? args.metadata : undefined,
+          chunks: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }
+        store.artifacts.push(artifact)
+        return {
+          created: true,
+          artifact: artifactSummary(artifact),
+          usageHint:
+            'Append bounded chunks to this artifact. Keep later assistant text to artifact id, counts, decisions, open questions, and next action.',
+        }
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'append_artifact_chunk',
+      aliases: ['artifact_append'],
+      description:
+        'Append one bounded chunk to a runtime artifact. Return value is intentionally compact so large intermediate results do not re-enter the transcript as tool output.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          artifactId: {
+            type: 'string',
+            description: 'Artifact id returned by create_artifact.',
+          },
+          chunk: {
+            description:
+              'Bounded chunk content, for example a small row batch, outline slice, analysis section, or verification summary.',
+          },
+          summary: {
+            type: 'string',
+            description: 'Short summary of this chunk.',
+          },
+          sourceRefs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: true,
+            },
+          },
+        },
+        required: ['artifactId', 'chunk'],
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const artifact = findRuntimeArtifact(context, args.artifactId)
+        if (!artifact) {
+          throw createStructuredError('找不到指定的 runtime artifact。', {
+            source: 'tool',
+            category: 'not_found',
+            code: 'ARTIFACT_NOT_FOUND',
+            detail: `artifactId=${args.artifactId || ''}`,
+            suggestedAction: '请先调用 create_artifact 创建 artifact，或用 summarize_artifact 检查可用 artifact。',
+          })
+        }
+        artifact.chunks ||= []
+        if (artifact.chunks.length >= MAX_ARTIFACT_CHUNKS) {
+          throw createStructuredError('runtime artifact chunk 数量已达到上限。', {
+            source: 'tool',
+            category: 'invalid_input',
+            code: 'ARTIFACT_CHUNK_LIMIT',
+            detail: `artifactId=${artifact.id}, maxChunks=${MAX_ARTIFACT_CHUNKS}`,
+            suggestedAction: '请 finalize 当前 artifact，或创建新的 artifact 继续承载后续内容。',
+          })
+        }
+        const chunk = {
+          index: artifact.chunks.length,
+          content: args.chunk,
+          summary: truncate(String(args.summary || '').trim(), 360),
+          itemCount: estimateArtifactChunkItems(args.chunk),
+          sourceRefs: normalizeObjectList(args.sourceRefs, 8),
+          createdAt: Date.now(),
+        }
+        artifact.chunks.push(chunk)
+        artifact.updatedAt = Date.now()
+        return {
+          appended: true,
+          artifact: artifactSummary(artifact),
+          appendedChunk: {
+            index: chunk.index,
+            itemCount: chunk.itemCount,
+            summary: chunk.summary,
+          },
+          usageHint:
+            'Do not repeat this chunk in assistant text. Update progress with the artifact id, processed ids/counts, and next action.',
+        }
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'read_artifact_slice',
+      aliases: ['artifact_read'],
+      description:
+        'Read a bounded slice of a runtime artifact when exact previously stored content is needed.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          artifactId: { type: 'string' },
+          offset: { type: 'number' },
+          limit: { type: 'number' },
+        },
+        required: ['artifactId'],
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const artifact = findRuntimeArtifact(context, args.artifactId)
+        if (!artifact) {
+          throw createStructuredError('找不到指定的 runtime artifact。', {
+            source: 'tool',
+            category: 'not_found',
+            code: 'ARTIFACT_NOT_FOUND',
+            detail: `artifactId=${args.artifactId || ''}`,
+            suggestedAction: '请先检查 artifact id，或重新创建 artifact。',
+          })
+        }
+        const offset = Math.max(0, Math.round(Number(args.offset) || 0))
+        const limit = Math.max(
+          1,
+          Math.min(MAX_ARTIFACT_SLICE_LIMIT, Math.round(Number(args.limit) || 5)),
+        )
+        return {
+          artifact: artifactSummary(artifact),
+          offset,
+          limit,
+          chunks: (artifact.chunks || []).slice(offset, offset + limit),
+        }
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'summarize_artifact',
+      aliases: ['artifact_summary'],
+      description:
+        'Return compact summaries for one runtime artifact or all runtime artifacts.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          artifactId: { type: 'string' },
+        },
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const store = ensureArtifactStore(context)
+        if (args.artifactId) {
+          const artifact = findRuntimeArtifact(context, args.artifactId)
+          if (!artifact) {
+            throw createStructuredError('找不到指定的 runtime artifact。', {
+              source: 'tool',
+              category: 'not_found',
+              code: 'ARTIFACT_NOT_FOUND',
+              detail: `artifactId=${args.artifactId || ''}`,
+              suggestedAction: '请检查 artifact id。',
+            })
+          }
+          return {
+            artifact: artifactSummary(artifact),
+            display: formatArtifactSummary(artifact),
+          }
+        }
+        return {
+          artifacts: store.artifacts.map(artifactSummary),
+          display: store.artifacts.map(formatArtifactSummary).join('\n\n') || 'No runtime artifacts.',
+        }
       },
     },
     {
@@ -2206,6 +2835,20 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       errorInfo: undefined,
     })
     throwIfAborted(abortController?.signal, effectiveTool)
+    const repeatedFullReadGuardOutput = await buildRepeatedFullReadGuardOutput(
+      hooks.workMemoryContext,
+      effectiveTool.name,
+      effectiveArgs,
+    )
+    if (repeatedFullReadGuardOutput) {
+      updateEvent({
+        status: 'success',
+        output: stringifyOutput(repeatedFullReadGuardOutput),
+        structuredOutput: undefined,
+        error: undefined,
+      })
+      return stringifyOutput(repeatedFullReadGuardOutput)
+    }
     const output = await runAbortable(
       Promise.resolve(
         effectiveTool.run(effectiveArgs, {

@@ -170,6 +170,16 @@ function normalizeTaskContextCompression(
   if (!session.messages.some(message => message.id === compressedThroughMessageId)) {
     return session.contextCompression
   }
+  const numberField = (key: keyof SessionContextCompression) => {
+    const raw = compression[key]
+    return typeof raw === 'number' && Number.isFinite(raw)
+      ? Math.max(0, Math.round(raw))
+      : undefined
+  }
+  const stringField = (key: keyof SessionContextCompression) => {
+    const raw = compression[key]
+    return typeof raw === 'string' ? raw.trim() || undefined : undefined
+  }
 
   return {
     id: compression.id?.trim() || createId(),
@@ -188,6 +198,27 @@ function normalizeTaskContextCompression(
       Math.round(Number(compression.compressedTokenEstimate) || 0),
     ),
     createdAt: Math.max(0, Math.round(Number(compression.createdAt) || Date.now())),
+    kind: stringField('kind'),
+    trigger: stringField('trigger'),
+    activePromptTokens: numberField('activePromptTokens'),
+    activePromptLimit: numberField('activePromptLimit'),
+    contextWindowTokens: numberField('contextWindowTokens'),
+    configuredContextWindowTokens: numberField('configuredContextWindowTokens'),
+    configuredThresholdTokens: numberField('configuredThresholdTokens'),
+    compressionThresholdTokens: numberField('compressionThresholdTokens'),
+    effectiveThresholdTokens: numberField('effectiveThresholdTokens'),
+    systemPromptTokens: numberField('systemPromptTokens'),
+    toolSchemaTokens: numberField('toolSchemaTokens'),
+    maxOutputTokens: numberField('maxOutputTokens'),
+    toolResultBufferTokens: numberField('toolResultBufferTokens'),
+    summaryTokens: numberField('summaryTokens'),
+    windowSource: stringField('windowSource'),
+    preserved: Array.isArray(compression.preserved)
+      ? compression.preserved
+        .map(item => (typeof item === 'string' ? item.trim() : ''))
+        .filter(Boolean)
+        .slice(0, 8)
+      : undefined,
     providerProfileId: compression.providerProfileId,
     model: compression.model,
   }
@@ -819,8 +850,63 @@ function approvalCategoryLabel(category?: string) {
   }
 }
 
+function formatCompactTokenCount(value?: number) {
+  const safe = Math.max(0, Math.round(Number(value) || 0))
+  if (safe >= 1000) {
+    return `${(safe / 1000).toFixed(safe >= 10000 ? 0 : 1)}k`
+  }
+  return String(safe)
+}
+
+function contextCompressionEvent(snapshot: AgentTaskSnapshot): MessageEvent | null {
+  const compression = snapshot.contextCompression
+  if (!compression?.summary?.trim()) {
+    return null
+  }
+  const before = compression.originalTokenEstimate
+  const after = compression.compressedTokenEstimate
+  const threshold =
+    compression.effectiveThresholdTokens ||
+    compression.compressionThresholdTokens ||
+    compression.contextWindowTokens ||
+    0
+  const source =
+    compression.windowSource === 'model_metadata'
+      ? '模型配置'
+      : compression.windowSource === 'settings'
+        ? '本地设置'
+        : compression.windowSource === 'inferred'
+          ? '系统推断'
+          : compression.windowSource || '未知'
+  return {
+    id: `context-compression-${compression.id}`,
+    kind: 'tool',
+    title: '上下文压缩',
+    summary: [
+      `已自动压缩上下文：${formatCompactTokenCount(before)} -> ${formatCompactTokenCount(after)}`,
+      threshold ? `触发阈值：${formatCompactTokenCount(threshold)}` : null,
+      `窗口来源：${source}`,
+    ].filter(Boolean).join(' · '),
+    toolName: 'context_compression',
+    order: -98,
+    source: 'builtin',
+    status: 'success',
+    output: JSON.stringify({
+      kind: compression.kind,
+      trigger: compression.trigger,
+      beforeTokens: before,
+      afterTokens: after,
+      effectiveThresholdTokens: compression.effectiveThresholdTokens,
+      contextWindowTokens: compression.contextWindowTokens,
+      windowSource: compression.windowSource,
+      preserved: compression.preserved,
+    }, null, 2),
+  }
+}
+
 function buildSnapshotMessageEvents(snapshot: AgentTaskSnapshot): MessageEvent[] {
   return [
+    contextCompressionEvent(snapshot),
     ...snapshot.toolEvents.map(mapToolEventToMessageEvent),
     ...(snapshot.pendingApproval
       ? [
@@ -855,7 +941,7 @@ function buildSnapshotMessageEvents(snapshot: AgentTaskSnapshot): MessageEvent[]
         },
       ]
       : []),
-  ]
+  ].filter((event): event is MessageEvent => Boolean(event))
 }
 
 function buildSnapshotErrorMessage(

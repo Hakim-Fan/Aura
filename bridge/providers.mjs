@@ -16,6 +16,10 @@ import {
   splitMessagesIntoTokenBatches,
 } from './contextCompression.mjs'
 
+function createRuntimeId(prefix = 'runtime') {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
 function flattenOpenAiMessageContent(content) {
   if (typeof content === 'string') {
     return content
@@ -656,15 +660,55 @@ async function compactRuntimeTranscript({
     hooks,
   })
   const summaryText = summaryMessages.map(message => message.content).join('\n\n')
+  const compactedTranscript = [
+    ...preservedPrefix,
+    buildSummaryEntry(summaryText),
+    ...recentEntries,
+  ]
+  const afterTokens = estimateTokens(compactedTranscript, settings)
+  hooks?.onContextCompression?.({
+    id: createRuntimeId(`runtime-transcript-compression-${providerKind}`),
+    kind: 'provider_runtime_transcript',
+    summary: summaryText,
+    compressedThroughMessageId: '',
+    originalMessageCount: Array.isArray(transcript) ? transcript.length : 0,
+    originalTokenEstimate: Math.max(0, Math.round(Number(estimatedTokens) || 0)),
+    compressedTokenEstimate: Math.max(0, Math.round(Number(afterTokens) || 0)),
+    createdAt: Date.now(),
+    trigger: 'provider_runtime_transcript',
+    contextWindowTokens: budget.contextWindowTokens,
+    configuredContextWindowTokens: budget.configuredContextWindowTokens,
+    configuredThresholdTokens: budget.configuredThresholdTokens,
+    compressionThresholdTokens: budget.compressionThresholdTokens,
+    effectiveThresholdTokens: budget.effectiveThresholdTokens,
+    systemPromptTokens: budget.systemPromptTokens,
+    toolSchemaTokens: budget.toolSchemaTokens,
+    maxOutputTokens: budget.maxOutputTokens,
+    toolResultBufferTokens: budget.toolResultBufferTokens,
+    summaryTokens: estimateTextTokens(summaryText, settings),
+    windowSource: budget.windowSource,
+    preserved: ['compressed_summary', 'recent_transcript_entries', 'system_prompt'],
+    providerProfileId:
+      typeof settings?.activeProviderProfileId === 'string'
+        ? settings.activeProviderProfileId
+        : undefined,
+    model: typeof settings?.model === 'string' ? settings.model : undefined,
+  })
+  hooks?.onActiveContextEstimate?.({
+    latestInputTokens: afterTokens,
+    contextWindow: budget.contextWindowTokens,
+    allowDecrease: true,
+    reason: 'provider_runtime_transcript_compression',
+  })
   hooks?.onReasoningDelta?.(
-    `Runtime transcript compression: ${estimatedTokens} estimated tokens -> ${estimateTokens([...preservedPrefix, buildSummaryEntry(summaryText), ...recentEntries], settings)} estimated tokens.`,
+    `Runtime transcript compression: ${estimatedTokens} estimated tokens -> ${afterTokens} estimated tokens.`,
     {
       blockId: `runtime-transcript-compression-${providerKind}`,
       kind: 'summary',
       order: -99,
     },
   )
-  return [...preservedPrefix, buildSummaryEntry(summaryText), ...recentEntries]
+  return compactedTranscript
 }
 
 function compactOpenAiRuntimeTranscript({
