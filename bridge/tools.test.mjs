@@ -533,6 +533,7 @@ test('runtime artifact tools keep large intermediate chunks out of tool output',
   assert.equal(parsedAppend.artifact.itemCount, 5)
   assert.doesNotMatch(appended, /entity-5/)
   assert.match(buildRuntimeArtifactPrompt(context), /Document table/)
+  assert.match(buildRuntimeArtifactPrompt(context), /Rows for headings 1-5/)
   assert.match(
     appendRuntimeToolEvidenceToSystemPrompt('base prompt', context),
     /Runtime artifact summaries from this ongoing task/,

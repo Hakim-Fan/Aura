@@ -658,3 +658,24 @@ For code changes, inspect by search and narrow ranges. Keep patch plans and veri
 分块执行 + 外置产物 + 结构化进度 + 工具证据 + 可观测压缩 + 运行时硬约束
 ```
 
+---
+
+## 13. 当前落地状态（2026-05-11）
+
+已完成第一轮 runtime 级改造：
+
+- **Context Budget Ledger**：压缩预算携带 `windowSource`、模型窗口、用户配置窗口、有效阈值、system/tool/output/buffer 预算。
+- **Compression Observability**：agent preflight/runtime 和 provider runtime transcript 压缩都会发结构化 `context_compression` 事件，前端生成持久执行事件。
+- **Progress Ledger**：新增 `update_progress` / `read_progress`，当前任务进度会回注 system prompt，压缩后仍可恢复。
+- **Tool Evidence Index**：工具证据记录 output recall、文件 size/mtime/hash，并注入当前任务 prompt。
+- **Repeat Read Guard**：同一任务重复全文读取未变化文件时，返回已读证据和窄读建议，避免再次塞全文。
+- **Runtime Artifact Store**：新增 `create_artifact`、`append_artifact_chunk`、`read_artifact_slice`、`summarize_artifact`。大中间产物通过 artifact 承载，append 返回只保留摘要和计数。
+- **Assistant Output Spillover**：provider 中间轮 assistant content 超过阈值且任务仍需继续时，自动分片保存为 artifact，并用 artifact 摘要替换后续 transcript 内容。
+- **Finalizer Guard**：最终整理 prompt 对 draft message 设上限，避免极端长草稿再次撑爆 finalization 请求。
+- **UI 可见性**：上下文 meter 显示实际窗口、窗口来源、有效压缩阈值；自动压缩作为执行事件展示。
+
+本轮仍未做的增强：
+
+- artifact store 目前是任务内存态，后续可接 SQLite/文件系统持久化。
+- artifact UI 目前通过工具事件/摘要可见，后续可做专门 artifact 面板。
+- 文档 outline 提取仍可作为领域工具单独增强，但不阻塞通用长任务 runtime。

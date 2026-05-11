@@ -66,6 +66,7 @@ const MAX_AUTO_TOOL_EVIDENCE_ENTRIES = 24
 const MAX_PROGRESS_LIST_ITEMS = 12
 const MAX_ARTIFACT_CHUNKS = 500
 const MAX_ARTIFACT_SLICE_LIMIT = 20
+const MAX_SPILLED_ARTIFACT_TEXT_CHARS = 8_000
 
 function sha256String(value = '') {
   return createHash('sha256').update(String(value), 'utf8').digest('hex')
@@ -750,6 +751,71 @@ function estimateArtifactChunkItems(chunk) {
   return chunk === undefined || chunk === null ? 0 : 1
 }
 
+function splitTextForSpillover(text = '') {
+  const source = String(text || '')
+  if (source.length <= MAX_SPILLED_ARTIFACT_TEXT_CHARS) {
+    return [source]
+  }
+  const slices = []
+  for (let start = 0; start < source.length; start += MAX_SPILLED_ARTIFACT_TEXT_CHARS) {
+    if (slices.length >= MAX_ARTIFACT_CHUNKS - 1) {
+      slices.push(source.slice(start))
+      break
+    }
+    slices.push(source.slice(start, start + MAX_SPILLED_ARTIFACT_TEXT_CHARS))
+  }
+  return slices
+}
+
+function buildSpilledArtifactChunks({ content, summary, sourceRefs }) {
+  const normalizedSourceRefs = normalizeObjectList(sourceRefs, 8)
+  const createdAt = Date.now()
+  const buildSummary = (index, count) => truncate([
+    String(summary || '').trim(),
+    count > 1 ? `slice ${index + 1}/${count}` : null,
+  ].filter(Boolean).join(' '), 480)
+
+  if (typeof content === 'string') {
+    const slices = splitTextForSpillover(content)
+    return slices.map((text, index) => ({
+      index,
+      content: text,
+      summary: buildSummary(index, slices.length),
+      itemCount: estimateArtifactChunkItems(text),
+      sourceRefs: normalizedSourceRefs,
+      createdAt,
+    }))
+  }
+
+  if (content && typeof content === 'object' && typeof content.text === 'string') {
+    const slices = splitTextForSpillover(content.text)
+    return slices.map((text, index) => ({
+      index,
+      content: {
+        ...content,
+        text,
+        sliceIndex: index,
+        sliceCount: slices.length,
+      },
+      summary: buildSummary(index, slices.length),
+      itemCount: estimateArtifactChunkItems(content),
+      sourceRefs: normalizedSourceRefs,
+      createdAt,
+    }))
+  }
+
+  return [
+    {
+      index: 0,
+      content,
+      summary: buildSummary(0, 1),
+      itemCount: estimateArtifactChunkItems(content),
+      sourceRefs: normalizedSourceRefs,
+      createdAt,
+    },
+  ]
+}
+
 function artifactSummary(artifact) {
   const chunks = Array.isArray(artifact?.chunks) ? artifact.chunks : []
   const itemCount = chunks.reduce(
@@ -770,13 +836,51 @@ function artifactSummary(artifact) {
 
 function formatArtifactSummary(artifact) {
   const summary = artifactSummary(artifact)
+  const chunkSummaries = (Array.isArray(artifact?.chunks) ? artifact.chunks : [])
+    .slice(-3)
+    .map(chunk => String(chunk?.summary || '').trim())
+    .filter(Boolean)
+    .join('; ')
   return [
     `Artifact ${summary.id} (${summary.type})`,
     summary.title ? `Title: ${summary.title}` : null,
     `Chunks: ${summary.chunkCount}`,
     `Items: ${summary.itemCount}`,
+    chunkSummaries ? `Recent chunk summaries: ${truncate(chunkSummaries, 520)}` : null,
     summary.metadata ? `Metadata: ${truncate(stringifyOutput(summary.metadata), 360)}` : null,
   ].filter(Boolean).join('\n')
+}
+
+export function spillRuntimeArtifact(context, {
+  type = 'draft',
+  title = 'Intermediate assistant output',
+  content,
+  summary = '',
+  metadata,
+  sourceRefs,
+} = {}) {
+  if (!context || content === undefined || content === null) {
+    return null
+  }
+  const store = ensureArtifactStore(context)
+  const artifactType = normalizeArtifactType(type)
+  const now = Date.now()
+  const artifact = {
+    id: createRuntimeArtifactId(artifactType),
+    type: artifactType,
+    title: truncate(String(title || `${artifactType} artifact`).trim(), 160),
+    schema: undefined,
+    metadata: metadata && typeof metadata === 'object' ? metadata : undefined,
+    chunks: buildSpilledArtifactChunks({ content, summary, sourceRefs }),
+    createdAt: now,
+    updatedAt: now,
+  }
+  store.artifacts.push(artifact)
+  return {
+    artifact,
+    summary: artifactSummary(artifact),
+    display: formatArtifactSummary(artifact),
+  }
 }
 
 function compactToolInput(toolName, args = {}) {

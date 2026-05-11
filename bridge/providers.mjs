@@ -1,7 +1,11 @@
-import { appendRuntimeToolEvidenceToSystemPrompt, invokeTool } from './tools.mjs'
+import {
+  appendRuntimeToolEvidenceToSystemPrompt,
+  invokeTool,
+  spillRuntimeArtifact,
+} from './tools.mjs'
 import { createStructuredError } from './runtimeErrors.mjs'
 import { buildDeliveryPolicy } from './agentEvidence.mjs'
-import { normalizeBaseUrl } from './utils.mjs'
+import { normalizeBaseUrl, stringifyOutput, truncate } from './utils.mjs'
 import { guardedFetch } from './web/net/guardedFetch.mjs'
 import { createApplyPatchStreamingReporter } from './editing/applyPatchStreaming.mjs'
 import {
@@ -18,6 +22,126 @@ import {
 
 function createRuntimeId(prefix = 'runtime') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+const ASSISTANT_SPILLOVER_TRIGGER_TOKENS = 6_000
+const ASSISTANT_SPILLOVER_SUMMARY_CHARS = 1_200
+const FINALIZER_DRAFT_MESSAGE_MAX_CHARS = 6_000
+
+function summarizeSpilloverText(content = '') {
+  const normalized = String(content || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return 'No textual summary available.'
+  }
+  const head = normalized.slice(0, Math.floor(ASSISTANT_SPILLOVER_SUMMARY_CHARS * 0.7))
+  const tail = normalized.length > ASSISTANT_SPILLOVER_SUMMARY_CHARS
+    ? normalized.slice(-Math.floor(ASSISTANT_SPILLOVER_SUMMARY_CHARS * 0.25))
+    : ''
+  return tail ? `${head} ... ${tail}` : head
+}
+
+function maybeSpillAssistantContent({
+  content = '',
+  settings = {},
+  hooks,
+  toolEvents = [],
+  providerKind = 'provider',
+  reason = 'continuation',
+  order,
+  stage,
+}) {
+  const source = String(content || '')
+  if (!source.trim() || !hooks?.workMemoryContext) {
+    return {
+      content: source,
+      spilled: false,
+    }
+  }
+  const tokenEstimate = estimateTextTokens(source, settings)
+  if (tokenEstimate < ASSISTANT_SPILLOVER_TRIGGER_TOKENS) {
+    return {
+      content: source,
+      spilled: false,
+      tokenEstimate,
+    }
+  }
+
+  const summaryText = summarizeSpilloverText(source)
+  const spilled = spillRuntimeArtifact(hooks.workMemoryContext, {
+    type: 'draft',
+    title: `Intermediate ${providerKind} output`,
+    content: {
+      providerKind,
+      reason,
+      stage,
+      text: source,
+    },
+    summary: summaryText,
+    metadata: {
+      providerKind,
+      reason,
+      tokenEstimate,
+      charCount: source.length,
+    },
+    sourceRefs: [
+      {
+        providerKind,
+        stage,
+        reason,
+      },
+    ],
+  })
+
+  if (!spilled?.summary?.id) {
+    return {
+      content: source,
+      spilled: false,
+      tokenEstimate,
+    }
+  }
+
+  const replacement = [
+    '[Large intermediate assistant output saved outside the active transcript]',
+    `Artifact: ${spilled.summary.id}`,
+    `Reason: ${reason}`,
+    `Original estimate: ${tokenEstimate} tokens, ${source.length} chars.`,
+    `Summary: ${summaryText}`,
+    'Continue from runtime progress/artifact summaries. Read a bounded artifact slice only if exact prior content is needed.',
+  ].join('\n')
+
+  const event = {
+    id: createRuntimeId('assistant-output-spillover'),
+    source: 'builtin',
+    name: 'assistant_output_spillover',
+    summary: `Long intermediate assistant output saved as artifact ${spilled.summary.id}.`,
+    order: typeof order === 'number' ? order : undefined,
+    status: 'success',
+    input: `${providerKind}:${reason}`,
+    output: stringifyOutput({
+      artifact: spilled.summary,
+      tokenEstimate,
+      charCount: source.length,
+      replacementPreview: truncate(replacement, 900),
+    }),
+  }
+  toolEvents.push(event)
+  hooks?.onToolEvent?.(event)
+  hooks?.onReasoningDelta?.(
+    `Assistant output spillover: ${tokenEstimate} estimated tokens saved as ${spilled.summary.id}.`,
+    {
+      blockId: `assistant-output-spillover-${providerKind}-${stage || 'runtime'}`,
+      kind: 'summary',
+      order: typeof order === 'number' ? order : -90,
+    },
+  )
+
+  return {
+    content: replacement,
+    originalContent: source,
+    spilled: true,
+    artifact: spilled.summary,
+    tokenEstimate,
+  }
 }
 
 function flattenOpenAiMessageContent(content) {
@@ -365,7 +489,9 @@ function buildFinalizerPrompt({
     deliveryPolicy?.allowedWording
       ? `Allowed wording: ${deliveryPolicy.allowedWording}`
       : null,
-    draftMessage?.trim() ? `当前已有但不完整的回答：\n${draftMessage}` : null,
+    draftMessage?.trim()
+      ? `当前已有但不完整的回答：\n${truncate(draftMessage, FINALIZER_DRAFT_MESSAGE_MAX_CHARS)}`
+      : null,
     toolDigest ? `本轮工具结果摘要：\n${toolDigest}` : null,
     reasoningDigest,
   ]
@@ -1430,6 +1556,7 @@ export const __testInternals = {
   getProviderFailureRecoveryMaxRetries,
   getProviderRetryDelayMs,
   hasWriteRepairAttemptSince,
+  maybeSpillAssistantContent,
   mergeStreamedField,
   mergeOpenAiToolCalls,
   parseToolArguments,
@@ -2683,51 +2810,61 @@ export async function runOpenAiCompatibleAgent({
       }
 
       if (stepResult.phaseReasoning.trim()) {
-      providerReasoningBlocks.push({
-        id: reasoningBlockId,
-        kind: 'provider',
-        content: stepResult.phaseReasoning,
-        order: reasoningOrder,
-      })
+        providerReasoningBlocks.push({
+          id: reasoningBlockId,
+          kind: 'provider',
+          content: stepResult.phaseReasoning,
+          order: reasoningOrder,
+        })
       }
 
       const { content, finalizedToolCalls } = stepResult
-      if (content.trim()) {
-        lastDraftMessage = content
-      }
       if (finalizedToolCalls.length === 0) {
-      const queuedInputs = drainAppendedInputs(hooks)
-      if (queuedInputs.length > 0) {
-        if (content.trim()) {
-          transcript.push({
-            role: 'assistant',
+        const queuedInputs = drainAppendedInputs(hooks)
+        if (queuedInputs.length > 0) {
+          const assistantContent = maybeSpillAssistantContent({
             content,
-          })
-          conversationMessages.push({
-            role: 'assistant',
-            content,
+            settings,
+            hooks,
+            toolEvents,
+            providerKind: 'openai',
+            reason: 'queued_user_input',
+            order: reasoningOrder,
+            stage: `step-${step + 1}`,
+          }).content
+          if (assistantContent.trim()) {
+            lastDraftMessage = assistantContent
+          }
+          if (assistantContent.trim()) {
+            transcript.push({
+              role: 'assistant',
+              content: assistantContent,
+            })
+            conversationMessages.push({
+              role: 'assistant',
+              content: assistantContent,
+            })
+          }
+          for (const input of queuedInputs) {
+            conversationMessages.push(input)
+            transcript.push({
+              role: 'user',
+              content: toOpenAiContent(input),
+            })
+          }
+          step += 1
+          continue
+        }
+        return {
+          message: content || '模型没有返回文本内容。',
+          toolEvents,
+          reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
+          usage: latestUsage,
+          messages: conversationMessages,
+          retryInfo: buildProviderRetryInfo(providerRetryCount, maxRetries, {
+            stage: 'response',
           })
         }
-        for (const input of queuedInputs) {
-          conversationMessages.push(input)
-          transcript.push({
-            role: 'user',
-            content: toOpenAiContent(input),
-          })
-        }
-        step += 1
-        continue
-      }
-      return {
-        message: content || '模型没有返回文本内容。',
-        toolEvents,
-        reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
-        usage: latestUsage,
-        messages: conversationMessages,
-        retryInfo: buildProviderRetryInfo(providerRetryCount, maxRetries, {
-          stage: 'response',
-        }),
-      }
       }
 
       loopGuard.record(
@@ -2739,14 +2876,28 @@ export async function runOpenAiCompatibleAgent({
         ),
       )
 
+      const assistantContent = maybeSpillAssistantContent({
+        content,
+        settings,
+        hooks,
+        toolEvents,
+        providerKind: 'openai',
+        reason: 'tool_calls',
+        order: reasoningOrder,
+        stage: `step-${step + 1}`,
+      }).content
+      if (assistantContent.trim()) {
+        lastDraftMessage = assistantContent
+      }
+
       transcript.push({
         role: 'assistant',
-        content,
+        content: assistantContent,
         tool_calls: finalizedToolCalls,
       })
       conversationMessages.push({
         role: 'assistant',
-        content,
+        content: assistantContent,
       })
 
       hooks?.onPhaseChange?.('tool_running')
@@ -3019,51 +3170,61 @@ export async function runGoogleAgent({
       }
 
       if (stepResult.phaseReasoning.trim()) {
-      providerReasoningBlocks.push({
-        id: reasoningBlockId,
-        kind: 'provider',
-        content: stepResult.phaseReasoning,
-        order: reasoningOrder,
-      })
+        providerReasoningBlocks.push({
+          id: reasoningBlockId,
+          kind: 'provider',
+          content: stepResult.phaseReasoning,
+          order: reasoningOrder,
+        })
       }
 
       const { content, functionCalls } = stepResult
-      if (content.trim()) {
-        lastDraftMessage = content
-      }
       if (functionCalls.length === 0) {
-      const queuedInputs = drainAppendedInputs(hooks)
-      if (queuedInputs.length > 0) {
-        if (content.trim()) {
-          transcript.push({
-            role: 'model',
-            parts: [{ text: content }],
-          })
-          conversationMessages.push({
-            role: 'assistant',
+        const queuedInputs = drainAppendedInputs(hooks)
+        if (queuedInputs.length > 0) {
+          const assistantContent = maybeSpillAssistantContent({
             content,
+            settings,
+            hooks,
+            toolEvents,
+            providerKind: 'google',
+            reason: 'queued_user_input',
+            order: reasoningOrder,
+            stage: `step-${step + 1}`,
+          }).content
+          if (assistantContent.trim()) {
+            lastDraftMessage = assistantContent
+          }
+          if (assistantContent.trim()) {
+            transcript.push({
+              role: 'model',
+              parts: [{ text: assistantContent }],
+            })
+            conversationMessages.push({
+              role: 'assistant',
+              content: assistantContent,
+            })
+          }
+          for (const input of queuedInputs) {
+            conversationMessages.push(input)
+            transcript.push({
+              role: 'user',
+              parts: toGeminiParts(input),
+            })
+          }
+          step += 1
+          continue
+        }
+        return {
+          message: content || '模型没有返回文本内容。',
+          toolEvents,
+          reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
+          usage: latestUsage,
+          messages: conversationMessages,
+          retryInfo: buildProviderRetryInfo(providerRetryCount, maxRetries, {
+            stage: 'response',
           })
         }
-        for (const input of queuedInputs) {
-          conversationMessages.push(input)
-          transcript.push({
-            role: 'user',
-            parts: toGeminiParts(input),
-          })
-        }
-        step += 1
-        continue
-      }
-      return {
-        message: content || '模型没有返回文本内容。',
-        toolEvents,
-        reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
-        usage: latestUsage,
-        messages: conversationMessages,
-        retryInfo: buildProviderRetryInfo(providerRetryCount, maxRetries, {
-          stage: 'response',
-        }),
-      }
       }
 
       loopGuard.record(
@@ -3075,10 +3236,24 @@ export async function runGoogleAgent({
         ),
       )
 
+      const assistantContent = maybeSpillAssistantContent({
+        content,
+        settings,
+        hooks,
+        toolEvents,
+        providerKind: 'google',
+        reason: 'function_calls',
+        order: reasoningOrder,
+        stage: `step-${step + 1}`,
+      }).content
+      if (assistantContent.trim()) {
+        lastDraftMessage = assistantContent
+      }
+
       transcript.push({
         role: 'model',
         parts: [
-          ...(content ? [{ text: content }] : []),
+          ...(assistantContent ? [{ text: assistantContent }] : []),
           ...functionCalls.map(entry => ({
             functionCall: {
               name: entry.name,
@@ -3089,7 +3264,7 @@ export async function runGoogleAgent({
       })
       conversationMessages.push({
         role: 'assistant',
-        content,
+        content: assistantContent,
       })
 
       hooks?.onPhaseChange?.('tool_running')

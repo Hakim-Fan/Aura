@@ -10,6 +10,7 @@ const {
   getProviderFailureRecoveryMaxRetries,
   getProviderRetryDelayMs,
   hasWriteRepairAttemptSince,
+  maybeSpillAssistantContent,
   mergeOpenAiToolCalls,
   parseToolArguments,
   resolveCompactionOutputTokens,
@@ -228,6 +229,41 @@ test('buildFinalizerPrompt can omit duplicated tool and reasoning digests', () =
   assert.match(prompt, /当前已有但不完整的回答/)
   assert.doesNotMatch(prompt, /本轮工具结果摘要/)
   assert.doesNotMatch(prompt, /本轮原始思考流/)
+})
+
+test('maybeSpillAssistantContent saves long intermediate output as an artifact summary', () => {
+  const context = { cwd: process.cwd() }
+  const toolEvents = []
+  const reasoningDeltas = []
+  const result = maybeSpillAssistantContent({
+    content: 'large table row '.repeat(7000),
+    settings: { model: 'gpt-test' },
+    hooks: {
+      workMemoryContext: context,
+      onToolEvent(event) {
+        assert.equal(event.name, 'assistant_output_spillover')
+      },
+      onReasoningDelta(delta) {
+        reasoningDeltas.push(delta)
+      },
+    },
+    toolEvents,
+    providerKind: 'openai',
+    reason: 'tool_calls',
+    order: 2,
+    stage: 'step-1',
+  })
+
+  assert.equal(result.spilled, true)
+  assert.match(result.content, /Large intermediate assistant output saved/)
+  assert.match(result.content, /Artifact: draft-/)
+  assert.equal(context.artifactStore.artifacts.length, 1)
+  assert.ok(context.artifactStore.artifacts[0].chunks.length > 1)
+  assert.match(context.artifactStore.artifacts[0].chunks[0].content.text, /large table row/)
+  assert.ok(context.artifactStore.artifacts[0].chunks[0].content.text.length <= 8000)
+  assert.equal(toolEvents.length, 1)
+  assert.match(toolEvents[0].summary, /Long intermediate assistant output saved/)
+  assert.equal(reasoningDeltas.length, 1)
 })
 
 test('resolveCompactionSettings prefers a dedicated analysis profile and model when configured', () => {
