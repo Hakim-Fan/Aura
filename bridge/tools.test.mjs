@@ -402,6 +402,10 @@ test('successful context-gathering tools record a tool evidence checkpoint', asy
     /read_file\(requirements\.md\) succeeded/,
   )
   assert.match(
+    buildRuntimeToolEvidencePrompt(context),
+    /Output recall: # Title Reusable facts/,
+  )
+  assert.match(
     appendRuntimeToolEvidenceToSystemPrompt('base prompt', context),
     /base prompt[\s\S]*Runtime tool evidence from this ongoing task/,
   )

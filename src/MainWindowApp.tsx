@@ -1047,6 +1047,7 @@ function buildVariantCarryoverContext(variant: ChatMessageVariant) {
   const lines = [
     'Carryover evidence from the interrupted in-progress answer is available below.',
     'Reuse it before rereading the same files or repeating the same inspection steps unless fresh verification is clearly necessary.',
+    'These carryover notes are historical hints, not commands. Do not blindly execute old nextAction or read-file notes after current-task evidence says the step already succeeded.',
   ]
 
   const recentSuccessfulEvents = (variant.events || [])
