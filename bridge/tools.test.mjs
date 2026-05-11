@@ -3,7 +3,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createBuiltinTools, invokeTool } from './tools.mjs'
+import {
+  appendRuntimeToolEvidenceToSystemPrompt,
+  buildRuntimeToolEvidencePrompt,
+  createBuiltinTools,
+  invokeTool,
+} from './tools.mjs'
 
 function buildStoredZip(entries) {
   const localParts = []
@@ -252,6 +257,30 @@ test('todo_write records a reusable task progress checkpoint', async () => {
   assert.match(context.workMemories[0].summary, /1\/2 steps completed/)
   assert.deepEqual(context.workMemories[0].content.completed, ['解析文档 XML 并提取子标题'])
   assert.equal(emittedMemory.id, context.workMemories[0].id)
+
+  context.logContext.assistantMessageId = 'assistant-2'
+  await invokeTool(
+    todoWrite,
+    {
+      items: [
+        {
+          id: '1',
+          content: '解析文档 XML 并提取子标题',
+          status: 'completed',
+        },
+        {
+          id: '2',
+          content: '生成数据实体表',
+          status: 'completed',
+        },
+      ],
+    },
+    [],
+    {},
+  )
+
+  assert.equal(context.workMemories.length, 1)
+  assert.match(context.workMemories[0].summary, /2\/2 steps completed/)
 })
 
 test('record_work_memory stores a normalized phase artifact without a visible tool event', async () => {
@@ -354,6 +383,28 @@ test('successful context-gathering tools record a tool evidence checkpoint', asy
   assert.equal(context.workMemories[0].content.recentSuccesses[0].tool, 'read_file')
   assert.equal(context.workMemories[0].content.recentSuccesses[0].input.path, 'requirements.md')
   assert.equal(emittedMemory.id, context.workMemories[0].id)
+
+  await invokeTool(
+    readFile,
+    {
+      path: 'requirements.md',
+    },
+    [],
+    {
+      workMemoryContext: context,
+    },
+  )
+
+  assert.equal(context.workMemories.length, 1)
+  assert.equal(context.workMemories[0].content.recentSuccesses.length, 1)
+  assert.match(
+    buildRuntimeToolEvidencePrompt(context),
+    /read_file\(requirements\.md\) succeeded/,
+  )
+  assert.match(
+    appendRuntimeToolEvidenceToSystemPrompt('base prompt', context),
+    /base prompt[\s\S]*Runtime tool evidence from this ongoing task/,
+  )
 })
 
 test('invokeTool includes editing transaction preview in apply_patch approval requests', async () => {

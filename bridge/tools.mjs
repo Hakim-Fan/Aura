@@ -61,6 +61,8 @@ const AUTO_WORK_MEMORY_TOOL_NAMES = new Set([
   'write_file',
 ])
 
+const MAX_AUTO_TOOL_EVIDENCE_ENTRIES = 24
+
 function structuredEventOutputForTool(toolName, value) {
   if (!STRUCTURED_EVENT_OUTPUT_TOOLS.has(toolName)) {
     return undefined
@@ -471,8 +473,7 @@ function stableWorkMemoryId(context, suffix) {
   const logContext = context?.logContext || {}
   const sessionId = normalizeWorkMemoryIdPart(logContext.sessionId, 'session')
   const taskId = normalizeWorkMemoryIdPart(logContext.taskId, 'task')
-  const messageId = normalizeWorkMemoryIdPart(logContext.assistantMessageId, 'message')
-  return `work-memory-${sessionId}-${taskId}-${messageId}-${suffix}`
+  return `work-memory-${sessionId}-${taskId}-${suffix}`
 }
 
 function workMemoryDefaults(context) {
@@ -616,22 +617,79 @@ function outputPreview(value) {
   return truncate(serialized, 260)
 }
 
+function toolEvidenceKey(entry) {
+  try {
+    return `${entry?.tool || ''}:${JSON.stringify(entry?.input || {})}`
+  } catch {
+    return `${entry?.tool || ''}:${String(entry?.input || '')}`
+  }
+}
+
+function upsertAutoToolEvidence(entries, entry) {
+  const existingEntries = Array.isArray(entries) ? entries : []
+  const nextKey = toolEvidenceKey(entry)
+  return [
+    ...existingEntries.filter(existing => toolEvidenceKey(existing) !== nextKey),
+    entry,
+  ].slice(-MAX_AUTO_TOOL_EVIDENCE_ENTRIES)
+}
+
+function formatToolEvidenceTarget(entry) {
+  const input = entry?.input || {}
+  const target =
+    input.path ||
+    input.pattern ||
+    input.skillId ||
+    input.query ||
+    input.command ||
+    ''
+  const lineRange =
+    input.path && (input.startLine || input.endLine)
+      ? `:${input.startLine || 1}-${input.endLine || 'end'}`
+      : ''
+  const mode = input.mode ? ` mode=${input.mode}` : ''
+  return target ? `${truncate(String(target), 120)}${lineRange}${mode}` : ''
+}
+
+function formatToolEvidenceLine(entry) {
+  const target = formatToolEvidenceTarget(entry)
+  return `${entry.tool}${target ? `(${target})` : ''} succeeded.`
+}
+
 function buildToolEvidenceSummary(entries) {
-  const recent = entries.slice(-6)
   return [
     `Tool evidence checkpoint: ${entries.length} successful context-gathering steps recorded for this task.`,
-    ...recent.map(entry => {
-      const input = entry.input || {}
-      const target =
-        input.path ||
-        input.pattern ||
-        input.skillId ||
-        input.query ||
-        input.command ||
-        ''
-      return `${entry.tool}${target ? `(${truncate(String(target), 120)})` : ''} succeeded.`
-    }),
+    ...entries.map(formatToolEvidenceLine),
   ].join(' ')
+}
+
+export function buildRuntimeToolEvidencePrompt(context) {
+  const entries = Array.isArray(context?.autoToolEvidence)
+    ? context.autoToolEvidence
+    : []
+  if (entries.length === 0) {
+    return ''
+  }
+
+  return [
+    'Runtime tool evidence from this ongoing task:',
+    `The runtime has recorded ${entries.length} successful context-gathering step(s).`,
+    ...entries.map((entry, index) => `${index + 1}. ${formatToolEvidenceLine(entry)}`),
+    'Before repeating an identical read, search, or extraction, reuse the current transcript or compressed summary first; repeat only when fresher or narrower context is necessary.',
+  ].join('\n')
+}
+
+export function appendRuntimeToolEvidenceToSystemPrompt(systemPrompt, context) {
+  const evidencePrompt = buildRuntimeToolEvidencePrompt(context)
+  if (!evidencePrompt) {
+    return systemPrompt
+  }
+
+  return [
+    systemPrompt,
+    'Ongoing task checkpoints are available below. They summarize successful tools already run in this task so compressed history does not cause duplicate reads or searches.',
+    evidencePrompt,
+  ].join('\n\n')
 }
 
 async function recordToolEvidenceCheckpoint(context, tool, args, output, runtime = {}) {
@@ -646,7 +704,7 @@ async function recordToolEvidenceCheckpoint(context, tool, args, output, runtime
     outputPreview: outputPreview(output),
     recordedAt: Date.now(),
   }
-  context.autoToolEvidence = [...context.autoToolEvidence, entry].slice(-12)
+  context.autoToolEvidence = upsertAutoToolEvidence(context.autoToolEvidence, entry)
 
   try {
     return await recordContextWorkMemory(

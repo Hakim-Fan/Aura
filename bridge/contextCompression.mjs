@@ -456,6 +456,7 @@ export function buildCompactionSystemPrompt(targetTokens) {
     'Preserve information. Do not omit facts merely because they are old.',
     'Use dense Markdown with these sections when applicable: User Goals, Current State, Completed Work, Important Files And Symbols, Decisions, Errors And Blockers, Pending Work, User Preferences.',
     'Keep concrete file paths, commands, error messages, tool outcomes, IDs, model/provider choices, and unresolved questions.',
+    'Preserve runtime tool evidence checkpoints, especially notes that a file read, search, extraction, command, or verification already succeeded.',
     'Do not invent details. If something is uncertain, label it as uncertain.',
   ].join('\n')
 }

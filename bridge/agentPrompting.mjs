@@ -206,7 +206,7 @@ export function buildRouteFirstSystemPrompt(
     buildReasoningInstruction(settings),
     [
       'Work memory discipline: reasoning and scratchpad text are temporary process, not reusable task memory.',
-      'When a stage produces reusable outcomes such as file/repo facts, schema drafts, implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
+      'When a stage produces reusable synthesized outcomes that are not already obvious from a tool result, such as schema drafts, implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
       'The runtime may also save compact progress/tool checkpoints automatically; treat those checkpoints as handoff hints and avoid repeating already successful extraction or setup steps.',
       'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
     ].join('\n'),

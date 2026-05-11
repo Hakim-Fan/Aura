@@ -38,7 +38,10 @@ import {
   estimateMessagesTokens,
 } from './contextCompression.mjs'
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
-import { createBuiltinTools } from './tools.mjs'
+import {
+  appendRuntimeToolEvidenceToSystemPrompt,
+  createBuiltinTools,
+} from './tools.mjs'
 import {
   buildRouteStopMessage,
   determineRouteStopReason,
@@ -1519,6 +1522,10 @@ export async function runRouteFirstAgent(request) {
         ),
         carryoverContext,
       )
+      const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
+        lastSystemPrompt,
+        context,
+      )
       const escalationTool = createRouteEscalationTool(
         promptRouteState,
         availableEscalations,
@@ -1530,7 +1537,7 @@ export async function runRouteFirstAgent(request) {
       const runtimeCompression = await maybeCompressMessagesForContext({
         messages,
         settings: effectiveRunSettings,
-        systemPrompt: lastSystemPrompt,
+        systemPrompt: activeSystemPrompt,
         toolSchemaTokens,
         latestInputTokens: getLatestActiveInputTokens(),
         hooks,
@@ -1539,7 +1546,7 @@ export async function runRouteFirstAgent(request) {
       messages = runtimeCompression.messages
       const promptContextSnapshot = buildPromptContextSnapshot(
         effectiveRunSettings,
-        lastSystemPrompt,
+        activeSystemPrompt,
         allTools,
         runtimeCompression.afterTokens,
         toolSchemaTokens,
@@ -1609,6 +1616,13 @@ export async function runRouteFirstAgent(request) {
       }
 
       let result = turnResult.result
+      const latestPromptContextSnapshot = buildPromptContextSnapshot(
+        effectiveRunSettings,
+        appendRuntimeToolEvidenceToSystemPrompt(lastSystemPrompt, context),
+        allTools,
+        runtimeCompression.afterTokens,
+        toolSchemaTokens,
+      )
       const capabilityContract = evaluateRuntimeCapabilityContract({
         routeState: promptRouteState,
         selectedTools: selectedCapabilities.selectedTools,
@@ -1667,7 +1681,7 @@ export async function runRouteFirstAgent(request) {
         routeState: promptRouteState,
         selectedCapabilities,
         selectedTools: selectedCapabilities.selectedTools,
-        contextEstimate: promptContextSnapshot,
+        contextEstimate: latestPromptContextSnapshot,
         escalationCount: routeEscalationCount,
         availableEscalations,
         tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),
@@ -1682,6 +1696,7 @@ export async function runRouteFirstAgent(request) {
             ? 'completed_with_evidence'
             : 'completed'),
       })
+      hooks?.onRouteDecision?.(lastRouteDecision)
 
       const inferredEscalation = inferRouteEscalationFromMessage(
         result.message,

@@ -165,6 +165,10 @@ const appendedInputs = []
 let currentStepAbortController = null
 let activeExecutionMonitor = null
 
+function clearTaskScopedApprovals() {
+  taskApprovalGrants.clear()
+}
+
 function stripInlineImageData(parts = []) {
   return parts.map((part) =>
     part && part.type === 'image'
@@ -448,6 +452,7 @@ rl.on('line', (line) => {
     .then((result) => {
       executionMonitor.stop()
       activeExecutionMonitor = null
+      clearTaskScopedApprovals()
       emit({
         type: 'completed',
         result,
@@ -456,6 +461,7 @@ rl.on('line', (line) => {
     .catch((error) => {
       executionMonitor.stop()
       activeExecutionMonitor = null
+      clearTaskScopedApprovals()
       emit({
         type: 'failed',
         message: error instanceof Error ? error.message : String(error),

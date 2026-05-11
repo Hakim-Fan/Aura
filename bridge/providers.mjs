@@ -1,4 +1,4 @@
-import { invokeTool } from './tools.mjs'
+import { appendRuntimeToolEvidenceToSystemPrompt, invokeTool } from './tools.mjs'
 import { createStructuredError } from './runtimeErrors.mjs'
 import { buildDeliveryPolicy } from './agentEvidence.mjs'
 import { normalizeBaseUrl } from './utils.mjs'
@@ -2456,10 +2456,20 @@ export async function runOpenAiCompatibleAgent({
         repairTurns += 1
       }
       appendQueuedInputsToOpenAiTranscript(transcript, conversationMessages, hooks)
+      const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
+        systemPrompt,
+        hooks?.workMemoryContext,
+      )
+      if (transcript[0]?.role === 'system') {
+        transcript[0] = {
+          ...transcript[0],
+          content: activeSystemPrompt,
+        }
+      }
       transcript = await compactOpenAiRuntimeTranscript({
         settings,
         transcript,
-        systemPrompt,
+        systemPrompt: activeSystemPrompt,
         hooks,
         tools: activeTools,
       })
@@ -2822,10 +2832,14 @@ export async function runGoogleAgent({
         repairTurns += 1
       }
       appendQueuedInputsToGeminiTranscript(transcript, conversationMessages, hooks)
+      const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
+        systemPrompt,
+        hooks?.workMemoryContext,
+      )
       transcript = await compactGeminiRuntimeTranscript({
         settings,
         transcript,
-        systemPrompt,
+        systemPrompt: activeSystemPrompt,
         hooks,
         tools: activeTools,
       })
@@ -2836,7 +2850,7 @@ export async function runGoogleAgent({
       const attemptResult = await runProviderOperationWithRetry(async attemptState => {
         hooks?.onPhaseChange?.('model_connecting')
         const estimatedInputTokens = estimateGoogleRequestInputTokens(
-          systemPrompt,
+          activeSystemPrompt,
           transcript,
           activeTools,
           settings,
@@ -2851,7 +2865,7 @@ export async function runGoogleAgent({
             },
             body: JSON.stringify({
               system_instruction: {
-                parts: [{ text: systemPrompt }],
+                parts: [{ text: activeSystemPrompt }],
               },
               contents: transcript,
               tools: geminiToolDefs(activeTools),
@@ -3083,7 +3097,10 @@ export async function runGoogleAgent({
     return await finalizeGoogleTranscriptAfterStepLimit({
       settings,
       apiBase,
-      systemPrompt,
+      systemPrompt: appendRuntimeToolEvidenceToSystemPrompt(
+        systemPrompt,
+        hooks?.workMemoryContext,
+      ),
       transcript,
       conversationMessages,
       toolEvents,
