@@ -76,6 +76,7 @@ function createDeltaEmitter(type) {
         sanitizePayload({
           type,
           delta,
+          id: meta.id || meta.blockId,
           ...meta,
         }),
       )}\n`,

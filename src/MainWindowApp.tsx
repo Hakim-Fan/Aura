@@ -3195,10 +3195,16 @@ export function MainWindowApp() {
     setContextCompressionSessionId(activeSession.id)
     setError('')
     try {
+      const contextCompressionId = createId()
       const result = await compressAgentContext(
         runtimeSettings,
         sourceMessages,
         MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
+        {
+          sessionId: activeSession.id,
+          compressedThroughMessageId,
+          compressionId: contextCompressionId,
+        },
       )
       if (!result.ok || !result.summary.trim()) {
         throw new Error(result.message || '上下文压缩没有返回可用摘要。')
@@ -3211,7 +3217,7 @@ export function MainWindowApp() {
         return {
           ...session,
           contextCompression: {
-            id: createId(),
+            id: contextCompressionId,
             summary: result.summary,
             compressedThroughMessageId,
             originalMessageCount: result.originalMessageCount || sourceMessages.length,
