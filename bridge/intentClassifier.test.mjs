@@ -48,6 +48,26 @@ test('deterministic classifier exposes capability admin tools for skill installa
   assert.equal(result.confidence, 'high')
 })
 
+test('deterministic classifier executes local document generation requests', () => {
+  const result = peekDeterministicIntentClassification(
+    [
+      {
+        role: 'user',
+        content: '工作目录下有一个word 文档，帮我将文档中每个子标题均生成对应数据实体表',
+      },
+    ],
+    {
+      hardSignals: {},
+      settings: {},
+    },
+  )
+
+  assert.equal(result.answerMode, 'execute')
+  assert.equal(result.workspaceRelated, true)
+  assert.equal(result.isCapabilityAdmin, false)
+  assert.equal(result.confidence, 'high')
+})
+
 test('resolveIntentClassification uses deterministic capability admin route before provider calls', async () => {
   const result = await resolveIntentClassification(
     [

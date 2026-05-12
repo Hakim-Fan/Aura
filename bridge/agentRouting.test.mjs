@@ -38,3 +38,49 @@ test('keyword fallback no longer infers tool routes from natural-language browse
   assert.equal(routeState.needsExternalFacts, false)
   assert.equal(routeState.webInteractionRequired, false)
 })
+
+test('attachments with generation action force execute mode', () => {
+  const routeState = inferRouteStateFromKeywords([
+    {
+      role: 'user',
+      content: '把这个附件转换成 markdown 并写入工作区',
+      attachments: [
+        {
+          id: 'att-1',
+          name: 'input.pdf',
+          path: '/tmp/input.pdf',
+        },
+      ],
+    },
+  ])
+
+  assert.equal(routeState.answerMode, 'execute')
+  assert.equal(routeState.workspaceRelated, true)
+  assert.equal(routeState.capabilityTier, 'local-write')
+})
+
+test('local document generation request forces execute mode without attachment metadata', () => {
+  const routeState = inferRouteStateFromKeywords([
+    {
+      role: 'user',
+      content: '工作目录下有一个word 文档，帮我将文档中每个子标题均生成对应数据实体表',
+    },
+  ])
+
+  assert.equal(routeState.answerMode, 'execute')
+  assert.equal(routeState.workspaceRelated, true)
+  assert.equal(routeState.capabilityTier, 'local-write')
+})
+
+test('skill implementation questions stay read-only diagnostics', () => {
+  const routeState = inferRouteStateFromKeywords([
+    {
+      role: 'user',
+      content: '这个 docx skill 有让你用py 解决吗？我怎么看是node 啊',
+    },
+  ])
+
+  assert.equal(routeState.answerMode, 'diagnose')
+  assert.equal(routeState.workspaceRelated, true)
+  assert.notEqual(routeState.capabilityTier, 'local-write')
+})

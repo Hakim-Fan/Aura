@@ -802,6 +802,36 @@ test('builtin run_shell returns structured exit evidence for successful commands
   assert.equal(events[0].structuredOutput, undefined)
 })
 
+test('builtin run_shell marks nonzero exit as tool error', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-run-shell-fail-'))
+  const runShellTool = createBuiltinTools({ cwd: workspace }).find(tool => tool.name === 'run_shell')
+  const events = []
+
+  const output = await invokeTool(
+    runShellTool,
+    {
+      command: 'node -e "process.exit(7)"',
+    },
+    events,
+    {
+      settings: {
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: false,
+      },
+      onToolEvent(event) {
+        events.push(event)
+      },
+    },
+  )
+  const parsed = JSON.parse(output)
+
+  assert.equal(parsed.running, false)
+  assert.equal(parsed.exitCode, 7)
+  assert.equal(events.at(-1)?.status, 'error')
+  assert.equal(events.at(-1)?.errorInfo?.code, 'COMMAND_EXIT_NONZERO')
+})
+
 test('read_file can return a line-numbered range without shell awk', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-read-file-'))
   await fs.writeFile(path.join(workspace, 'sample.ts'), 'one\ntwo\nthree\nfour\n')

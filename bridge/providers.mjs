@@ -1704,7 +1704,10 @@ function normalizeInlineToolArgs(toolName, args) {
 
 function extractInlineToolCalls(text, startIndex = 0) {
   const normalizedText = typeof text === 'string' ? text : ''
-  if (!normalizedText.includes('<|tool_calls_section_begin|>')) {
+  if (
+    !normalizedText.includes('<|tool_calls_section_begin|>') &&
+    !normalizedText.includes('<tool_call>')
+  ) {
     return {
       text: normalizedText,
       toolCalls: [],
@@ -1712,7 +1715,7 @@ function extractInlineToolCalls(text, startIndex = 0) {
   }
 
   const toolCalls = []
-  const cleanedText = normalizedText
+  const withCodexMarkersRemoved = normalizedText
     .replace(
       /<\|tool_calls_section_begin\|>([\s\S]*?)<\|tool_calls_section_end\|>/gu,
       (_, sectionBody) => {
@@ -1753,6 +1756,40 @@ function extractInlineToolCalls(text, startIndex = 0) {
         return ''
       },
     )
+
+  const cleanedText = withCodexMarkersRemoved
+    .replace(
+      /<tool_call>\s*<function=([^\s>]+)>\s*([\s\S]*?)<\/function>\s*<\/tool_call>/giu,
+      (_, rawName, functionBody) => {
+        const toolName = normalizeInlineToolName(rawName)
+        if (!toolName) {
+          return ''
+        }
+
+        const args = {}
+        const parameterPattern =
+          /<parameter=([^\s>]+)>([\s\S]*?)<\/parameter>/giu
+        for (const match of String(functionBody || '').matchAll(parameterPattern)) {
+          const key = typeof match[1] === 'string' ? match[1].trim() : ''
+          if (!key) {
+            continue
+          }
+          args[key] = typeof match[2] === 'string' ? match[2].trim() : ''
+        }
+
+        toolCalls.push({
+          index: startIndex + toolCalls.length,
+          id: `inline-tool-call-${startIndex + toolCalls.length}`,
+          type: 'function',
+          function: {
+            name: toolName,
+            arguments: JSON.stringify(normalizeInlineToolArgs(toolName, args)),
+          },
+        })
+
+        return ''
+      },
+    )
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 
@@ -1772,6 +1809,10 @@ function dedupeInlineToolCalls(existingCalls, nextCalls) {
         (existingCall?.function?.arguments || '') === nextArguments,
     )
   })
+}
+
+export function stripInlineToolCallText(text) {
+  return extractInlineToolCalls(text).text
 }
 
 export const __testInternals = {

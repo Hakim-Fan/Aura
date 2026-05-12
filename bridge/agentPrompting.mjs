@@ -387,6 +387,9 @@ export function buildRouteFirstSystemPrompt(
       sections.push(
         'Enabled skills are live routing hints for this turn. At the start of each user request, scan the skill names, ids, and descriptions even if the user does not mention a skill. If a skill clearly or plausibly matches the request, use it proactively: call aura_read_skill with the exact skill id before applying the skill, then follow its instructions. If no skill matches, proceed normally and do not force an irrelevant skill.',
       )
+      sections.push(
+        'After reading a skill, treat its named tools, runtimes, libraries, and validation steps as the source of truth for that domain. Do not substitute an unrelated dependency or language-specific package unless the skill explicitly allows it or the skill path is impossible and you clearly report the blocker.',
+      )
     }
   }
 

@@ -18,10 +18,57 @@ function collectMessageText(message) {
   return [message?.content, parts].filter(Boolean).join('\n')
 }
 
+function latestUserMessage(messages) {
+  return [...messages].reverse().find(message => message.role === 'user') || null
+}
+
 function latestUserResearchMode(messages) {
-  return [...messages].reverse().find(message => message.role === 'user')?.researchMode === 'deep'
+  return latestUserMessage(messages)?.researchMode === 'deep'
     ? 'deep'
     : 'auto'
+}
+
+function userMessageHasAttachment(message) {
+  if (!message || typeof message !== 'object') {
+    return false
+  }
+  if (Array.isArray(message.attachments) && message.attachments.length > 0) {
+    return true
+  }
+  return Array.isArray(message.parts)
+    ? message.parts.some(part => part?.type === 'image' || part?.type === 'file')
+    : false
+}
+
+const ATTACHMENT_EXECUTION_PATTERN =
+  /\b(?:generate|convert|transform|write|create|save|export|render|build|run|execute|process|extract|parse|transcribe|produce)\b|生成|转换|转成|转为|写入|写到|创建|保存|导出|渲染|构建|执行|运行|处理|提取|解析|转写|生成出/u
+
+const LOCAL_FILE_REFERENCE_PATTERN =
+  /(?:附件|文件|文档|表格|图片|工作目录|当前目录|目录下|本地|word\s*文档|\.docx\b|\.doc\b|\.pdf\b|\.xlsx\b|\.csv\b|\battachments?\b|\bfiles?\b|\bdocuments?\b|\bworkspace\b|\bcwd\b|\blocal\b|\bword\b|\bdocx\b|\bpdf\b|\bxlsx\b|\bcsv\b)/iu
+
+function latestUserRequiresAttachmentExecution(messages) {
+  const latestUser = latestUserMessage(messages)
+  if (!userMessageHasAttachment(latestUser)) {
+    return false
+  }
+  return ATTACHMENT_EXECUTION_PATTERN.test(collectMessageText(latestUser))
+}
+
+function latestUserHasLocalFileContext(messages) {
+  const latestUser = latestUserMessage(messages)
+  if (userMessageHasAttachment(latestUser)) {
+    return true
+  }
+  return LOCAL_FILE_REFERENCE_PATTERN.test(collectMessageText(latestUser))
+}
+
+function latestUserRequiresLocalFileExecution(messages) {
+  const latestUser = latestUserMessage(messages)
+  const text = collectMessageText(latestUser)
+  if (!text || !latestUserHasLocalFileContext(messages)) {
+    return false
+  }
+  return ATTACHMENT_EXECUTION_PATTERN.test(text)
 }
 
 const SEARCH_BUDGET_BY_TIER = {
@@ -979,6 +1026,7 @@ function buildRouteStateFromSignals({
   researchMode = 'auto',
   taskComplexity = 'medium',
   planDepth = 'single_step',
+  executionMode = 'bounded',
 }) {
   let capabilityTier = 'none'
 
@@ -1022,6 +1070,7 @@ function buildRouteStateFromSignals({
     responseStyle,
     taskComplexity,
     planDepth,
+    executionMode: executionMode === 'long-task' ? 'long-task' : 'bounded',
     allowEscalationTo: uniqueTargets(allowEscalationTo),
     budgets: {
       searchesRemaining: getSearchBudgetForRoute({
@@ -1055,6 +1104,8 @@ export function deriveHardSignals(messages) {
     explicitWebLookupRead: false,
     publicWebUrlReference: false,
     explicitSystemBrowserRequest: false,
+    attachmentExecutionRequired: latestUserRequiresAttachmentExecution(messages),
+    localFileExecutionRequired: latestUserRequiresLocalFileExecution(messages),
     forceOrchestrated: false,
   }
 }
@@ -1073,12 +1124,21 @@ export function applyHardSignalIntentOverrides(classification, hardSignals = {})
     (classification.webInteractionRequired === true && explicitWebLookupRead !== true)
   const needsExternalFacts =
     classification.needsExternalFacts === true || explicitWebLookupRead
+  const attachmentExecutionRequired = hardSignals.attachmentExecutionRequired === true
+  const localFileExecutionRequired = hardSignals.localFileExecutionRequired === true
 
   return {
     ...classification,
-    answerMode: webInteractionRequired ? 'execute' : classification.answerMode,
+    answerMode:
+      webInteractionRequired || attachmentExecutionRequired || localFileExecutionRequired
+        ? 'execute'
+        : classification.answerMode,
     needsExternalFacts,
     webInteractionRequired,
+    workspaceRelated:
+      classification.workspaceRelated === true ||
+      attachmentExecutionRequired ||
+      localFileExecutionRequired,
     systemBrowserRequested:
       classification.systemBrowserRequested === true || explicitSystemBrowserRequest,
   }
@@ -1107,9 +1167,14 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
   const webInteractionRequired =
     normalizedClassification.webInteractionRequired === true ||
     hardSignals.explicitWebInteraction === true
-  const workspaceRelated = normalizedClassification.workspaceRelated === true
+  const attachmentExecutionRequired = hardSignals.attachmentExecutionRequired === true
+  const localFileExecutionRequired = hardSignals.localFileExecutionRequired === true
+  const workspaceRelated =
+    normalizedClassification.workspaceRelated === true ||
+    attachmentExecutionRequired ||
+    localFileExecutionRequired
 
-  if (webInteractionRequired) {
+  if (webInteractionRequired || attachmentExecutionRequired || localFileExecutionRequired) {
     answerMode = 'execute'
   }
 
@@ -1127,19 +1192,18 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
     researchMode: hardSignals.researchMode || 'auto',
     taskComplexity: normalizedClassification.taskComplexity,
     planDepth: normalizedClassification.planDepth,
+    executionMode: settings?.executionMode,
   })
 }
 
 function latestUserHasFileContext(messages) {
-  const latestUser = [...messages].reverse().find(message => message.role === 'user')
-  return Array.isArray(latestUser?.parts)
-    ? latestUser.parts.some(part => part.type === 'file')
-    : false
+  return latestUserHasLocalFileContext(messages)
 }
 
 export function inferRouteStateFromKeywords(messages, settings = {}) {
   const workspaceRelated = latestUserHasFileContext(messages)
-  const answerMode = workspaceRelated ? 'diagnose' : 'advise'
+  const localFileExecutionRequired = latestUserRequiresLocalFileExecution(messages)
+  const answerMode = localFileExecutionRequired ? 'execute' : workspaceRelated ? 'diagnose' : 'advise'
   return buildRouteStateFromSignals({
     answerMode,
     needsExternalFacts: false,
@@ -1148,6 +1212,7 @@ export function inferRouteStateFromKeywords(messages, settings = {}) {
     isCapabilityAdminTask: false,
     explicitSystemBrowserRequest: false,
     researchMode: latestUserResearchMode(messages),
+    executionMode: settings?.executionMode,
   })
 }
 

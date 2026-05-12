@@ -183,6 +183,27 @@ function collectProducedEvidence(event, effectTypes) {
     return producedEvidence
   }
 
+  if (COMMAND_SESSION_TOOLS.has(name)) {
+    if (structuredOutput && typeof structuredOutput === 'object') {
+      producedEvidence.push('command_output')
+      if (Object.prototype.hasOwnProperty.call(structuredOutput, 'sessionId')) {
+        producedEvidence.push('command_session')
+      }
+      if (structuredOutput.running === false && structuredOutput.exitCode === 0) {
+        producedEvidence.push('command_exit_0')
+      } else if (
+        structuredOutput.running === false &&
+        typeof structuredOutput.exitCode === 'number' &&
+        structuredOutput.exitCode !== 0
+      ) {
+        producedEvidence.push('command_exit_nonzero')
+      }
+      if (structuredOutput.timedOut === true) {
+        producedEvidence.push('command_timeout')
+      }
+    }
+  }
+
   if (event?.status === 'success') {
     if (effectTypes.includes('write')) {
       producedEvidence.push('file_mutation')
@@ -216,37 +237,6 @@ function collectProducedEvidence(event, effectTypes) {
     }
 
     if (COMMAND_SESSION_TOOLS.has(name)) {
-      producedEvidence.push('command_output')
-      if (
-        structuredOutput &&
-        typeof structuredOutput === 'object' &&
-        Object.prototype.hasOwnProperty.call(structuredOutput, 'sessionId')
-      ) {
-        producedEvidence.push('command_session')
-      }
-      if (
-        structuredOutput &&
-        typeof structuredOutput === 'object' &&
-        structuredOutput.running === false &&
-        structuredOutput.exitCode === 0
-      ) {
-        producedEvidence.push('command_exit_0')
-      } else if (
-        structuredOutput &&
-        typeof structuredOutput === 'object' &&
-        structuredOutput.running === false &&
-        typeof structuredOutput.exitCode === 'number' &&
-        structuredOutput.exitCode !== 0
-      ) {
-        producedEvidence.push('command_exit_nonzero')
-      }
-      if (
-        structuredOutput &&
-        typeof structuredOutput === 'object' &&
-        structuredOutput.timedOut === true
-      ) {
-        producedEvidence.push('command_timeout')
-      }
       if (TEST_COMMAND_PATTERN.test(String(event?.input || ''))) {
         if (
           structuredOutput &&
@@ -369,7 +359,12 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     })
   }
 
-  const hasExecutionFailure = hasUnresolvedExecutionFailure(records)
+  const hasExecutionFailure =
+    hasUnresolvedExecutionFailure(records) ||
+    records.some(record =>
+      record.producedEvidence.includes('command_exit_nonzero'),
+    )
+  const hasArtifactEvidence = artifactPaths.size > 0 || verifiedArtifactCount > 0
 
   return {
     records,
@@ -384,6 +379,7 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     hasFileVerification: verifiedArtifactCount > 0,
     verifiedArtifactCount,
     artifactPaths: Array.from(artifactPaths),
+    hasArtifactEvidence,
     hasSuccessfulCommand: records.some(
       record =>
         (record.toolName === 'run_shell' ||
@@ -420,7 +416,8 @@ function hasUnresolvedExecutionFailure(records) {
             effectType === 'browser',
         )
       ) ||
-      record.producedEvidence.includes('command_timeout')
+      record.producedEvidence.includes('command_timeout') ||
+      record.producedEvidence.includes('command_exit_nonzero')
 
     if (failed) {
       if (record.effectTypes.includes('write')) {
@@ -454,10 +451,6 @@ function hasUnresolvedExecutionFailure(records) {
 }
 
 export function deriveCompletionState(routeState, evidenceSummary, runtimeBlocks = {}) {
-  if (routeState?.answerMode !== 'execute') {
-    return 'not_executed'
-  }
-
   if (runtimeBlocks.hasApprovalBlock === true || evidenceSummary.hasApprovalBlock) {
     return 'blocked_by_approval'
   }
@@ -466,12 +459,33 @@ export function deriveCompletionState(routeState, evidenceSummary, runtimeBlocks
     return 'blocked_by_capability'
   }
 
-  if (!evidenceSummary.hasAnyExecution) {
+  if (evidenceSummary.hasExecutionFailure) {
+    return 'failed_after_execution'
+  }
+
+  if (routeState?.answerMode !== 'execute') {
     return 'not_executed'
   }
 
-  if (evidenceSummary.hasExecutionFailure) {
-    return 'failed_after_execution'
+  if (!evidenceSummary.hasAnyExecution) {
+    if (
+      routeState?.answerMode === 'execute' &&
+      Array.isArray(evidenceSummary.records) &&
+      evidenceSummary.records.length > 0
+    ) {
+      return 'executed_unverified'
+    }
+    return 'not_executed'
+  }
+
+  if (
+    routeState?.executionMode === 'long-task' &&
+    routeState?.answerMode === 'execute' &&
+    !evidenceSummary.hasArtifactEvidence &&
+    !evidenceSummary.hasVerifiedEvidence &&
+    !evidenceSummary.hasFileVerification
+  ) {
+    return 'executed_unverified'
   }
 
   if (

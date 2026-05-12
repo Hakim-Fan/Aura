@@ -62,6 +62,12 @@ const AUTO_WORK_MEMORY_TOOL_NAMES = new Set([
   'write_file',
 ])
 
+const COMMAND_EXIT_STATUS_TOOLS = new Set([
+  'exec_command',
+  'run_shell',
+  'write_stdin',
+])
+
 const MAX_AUTO_TOOL_EVIDENCE_ENTRIES = 24
 const MAX_PROGRESS_LIST_ITEMS = 12
 const MAX_ARTIFACT_CHUNKS = 500
@@ -80,6 +86,20 @@ function structuredEventOutputForTool(toolName, value) {
     return undefined
   }
   return value
+}
+
+function commandExitFailureForTool(toolName, output) {
+  if (!COMMAND_EXIT_STATUS_TOOLS.has(toolName) || !output || typeof output !== 'object') {
+    return null
+  }
+  if (
+    output.running === false &&
+    typeof output.exitCode === 'number' &&
+    output.exitCode !== 0
+  ) {
+    return output.exitCode
+  }
+  return null
 }
 
 async function walkDirectory(dirPath, maxDepth, currentDepth = 0) {
@@ -395,16 +415,7 @@ async function runShellStreaming(
       }
       signal?.removeEventListener('abort', handleAbort)
       flush()
-      if (code === 0) {
-        resolve(buildResult(code))
-        return
-      }
-
-      reject(
-        new Error(
-          `Command exited with code ${code}\n\n${truncate(stderr || stdout)}`,
-        ),
-      )
+      resolve(buildResult(code))
     })
   })
 }
@@ -3003,23 +3014,39 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       effectiveTool,
     )
     const structuredOutput = structuredEventOutputForTool(effectiveTool.name, output)
+    const nonzeroExitCode = commandExitFailureForTool(effectiveTool.name, output)
+    const commandExitError =
+      nonzeroExitCode === null
+        ? null
+        : createStructuredError(`命令退出码为 ${nonzeroExitCode}。`, {
+            source: 'tool',
+            category: 'execution_failed',
+            code: 'COMMAND_EXIT_NONZERO',
+            detail: `Command "${effectiveTool.name}" exited with code ${nonzeroExitCode}.`,
+            suggestedAction:
+              '请查看命令输出中的错误信息，修复后重新执行；不要在非零退出码后宣称任务已完成。',
+            retryable: true,
+          })
     updateEvent({
-      status: 'success',
+      status: commandExitError ? 'error' : 'success',
       output: stringifyOutput(output),
       structuredOutput,
-      error: undefined,
+      error: commandExitError?.rawMessage,
+      errorInfo: commandExitError?.errorInfo,
     })
-    await recordToolEvidenceCheckpoint(
-      hooks.workMemoryContext,
-      effectiveTool,
-      effectiveArgs,
-      output,
-      {
-        onWorkMemory(memory) {
-          hooks.onWorkMemory?.(memory)
+    if (!commandExitError) {
+      await recordToolEvidenceCheckpoint(
+        hooks.workMemoryContext,
+        effectiveTool,
+        effectiveArgs,
+        output,
+        {
+          onWorkMemory(memory) {
+            hooks.onWorkMemory?.(memory)
+          },
         },
-      },
-    )
+      )
+    }
     return stringifyOutput(output)
   } catch (error) {
     const detail = formatToolError(error)

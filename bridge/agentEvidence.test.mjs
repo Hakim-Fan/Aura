@@ -123,6 +123,103 @@ test('successful read-only shell command is verified by exit code', () => {
   )
 })
 
+test('nonzero command exit is always an execution failure', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'run_shell',
+      source: 'builtin',
+      status: 'error',
+      input: '$ npm test',
+      output: JSON.stringify({
+        status: 'exited',
+        running: false,
+        exitCode: 1,
+        output: 'tests failed',
+      }),
+    },
+  ])
+
+  assert.equal(evidence.hasExecutionFailure, true)
+  assert.equal(
+    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    'failed_after_execution',
+  )
+})
+
+test('failed command execution is not hidden by advise route mode', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'exec_command',
+      source: 'builtin',
+      status: 'error',
+      input: '$ node missing-file.js',
+      output: JSON.stringify({
+        status: 'exited',
+        running: false,
+        exitCode: 1,
+        output: 'module not found',
+      }),
+    },
+  ])
+
+  assert.equal(evidence.hasExecutionFailure, true)
+  assert.equal(
+    deriveCompletionState({ answerMode: 'advise' }, evidence),
+    'failed_after_execution',
+  )
+})
+
+test('execute route with only read tool progress is executed_unverified', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'glob_files',
+      source: 'builtin',
+      status: 'success',
+      input: '{"pattern":"**/*.docx"}',
+      output: 'No matches found',
+    },
+    {
+      name: 'aura_read_skill',
+      source: 'builtin',
+      status: 'success',
+      input: '{"skillId":"docx"}',
+      output: '{"name":"docx"}',
+    },
+  ])
+
+  assert.equal(evidence.hasAnyExecution, false)
+  assert.equal(
+    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    'executed_unverified',
+  )
+})
+
+test('long task execution without artifact or verification stays unverified', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'run_shell',
+      source: 'builtin',
+      status: 'success',
+      input: '$ node script.js',
+      output: JSON.stringify({
+        status: 'exited',
+        running: false,
+        exitCode: 0,
+        output: 'ok',
+      }),
+    },
+  ])
+
+  assert.equal(evidence.hasArtifactEvidence, false)
+  assert.equal(
+    deriveCompletionState(
+      { answerMode: 'execute', executionMode: 'long-task' },
+      evidence,
+    ),
+    'executed_unverified',
+  )
+})
+
 test('structured tool output provides verification even when display output is truncated', () => {
   const evidence = collectEvidenceFromToolEvents([
     {

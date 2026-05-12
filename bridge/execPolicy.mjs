@@ -12,7 +12,7 @@ const SHELL_IN_PLACE_EDIT_PATTERN =
   /\b(?:sed|perl)\b[\s\S]*(?:\s-i(?:\s|$|['"])|--in-place\b)/i
 
 const SHELL_REDIRECT_SOURCE_WRITE_PATTERN = new RegExp(
-  `\\b(?:cat|tee|printf|echo)\\b[\\s\\S]*(?:>|>>)\\s*['"]?[^'"]+\\.(?:${SOURCE_WRITE_EXTENSIONS})\\b`,
+  `\\b(?:cat|tee|printf|echo)\\b[^\\n;&|]*(?:^|[^\\d])(?:>|>>)\\s*['"]?[^\\s'";|&]+\\.(?:${SOURCE_WRITE_EXTENSIONS})\\b`,
   'i',
 )
 

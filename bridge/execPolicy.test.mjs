@@ -96,6 +96,29 @@ test('execution policy detects shell source mutation and known-safe commands', (
     looksLikeShellFileMutation("python3 - <<'PY'\nfrom pathlib import Path\nPath('src/App.tsx').write_text('bad')\nPY"),
     true,
   )
+  assert.equal(
+    looksLikeShellFileMutation(
+      'cat ~/.npm/_npx/*/node_modules/@anthropic-ai/aura-skills/docx/SKILL.md 2>/dev/null || cat ~/.aura/skills/docx/SKILL.md 2>/dev/null || echo "NOT FOUND"',
+    ),
+    false,
+  )
   assert.equal(isKnownSafeCommand('pnpm typecheck'), true)
   assert.equal(isKnownSafeCommand('pnpm typecheck && rm -rf /'), false)
+})
+
+test('execution policy does not treat read-only stderr redirection as source mutation', () => {
+  const result = evaluateToolExecutionPolicy({
+    tool: {
+      name: 'exec_command',
+      approvalCategory: 'shell',
+    },
+    args: {
+      cmd: 'cat ~/.npm/_npx/*/node_modules/@anthropic-ai/aura-skills/docx/SKILL.md 2>/dev/null || cat ~/.aura/skills/docx/SKILL.md 2>/dev/null || echo "NOT FOUND"',
+    },
+    settings: {
+      cwd: path.join(os.tmpdir(), 'aura-policy-workspace'),
+    },
+  })
+
+  assert.notEqual(result.code, 'SHELL_FILE_MUTATION_BLOCKED')
 })

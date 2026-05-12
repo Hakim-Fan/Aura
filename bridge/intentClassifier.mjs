@@ -84,9 +84,32 @@ function getLatestUserMessage(messages) {
 }
 
 function countLatestUserFileParts(message) {
-  return Array.isArray(message?.parts)
-    ? message.parts.filter(part => part?.type === 'file').length
+  const attachmentCount = Array.isArray(message?.attachments)
+    ? message.attachments.length
     : 0
+  const partCount = Array.isArray(message?.parts)
+    ? message.parts.filter(part => part?.type === 'file' || part?.type === 'image').length
+    : 0
+  return attachmentCount + partCount
+}
+
+const LOCAL_FILE_REFERENCE_PATTERN =
+  /(?:附件|文件|文档|表格|图片|工作目录|当前目录|目录下|本地|word\s*文档|\.docx\b|\.doc\b|\.pdf\b|\.xlsx\b|\.csv\b|\battachments?\b|\bfiles?\b|\bdocuments?\b|\bworkspace\b|\bcwd\b|\blocal\b|\bword\b|\bdocx\b|\bpdf\b|\bxlsx\b|\bcsv\b)/iu
+
+const LOCAL_FILE_EXECUTION_PATTERN =
+  /\b(?:generate|convert|transform|write|create|save|export|render|build|run|execute|process|extract|parse|transcribe|produce)\b|生成|转换|转成|转为|写入|写到|创建|保存|导出|渲染|构建|执行|运行|处理|提取|解析|转写|生成出/u
+
+function latestUserHasLocalFileContext(message) {
+  const text = collectMessageText(message)
+  return countLatestUserFileParts(message) > 0 || LOCAL_FILE_REFERENCE_PATTERN.test(text)
+}
+
+function latestUserRequiresLocalFileExecution(message) {
+  const text = collectMessageText(message)
+  if (!text || !latestUserHasLocalFileContext(message)) {
+    return false
+  }
+  return LOCAL_FILE_EXECUTION_PATTERN.test(text)
 }
 
 function resolveFallbackPlanningHints(messages, latestUserMessage) {
@@ -347,8 +370,10 @@ function inferFallbackClassification(messages, options = {}) {
   const latestUserMessage = getLatestUserMessage(messages)
   const fileAttachmentCount = countLatestUserFileParts(latestUserMessage)
   const planningHints = resolveFallbackPlanningHints(messages, latestUserMessage)
-  const workspaceRelated = fileAttachmentCount > 0
-  const answerMode = workspaceRelated ? 'diagnose' : 'advise'
+  const localFileContext = latestUserHasLocalFileContext(latestUserMessage)
+  const localFileExecution = latestUserRequiresLocalFileExecution(latestUserMessage)
+  const workspaceRelated = fileAttachmentCount > 0 || localFileContext
+  const answerMode = localFileExecution ? 'execute' : workspaceRelated ? 'diagnose' : 'advise'
 
   return {
     classification: parseAndValidateClassification({
@@ -368,8 +393,23 @@ function inferFallbackClassification(messages, options = {}) {
 }
 
 export function inferDeterministicClassification(messages, options = {}) {
+  const latestUserMessage = getLatestUserMessage(messages)
+  if (latestUserRequiresLocalFileExecution(latestUserMessage)) {
+    const planningHints = resolveFallbackPlanningHints(messages, latestUserMessage)
+    return parseAndValidateClassification({
+      answerMode: 'execute',
+      needsExternalFacts: false,
+      webInteractionRequired: false,
+      workspaceRelated: true,
+      isCapabilityAdmin: false,
+      systemBrowserRequested: false,
+      taskComplexity: planningHints.taskComplexity === 'low' ? 'medium' : planningHints.taskComplexity,
+      planDepth: planningHints.planDepth === 'single_step' ? 'multi_step' : planningHints.planDepth,
+      confidence: 'high',
+    })
+  }
+
   if (latestUserRequestsCapabilityAdmin(messages)) {
-    const latestUserMessage = getLatestUserMessage(messages)
     const planningHints = resolveFallbackPlanningHints(messages, latestUserMessage)
     return parseAndValidateClassification({
       answerMode: 'execute',
@@ -502,7 +542,9 @@ export async function resolveIntentClassification(messages, settings, options = 
     return {
       classification: deterministicClassification,
       source: 'deterministic',
-      reason: 'capability-admin-keyword',
+      reason: deterministicClassification.isCapabilityAdmin
+        ? 'capability-admin-keyword'
+        : 'local-file-execution-keyword',
     }
   }
 

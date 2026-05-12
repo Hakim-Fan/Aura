@@ -8,6 +8,8 @@ const ARTIFACT_ACTION_CLAIM_PATTERN =
   /\b(saved?|wrote|written|created|updated|patched|edited|modified|changed|added|generated)\b|保存到|存到|写到|写入|已写好|创建了|生成了|更新了|修改了|改好了|补丁/u
 const ARTIFACT_NOUN_PATTERN =
   /\b(file|files|document|doc|readme|markdown|patch|changes?)\b|文件|文档|目录|路径|补丁/u
+const RECOVERY_SUCCESS_CLAIM_PATTERN =
+  /\b(?:parsed|generated|created|converted|wrote|saved|completed)\s+successfully\b|\b(?:successfully\s+)?(?:parsed|generated|created|converted|wrote|saved)\b|解析成功|已解析|生成成功|已生成|转换成功|已转换|写入成功|已写入|创建成功|已创建/u
 
 function messageClaimsCompletion(message) {
   const normalized = normalizeText(message).toLowerCase()
@@ -97,8 +99,12 @@ export function applyCompletionGate(result, routeState) {
     nextMessage,
     evidenceSummary,
   )
+  const claimsRecoverySuccess =
+    result?.recovered === true &&
+    result?.completionState !== 'executed_verified' &&
+    RECOVERY_SUCCESS_CLAIM_PATTERN.test(nextMessage)
 
-  if (!claimsCompletion && !claimsArtifactMutation) {
+  if (!claimsCompletion && !claimsArtifactMutation && !claimsRecoverySuccess) {
     return result
   }
 

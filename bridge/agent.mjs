@@ -30,6 +30,7 @@ import {
   finalizeOpenAiCompatibleAnswer,
   runGoogleAgent,
   runOpenAiCompatibleAgent,
+  stripInlineToolCallText,
 } from './providers.mjs'
 import {
   buildContextCompressionBudget,
@@ -469,6 +470,38 @@ function buildCompletionContext(routeState, toolEvents, runtimeBlocks = {}) {
   }
 }
 
+function isLongTaskCompletionBlocked(settings, routeState, result = {}) {
+  return (
+    settings?.executionMode === 'long-task' &&
+    routeState?.answerMode === 'execute' &&
+    result?.completionState !== 'executed_verified'
+  )
+}
+
+function completeCurrentTaskWithResult(taskTracker, currentTaskId, settings, routeState, result) {
+  if (
+    result?.completionState === 'failed_after_execution' ||
+    result?.completionState === 'blocked_by_capability' ||
+    result?.completionState === 'blocked_by_approval'
+  ) {
+    taskTracker.completeTask(
+      currentTaskId,
+      result?.deliveryPolicy?.deliveryNote || '执行未完成，未标记为完成',
+      'failed',
+    )
+    return
+  }
+  if (isLongTaskCompletionBlocked(settings, routeState, result)) {
+    taskTracker.completeTask(
+      currentTaskId,
+      '长任务缺少产物或验证证据，未标记为完成',
+      'failed',
+    )
+    return
+  }
+  taskTracker.completeTask(currentTaskId, '生成最终回答')
+}
+
 function buildRouteDecisionSnapshot({
   routeState,
   selectedCapabilities,
@@ -864,7 +897,7 @@ function extractProviderReasoning(reasoning = []) {
 
 function extractPartialProviderMessage(normalized) {
   return typeof normalized?.errorInfo?.partialMessage === 'string'
-    ? normalized.errorInfo.partialMessage.trim()
+    ? stripInlineToolCallText(normalized.errorInfo.partialMessage).trim()
     : ''
 }
 
@@ -975,6 +1008,23 @@ function mergeProviderRetryInfo(...entries) {
       recovered: selected.recovered === true || entry.recovered === true,
     }
   }, undefined)
+}
+
+function markRecoveredRetryInfo(...entries) {
+  const merged = mergeProviderRetryInfo(...entries) || {}
+  return {
+    ...merged,
+    attemptedRetries:
+      typeof merged.attemptedRetries === 'number' && merged.attemptedRetries > 0
+        ? merged.attemptedRetries
+        : 1,
+    configuredMaxAttempts:
+      typeof merged.configuredMaxAttempts === 'number' && merged.configuredMaxAttempts > 0
+        ? merged.configuredMaxAttempts
+        : 1,
+    stage: merged.stage || 'recovery',
+    recovered: true,
+  }
 }
 
 function normalizeFinalAnswer(message) {
@@ -1141,6 +1191,7 @@ async function runProviderTurn({
         // 如果收尾补答失败，回退到原始结果，避免把整轮执行直接打成失败。
       }
     }
+    result = sanitizeResultMessage(result, recentToolEvents)
 
     return {
       result,
@@ -1189,6 +1240,7 @@ async function runProviderTurn({
         // 如果收尾补答失败，回退到原始结果，避免把整轮执行直接打成失败。
       }
     }
+    result = sanitizeResultMessage(result, recentToolEvents)
 
     return {
       result,
@@ -1224,7 +1276,42 @@ function summarizeToolOutput(output, maxLength = 220) {
     : normalized
 }
 
+function buildToolCallOnlyFallbackMessage(toolEvents) {
+  const recentSuccessful = toolEvents
+    .filter(event => event.status === 'success')
+    .slice(-3)
+    .map((event, index) => {
+      const summary = summarizeToolOutput(event.output) || event.summary || event.name
+      return `${index + 1}. ${event.name}: ${summary}`
+    })
+    .join('\n')
+
+  return [
+    '模型输出了工具调用标记，系统已经将它转换为实际工具执行，但模型没有继续返回可展示的最终结论。',
+    recentSuccessful
+      ? `已完成的步骤：\n${recentSuccessful}`
+      : '本轮还没有拿到足够的工具结果来整理完整结论。',
+    '我没有把这一步标记为完成；需要继续执行后才能给出可靠结果。',
+  ].join('\n\n')
+}
+
+function sanitizeResultMessage(result, toolEvents = []) {
+  const originalMessage = typeof result?.message === 'string' ? result.message : ''
+  const strippedMessage = stripInlineToolCallText(originalMessage).trim()
+  if (strippedMessage) {
+    return strippedMessage === originalMessage ? result : { ...result, message: strippedMessage }
+  }
+  if (originalMessage.trim() && originalMessage !== strippedMessage) {
+    return {
+      ...result,
+      message: buildToolCallOnlyFallbackMessage(toolEvents),
+    }
+  }
+  return result
+}
+
 function buildPartialRecoveryMessage(toolEvents, normalized, partialMessage = '') {
+  const displayPartialMessage = stripInlineToolCallText(partialMessage).trim()
   const successfulEvents = toolEvents.filter(event => event.status === 'success')
   const recentSuccessful = successfulEvents.slice(-3)
   const completedSteps = recentSuccessful
@@ -1249,7 +1336,7 @@ function buildPartialRecoveryMessage(toolEvents, normalized, partialMessage = ''
 
   return [
     '执行在模型生成最终回答时中断了，但我先把已经保留下来的内容和已完成进展整理给你。',
-    partialMessage ? `模型中断前已经写出的内容：\n${partialMessage.slice(0, 6000)}` : null,
+    displayPartialMessage ? `模型中断前已经写出的内容：\n${displayPartialMessage.slice(0, 6000)}` : null,
     completedSteps
       ? `已完成的步骤：\n${completedSteps}`
       : toolEvents.length > 0
@@ -1801,7 +1888,13 @@ export async function runRouteFirstAgent(request) {
         kind: summaryReasoning[0].kind,
       })
       const reasoning = [...summaryReasoning, ...(result.reasoning || [])]
-      taskTracker.completeTask(currentTaskId, '生成最终回答')
+      completeCurrentTaskWithResult(
+        taskTracker,
+        currentTaskId,
+        settings,
+        promptRouteState,
+        result,
+      )
       return {
         ...result,
         usage: getAccumulatedUsage() || result.usage,
@@ -1872,11 +1965,15 @@ export async function runRouteFirstAgent(request) {
 
         if (recovered.message.trim()) {
           let recoveredResult = enforceEvidencePolicy(
-            recovered,
+            sanitizeResultMessage(recovered, toolEvents),
             toolEvents,
             routeState,
             buildRuntimeBlocks(lastRouteDecision?.stopReason),
           )
+          recoveredResult = {
+            ...recoveredResult,
+            recovered: true,
+          }
           recoveredResult = applyCompletionGate(recoveredResult, routeState)
           const summaryReasoning = summarizeReasoning(
             messages,
@@ -1888,7 +1985,13 @@ export async function runRouteFirstAgent(request) {
             blockId: summaryReasoning[0].id,
             kind: summaryReasoning[0].kind,
           })
-          taskTracker.completeTask(currentTaskId, '生成最终回答')
+          completeCurrentTaskWithResult(
+            taskTracker,
+            currentTaskId,
+            settings,
+            routeState,
+            recoveredResult,
+          )
           return {
             ...recoveredResult,
             toolEvents,
@@ -1897,12 +2000,7 @@ export async function runRouteFirstAgent(request) {
             capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
             reasoning: summaryReasoning,
             workMemories: context.workMemories,
-            retryInfo: recovered.retryInfo
-              ? {
-                  ...recovered.retryInfo,
-                  recovered: true,
-                }
-              : undefined,
+            retryInfo: markRecoveredRetryInfo(recovered.retryInfo, retryInfo),
             usage: getAccumulatedUsage() || recovered.usage,
             contextCompression: getLatestContextCompression(),
             status: 'completed',
@@ -1936,7 +2034,13 @@ export async function runRouteFirstAgent(request) {
         blockId: summaryReasoning[0].id,
         kind: summaryReasoning[0].kind,
       })
-      taskTracker.completeTask(currentTaskId, '生成部分恢复回答')
+      completeCurrentTaskWithResult(
+        taskTracker,
+        currentTaskId,
+        settings,
+        routeState,
+        fallbackResult,
+      )
       return {
         ...fallbackResult,
         toolEvents,

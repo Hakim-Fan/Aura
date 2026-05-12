@@ -51,3 +51,20 @@ test('applyCompletionGate does not rewrite non-completion analysis', () => {
 
   assert.equal(result.message, '我定位到了问题，下一步建议先跑一次针对性测试。')
 })
+
+test('applyCompletionGate strips recovery success claims without verified evidence', () => {
+  const result = applyCompletionGate(
+    {
+      message: '解析成功，已生成转换后的文件。',
+      completionState: 'executed_unverified',
+      recovered: true,
+      evidenceSummary: {},
+    },
+    {
+      answerMode: 'execute',
+    },
+  )
+
+  assert.match(result.message, /缺少系统级验证证据/)
+  assert.doesNotMatch(result.message, /^解析成功/)
+})

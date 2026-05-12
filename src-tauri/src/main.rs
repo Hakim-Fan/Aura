@@ -1370,6 +1370,21 @@ fn event_step_id(event: &serde_json::Value) -> Option<&str> {
         .or_else(|| event.get("blockId").and_then(|value| value.as_str()))
 }
 
+fn context_step_id(context: &serde_json::Value, kind: &str, suffix: &str) -> Option<String> {
+    let message_id = context
+        .get("messageId")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            context
+                .get("assistantMessageId")
+                .and_then(|value| value.as_str())
+        })?;
+    if message_id.trim().is_empty() {
+        return None;
+    }
+    Some(format!("{message_id}-{kind}-{suffix}"))
+}
+
 fn delta_log_preview(event: &serde_json::Value) -> Option<String> {
     event
         .get("delta")
@@ -1461,6 +1476,44 @@ fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> 
                 "rootStatus": root.get("status").and_then(|value| value.as_str()),
                 "rootSummary": root.get("summary").and_then(|value| value.as_str()),
                 "tree": tree.clone(),
+            }))
+        }
+        "route_decision" => {
+            let route_decision = event
+                .get("routeDecision")
+                .unwrap_or(&serde_json::Value::Null);
+            agent_log_details(context, serde_json::json!({
+                "stepId": context_step_id(context, "route", "decision"),
+                "answerMode": route_decision.get("answerMode").and_then(|value| value.as_str()),
+                "capabilityTier": route_decision
+                    .get("capabilityTier")
+                    .and_then(|value| value.as_str()),
+                "stopReason": route_decision.get("stopReason").and_then(|value| value.as_str()),
+                "escalationCount": route_decision
+                    .get("escalationCount")
+                    .and_then(|value| value.as_u64()),
+                "routeDecision": route_decision.clone(),
+            }))
+        }
+        "approval_required" => {
+            let request = event.get("request").unwrap_or(&serde_json::Value::Null);
+            agent_log_details(context, serde_json::json!({
+                "stepId": request.get("id").and_then(|value| value.as_str()),
+                "approvalId": request.get("id").and_then(|value| value.as_str()),
+                "category": request.get("category").and_then(|value| value.as_str()),
+                "toolName": request.get("toolName").and_then(|value| value.as_str()),
+                "summary": request.get("summary").and_then(|value| value.as_str()),
+            }))
+        }
+        "user_input_required" => {
+            let request = event.get("request").unwrap_or(&serde_json::Value::Null);
+            agent_log_details(context, serde_json::json!({
+                "stepId": request.get("id").and_then(|value| value.as_str()),
+                "userInputRequestId": request.get("id").and_then(|value| value.as_str()),
+                "question": request.get("question").and_then(|value| value.as_str()),
+                "allowAttachments": request
+                    .get("allowAttachments")
+                    .and_then(|value| value.as_bool()),
             }))
         }
         "failed" => agent_log_details(context, serde_json::json!({
@@ -3064,6 +3117,28 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
     }));
 }
 
+fn reasoning_blocks_log_summary(reasoning: &[serde_json::Value]) -> serde_json::Value {
+    serde_json::Value::Array(
+        reasoning
+            .iter()
+            .map(|block| {
+                let content = block
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "stepId": block.get("id").and_then(|value| value.as_str()),
+                    "reasoningStepId": block.get("id").and_then(|value| value.as_str()),
+                    "kind": block.get("kind").and_then(|value| value.as_str()),
+                    "order": block.get("order").and_then(|value| value.as_u64()),
+                    "contentChars": content.chars().count(),
+                    "contentPreview": truncate_snapshot_text(content, MAX_LOG_DELTA_CHARS),
+                })
+            })
+            .collect(),
+    )
+}
+
 fn append_phase_output_delta(current: &mut AgentTaskSnapshot, event: &serde_json::Value) {
     let delta = event
         .get("delta")
@@ -3338,6 +3413,7 @@ fn spawn_agent_task<R: Runtime>(
         let reader = BufReader::new(stdout);
         let mut last_logged_phase: Option<String> = None;
         let mut logged_running_tools: HashSet<String> = HashSet::new();
+        let mut logged_reasoning_blocks: HashSet<String> = HashSet::new();
         for line in reader.lines() {
             let Ok(line) = line else {
                 break;
@@ -3404,12 +3480,17 @@ fn spawn_agent_task<R: Runtime>(
                 }),
                 Some("reasoning_delta") => with_snapshot(&stdout_snapshot, |current| {
                     clear_retry_progress_if_connected(current);
-                    append_app_log(
-                        &stdout_log_app,
-                        "info",
-                        "agent_reasoning_delta",
-                        event_log_details(&stdout_log_context, &event),
-                    );
+                    let reasoning_step_id = event_step_id(&event)
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "reasoning".to_string());
+                    if logged_reasoning_blocks.insert(reasoning_step_id) {
+                        append_app_log(
+                            &stdout_log_app,
+                            "info",
+                            "agent_reasoning_started",
+                            event_log_details(&stdout_log_context, &event),
+                        );
+                    }
                     append_reasoning_delta(current, &event);
                 }),
                 Some("usage") => with_snapshot(&stdout_snapshot, |current| {
@@ -3489,6 +3570,12 @@ fn spawn_agent_task<R: Runtime>(
                     current.task_tree = extract_array(event.get("tree"));
                 }),
                 Some("route_decision") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "info",
+                        "agent_route_decision",
+                        event_log_details(&stdout_log_context, &event),
+                    );
                     current.route_decision = extract_object(event.get("routeDecision"));
                 }),
                 Some("runtime_status") => with_snapshot(&stdout_snapshot, |current| {
@@ -3532,12 +3619,24 @@ fn spawn_agent_task<R: Runtime>(
                     current.stalled = event.get("stalled").and_then(|value| value.as_bool());
                 }),
                 Some("approval_required") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "info",
+                        "agent_approval_required",
+                        event_log_details(&stdout_log_context, &event),
+                    );
                     current.status = "awaiting_approval".into();
                     current.phase = Some("awaiting_approval".into());
                     current.pending_approval = event.get("request").cloned();
                     current.pending_user_input = None;
                 }),
                 Some("user_input_required") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "info",
+                        "agent_user_input_required",
+                        event_log_details(&stdout_log_context, &event),
+                    );
                     current.status = "awaiting_user_input".into();
                     current.phase = Some("awaiting_user_input".into());
                     current.pending_approval = None;
@@ -3586,6 +3685,7 @@ fn spawn_agent_task<R: Runtime>(
                     }
                 }
                 Some("completed") => with_snapshot(&stdout_snapshot, |current| {
+                    let previous_reasoning = current.reasoning.clone();
                     append_app_log(
                         &stdout_log_app,
                         "info",
@@ -3641,8 +3741,47 @@ fn spawn_agent_task<R: Runtime>(
                             .map(|value| value.to_string());
                         current.retry_info = extract_object(result.get("retryInfo"));
                     }
+                    let reasoning_summary = reasoning_blocks_log_summary(&current.reasoning);
+                    if reasoning_summary
+                        .as_array()
+                        .map(|entries| !entries.is_empty())
+                        .unwrap_or(false)
+                    {
+                        append_app_log(
+                            &stdout_log_app,
+                            "info",
+                            "agent_reasoning_completed",
+                            agent_log_details(
+                                &stdout_log_context,
+                                serde_json::json!({
+                                    "status": "completed",
+                                    "blocks": reasoning_summary,
+                                    "previousBlockCount": previous_reasoning.len(),
+                                }),
+                            ),
+                        );
+                    }
                 }),
                 Some("failed") => with_snapshot(&stdout_snapshot, |current| {
+                    let reasoning_summary = reasoning_blocks_log_summary(&current.reasoning);
+                    if reasoning_summary
+                        .as_array()
+                        .map(|entries| !entries.is_empty())
+                        .unwrap_or(false)
+                    {
+                        append_app_log(
+                            &stdout_log_app,
+                            "warn",
+                            "agent_reasoning_completed",
+                            agent_log_details(
+                                &stdout_log_context,
+                                serde_json::json!({
+                                    "status": "failed",
+                                    "blocks": reasoning_summary,
+                                }),
+                            ),
+                        );
+                    }
                     append_app_log(
                         &stdout_log_app,
                         "error",

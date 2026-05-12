@@ -300,6 +300,9 @@ export type EvidenceRecord = {
     | 'artifact_read_back'
     | 'artifact_hash_recorded'
     | 'command_exit_0'
+    | 'command_exit_nonzero'
+    | 'command_session'
+    | 'command_timeout'
     | 'command_output'
     | 'test_pass'
     | 'test_fail'
@@ -321,6 +324,7 @@ export type ExecutionEvidenceSummary = {
   hasWriteEffect: boolean
   hasBrowserEffect: boolean
   hasFileVerification: boolean
+  hasArtifactEvidence: boolean
   verifiedArtifactCount: number
   artifactPaths: string[]
   hasSuccessfulCommand: boolean

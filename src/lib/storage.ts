@@ -546,6 +546,9 @@ function normalizeEvidenceSummary(value: unknown): ExecutionEvidenceSummary | un
                     entry === 'artifact_read_back' ||
                     entry === 'artifact_hash_recorded' ||
                     entry === 'command_exit_0' ||
+                    entry === 'command_exit_nonzero' ||
+                    entry === 'command_session' ||
+                    entry === 'command_timeout' ||
                     entry === 'command_output' ||
                     entry === 'test_pass' ||
                     entry === 'test_fail' ||
@@ -586,6 +589,10 @@ function normalizeEvidenceSummary(value: unknown): ExecutionEvidenceSummary | un
           (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
         )
       : [],
+    hasArtifactEvidence:
+      summary.hasArtifactEvidence === true ||
+      (Array.isArray(summary.artifactPaths) && summary.artifactPaths.length > 0) ||
+      summary.hasFileVerification === true,
     hasSuccessfulCommand: summary.hasSuccessfulCommand === true,
     hasSuccessfulBrowserAction: summary.hasSuccessfulBrowserAction === true,
     hasVerifiedEvidence: summary.hasVerifiedEvidence === true,

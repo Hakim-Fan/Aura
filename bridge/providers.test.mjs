@@ -139,6 +139,26 @@ test('extractInlineToolCalls converts codex-style raw tool markers into executab
   })
 })
 
+test('extractInlineToolCalls removes xml-style raw tool markers from visible text', () => {
+  const extracted = extractInlineToolCalls(
+    [
+      '我先找一下文档。',
+      '<tool_call>',
+      '<function=glob_files>',
+      '<parameter=pattern>**/*.docx</parameter>',
+      '</function>',
+      '</tool_call>',
+    ].join('\n'),
+  )
+
+  assert.equal(extracted.text, '我先找一下文档。')
+  assert.equal(extracted.toolCalls.length, 1)
+  assert.equal(extracted.toolCalls[0].function.name, 'glob_files')
+  assert.deepEqual(parseToolArguments(extracted.toolCalls[0].function.arguments), {
+    pattern: '**/*.docx',
+  })
+})
+
 test('provider failure recovery uses a fixed five-retry policy', () => {
   assert.equal(getProviderFailureRecoveryMaxRetries(), 5)
 })
