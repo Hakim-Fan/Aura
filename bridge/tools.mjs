@@ -2090,7 +2090,10 @@ export function createBuiltinTools(context) {
         }
 
         const response = await runtime.requestUserInput({
-          id: `user-input-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          id:
+            typeof runtime.createExecutionStepId === 'function'
+              ? runtime.createExecutionStepId('user-input', 'request')
+              : `user-input-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           question: typeof args.question === 'string' ? args.question : '',
           context: typeof args.context === 'string' ? args.context : '',
           allowAttachments: args.allowAttachments !== false,
@@ -2769,7 +2772,10 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     shellPatchInterception?.tool || shellFileMutationInterception?.tool || tool
   const effectiveArgs =
     shellPatchInterception?.args || shellFileMutationInterception?.args || args
-  const eventId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const eventId =
+    typeof hooks.createExecutionStepId === 'function'
+      ? hooks.createExecutionStepId('tool', effectiveTool.name)
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const shouldEmitEvent = effectiveTool.internalOnly !== true
   const eventSummary =
     shellPatchInterception?.summary ||
@@ -2981,6 +2987,13 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
           requestUserInput(request) {
             return hooks.requestUserInput?.(request)
           },
+          ...(typeof hooks.createExecutionStepId === 'function'
+            ? {
+                createExecutionStepId(type, hint) {
+                  return hooks.createExecutionStepId(type, hint)
+                },
+              }
+            : {}),
           onWorkMemory(memory) {
             hooks.onWorkMemory?.(memory)
           },

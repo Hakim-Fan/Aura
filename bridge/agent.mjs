@@ -61,6 +61,7 @@ import {
   ORCHESTRATED_AGENT_AVAILABLE,
   runOrchestratedAgent,
 } from './agentModes/orchestrated.mjs'
+import { createExecutionStepIdFactory } from './executionIds.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ROUTE_ESCALATION_TOOL_NAME = 'route_request_escalation'
@@ -813,7 +814,7 @@ function summarizeMessages(messages) {
   return latestUser.length > 80 ? `${latestUser.slice(0, 80)}...` : latestUser
 }
 
-function summarizeReasoning(messages, toolEvents, finalMessage) {
+function summarizeReasoning(messages, toolEvents, finalMessage, hooks = {}) {
   const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')
   const userIntent = latestUserMessage?.content?.replace(/\s+/g, ' ').trim() || '处理当前任务'
   const imageCount = (latestUserMessage?.parts || []).filter(part => part.type === 'image').length
@@ -843,7 +844,10 @@ function summarizeReasoning(messages, toolEvents, finalMessage) {
 
   return [
     {
-      id: 'summary',
+      id:
+        typeof hooks.createExecutionStepId === 'function'
+          ? hooks.createExecutionStepId('reasoning', 'summary')
+          : 'summary',
       kind: 'summary',
       content: lines.join('\n'),
     },
@@ -1262,7 +1266,10 @@ function buildPartialRecoveryMessage(toolEvents, normalized, partialMessage = ''
 
 function createTaskTracker(hooks, rootTitle) {
   const root = {
-    id: createId('main'),
+    id:
+      typeof hooks?.createExecutionStepId === 'function'
+        ? hooks.createExecutionStepId('task', 'main')
+        : createId('main'),
     title: rootTitle,
     summary: '',
     kind: 'main',
@@ -1306,7 +1313,10 @@ function createTaskTracker(hooks, rootTitle) {
         return null
       }
       const child = {
-        id: createId('subagent'),
+        id:
+          typeof hooks?.createExecutionStepId === 'function'
+            ? hooks.createExecutionStepId('task', title || 'subagent')
+            : createId('subagent'),
         title: title || 'Subagent task',
         summary: summary || '',
         kind: 'subagent',
@@ -1351,12 +1361,21 @@ export async function runRouteFirstAgent(request) {
     capabilities,
     carryoverContext = '',
   } = request
+  const executionStepIds =
+    runtime.executionStepIds || createExecutionStepIdFactory(request.logContext || {})
+  const baseHooks = {
+    ...incomingHooks,
+    executionMessageId: executionStepIds.messageId,
+    createExecutionStepId(type, hint) {
+      return executionStepIds.next(type, hint)
+    },
+  }
   const {
     hooks,
     getAccumulatedUsage,
     getLatestContextCompression,
     getLatestActiveInputTokens,
-  } = createUsageTrackingHooks(incomingHooks)
+  } = createUsageTrackingHooks(baseHooks)
   let messages = Array.isArray(requestedMessages) ? requestedMessages : []
   hooks?.onPhaseChange?.('preparing')
   if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
@@ -1421,7 +1440,10 @@ export async function runRouteFirstAgent(request) {
     appRoot,
     settings,
     context,
-    runtimeMeta: runtime,
+    runtimeMeta: {
+      ...runtime,
+      executionStepIds,
+    },
     runNestedAgent: nestedRequest =>
       runAgent({
         ...nestedRequest,
@@ -1772,6 +1794,7 @@ export async function runRouteFirstAgent(request) {
         turnResult.resolvedMessages,
         toolEvents,
         result.message,
+        hooks,
       )
       hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
         blockId: summaryReasoning[0].id,
@@ -1859,6 +1882,7 @@ export async function runRouteFirstAgent(request) {
             messages,
             toolEvents,
             recoveredResult.message,
+            hooks,
           )
           hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
             blockId: summaryReasoning[0].id,
@@ -1906,6 +1930,7 @@ export async function runRouteFirstAgent(request) {
         messages,
         toolEvents,
         fallbackResult.message,
+        hooks,
       )
       hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
         blockId: summaryReasoning[0].id,

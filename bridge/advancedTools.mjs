@@ -382,6 +382,7 @@ function buildMultiAgentTools({
               subagentDepth: (runtimeMeta.subagentDepth || 0) + 1,
               currentTaskId: taskNode?.id,
               taskTracker,
+              executionStepIds: runtimeMeta.executionStepIds,
             },
           })
 

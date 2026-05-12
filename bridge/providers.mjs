@@ -24,6 +24,22 @@ function createRuntimeId(prefix = 'runtime') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+function createExecutionStepId(hooks, type, hint, fallbackPrefix = type) {
+  return typeof hooks?.createExecutionStepId === 'function'
+    ? hooks.createExecutionStepId(type, hint)
+    : createRuntimeId(fallbackPrefix)
+}
+
+function createProviderReasoningBlockId(hooks, providerKind, step) {
+  const fallbackId = `provider-phase-${step + 1}`
+  return createExecutionStepId(
+    hooks,
+    'reasoning',
+    `${providerKind}-${fallbackId}`,
+    fallbackId,
+  )
+}
+
 const ASSISTANT_SPILLOVER_TRIGGER_TOKENS = 6_000
 const ASSISTANT_SPILLOVER_SUMMARY_CHARS = 1_200
 const FINALIZER_DRAFT_MESSAGE_MAX_CHARS = 6_000
@@ -110,7 +126,12 @@ function maybeSpillAssistantContent({
   ].join('\n')
 
   const event = {
-    id: createRuntimeId('assistant-output-spillover'),
+    id: createExecutionStepId(
+      hooks,
+      'tool',
+      'assistant-output-spillover',
+      'assistant-output-spillover',
+    ),
     source: 'builtin',
     name: 'assistant_output_spillover',
     summary: `Long intermediate assistant output saved as artifact ${spilled.summary.id}.`,
@@ -129,7 +150,12 @@ function maybeSpillAssistantContent({
   hooks?.onReasoningDelta?.(
     `Assistant output spillover: ${tokenEstimate} estimated tokens saved as ${spilled.summary.id}.`,
     {
-      blockId: `assistant-output-spillover-${providerKind}-${stage || 'runtime'}`,
+      blockId: createExecutionStepId(
+        hooks,
+        'reasoning',
+        `assistant-output-spillover-${providerKind}-${stage || 'runtime'}`,
+        `assistant-output-spillover-${providerKind}-${stage || 'runtime'}`,
+      ),
       kind: 'summary',
       order: typeof order === 'number' ? order : -90,
     },
@@ -461,16 +487,16 @@ function buildFinalizerPrompt({
 }) {
   const toolDigest = includeToolDigest
     ? toolEvents
-        .slice(-8)
-        .map(event => {
-          const pieces = [
-            `- ${event.name} [${event.status}]`,
-            event.output ? `输出摘要: ${String(event.output).slice(0, 600)}` : null,
-            event.error ? `错误: ${String(event.error).slice(0, 300)}` : null,
-          ].filter(Boolean)
-          return pieces.join('\n')
-        })
-        .join('\n')
+      .slice(-8)
+      .map(event => {
+        const pieces = [
+          `- ${event.name} [${event.status}]`,
+          event.output ? `输出摘要: ${String(event.output).slice(0, 600)}` : null,
+          event.error ? `错误: ${String(event.error).slice(0, 300)}` : null,
+        ].filter(Boolean)
+        return pieces.join('\n')
+      })
+      .join('\n')
     : ''
   const reasoningDigest =
     includeReasoningText && reasoningText?.trim()
@@ -785,7 +811,15 @@ async function compactRuntimeTranscript({
     maxInputBatchTokens: budget.compactionInputBatchTokens,
     hooks,
   })
+
   const summaryText = summaryMessages.map(message => message.content).join('\n\n')
+
+  const compressionStepId = createExecutionStepId(
+    hooks,
+    'compression',
+    `runtime-transcript-${providerKind}`,
+    `runtime-transcript-compression-${providerKind}`,
+  )
   const compactedTranscript = [
     ...preservedPrefix,
     buildSummaryEntry(summaryText),
@@ -793,7 +827,7 @@ async function compactRuntimeTranscript({
   ]
   const afterTokens = estimateTokens(compactedTranscript, settings)
   hooks?.onContextCompression?.({
-    id: createRuntimeId(`runtime-transcript-compression-${providerKind}`),
+    id: compressionStepId,
     kind: 'provider_runtime_transcript',
     summary: summaryText,
     compressedThroughMessageId: '',
@@ -829,7 +863,7 @@ async function compactRuntimeTranscript({
   hooks?.onReasoningDelta?.(
     `Runtime transcript compression: ${estimatedTokens} estimated tokens -> ${afterTokens} estimated tokens.`,
     {
-      blockId: `runtime-transcript-compression-${providerKind}`,
+      blockId: compressionStepId,
       kind: 'summary',
       order: -99,
     },
@@ -941,7 +975,7 @@ async function callOpenAiCompatibleCompaction(
   pushUsage(
     hooks,
     normalizeOpenAiUsage(data.usage) ||
-      buildEstimatedUsage(estimatedInputTokens, content, settings),
+    buildEstimatedUsage(estimatedInputTokens, content, settings),
   )
   return content
 }
@@ -1006,7 +1040,7 @@ async function callGoogleCompaction(
   pushUsage(
     hooks,
     normalizeGoogleUsage(data.usageMetadata) ||
-      buildEstimatedUsage(estimatedInputTokens, content, settings),
+    buildEstimatedUsage(estimatedInputTokens, content, settings),
   )
   return content
 }
@@ -1069,9 +1103,9 @@ export async function compactMessagesWithProvider({
       const dropOldestCount =
         plan.dropOldestRatio > 0
           ? Math.min(
-              Math.max(0, olderMessages.length - 1),
-              Math.floor(olderMessages.length * plan.dropOldestRatio),
-            )
+            Math.max(0, olderMessages.length - 1),
+            Math.floor(olderMessages.length * plan.dropOldestRatio),
+          )
           : 0
       const summarizableMessages =
         dropOldestCount > 0 ? olderMessages.slice(dropOldestCount) : olderMessages
@@ -1143,7 +1177,12 @@ export async function compactMessagesWithProvider({
             : `retrying with smaller compaction batches (${nextPlan.batchTokenLimit} estimated tokens).`,
         ].join(' '),
         {
-          blockId: `context-compression-fallback-${attemptIndex + 1}`,
+          blockId: createExecutionStepId(
+            hooks,
+            'reasoning',
+            `context-compression-fallback-${attemptIndex + 1}`,
+            `context-compression-fallback-${attemptIndex + 1}`,
+          ),
           kind: 'summary',
           order: -101,
         },
@@ -1859,15 +1898,15 @@ function extractProviderRetryInfo(value) {
   const retryInfo = value.retryInfo
   const configuredMaxRetries =
     typeof retryInfo.configuredMaxRetries === 'number' &&
-    Number.isFinite(retryInfo.configuredMaxRetries)
+      Number.isFinite(retryInfo.configuredMaxRetries)
       ? Math.max(0, Math.round(retryInfo.configuredMaxRetries))
       : typeof retryInfo.configuredMaxAttempts === 'number' &&
-          Number.isFinite(retryInfo.configuredMaxAttempts)
+        Number.isFinite(retryInfo.configuredMaxAttempts)
         ? Math.max(0, Math.round(retryInfo.configuredMaxAttempts) - 1)
         : undefined
   const configuredMaxAttempts =
     typeof retryInfo.configuredMaxAttempts === 'number' &&
-    Number.isFinite(retryInfo.configuredMaxAttempts)
+      Number.isFinite(retryInfo.configuredMaxAttempts)
       ? Math.max(1, Math.round(retryInfo.configuredMaxAttempts))
       : typeof configuredMaxRetries === 'number'
         ? configuredMaxRetries + 1
@@ -1888,8 +1927,8 @@ function extractProviderRetryInfo(value) {
     configuredMaxAttempts,
     stage:
       retryInfo.stage === 'response' ||
-      retryInfo.stage === 'finalization' ||
-      retryInfo.stage === 'recovery'
+        retryInfo.stage === 'finalization' ||
+        retryInfo.stage === 'recovery'
         ? retryInfo.stage
         : undefined,
     stageLabel: typeof retryInfo.stageLabel === 'string' ? retryInfo.stageLabel : undefined,
@@ -1897,12 +1936,12 @@ function extractProviderRetryInfo(value) {
     inProgress: retryInfo.inProgress === true,
     nextRetryDelayMs:
       typeof retryInfo.nextRetryDelayMs === 'number' &&
-      Number.isFinite(retryInfo.nextRetryDelayMs)
+        Number.isFinite(retryInfo.nextRetryDelayMs)
         ? Math.max(0, Math.round(retryInfo.nextRetryDelayMs))
         : undefined,
     nextAttemptNumber:
       typeof retryInfo.nextAttemptNumber === 'number' &&
-      Number.isFinite(retryInfo.nextAttemptNumber)
+        Number.isFinite(retryInfo.nextAttemptNumber)
         ? Math.max(1, Math.round(retryInfo.nextAttemptNumber))
         : undefined,
     lastErrorSummary:
@@ -2220,7 +2259,7 @@ async function finalizeOpenAiTranscriptAfterStepLimit({
     pushUsage(
       hooks,
       normalizeOpenAiUsage(data.usage) ||
-        buildEstimatedUsage(estimatedInputTokens, content, settings),
+      buildEstimatedUsage(estimatedInputTokens, content, settings),
     )
     return content
   }, {
@@ -2326,7 +2365,7 @@ async function finalizeGoogleTranscriptAfterStepLimit({
     pushUsage(
       hooks,
       normalizeGoogleUsage(data.usageMetadata) ||
-        buildEstimatedUsage(estimatedInputTokens, content, settings),
+      buildEstimatedUsage(estimatedInputTokens, content, settings),
     )
     return content
   }, {
@@ -2413,11 +2452,11 @@ export async function finalizeOpenAiCompatibleAnswer({
       ...messages,
       ...(draftMessage?.trim()
         ? [
-            {
-              role: 'assistant',
-              content: draftMessage,
-            },
-          ]
+          {
+            role: 'assistant',
+            content: draftMessage,
+          },
+        ]
         : []),
       {
         role: 'user',
@@ -2467,7 +2506,7 @@ export async function finalizeOpenAiCompatibleAnswer({
     pushUsage(
       hooks,
       normalizeOpenAiUsage(data.usage) ||
-        buildEstimatedUsage(estimatedInputTokens, trimmedContent, settings),
+      buildEstimatedUsage(estimatedInputTokens, trimmedContent, settings),
     )
     return trimmedContent
   }, {
@@ -2507,11 +2546,11 @@ export async function finalizeGoogleAnswer({
       ...messages,
       ...(draftMessage?.trim()
         ? [
-            {
-              role: 'assistant',
-              content: draftMessage,
-            },
-          ]
+          {
+            role: 'assistant',
+            content: draftMessage,
+          },
+        ]
         : []),
       {
         role: 'user',
@@ -2572,7 +2611,7 @@ export async function finalizeGoogleAnswer({
     pushUsage(
       hooks,
       normalizeGoogleUsage(data.usageMetadata) ||
-        buildEstimatedUsage(estimatedInputTokens, content, settings),
+      buildEstimatedUsage(estimatedInputTokens, content, settings),
     )
     return content
   }, {
@@ -2644,7 +2683,7 @@ export async function runOpenAiCompatibleAgent({
         hooks,
         tools: activeTools,
       })
-      const reasoningBlockId = `provider-phase-${step + 1}`
+      const reasoningBlockId = createProviderReasoningBlockId(hooks, 'openai', step)
       const reasoningOrder = step * 2
       const toolOrder = reasoningOrder + 1
 
@@ -2668,10 +2707,10 @@ export async function runOpenAiCompatibleAgent({
               stream: true,
               ...(settings.provider === 'openai'
                 ? {
-                    stream_options: {
-                      include_usage: true,
-                    },
-                  }
+                  stream_options: {
+                    include_usage: true,
+                  },
+                }
                 : {}),
             }),
           },
@@ -2910,18 +2949,18 @@ export async function runOpenAiCompatibleAgent({
         )
         const result = tool
           ? await invokeTool(tool, args, toolEvents, {
-              ...hooks,
-              timelineOrder: toolOrder,
-              registerDynamicTools(nextTools) {
-                for (const nextTool of Array.isArray(nextTools) ? nextTools : []) {
-                  if (!nextTool?.name || registry.has(nextTool.name)) {
-                    continue
-                  }
-                  registry.set(nextTool.name, nextTool)
-                  activeTools.push(nextTool)
+            ...hooks,
+            timelineOrder: toolOrder,
+            registerDynamicTools(nextTools) {
+              for (const nextTool of Array.isArray(nextTools) ? nextTools : []) {
+                if (!nextTool?.name || registry.has(nextTool.name)) {
+                  continue
                 }
-              },
-            })
+                registry.set(nextTool.name, nextTool)
+                activeTools.push(nextTool)
+              }
+            },
+          })
           : `Tool not found: ${toolCall.function.name}`
 
         transcript.push({
@@ -3038,7 +3077,7 @@ export async function runGoogleAgent({
         hooks,
         tools: activeTools,
       })
-      const reasoningBlockId = `provider-phase-${step + 1}`
+      const reasoningBlockId = createProviderReasoningBlockId(hooks, 'google', step)
       const reasoningOrder = step * 2
       const toolOrder = reasoningOrder + 1
 
@@ -3274,18 +3313,18 @@ export async function runGoogleAgent({
         const tool = registry.get(entry.name)
         const result = tool
           ? await invokeTool(tool, entry.args || {}, toolEvents, {
-              ...hooks,
-              timelineOrder: toolOrder,
-              registerDynamicTools(nextTools) {
-                for (const nextTool of Array.isArray(nextTools) ? nextTools : []) {
-                  if (!nextTool?.name || registry.has(nextTool.name)) {
-                    continue
-                  }
-                  registry.set(nextTool.name, nextTool)
-                  activeTools.push(nextTool)
+            ...hooks,
+            timelineOrder: toolOrder,
+            registerDynamicTools(nextTools) {
+              for (const nextTool of Array.isArray(nextTools) ? nextTools : []) {
+                if (!nextTool?.name || registry.has(nextTool.name)) {
+                  continue
                 }
-              },
-            })
+                registry.set(nextTool.name, nextTool)
+                activeTools.push(nextTool)
+              }
+            },
+          })
           : `Tool not found: ${entry.name}`
 
         toolResponses.push({

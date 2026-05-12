@@ -20,6 +20,8 @@ type AgentTaskLogContext = {
   sessionId?: string
   userMessageId?: string
   assistantMessageId?: string
+  compressedThroughMessageId?: string
+  compressionId?: string
 }
 
 function collapseWhitespace(value: string): string {
@@ -567,12 +569,14 @@ export async function compressAgentContext(
   settings: AgentSettings,
   messages: ChatMessage[],
   keepRecentCount = DEFAULT_MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES,
+  logContext?: AgentTaskLogContext,
 ): Promise<AgentContextCompressionResult> {
   return invoke<AgentContextCompressionResult>('compress_agent_context', {
     payload: {
       settings,
       messages: buildAgentCompressionMessages(messages),
       keepRecentCount,
+      logContext,
     },
   })
 }

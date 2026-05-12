@@ -186,7 +186,9 @@ export function createApplyPatchStreamingReporter({ hooks = {}, order } = {}) {
 
     const eventId =
       existing?.eventId ||
-      `apply-patch-stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      (typeof hooks.createExecutionStepId === 'function'
+        ? hooks.createExecutionStepId('tool', 'apply-patch-stream')
+        : `apply-patch-stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
     eventsByToolCall.set(toolCallId, {
       eventId,
       fingerprint,

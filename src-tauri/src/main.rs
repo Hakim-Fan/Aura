@@ -27,6 +27,7 @@ const MAX_WORK_MEMORY_SUMMARY_CHARS: usize = 1_200;
 const MAX_WORK_MEMORY_NEXT_USE_CHARS: usize = 600;
 const MAX_WORK_MEMORY_CONTENT_JSON_CHARS: usize = 8_000;
 const MAX_WORK_MEMORY_SOURCE_REFS_JSON_CHARS: usize = 2_400;
+const MAX_LOG_DELTA_CHARS: usize = 2_000;
 const SNAPSHOT_TRUNCATION_MARKER: &str = "\n...(truncated to keep memory bounded)...\n";
 const MAX_INLINE_IMAGE_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TERMINAL_TASK_SNAPSHOTS: usize = 64;
@@ -1254,6 +1255,93 @@ fn agent_payload_log_details(task_id: &str, payload: &serde_json::Value) -> serd
     }))
 }
 
+fn context_compression_log_details(payload: &serde_json::Value) -> serde_json::Value {
+    let settings = payload.get("settings").unwrap_or(&serde_json::Value::Null);
+    let log_context = payload
+        .get("logContext")
+        .unwrap_or(&serde_json::Value::Null);
+    let message_count = payload
+        .get("messages")
+        .and_then(|value| value.as_array())
+        .map(|value| value.len())
+        .unwrap_or(0);
+    let mut fields = serde_json::Map::new();
+    insert_log_string(
+        &mut fields,
+        "sessionId",
+        log_context.get("sessionId").and_then(|value| value.as_str()),
+    );
+    insert_log_string(
+        &mut fields,
+        "compressionId",
+        log_context
+            .get("compressionId")
+            .and_then(|value| value.as_str()),
+    );
+    insert_log_string(
+        &mut fields,
+        "compressedThroughMessageId",
+        log_context
+            .get("compressedThroughMessageId")
+            .and_then(|value| value.as_str()),
+    );
+    insert_log_string(
+        &mut fields,
+        "provider",
+        settings.get("provider").and_then(|value| value.as_str()),
+    );
+    insert_log_string(
+        &mut fields,
+        "model",
+        settings.get("model").and_then(|value| value.as_str()),
+    );
+    insert_log_string(
+        &mut fields,
+        "cwd",
+        settings.get("cwd").and_then(|value| value.as_str()),
+    );
+    fields.insert(
+        "baseUrl".into(),
+        settings
+            .get("baseUrl")
+            .and_then(|value| value.as_str())
+            .map(sanitize_url_for_log)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    fields.insert(
+        "providerProxyEnabled".into(),
+        settings
+            .get("providerProxyEnabled")
+            .and_then(|value| value.as_bool())
+            .map(serde_json::Value::Bool)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    fields.insert(
+        "networkProxyConfigured".into(),
+        serde_json::Value::Bool(
+            settings
+                .get("networkProxy")
+                .and_then(|value| value.as_str())
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false),
+        ),
+    );
+    fields.insert(
+        "messageCount".into(),
+        serde_json::Value::Number(serde_json::Number::from(message_count)),
+    );
+    fields.insert(
+        "keepRecentCount".into(),
+        payload
+            .get("keepRecentCount")
+            .and_then(|value| value.as_u64())
+            .map(|value| serde_json::Value::Number(serde_json::Number::from(value)))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    serde_json::Value::Object(fields)
+}
+
 fn provider_action_log_details(payload: &serde_json::Value) -> serde_json::Value {
     let settings = payload.get("settings").unwrap_or(&serde_json::Value::Null);
     serde_json::json!({
@@ -1275,12 +1363,50 @@ fn provider_action_log_details(payload: &serde_json::Value) -> serde_json::Value
     })
 }
 
+fn event_step_id(event: &serde_json::Value) -> Option<&str> {
+    event
+        .get("id")
+        .and_then(|value| value.as_str())
+        .or_else(|| event.get("blockId").and_then(|value| value.as_str()))
+}
+
+fn delta_log_preview(event: &serde_json::Value) -> Option<String> {
+    event
+        .get("delta")
+        .and_then(|value| value.as_str())
+        .map(|value| truncate_snapshot_text(value, MAX_LOG_DELTA_CHARS))
+}
+
+fn delta_log_char_count(event: &serde_json::Value) -> Option<usize> {
+    event
+        .get("delta")
+        .and_then(|value| value.as_str())
+        .map(|value| value.chars().count())
+}
+
 fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> serde_json::Value {
     let event_type = event
         .get("type")
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
     match event_type {
+        "text_delta" => agent_log_details(context, serde_json::json!({
+            "stepId": event_step_id(event),
+            "blockId": event.get("blockId").and_then(|value| value.as_str()),
+            "target": event.get("target").and_then(|value| value.as_str()),
+            "order": event.get("order").and_then(|value| value.as_f64()),
+            "deltaChars": delta_log_char_count(event),
+            "delta": delta_log_preview(event),
+        })),
+        "reasoning_delta" => agent_log_details(context, serde_json::json!({
+            "stepId": event_step_id(event),
+            "reasoningStepId": event_step_id(event),
+            "blockId": event.get("blockId").and_then(|value| value.as_str()),
+            "kind": event.get("kind").and_then(|value| value.as_str()),
+            "order": event.get("order").and_then(|value| value.as_f64()),
+            "deltaChars": delta_log_char_count(event),
+            "delta": delta_log_preview(event),
+        })),
         "runtime_status" => agent_log_details(context, serde_json::json!({
             "phase": event.get("phase").and_then(|value| value.as_str()),
             "stalled": event.get("stalled").and_then(|value| value.as_bool()),
@@ -1295,6 +1421,7 @@ fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> 
                 .get("contextCompression")
                 .unwrap_or(&serde_json::Value::Null);
             agent_log_details(context, serde_json::json!({
+                "stepId": compression.get("id").and_then(|value| value.as_str()),
                 "compressionId": compression.get("id").and_then(|value| value.as_str()),
                 "compressedThroughMessageId": compression
                     .get("compressedThroughMessageId")
@@ -1310,6 +1437,7 @@ fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> 
         "tool_event" => {
             let tool_event = event.get("event").unwrap_or(&serde_json::Value::Null);
             agent_log_details(context, serde_json::json!({
+                "stepId": tool_event.get("id").and_then(|value| value.as_str()),
                 "toolEventId": tool_event.get("id").and_then(|value| value.as_str()),
                 "source": tool_event.get("source").and_then(|value| value.as_str()),
                 "toolName": tool_event.get("name").and_then(|value| value.as_str()),
@@ -1318,6 +1446,21 @@ fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> 
                 "status": tool_event.get("status").and_then(|value| value.as_str()),
                 "error": tool_event.get("error").and_then(|value| value.as_str()),
                 "errorInfo": tool_event.get("errorInfo").cloned().unwrap_or(serde_json::Value::Null),
+            }))
+        }
+        "task_tree" => {
+            let tree = event.get("tree").unwrap_or(&serde_json::Value::Null);
+            let root = tree
+                .as_array()
+                .and_then(|entries| entries.first())
+                .unwrap_or(&serde_json::Value::Null);
+            agent_log_details(context, serde_json::json!({
+                "stepId": root.get("id").and_then(|value| value.as_str()),
+                "rootTaskId": root.get("id").and_then(|value| value.as_str()),
+                "rootTitle": root.get("title").and_then(|value| value.as_str()),
+                "rootStatus": root.get("status").and_then(|value| value.as_str()),
+                "rootSummary": root.get("summary").and_then(|value| value.as_str()),
+                "tree": tree.clone(),
             }))
         }
         "failed" => agent_log_details(context, serde_json::json!({
@@ -3243,7 +3386,15 @@ fn spawn_agent_task<R: Runtime>(
                     }
                     clear_retry_progress_if_connected(current);
                     match event.get("target").and_then(|value| value.as_str()) {
-                        Some("phase") => append_phase_output_delta(current, &event),
+                        Some("phase") => {
+                            append_app_log(
+                                &stdout_log_app,
+                                "info",
+                                "agent_phase_output_delta",
+                                event_log_details(&stdout_log_context, &event),
+                            );
+                            append_phase_output_delta(current, &event)
+                        }
                         _ => {
                             let mut next_message = current.message.clone().unwrap_or_default();
                             next_message.push_str(delta);
@@ -3253,6 +3404,12 @@ fn spawn_agent_task<R: Runtime>(
                 }),
                 Some("reasoning_delta") => with_snapshot(&stdout_snapshot, |current| {
                     clear_retry_progress_if_connected(current);
+                    append_app_log(
+                        &stdout_log_app,
+                        "info",
+                        "agent_reasoning_delta",
+                        event_log_details(&stdout_log_context, &event),
+                    );
                     append_reasoning_delta(current, &event);
                 }),
                 Some("usage") => with_snapshot(&stdout_snapshot, |current| {
@@ -3323,6 +3480,12 @@ fn spawn_agent_task<R: Runtime>(
                     current.appended_inputs = extract_array(event.get("inputs"));
                 }),
                 Some("task_tree") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "info",
+                        "agent_task_tree_updated",
+                        event_log_details(&stdout_log_context, &event),
+                    );
                     current.task_tree = extract_array(event.get("tree"));
                 }),
                 Some("route_decision") => with_snapshot(&stdout_snapshot, |current| {
@@ -3754,6 +3917,7 @@ async fn compress_agent_context<R: Runtime>(
         "info",
         "context_compression_started",
         serde_json::json!({
+            "request": context_compression_log_details(&payload),
             "launch": launch_details.clone(),
         }),
     );
@@ -3761,6 +3925,7 @@ async fn compress_agent_context<R: Runtime>(
         .map_err(|error| format!("Failed to serialize context compression payload: {error}"))?;
     let app_handle = app.clone();
     let launch_details_for_error = launch_details.clone();
+    let payload_for_blocking = payload.clone();
 
     let output =
         tauri::async_runtime::spawn_blocking(move || -> Result<std::process::Output, String> {
@@ -3783,6 +3948,7 @@ async fn compress_agent_context<R: Runtime>(
                         "error",
                         "context_compression_launch_failed",
                         serde_json::json!({
+                            "request": context_compression_log_details(&payload_for_blocking),
                             "error": message,
                             "launch": launch_details_for_error.clone(),
                         }),
@@ -3795,6 +3961,7 @@ async fn compress_agent_context<R: Runtime>(
                     "warn",
                     "context_compression_system_node_fallback_used",
                     serde_json::json!({
+                        "request": context_compression_log_details(&payload_for_blocking),
                         "launch": launch_details_for_error.clone(),
                     }),
                 );
@@ -3829,6 +3996,7 @@ async fn compress_agent_context<R: Runtime>(
             "error",
             "context_compression_failed",
             serde_json::json!({
+                "request": context_compression_log_details(&payload),
                 "error": message,
                 "launch": launch_details,
             }),
@@ -3843,6 +4011,20 @@ async fn compress_agent_context<R: Runtime>(
         "info",
         "context_compression_completed",
         serde_json::json!({
+            "request": context_compression_log_details(&payload),
+            "result": {
+                "ok": parsed.get("ok").and_then(|value| value.as_bool()),
+                "message": parsed.get("message").and_then(|value| value.as_str()),
+                "originalTokens": parsed.get("originalTokens").and_then(|value| value.as_u64()),
+                "compressedTokens": parsed.get("compressedTokens").and_then(|value| value.as_u64()),
+                "originalMessageCount": parsed
+                    .get("originalMessageCount")
+                    .and_then(|value| value.as_u64()),
+                "compressedMessageCount": parsed
+                    .get("compressedMessageCount")
+                    .and_then(|value| value.as_u64()),
+                "keptRecentCount": parsed.get("keptRecentCount").and_then(|value| value.as_u64()),
+            },
             "launch": launch_details,
         }),
     );
