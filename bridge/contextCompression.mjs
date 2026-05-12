@@ -27,13 +27,23 @@ function estimatePartTokens(part, options = {}) {
   }
 
   if (part.type === 'image') {
-    return IMAGE_PART_TOKEN_COST +
-      estimateTextTokens([part.name, part.mimeType, part.path].filter(Boolean).join(' '), options)
+    return (
+      IMAGE_PART_TOKEN_COST +
+      estimateTextTokens(
+        [part.name, part.mimeType, part.path].filter(Boolean).join(' '),
+        options,
+      )
+    )
   }
 
   if (part.type === 'file') {
-    return FILE_PART_TOKEN_COST +
-      estimateTextTokens([part.name, part.path, part.mimeType].filter(Boolean).join(' '), options)
+    return (
+      FILE_PART_TOKEN_COST +
+      estimateTextTokens(
+        [part.name, part.path, part.mimeType].filter(Boolean).join(' '),
+        options,
+      )
+    )
   }
 
   return estimateTextTokens(JSON.stringify(part), options)
@@ -43,10 +53,13 @@ export function estimateMessageTokens(message = {}, options = {}) {
   const roleTokens = 4
   const contentTokens = estimateTextTokens(message.content || '', options)
   const parts = Array.isArray(message.parts) ? message.parts : []
-  const partTokens = parts.reduce((total, part) => total + estimatePartTokens(part, options), 0)
+  const partTokens = parts.reduce(
+    (total, part) => total + estimatePartTokens(part, options),
+    0,
+  )
   const textPartContent = parts
-    .filter(part => part?.type === 'text' && typeof part.text === 'string')
-    .map(part => part.text.trim())
+    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text.trim())
     .filter(Boolean)
     .join('\n')
   const contentMirrorsTextParts =
@@ -67,14 +80,16 @@ export function estimateMessagesTokens(messages = [], options = {}) {
 }
 
 function findActiveProviderProfile(settings = {}) {
-  const profiles = Array.isArray(settings.providerProfiles) ? settings.providerProfiles : []
+  const profiles = Array.isArray(settings.providerProfiles)
+    ? settings.providerProfiles
+    : []
   const activeId =
     typeof settings.activeProviderProfileId === 'string'
       ? settings.activeProviderProfileId.trim()
       : ''
   return (
-    profiles.find(profile => profile?.id === activeId) ||
-    profiles.find(profile => profile?.provider === settings.provider) ||
+    profiles.find((profile) => profile?.id === activeId) ||
+    profiles.find((profile) => profile?.provider === settings.provider) ||
     profiles[0] ||
     null
   )
@@ -83,8 +98,9 @@ function findActiveProviderProfile(settings = {}) {
 function findModelMetadata(settings = {}) {
   const profile = findActiveProviderProfile(settings)
   const models = Array.isArray(profile?.models) ? profile.models : []
-  const modelId = typeof settings.model === 'string' ? settings.model.trim() : ''
-  return models.find(model => model?.id === modelId) || null
+  const modelId =
+    typeof settings.model === 'string' ? settings.model.trim() : ''
+  return models.find((model) => model?.id === modelId) || null
 }
 
 function inferContextWindowFromModel(settings = {}) {
@@ -99,7 +115,11 @@ function inferContextWindowFromModel(settings = {}) {
   }
 
   if (provider === 'custom') {
-    if (/(ollama|llama|local|lmstudio|vllm)/u.test(String(settings.baseUrl || '').toLowerCase())) {
+    if (
+      /(ollama|llama|local|lmstudio|vllm)/u.test(
+        String(settings.baseUrl || '').toLowerCase(),
+      )
+    ) {
       return DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS
     }
   }
@@ -114,19 +134,28 @@ export function resolveContextWindowTokens(settings = {}) {
 export function resolveContextWindowInfo(settings = {}) {
   const modelMetadata = findModelMetadata(settings)
   const modelContextWindowTokens = Number(modelMetadata?.contextWindowTokens)
-  const configuredContextWindowTokens = Number(settings.contextCompressionThresholdTokens)
-  if (Number.isFinite(modelContextWindowTokens) && modelContextWindowTokens > 0) {
+  const configuredContextWindowTokens = Number(
+    settings.contextCompressionThresholdTokens,
+  )
+  if (
+    Number.isFinite(modelContextWindowTokens) &&
+    modelContextWindowTokens > 0
+  ) {
     return {
       contextWindowTokens: Math.round(modelContextWindowTokens),
       windowSource: 'model_metadata',
       modelContextWindowTokens: Math.round(modelContextWindowTokens),
       configuredContextWindowTokens:
-        Number.isFinite(configuredContextWindowTokens) && configuredContextWindowTokens > 0
+        Number.isFinite(configuredContextWindowTokens) &&
+        configuredContextWindowTokens > 0
           ? Math.round(configuredContextWindowTokens)
           : undefined,
     }
   }
-  if (Number.isFinite(configuredContextWindowTokens) && configuredContextWindowTokens > 0) {
+  if (
+    Number.isFinite(configuredContextWindowTokens) &&
+    configuredContextWindowTokens > 0
+  ) {
     return {
       contextWindowTokens: Math.round(configuredContextWindowTokens),
       windowSource: 'settings',
@@ -139,21 +168,34 @@ export function resolveContextWindowInfo(settings = {}) {
   }
 }
 
-export function resolveMaxOutputTokens(settings = {}, contextWindowTokens = resolveContextWindowTokens(settings)) {
+export function resolveMaxOutputTokens(
+  settings = {},
+  contextWindowTokens = resolveContextWindowTokens(settings),
+) {
   const modelMetadata = findModelMetadata(settings)
   const configured = Number(modelMetadata?.maxOutputTokens)
   if (Number.isFinite(configured) && configured > 0) {
     return Math.round(configured)
   }
   return Math.round(
-    Math.max(2_000, Math.min(MAX_DEFAULT_OUTPUT_TOKENS, contextWindowTokens * 0.125, DEFAULT_MAX_OUTPUT_TOKENS)),
+    Math.max(
+      2_000,
+      Math.min(
+        MAX_DEFAULT_OUTPUT_TOKENS,
+        contextWindowTokens * 0.125,
+        DEFAULT_MAX_OUTPUT_TOKENS,
+      ),
+    ),
   )
 }
 
 export function buildContextCompressionBudget(settings = {}, options = {}) {
   const contextWindowInfo = resolveContextWindowInfo(settings)
   const contextWindowTokens = contextWindowInfo.contextWindowTokens
-  const systemPromptTokens = estimateTextTokens(options.systemPrompt || '', settings)
+  const systemPromptTokens = estimateTextTokens(
+    options.systemPrompt || '',
+    settings,
+  )
   const toolSchemaTokens = Math.max(
     0,
     Math.round(Number(options.toolSchemaTokens) || 0),
@@ -195,7 +237,8 @@ export function buildContextCompressionBudget(settings = {}, options = {}) {
     contextWindowTokens,
     windowSource: contextWindowInfo.windowSource,
     modelContextWindowTokens: contextWindowInfo.modelContextWindowTokens,
-    configuredContextWindowTokens: contextWindowInfo.configuredContextWindowTokens,
+    configuredContextWindowTokens:
+      contextWindowInfo.configuredContextWindowTokens,
     configuredThresholdTokens,
     systemPromptTokens,
     toolSchemaTokens,
@@ -208,12 +251,18 @@ export function buildContextCompressionBudget(settings = {}, options = {}) {
   }
 }
 
-export function shouldCompressMessages(messages = [], settings = {}, options = {}) {
+export function shouldCompressMessages(
+  messages = [],
+  settings = {},
+  options = {},
+) {
   const estimatedTokens = estimateMessagesTokens(messages, settings)
   const budget = buildContextCompressionBudget(settings, options)
   const latestInputTokens = Math.max(
     0,
-    Math.round(Number(options.latestInputTokens || options.activeInputTokens) || 0),
+    Math.round(
+      Number(options.latestInputTokens || options.activeInputTokens) || 0,
+    ),
   )
   const estimatedPromptTokens =
     budget.systemPromptTokens + budget.toolSchemaTokens + estimatedTokens
@@ -224,7 +273,8 @@ export function shouldCompressMessages(messages = [], settings = {}, options = {
       budget.maxOutputTokens -
       budget.toolResultBufferTokens,
   )
-  const conversationLimitReached = estimatedTokens > budget.effectiveThresholdTokens
+  const conversationLimitReached =
+    estimatedTokens > budget.effectiveThresholdTokens
   const activePromptLimitReached = activePromptTokens > activePromptLimit
   return {
     shouldCompress:
@@ -257,7 +307,10 @@ function splitTextIntoTokenChunks(text, maxTokens, options = {}) {
 
   while (start < source.length) {
     let end = Math.min(source.length, start + Math.max(1_000, limit * 3))
-    while (end > start + 200 && estimateTextTokens(source.slice(start, end), options) > limit) {
+    while (
+      end > start + 200 &&
+      estimateTextTokens(source.slice(start, end), options) > limit
+    ) {
       end = start + Math.floor((end - start) * 0.75)
     }
     if (end <= start) {
@@ -282,7 +335,11 @@ function splitOversizedMessageForBatch(message, maxBatchTokens, options = {}) {
     return [message]
   }
 
-  const chunks = splitTextIntoTokenChunks(content, Math.max(500, limit - 200), options)
+  const chunks = splitTextIntoTokenChunks(
+    content,
+    Math.max(500, limit - 200),
+    options,
+  )
   return chunks.map((chunk, index) => ({
     ...message,
     content: [
@@ -360,8 +417,8 @@ function userMessageTextForCompaction(message = {}) {
   }
   if (Array.isArray(message.parts)) {
     const textParts = message.parts
-      .filter(part => part?.type === 'text' && typeof part.text === 'string')
-      .map(part => part.text.trim())
+      .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+      .map((part) => part.text.trim())
       .filter(Boolean)
     for (const text of textParts) {
       if (!pieces.includes(text)) {
@@ -383,7 +440,10 @@ function truncateTextToTokenBudget(text, maxTokens, options = {}) {
   }
 
   let end = Math.min(source.length, Math.max(200, limit * 4))
-  while (end > 200 && estimateTextTokens(source.slice(0, end), options) > limit) {
+  while (
+    end > 200 &&
+    estimateTextTokens(source.slice(0, end), options) > limit
+  ) {
     end = Math.floor(end * 0.75)
   }
   return source.slice(0, Math.max(1, end)).trim()
@@ -450,8 +510,8 @@ export function splitMessagesIntoTokenBatches(
   let currentTokens = 0
   const limit = Math.max(1_000, Math.floor(maxBatchTokens))
 
-  const expandedMessages = (Array.isArray(messages) ? messages : []).flatMap(message =>
-    splitOversizedMessageForBatch(message, limit, options),
+  const expandedMessages = (Array.isArray(messages) ? messages : []).flatMap(
+    (message) => splitOversizedMessageForBatch(message, limit, options),
   )
 
   for (const message of expandedMessages) {
@@ -486,7 +546,9 @@ export function buildCompactionSystemPrompt(targetTokens) {
 
 export function buildCompactionUserPrompt(messages = [], options = {}) {
   const previousSummary =
-    typeof options.previousSummary === 'string' ? options.previousSummary.trim() : ''
+    typeof options.previousSummary === 'string'
+      ? options.previousSummary.trim()
+      : ''
   const batchLabel =
     typeof options.batchCount === 'number' && options.batchCount > 1
       ? `This is batch ${(options.batchIndex || 0) + 1} of ${options.batchCount}.`
@@ -510,22 +572,27 @@ export function buildCompactionUserPrompt(messages = [], options = {}) {
     .join('\n')
 }
 
-export function buildCompressedSummaryMessage(summary, originalMessageCount, metadata = {}) {
+export function buildCompressedSummaryMessage(
+  summary,
+  originalMessageCount,
+  metadata = {},
+) {
   const recentUserMessages = Array.isArray(metadata.recentUserMessages)
     ? metadata.recentUserMessages
     : []
-  const recentUserMessageSection = recentUserMessages.length > 0
-    ? [
-        '',
-        '## Recent User Messages Preserved Verbatim',
-        ...recentUserMessages.map((message, index) =>
-          [
-            `### User message ${index + 1}${message.truncated ? ' (truncated)' : ''}`,
-            String(message.content || '').trim(),
-          ].join('\n'),
-        ),
-      ]
-    : []
+  const recentUserMessageSection =
+    recentUserMessages.length > 0
+      ? [
+          '',
+          '## Recent User Messages Preserved Verbatim',
+          ...recentUserMessages.map((message, index) =>
+            [
+              `### User message ${index + 1}${message.truncated ? ' (truncated)' : ''}`,
+              String(message.content || '').trim(),
+            ].join('\n'),
+          ),
+        ]
+      : []
   const lines = [
     `[Compressed summary of ${originalMessageCount} earlier conversation message(s).]`,
     metadata.beforeTokens && metadata.afterTokens
@@ -537,12 +604,49 @@ export function buildCompressedSummaryMessage(summary, originalMessageCount, met
     '',
     String(summary || '').trim(),
     ...recentUserMessageSection,
-  ].filter(line => line !== null)
+  ].filter((line) => line !== null)
 
   return {
     role: 'assistant',
     content: lines.join('\n').trim(),
     parts: [],
+  }
+}
+
+export function calculateTranscriptBudget(settings = {}, options = {}) {
+  const budget = buildContextCompressionBudget(settings, options)
+  const conversationBudget = Math.max(1_000, budget.effectiveThresholdTokens)
+
+  const assistantContentRatio =
+    Number(settings.assistantContentBudgetRatio) || 0.08
+  const assistantWindowRatio =
+    Number(settings.assistantContentWindowRatio) || 0.03
+  const assistantContentMaxTokens = Math.max(
+    1_000,
+    Math.floor(
+      Math.min(
+        conversationBudget * assistantContentRatio,
+        budget.contextWindowTokens * assistantWindowRatio,
+      ),
+    ),
+  )
+
+  const toolOutputRatio = Number(settings.toolOutputBudgetRatio) || 0.05
+  const toolOutputWindowRatio = Number(settings.toolOutputWindowRatio) || 0.02
+  const toolOutputMaxTokens = Math.max(
+    500,
+    Math.floor(
+      Math.min(
+        conversationBudget * toolOutputRatio,
+        budget.contextWindowTokens * toolOutputWindowRatio,
+      ),
+    ),
+  )
+
+  return {
+    ...budget,
+    assistantContentMaxTokens,
+    toolOutputMaxTokens,
   }
 }
 

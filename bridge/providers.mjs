@@ -13,6 +13,7 @@ import {
   buildCompactionSystemPrompt,
   buildCompactionUserPrompt,
   buildCompressedSummaryMessage,
+  calculateTranscriptBudget,
   DEFAULT_RECENT_USER_MESSAGE_TOKEN_BUDGET,
   estimateTextTokens,
   estimateMessagesTokens,
@@ -28,15 +29,75 @@ const ASSISTANT_SPILLOVER_TRIGGER_TOKENS = 6_000
 const ASSISTANT_SPILLOVER_SUMMARY_CHARS = 1_200
 const FINALIZER_DRAFT_MESSAGE_MAX_CHARS = 6_000
 
+function buildTranscriptTruncationBudgets(settings = {}) {
+  const budget = calculateTranscriptBudget(settings)
+  return {
+    assistantContentMaxTokens: budget.assistantContentMaxTokens,
+    toolOutputMaxTokens: budget.toolOutputMaxTokens,
+  }
+}
+
+function middleTruncateText(text, maxTokens, settings = {}) {
+  const source = String(text || '')
+  if (!source.trim()) {
+    return source
+  }
+  const currentTokens = estimateTextTokens(source, settings)
+  if (currentTokens <= maxTokens) {
+    return source
+  }
+
+  const ratio = maxTokens / currentTokens
+  const targetChars = Math.max(200, Math.floor(source.length * ratio))
+  const headChars = Math.floor(targetChars * 0.6)
+  const tailChars = Math.floor(targetChars * 0.3)
+  const head = source.slice(0, headChars)
+  const tail = source.slice(-tailChars)
+  return `${head}\n\n... [truncated: ${currentTokens} -> ~${maxTokens} tokens] ...\n\n${tail}`
+}
+
+function truncateAssistantContentForTranscript(content, settings = {}) {
+  const source = String(content || '')
+  if (!source.trim()) {
+    return source
+  }
+  const budgets = buildTranscriptTruncationBudgets(settings)
+  return middleTruncateText(source, budgets.assistantContentMaxTokens, settings)
+}
+
+function truncateToolOutputForTranscript(toolOutput, settings = {}) {
+  const source =
+    typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput)
+  if (!source?.trim()) {
+    return toolOutput
+  }
+  const budgets = buildTranscriptTruncationBudgets(settings)
+  const truncated = middleTruncateText(
+    source,
+    budgets.toolOutputMaxTokens,
+    settings,
+  )
+  if (truncated === source) {
+    return toolOutput
+  }
+  return truncated
+}
+
 function summarizeSpilloverText(content = '') {
-  const normalized = String(content || '').replace(/\s+/g, ' ').trim()
+  const normalized = String(content || '')
+    .replace(/\s+/g, ' ')
+    .trim()
   if (!normalized) {
     return 'No textual summary available.'
   }
-  const head = normalized.slice(0, Math.floor(ASSISTANT_SPILLOVER_SUMMARY_CHARS * 0.7))
-  const tail = normalized.length > ASSISTANT_SPILLOVER_SUMMARY_CHARS
-    ? normalized.slice(-Math.floor(ASSISTANT_SPILLOVER_SUMMARY_CHARS * 0.25))
-    : ''
+  const head = normalized.slice(
+    0,
+    Math.floor(ASSISTANT_SPILLOVER_SUMMARY_CHARS * 0.7),
+  )
+  const tail =
+    normalized.length > ASSISTANT_SPILLOVER_SUMMARY_CHARS
+      ? normalized.slice(-Math.floor(ASSISTANT_SPILLOVER_SUMMARY_CHARS * 0.25))
+      : ''
   return tail ? `${head} ... ${tail}` : head
 }
 
@@ -152,7 +213,7 @@ function flattenOpenAiMessageContent(content) {
     return ''
   }
   return content
-    .map(block => {
+    .map((block) => {
       if (!block || typeof block !== 'object') {
         return ''
       }
@@ -173,7 +234,10 @@ function normalizeOpenAiUsage(usage) {
     return undefined
   }
   const inputTokens = Math.max(0, Math.round(Number(usage.prompt_tokens) || 0))
-  const outputTokens = Math.max(0, Math.round(Number(usage.completion_tokens) || 0))
+  const outputTokens = Math.max(
+    0,
+    Math.round(Number(usage.completion_tokens) || 0),
+  )
   if (inputTokens <= 0 && outputTokens <= 0) {
     return undefined
   }
@@ -187,8 +251,14 @@ function normalizeGoogleUsage(usage) {
   if (!usage || typeof usage !== 'object') {
     return undefined
   }
-  const inputTokens = Math.max(0, Math.round(Number(usage.promptTokenCount) || 0))
-  const outputTokens = Math.max(0, Math.round(Number(usage.candidatesTokenCount) || 0))
+  const inputTokens = Math.max(
+    0,
+    Math.round(Number(usage.promptTokenCount) || 0),
+  )
+  const outputTokens = Math.max(
+    0,
+    Math.round(Number(usage.candidatesTokenCount) || 0),
+  )
   if (inputTokens <= 0 && outputTokens <= 0) {
     return undefined
   }
@@ -206,7 +276,11 @@ function attachEstimatedInputTokens(usage, estimatedInputTokens) {
   return estimate > 0 ? { ...usage, estimatedInputTokens: estimate } : usage
 }
 
-function buildEstimatedUsage(estimatedInputTokens, outputText = '', settings = {}) {
+function buildEstimatedUsage(
+  estimatedInputTokens,
+  outputText = '',
+  settings = {},
+) {
   const inputTokens = Math.max(0, Math.round(Number(estimatedInputTokens) || 0))
   if (inputTokens <= 0) {
     return undefined
@@ -226,25 +300,40 @@ function estimateSerializedInputTokens(value, settings = {}) {
   }
 }
 
-function estimateOpenAiRequestInputTokens(transcript, tools = [], settings = {}) {
-  return estimateSerializedInputTokens({
-    messages: transcript,
-    tools: openAiToolDefs(tools),
-  }, settings)
+function estimateOpenAiRequestInputTokens(
+  transcript,
+  tools = [],
+  settings = {},
+) {
+  return estimateSerializedInputTokens(
+    {
+      messages: transcript,
+      tools: openAiToolDefs(tools),
+    },
+    settings,
+  )
 }
 
-function estimateGoogleRequestInputTokens(systemPrompt, transcript, tools = [], settings = {}) {
-  return estimateSerializedInputTokens({
-    system_instruction: {
-      parts: [{ text: systemPrompt }],
+function estimateGoogleRequestInputTokens(
+  systemPrompt,
+  transcript,
+  tools = [],
+  settings = {},
+) {
+  return estimateSerializedInputTokens(
+    {
+      system_instruction: {
+        parts: [{ text: systemPrompt }],
+      },
+      contents: transcript,
+      tools: geminiToolDefs(tools),
     },
-    contents: transcript,
-    tools: geminiToolDefs(tools),
-  }, settings)
+    settings,
+  )
 }
 
 function openAiToolDefs(tools) {
-  return tools.map(tool => ({
+  return tools.map((tool) => ({
     type: 'function',
     function: {
       name: tool.name,
@@ -255,7 +344,7 @@ function openAiToolDefs(tools) {
 }
 
 function geminiToolDefs(tools) {
-  return tools.map(tool => ({
+  return tools.map((tool) => ({
     functionDeclarations: [
       {
         name: tool.name,
@@ -270,9 +359,7 @@ function normalizeMessageParts(message) {
   if (Array.isArray(message.parts) && message.parts.length > 0) {
     return message.parts
   }
-  return message.content
-    ? [{ type: 'text', text: message.content }]
-    : []
+  return message.content ? [{ type: 'text', text: message.content }] : []
 }
 
 function splitDataUrl(dataUrl) {
@@ -288,11 +375,9 @@ function splitDataUrl(dataUrl) {
 
 function toOpenAiContent(message) {
   const parts = normalizeMessageParts(message)
-  const blocks = parts.flatMap(part => {
+  const blocks = parts.flatMap((part) => {
     if (part.type === 'text') {
-      return part.text.trim()
-        ? [{ type: 'text', text: part.text }]
-        : []
+      return part.text.trim() ? [{ type: 'text', text: part.text }] : []
     }
     if (part.type === 'image' && part.dataUrl) {
       return [
@@ -326,7 +411,7 @@ function toOpenAiTranscript(systemPrompt, messages) {
       role: 'system',
       content: systemPrompt,
     },
-    ...messages.map(message => {
+    ...messages.map((message) => {
       if (message.role === 'assistant') {
         return {
           role: 'assistant',
@@ -343,7 +428,7 @@ function toOpenAiTranscript(systemPrompt, messages) {
 
 function toGeminiParts(message) {
   const parts = normalizeMessageParts(message)
-  const mapped = parts.flatMap(part => {
+  const mapped = parts.flatMap((part) => {
     if (part.type === 'text') {
       return part.text.trim() ? [{ text: part.text }] : []
     }
@@ -372,25 +457,31 @@ function toGeminiParts(message) {
 }
 
 function toGeminiContents(messages) {
-  return messages.map(message => ({
+  return messages.map((message) => ({
     role: message.role === 'assistant' ? 'model' : 'user',
     parts: toGeminiParts(message),
   }))
 }
 
 function resolveCompactionSettings(settings = {}) {
-  const profiles = Array.isArray(settings.providerProfiles) ? settings.providerProfiles : []
+  const profiles = Array.isArray(settings.providerProfiles)
+    ? settings.providerProfiles
+    : []
   const requestedProfileId =
     typeof settings.analysisProviderProfileId === 'string'
       ? settings.analysisProviderProfileId.trim()
       : ''
   const requestedModel =
-    typeof settings.analysisModel === 'string' ? settings.analysisModel.trim() : ''
+    typeof settings.analysisModel === 'string'
+      ? settings.analysisModel.trim()
+      : ''
 
   if (requestedProfileId && requestedModel) {
-    const profile = profiles.find(entry => entry?.id === requestedProfileId)
+    const profile = profiles.find((entry) => entry?.id === requestedProfileId)
     const modelEnabled = Array.isArray(profile?.models)
-      ? profile.models.some(model => model?.enabled !== false && model?.id === requestedModel)
+      ? profile.models.some(
+          (model) => model?.enabled !== false && model?.id === requestedModel,
+        )
       : false
 
     if (profile && modelEnabled) {
@@ -462,10 +553,12 @@ function buildFinalizerPrompt({
   const toolDigest = includeToolDigest
     ? toolEvents
         .slice(-8)
-        .map(event => {
+        .map((event) => {
           const pieces = [
             `- ${event.name} [${event.status}]`,
-            event.output ? `输出摘要: ${String(event.output).slice(0, 600)}` : null,
+            event.output
+              ? `输出摘要: ${String(event.output).slice(0, 600)}`
+              : null,
             event.error ? `错误: ${String(event.error).slice(0, 300)}` : null,
           ].filter(Boolean)
           return pieces.join('\n')
@@ -502,7 +595,10 @@ function buildFinalizerPrompt({
 function resolveCompactionOutputTokens(targetTokens, recentTokens = 0) {
   return Math.max(
     800,
-    Math.min(8_000, Math.floor(Number(targetTokens) || 0) - Math.floor(recentTokens)),
+    Math.min(
+      8_000,
+      Math.floor(Number(targetTokens) || 0) - Math.floor(recentTokens),
+    ),
   )
 }
 
@@ -556,7 +652,7 @@ function compactionErrorText(error) {
       error.message,
       error.stack,
     ]
-      .filter(value => value !== undefined && value !== null)
+      .filter((value) => value !== undefined && value !== null)
       .join('\n')
   }
   return String(error || '')
@@ -585,7 +681,10 @@ function buildCompactionFallbackPlans(maxInputBatchTokens, compactionBudget) {
   const baseLimit = Math.max(
     1_000,
     Math.floor(
-      Math.min(maxInputBatchTokens, compactionBudget.compactionInputBatchTokens),
+      Math.min(
+        maxInputBatchTokens,
+        compactionBudget.compactionInputBatchTokens,
+      ),
     ),
   )
   const limits = [
@@ -593,11 +692,11 @@ function buildCompactionFallbackPlans(maxInputBatchTokens, compactionBudget) {
     Math.floor(baseLimit * 0.5),
     Math.floor(baseLimit * 0.25),
   ]
-    .map(limit => Math.max(1_000, limit))
+    .map((limit) => Math.max(1_000, limit))
     .filter((limit, index, all) => all.indexOf(limit) === index)
 
   return [
-    ...limits.map(limit => ({
+    ...limits.map((limit) => ({
       batchTokenLimit: limit,
       dropOldestRatio: 0,
     })),
@@ -611,18 +710,20 @@ function buildCompactionFallbackPlans(maxInputBatchTokens, compactionBudget) {
 function flattenGeminiTextResponse(data) {
   const parts = data?.candidates?.[0]?.content?.parts || []
   return parts
-    .map(part => (typeof part.text === 'string' ? part.text : ''))
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
     .join('\n')
     .trim()
 }
 
 function openAiTranscriptEntryText(entry, index) {
-  const lines = [`### Transcript entry ${index + 1} (${entry?.role || 'unknown'})`]
+  const lines = [
+    `### Transcript entry ${index + 1} (${entry?.role || 'unknown'})`,
+  ]
   if (typeof entry?.content === 'string' && entry.content.trim()) {
     lines.push(entry.content.trim())
   } else if (Array.isArray(entry?.content)) {
     const text = entry.content
-      .map(part => {
+      .map((part) => {
         if (part?.type === 'text') {
           return part.text || ''
         }
@@ -640,10 +741,12 @@ function openAiTranscriptEntryText(entry, index) {
   if (Array.isArray(entry?.tool_calls) && entry.tool_calls.length > 0) {
     lines.push(
       `Tool calls:\n${entry.tool_calls
-        .map(toolCall =>
+        .map((toolCall) =>
           [
             `- ${toolCall?.function?.name || 'unknown'}`,
-            toolCall?.function?.arguments ? `args=${toolCall.function.arguments}` : null,
+            toolCall?.function?.arguments
+              ? `args=${toolCall.function.arguments}`
+              : null,
           ]
             .filter(Boolean)
             .join(' '),
@@ -660,7 +763,9 @@ function openAiTranscriptEntryText(entry, index) {
 function estimateOpenAiTranscriptTokens(transcript = [], settings = {}) {
   return (Array.isArray(transcript) ? transcript : []).reduce(
     (total, entry, index) =>
-      total + estimateTextTokens(openAiTranscriptEntryText(entry, index), settings) + 4,
+      total +
+      estimateTextTokens(openAiTranscriptEntryText(entry, index), settings) +
+      4,
     0,
   )
 }
@@ -682,7 +787,9 @@ function geminiPartText(part) {
 }
 
 function geminiTranscriptEntryText(entry, index) {
-  const lines = [`### Transcript entry ${index + 1} (${entry?.role || 'unknown'})`]
+  const lines = [
+    `### Transcript entry ${index + 1} (${entry?.role || 'unknown'})`,
+  ]
   const parts = Array.isArray(entry?.parts)
     ? entry.parts.map(geminiPartText).filter(Boolean).join('\n')
     : ''
@@ -695,7 +802,9 @@ function geminiTranscriptEntryText(entry, index) {
 function estimateGeminiTranscriptTokens(transcript = [], settings = {}) {
   return (Array.isArray(transcript) ? transcript : []).reduce(
     (total, entry, index) =>
-      total + estimateTextTokens(geminiTranscriptEntryText(entry, index), settings) + 4,
+      total +
+      estimateTextTokens(geminiTranscriptEntryText(entry, index), settings) +
+      4,
     0,
   )
 }
@@ -719,11 +828,17 @@ function chooseOpenAiRecentTranscriptStart(transcript, keepRecentEntries) {
 }
 
 function hasGeminiFunctionCall(entry) {
-  return Array.isArray(entry?.parts) && entry.parts.some(part => part?.functionCall)
+  return (
+    Array.isArray(entry?.parts) &&
+    entry.parts.some((part) => part?.functionCall)
+  )
 }
 
 function hasGeminiFunctionResponse(entry) {
-  return Array.isArray(entry?.parts) && entry.parts.some(part => part?.functionResponse)
+  return (
+    Array.isArray(entry?.parts) &&
+    entry.parts.some((part) => part?.functionResponse)
+  )
 }
 
 function chooseGeminiRecentTranscriptStart(transcript, keepRecentEntries) {
@@ -767,8 +882,12 @@ async function compactRuntimeTranscript({
   }
 
   const recentStart = chooseRecentStart(transcript, 8)
-  const preservedPrefix = providerKind === 'openai' ? transcript.slice(0, 1) : []
-  const olderEntries = transcript.slice(providerKind === 'openai' ? 1 : 0, recentStart)
+  const preservedPrefix =
+    providerKind === 'openai' ? transcript.slice(0, 1) : []
+  const olderEntries = transcript.slice(
+    providerKind === 'openai' ? 1 : 0,
+    recentStart,
+  )
   const recentEntries = transcript.slice(recentStart)
   if (olderEntries.length === 0) {
     return transcript
@@ -785,7 +904,9 @@ async function compactRuntimeTranscript({
     maxInputBatchTokens: budget.compactionInputBatchTokens,
     hooks,
   })
-  const summaryText = summaryMessages.map(message => message.content).join('\n\n')
+  const summaryText = summaryMessages
+    .map((message) => message.content)
+    .join('\n\n')
   const compactedTranscript = [
     ...preservedPrefix,
     buildSummaryEntry(summaryText),
@@ -798,7 +919,10 @@ async function compactRuntimeTranscript({
     summary: summaryText,
     compressedThroughMessageId: '',
     originalMessageCount: Array.isArray(transcript) ? transcript.length : 0,
-    originalTokenEstimate: Math.max(0, Math.round(Number(estimatedTokens) || 0)),
+    originalTokenEstimate: Math.max(
+      0,
+      Math.round(Number(estimatedTokens) || 0),
+    ),
     compressedTokenEstimate: Math.max(0, Math.round(Number(afterTokens) || 0)),
     createdAt: Date.now(),
     trigger: 'provider_runtime_transcript',
@@ -813,7 +937,11 @@ async function compactRuntimeTranscript({
     toolResultBufferTokens: budget.toolResultBufferTokens,
     summaryTokens: estimateTextTokens(summaryText, settings),
     windowSource: budget.windowSource,
-    preserved: ['compressed_summary', 'recent_transcript_entries', 'system_prompt'],
+    preserved: [
+      'compressed_summary',
+      'recent_transcript_entries',
+      'system_prompt',
+    ],
     providerProfileId:
       typeof settings?.activeProviderProfileId === 'string'
         ? settings.activeProviderProfileId
@@ -844,7 +972,10 @@ function compactOpenAiRuntimeTranscript({
   hooks,
   tools = [],
 }) {
-  const toolSchemaTokens = estimateTextTokens(JSON.stringify(openAiToolDefs(tools)), settings)
+  const toolSchemaTokens = estimateTextTokens(
+    JSON.stringify(openAiToolDefs(tools)),
+    settings,
+  )
   return compactRuntimeTranscript({
     settings,
     transcript,
@@ -871,7 +1002,10 @@ function compactGeminiRuntimeTranscript({
   hooks,
   tools = [],
 }) {
-  const toolSchemaTokens = estimateTextTokens(JSON.stringify(geminiToolDefs(tools)), settings)
+  const toolSchemaTokens = estimateTextTokens(
+    JSON.stringify(geminiToolDefs(tools)),
+    settings,
+  )
   return compactRuntimeTranscript({
     settings,
     transcript,
@@ -880,7 +1014,9 @@ function compactGeminiRuntimeTranscript({
     buildSummaryEntry(summary) {
       return {
         role: 'model',
-        parts: [{ text: `[Compressed runtime transcript summary]\n\n${summary}` }],
+        parts: [
+          { text: `[Compressed runtime transcript summary]\n\n${summary}` },
+        ],
       }
     },
     chooseRecentStart: chooseGeminiRecentTranscriptStart,
@@ -895,7 +1031,10 @@ async function callOpenAiCompatibleCompaction(
   settings,
   { systemPrompt, userPrompt, maxOutputTokens, messages, hooks },
 ) {
-  const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
+  const apiBase = normalizeBaseUrl(
+    settings.baseUrl,
+    'https://api.openai.com/v1',
+  )
   const requestMessages = [
     {
       role: 'system',
@@ -906,7 +1045,11 @@ async function callOpenAiCompatibleCompaction(
       content: userPrompt,
     },
   ]
-  const estimatedInputTokens = estimateOpenAiRequestInputTokens(requestMessages, [], settings)
+  const estimatedInputTokens = estimateOpenAiRequestInputTokens(
+    requestMessages,
+    [],
+    settings,
+  )
   const response = await fetchWithTimeout(
     `${apiBase}/chat/completions`,
     {
@@ -937,7 +1080,9 @@ async function callOpenAiCompatibleCompaction(
   }
 
   const data = await parseJsonResponse(response)
-  const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
+  const content = flattenOpenAiMessageContent(
+    data.choices?.[0]?.message?.content,
+  ).trim()
   pushUsage(
     hooks,
     normalizeOpenAiUsage(data.usage) ||
@@ -1020,13 +1165,16 @@ async function callProviderForCompaction(settings, options) {
     return callOpenAiCompatibleCompaction(settings, options)
   }
 
-  throw createStructuredError(`模型调用失败，当前 Provider "${settings.provider}" 不支持上下文压缩。`, {
-    source: 'provider',
-    category: 'unsupported',
-    code: 'UNSUPPORTED_COMPACTION_PROVIDER',
-    detail: `Unsupported compaction provider: ${settings.provider}`,
-    suggestedAction: '请切换到 OpenAI-compatible 或 Google Provider 后再试。',
-  })
+  throw createStructuredError(
+    `模型调用失败，当前 Provider "${settings.provider}" 不支持上下文压缩。`,
+    {
+      source: 'provider',
+      category: 'unsupported',
+      code: 'UNSUPPORTED_COMPACTION_PROVIDER',
+      detail: `Unsupported compaction provider: ${settings.provider}`,
+      suggestedAction: '请切换到 OpenAI-compatible 或 Google Provider 后再试。',
+    },
+  )
 }
 
 export async function compactMessagesWithProvider({
@@ -1065,7 +1213,10 @@ export async function compactMessagesWithProvider({
           targetTokens,
           compactionSettings,
         )
-      const maxOutputTokens = resolveCompactionOutputTokens(targetTokens, recentTokens)
+      const maxOutputTokens = resolveCompactionOutputTokens(
+        targetTokens,
+        recentTokens,
+      )
       const dropOldestCount =
         plan.dropOldestRatio > 0
           ? Math.min(
@@ -1074,7 +1225,9 @@ export async function compactMessagesWithProvider({
             )
           : 0
       const summarizableMessages =
-        dropOldestCount > 0 ? olderMessages.slice(dropOldestCount) : olderMessages
+        dropOldestCount > 0
+          ? olderMessages.slice(dropOldestCount)
+          : olderMessages
       const batches = splitMessagesIntoTokenBatches(
         summarizableMessages,
         plan.batchTokenLimit,
@@ -1105,7 +1258,10 @@ export async function compactMessagesWithProvider({
         recentUserMessageTokenBudget,
         compactionSettings,
       )
-      const beforeTokens = estimateMessagesTokens(olderMessages, compactionSettings)
+      const beforeTokens = estimateMessagesTokens(
+        olderMessages,
+        compactionSettings,
+      )
       const summaryMessage = buildCompressedSummaryMessage(
         rollingSummary || 'No older messages required model summarization.',
         olderMessages.length,
@@ -1120,7 +1276,10 @@ export async function compactMessagesWithProvider({
         olderMessages.length,
         {
           beforeTokens,
-          afterTokens: estimateMessagesTokens([summaryMessage], compactionSettings),
+          afterTokens: estimateMessagesTokens(
+            [summaryMessage],
+            compactionSettings,
+          ),
           recentUserMessages,
           droppedMessageCount: dropOldestCount,
         },
@@ -1130,7 +1289,8 @@ export async function compactMessagesWithProvider({
     } catch (error) {
       lastError = error
       const canFallback =
-        attemptIndex < fallbackPlans.length - 1 && isLikelyContextWindowError(error)
+        attemptIndex < fallbackPlans.length - 1 &&
+        isLikelyContextWindowError(error)
       if (!canFallback) {
         throw error
       }
@@ -1169,7 +1329,11 @@ async function parseJsonResponse(response) {
   }
 }
 
-async function fetchWithTimeout(url, init, { timeoutMs, timeoutMessage, messages, settings }) {
+async function fetchWithTimeout(
+  url,
+  init,
+  { timeoutMs, timeoutMessage, messages, settings },
+) {
   try {
     return await guardedFetch(url, init, {
       timeoutMs,
@@ -1189,7 +1353,8 @@ async function fetchWithTimeout(url, init, { timeoutMs, timeoutMessage, messages
         category: 'timeout',
         code: 'PROVIDER_REQUEST_TIMEOUT',
         rawMessage: presentProviderError(timeoutMessage, messages),
-        suggestedAction: '当前模型响应较慢。你可以稍后重试，或切换到更稳定的 Provider / 模型。',
+        suggestedAction:
+          '当前模型响应较慢。你可以稍后重试，或切换到更稳定的 Provider / 模型。',
         retryable: true,
       })
     }
@@ -1201,14 +1366,20 @@ function openAiCompatibleHeaders(settings = {}) {
   const headers = {
     'content-type': 'application/json',
   }
-  const apiKey = typeof settings.apiKey === 'string' ? settings.apiKey.trim() : ''
+  const apiKey =
+    typeof settings.apiKey === 'string' ? settings.apiKey.trim() : ''
   if (apiKey) {
     headers.authorization = `Bearer ${apiKey}`
   }
   return headers
 }
 
-async function readChunkWithTimeout(reader, timeoutMs, timeoutMessage, messages) {
+async function readChunkWithTimeout(
+  reader,
+  timeoutMs,
+  timeoutMessage,
+  messages,
+) {
   let timerId
   try {
     return await Promise.race([
@@ -1257,7 +1428,9 @@ async function readSseStream(response, onData, options = {}) {
     const { value, done } = await readChunkWithTimeout(
       reader,
       isFirstChunk ? firstChunkTimeoutMs : idleTimeoutMs,
-      isFirstChunk ? 'Timed out while waiting for the first streaming chunk.' : 'Streaming response stalled while waiting for the next chunk.',
+      isFirstChunk
+        ? 'Timed out while waiting for the first streaming chunk.'
+        : 'Streaming response stalled while waiting for the next chunk.',
       options.messages,
     )
     if (done) {
@@ -1278,8 +1451,8 @@ async function readSseStream(response, onData, options = {}) {
       buffer = buffer.slice(delimiterMatch.index + delimiterMatch[0].length)
       const dataLines = rawEvent
         .split(/\r?\n/u)
-        .filter(line => line.startsWith('data:'))
-        .map(line => line.slice(5).trimStart())
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
 
       if (dataLines.length === 0) {
         continue
@@ -1301,8 +1474,8 @@ async function readSseStream(response, onData, options = {}) {
 
   const dataLines = trailing
     .split(/\r?\n/u)
-    .filter(line => line.startsWith('data:'))
-    .map(line => line.slice(5).trimStart())
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trimStart())
 
   for (const payload of dataLines) {
     if (payload && payload !== '[DONE]') {
@@ -1316,7 +1489,8 @@ function extractCompleteApplyPatchText(rawArgs) {
   const beginMarker = '*** Begin Patch'
   const endMarker = '*** End Patch'
   const begin = text.indexOf(beginMarker)
-  const end = begin >= 0 ? text.indexOf(endMarker, begin + beginMarker.length) : -1
+  const end =
+    begin >= 0 ? text.indexOf(endMarker, begin + beginMarker.length) : -1
   if (begin < 0 || end < 0) {
     return ''
   }
@@ -1346,7 +1520,8 @@ function parseToolArguments(rawArgs, toolName = '') {
     }
 
     const detail = error instanceof Error ? error.message : String(error)
-    const preview = rawArgs.length > 1200 ? `${rawArgs.slice(0, 1200)}...` : rawArgs
+    const preview =
+      rawArgs.length > 1200 ? `${rawArgs.slice(0, 1200)}...` : rawArgs
     throw createClassifiedError('模型返回了无法解析的工具参数。', {
       source: 'provider',
       category: 'invalid_input',
@@ -1418,7 +1593,9 @@ function mergeOpenAiToolCalls(existingCalls, deltaCalls) {
 }
 
 function camelCaseKey(value) {
-  return String(value || '').replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())
+  return String(value || '').replace(/_([a-z])/g, (_, letter) =>
+    letter.toUpperCase(),
+  )
 }
 
 function normalizeInlineToolArgsValue(value) {
@@ -1455,7 +1632,11 @@ function normalizeInlineToolArgs(toolName, args) {
       ? { ...normalizeInlineToolArgsValue(args) }
       : args
 
-  if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) {
+  if (
+    !normalized ||
+    typeof normalized !== 'object' ||
+    Array.isArray(normalized)
+  ) {
     return normalized
   }
 
@@ -1466,10 +1647,18 @@ function normalizeInlineToolArgs(toolName, args) {
     normalized.workdir = normalized.cwd
   }
 
-  if (toolName === 'exec_command' && !normalized.cmd && typeof normalized.command === 'string') {
+  if (
+    toolName === 'exec_command' &&
+    !normalized.cmd &&
+    typeof normalized.command === 'string'
+  ) {
     normalized.cmd = normalized.command
   }
-  if (toolName === 'run_shell' && !normalized.command && typeof normalized.cmd === 'string') {
+  if (
+    toolName === 'run_shell' &&
+    !normalized.command &&
+    typeof normalized.cmd === 'string'
+  ) {
     normalized.command = normalized.cmd
   }
 
@@ -1500,7 +1689,8 @@ function extractInlineToolCalls(text, startIndex = 0) {
             continue
           }
 
-          const rawArguments = typeof match[2] === 'string' ? match[2].trim() : '{}'
+          const rawArguments =
+            typeof match[2] === 'string' ? match[2].trim() : '{}'
           let normalizedArguments = rawArguments
 
           try {
@@ -1536,11 +1726,11 @@ function extractInlineToolCalls(text, startIndex = 0) {
 }
 
 function dedupeInlineToolCalls(existingCalls, nextCalls) {
-  return (nextCalls || []).filter(nextCall => {
+  return (nextCalls || []).filter((nextCall) => {
     const nextName = nextCall?.function?.name || ''
     const nextArguments = nextCall?.function?.arguments || ''
     return !existingCalls.some(
-      existingCall =>
+      (existingCall) =>
         (existingCall?.function?.name || '') === nextName &&
         (existingCall?.function?.arguments || '') === nextArguments,
     )
@@ -1611,7 +1801,10 @@ function createThinkStreamParser({ onContent, onReasoning }) {
           continue
         }
 
-        const safeLength = Math.max(0, state.buffer.length - (closeTag.length - 1))
+        const safeLength = Math.max(
+          0,
+          state.buffer.length - (closeTag.length - 1),
+        )
         if (safeLength === 0) {
           break
         }
@@ -1657,8 +1850,8 @@ function createThinkStreamParser({ onContent, onReasoning }) {
 }
 
 function hasImageInput(messages) {
-  return messages.some(message =>
-    normalizeMessageParts(message).some(part => part.type === 'image'),
+  return messages.some((message) =>
+    normalizeMessageParts(message).some((part) => part.type === 'image'),
   )
 }
 
@@ -1735,7 +1928,7 @@ function isRetryableProviderError(error) {
 }
 
 function wait(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms))
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 const PROVIDER_CONNECT_TIMEOUT_MS = 45_000
@@ -1794,15 +1987,24 @@ function buildProviderRetryInfo(retryCount, maxRetries, extras = {}) {
     typeof extras.nextRetryDelayMs === 'number' &&
     Number.isFinite(extras.nextRetryDelayMs)
   ) {
-    retryInfo.nextRetryDelayMs = Math.max(0, Math.round(extras.nextRetryDelayMs))
+    retryInfo.nextRetryDelayMs = Math.max(
+      0,
+      Math.round(extras.nextRetryDelayMs),
+    )
   }
   if (
     typeof extras.nextAttemptNumber === 'number' &&
     Number.isFinite(extras.nextAttemptNumber)
   ) {
-    retryInfo.nextAttemptNumber = Math.max(1, Math.round(extras.nextAttemptNumber))
+    retryInfo.nextAttemptNumber = Math.max(
+      1,
+      Math.round(extras.nextAttemptNumber),
+    )
   }
-  if (typeof extras.lastErrorSummary === 'string' && extras.lastErrorSummary.trim()) {
+  if (
+    typeof extras.lastErrorSummary === 'string' &&
+    extras.lastErrorSummary.trim()
+  ) {
     retryInfo.lastErrorSummary = extras.lastErrorSummary.trim()
   }
 
@@ -1811,7 +2013,7 @@ function buildProviderRetryInfo(retryCount, maxRetries, extras = {}) {
 
 function mergeProviderRetryInfo(...entries) {
   const validEntries = entries.filter(
-    entry =>
+    (entry) =>
       entry &&
       typeof entry.attemptedRetries === 'number' &&
       Number.isFinite(entry.attemptedRetries) &&
@@ -1837,7 +2039,10 @@ function mergeProviderRetryInfo(...entries) {
     return {
       ...selected,
       ...entry,
-      attemptedRetries: Math.max(selected.attemptedRetries, entry.attemptedRetries),
+      attemptedRetries: Math.max(
+        selected.attemptedRetries,
+        entry.attemptedRetries,
+      ),
       configuredMaxRetries: Math.max(
         selected.configuredMaxRetries || 0,
         entry.configuredMaxRetries || 0,
@@ -1852,7 +2057,12 @@ function mergeProviderRetryInfo(...entries) {
 }
 
 function extractProviderRetryInfo(value) {
-  if (!value || typeof value !== 'object' || !value.retryInfo || typeof value.retryInfo !== 'object') {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    !value.retryInfo ||
+    typeof value.retryInfo !== 'object'
+  ) {
     return undefined
   }
 
@@ -1892,7 +2102,10 @@ function extractProviderRetryInfo(value) {
       retryInfo.stage === 'recovery'
         ? retryInfo.stage
         : undefined,
-    stageLabel: typeof retryInfo.stageLabel === 'string' ? retryInfo.stageLabel : undefined,
+    stageLabel:
+      typeof retryInfo.stageLabel === 'string'
+        ? retryInfo.stageLabel
+        : undefined,
     recovered: retryInfo.recovered === true,
     inProgress: retryInfo.inProgress === true,
     nextRetryDelayMs:
@@ -1933,7 +2146,8 @@ function pickPreferredPartialProviderState(currentState, nextState) {
   if (!hasPartialProviderState(currentState)) {
     return nextState
   }
-  return scorePartialProviderState(nextState) >= scorePartialProviderState(currentState)
+  return scorePartialProviderState(nextState) >=
+    scorePartialProviderState(currentState)
     ? nextState
     : currentState
 }
@@ -1967,7 +2181,10 @@ function attachProviderRetryInfo(error, retryInfo) {
 }
 
 function summarizeRetryError(error) {
-  if (typeof error?.errorInfo?.summary === 'string' && error.errorInfo.summary.trim()) {
+  if (
+    typeof error?.errorInfo?.summary === 'string' &&
+    error.errorInfo.summary.trim()
+  ) {
     return error.errorInfo.summary.trim()
   }
   if (error instanceof Error && error.message.trim()) {
@@ -2014,7 +2231,10 @@ async function runProviderOperationWithRetry(
       }
     } catch (error) {
       let normalized = maybeNormalizeProviderTermination(error, messages)
-      bestPartialState = pickPreferredPartialProviderState(bestPartialState, attemptState)
+      bestPartialState = pickPreferredPartialProviderState(
+        bestPartialState,
+        attemptState,
+      )
       normalized = attachPartialProviderState(normalized, bestPartialState)
       normalized = attachProviderRetryInfo(
         normalized,
@@ -2076,7 +2296,8 @@ function maybeNormalizeProviderTermination(error, messages) {
         source: 'provider',
         category: 'network',
         rawMessage: presentProviderError(message, messages),
-        suggestedAction: '请稍后重试，或切换到对工具调用支持更稳定的模型 / Provider。',
+        suggestedAction:
+          '请稍后重试，或切换到对工具调用支持更稳定的模型 / Provider。',
         retryable: true,
       },
     )
@@ -2085,7 +2306,10 @@ function maybeNormalizeProviderTermination(error, messages) {
 }
 
 function getLoopConfig(settings) {
-  const boundedLimit = Math.max(1, Math.min(128, Number(settings.maxSteps) || 8))
+  const boundedLimit = Math.max(
+    1,
+    Math.min(128, Number(settings.maxSteps) || 8),
+  )
   if (settings.executionMode === 'long-task') {
     return {
       mode: 'long-task',
@@ -2121,13 +2345,17 @@ function hasWriteRepairAttemptSince(toolEvents, startIndex) {
   return toolEvents
     .slice(startIndex)
     .some(
-      event =>
+      (event) =>
         TOOL_ERROR_REPAIR_CLEARING_TOOLS.has(event?.name) &&
         event?.errorInfo?.category !== 'invalid_input',
     )
 }
 
-function updateUnresolvedToolErrorForRepair(toolEvents, startIndex, previousValue) {
+function updateUnresolvedToolErrorForRepair(
+  toolEvents,
+  startIndex,
+  previousValue,
+) {
   let hasUnresolvedError = previousValue
   for (const event of toolEvents.slice(startIndex)) {
     if (event?.status === 'error') {
@@ -2146,7 +2374,9 @@ function updateUnresolvedToolErrorForRepair(toolEvents, startIndex, previousValu
 
 function joinReasoningBlocks(blocks = []) {
   return blocks
-    .map(block => (typeof block?.content === 'string' ? block.content.trim() : ''))
+    .map((block) =>
+      typeof block?.content === 'string' ? block.content.trim() : '',
+    )
     .filter(Boolean)
     .join('\n\n')
 }
@@ -2174,66 +2404,74 @@ async function finalizeOpenAiTranscriptAfterStepLimit({
     includeToolDigest: false,
     includeReasoningText: false,
   })
-  const attemptResult = await runProviderOperationWithRetry(async () => {
-    const requestMessages = [
-      ...transcript,
-      {
-        role: 'user',
-        content: prompt,
-      },
-    ]
-    const estimatedInputTokens = estimateOpenAiRequestInputTokens(
-      requestMessages,
-      [],
-      settings,
-    )
-    const response = await fetchWithTimeout(
-      `${apiBase}/chat/completions`,
-      {
-        method: 'POST',
-        headers: openAiCompatibleHeaders(settings),
-        body: JSON.stringify({
-          model: settings.model,
-          messages: requestMessages,
-          stream: false,
-        }),
-      },
-      {
-        timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
-        timeoutMessage: 'Timed out while waiting for the final answer completion request.',
-        messages: conversationMessages,
+  const attemptResult = await runProviderOperationWithRetry(
+    async () => {
+      const requestMessages = [
+        ...transcript,
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ]
+      const estimatedInputTokens = estimateOpenAiRequestInputTokens(
+        requestMessages,
+        [],
         settings,
-      },
-    )
-
-    if (!response.ok) {
-      const data = await parseJsonResponse(response)
-      throw buildProviderHttpError(
-        response,
-        data.error?.message || 'OpenAI-compatible finalization request failed',
-        conversationMessages,
       )
-    }
+      const response = await fetchWithTimeout(
+        `${apiBase}/chat/completions`,
+        {
+          method: 'POST',
+          headers: openAiCompatibleHeaders(settings),
+          body: JSON.stringify({
+            model: settings.model,
+            messages: requestMessages,
+            stream: false,
+          }),
+        },
+        {
+          timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+          timeoutMessage:
+            'Timed out while waiting for the final answer completion request.',
+          messages: conversationMessages,
+          settings,
+        },
+      )
 
-    const data = await parseJsonResponse(response)
-    const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content).trim()
-    pushUsage(
+      if (!response.ok) {
+        const data = await parseJsonResponse(response)
+        throw buildProviderHttpError(
+          response,
+          data.error?.message ||
+            'OpenAI-compatible finalization request failed',
+          conversationMessages,
+        )
+      }
+
+      const data = await parseJsonResponse(response)
+      const content = flattenOpenAiMessageContent(
+        data.choices?.[0]?.message?.content,
+      ).trim()
+      pushUsage(
+        hooks,
+        normalizeOpenAiUsage(data.usage) ||
+          buildEstimatedUsage(estimatedInputTokens, content, settings),
+      )
+      return content
+    },
+    {
+      messages: conversationMessages,
+      maxRetries,
+      stage: 'finalization',
       hooks,
-      normalizeOpenAiUsage(data.usage) ||
-        buildEstimatedUsage(estimatedInputTokens, content, settings),
-    )
-    return content
-  }, {
-    messages: conversationMessages,
-    maxRetries,
-    stage: 'finalization',
-    hooks,
-  })
+    },
+  )
 
   return {
     message: attemptResult.value || '模型没有返回文本内容。',
     toolEvents,
-    reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
+    reasoning:
+      providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
     usage: latestUsage,
     messages: conversationMessages,
     retryInfo: mergeProviderRetryInfo(
@@ -2271,75 +2509,80 @@ async function finalizeGoogleTranscriptAfterStepLimit({
     includeToolDigest: false,
     includeReasoningText: false,
   })
-  const attemptResult = await runProviderOperationWithRetry(async () => {
-    const requestContents = [
-      ...transcript,
-      {
-        role: 'user',
-        parts: [{ text: prompt }],
-      },
-    ]
-    const estimatedInputTokens = estimateGoogleRequestInputTokens(
-      systemPrompt,
-      requestContents,
-      [],
-      settings,
-    )
-    const response = await fetchWithTimeout(
-      `${apiBase}/models/${settings.model}:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-goog-api-key': settings.apiKey,
+  const attemptResult = await runProviderOperationWithRetry(
+    async () => {
+      const requestContents = [
+        ...transcript,
+        {
+          role: 'user',
+          parts: [{ text: prompt }],
         },
-        body: JSON.stringify({
-          system_instruction: {
-            parts: [{ text: systemPrompt }],
-          },
-          contents: requestContents,
-        }),
-      },
-      {
-        timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
-        timeoutMessage: 'Timed out while waiting for the final answer completion request.',
-        messages: conversationMessages,
+      ]
+      const estimatedInputTokens = estimateGoogleRequestInputTokens(
+        systemPrompt,
+        requestContents,
+        [],
         settings,
-      },
-    )
-
-    if (!response.ok) {
-      const data = await parseJsonResponse(response)
-      throw buildProviderHttpError(
-        response,
-        data.error?.message || 'Google finalization request failed',
-        conversationMessages,
       )
-    }
+      const response = await fetchWithTimeout(
+        `${apiBase}/models/${settings.model}:generateContent`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-goog-api-key': settings.apiKey,
+          },
+          body: JSON.stringify({
+            system_instruction: {
+              parts: [{ text: systemPrompt }],
+            },
+            contents: requestContents,
+          }),
+        },
+        {
+          timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+          timeoutMessage:
+            'Timed out while waiting for the final answer completion request.',
+          messages: conversationMessages,
+          settings,
+        },
+      )
 
-    const data = await parseJsonResponse(response)
-    const parts = data.candidates?.[0]?.content?.parts || []
-    const content = parts
-      .map(part => (typeof part.text === 'string' ? part.text : ''))
-      .join('\n')
-      .trim()
-    pushUsage(
+      if (!response.ok) {
+        const data = await parseJsonResponse(response)
+        throw buildProviderHttpError(
+          response,
+          data.error?.message || 'Google finalization request failed',
+          conversationMessages,
+        )
+      }
+
+      const data = await parseJsonResponse(response)
+      const parts = data.candidates?.[0]?.content?.parts || []
+      const content = parts
+        .map((part) => (typeof part.text === 'string' ? part.text : ''))
+        .join('\n')
+        .trim()
+      pushUsage(
+        hooks,
+        normalizeGoogleUsage(data.usageMetadata) ||
+          buildEstimatedUsage(estimatedInputTokens, content, settings),
+      )
+      return content
+    },
+    {
+      messages: conversationMessages,
+      maxRetries,
+      stage: 'finalization',
       hooks,
-      normalizeGoogleUsage(data.usageMetadata) ||
-        buildEstimatedUsage(estimatedInputTokens, content, settings),
-    )
-    return content
-  }, {
-    messages: conversationMessages,
-    maxRetries,
-    stage: 'finalization',
-    hooks,
-  })
+    },
+  )
 
   return {
     message: attemptResult.value || '模型没有返回文本内容。',
     toolEvents,
-    reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
+    reasoning:
+      providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
     usage: latestUsage,
     messages: conversationMessages,
     retryInfo: mergeProviderRetryInfo(
@@ -2401,81 +2644,97 @@ export async function finalizeOpenAiCompatibleAnswer({
   reasoningText,
   draftMessage,
   completionState,
-  deliveryPolicy = completionState ? buildDeliveryPolicy(completionState) : undefined,
+  deliveryPolicy = completionState
+    ? buildDeliveryPolicy(completionState)
+    : undefined,
   responseStyle,
   stage = 'finalization',
   hooks,
 }) {
   const maxRetries = getProviderFailureRecoveryMaxRetries()
-  const attemptResult = await runProviderOperationWithRetry(async () => {
-    const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
-    const transcript = toOpenAiTranscript(systemPrompt, [
-      ...messages,
-      ...(draftMessage?.trim()
-        ? [
-            {
-              role: 'assistant',
-              content: draftMessage,
-            },
-          ]
-        : []),
-      {
-        role: 'user',
-        content: buildFinalizerPrompt({
-          toolEvents,
-          reasoningText,
-          draftMessage,
-          completionState,
-          deliveryPolicy,
-          responseStyle,
-        }),
-      },
-    ])
-    const estimatedInputTokens = estimateOpenAiRequestInputTokens(transcript, [], settings)
-
-    const response = await fetchWithTimeout(
-      `${apiBase}/chat/completions`,
-      {
-        method: 'POST',
-        headers: openAiCompatibleHeaders(settings),
-        body: JSON.stringify({
-          model: settings.model,
-          messages: transcript,
-          stream: false,
-        }),
-      },
-      {
-        timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
-        timeoutMessage: 'Timed out while waiting for the final answer completion request.',
-        messages,
-        settings,
-      },
-    )
-
-    if (!response.ok) {
-      const data = await parseJsonResponse(response)
-      throw buildProviderHttpError(
-        response,
-        data.error?.message || 'OpenAI-compatible finalization request failed',
-        messages,
+  const attemptResult = await runProviderOperationWithRetry(
+    async () => {
+      const apiBase = normalizeBaseUrl(
+        settings.baseUrl,
+        'https://api.openai.com/v1',
       )
-    }
+      const transcript = toOpenAiTranscript(systemPrompt, [
+        ...messages,
+        ...(draftMessage?.trim()
+          ? [
+              {
+                role: 'assistant',
+                content: draftMessage,
+              },
+            ]
+          : []),
+        {
+          role: 'user',
+          content: buildFinalizerPrompt({
+            toolEvents,
+            reasoningText,
+            draftMessage,
+            completionState,
+            deliveryPolicy,
+            responseStyle,
+          }),
+        },
+      ])
+      const estimatedInputTokens = estimateOpenAiRequestInputTokens(
+        transcript,
+        [],
+        settings,
+      )
 
-    const data = await parseJsonResponse(response)
-    const content = flattenOpenAiMessageContent(data.choices?.[0]?.message?.content)
-    const trimmedContent = content.trim()
-    pushUsage(
+      const response = await fetchWithTimeout(
+        `${apiBase}/chat/completions`,
+        {
+          method: 'POST',
+          headers: openAiCompatibleHeaders(settings),
+          body: JSON.stringify({
+            model: settings.model,
+            messages: transcript,
+            stream: false,
+          }),
+        },
+        {
+          timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+          timeoutMessage:
+            'Timed out while waiting for the final answer completion request.',
+          messages,
+          settings,
+        },
+      )
+
+      if (!response.ok) {
+        const data = await parseJsonResponse(response)
+        throw buildProviderHttpError(
+          response,
+          data.error?.message ||
+            'OpenAI-compatible finalization request failed',
+          messages,
+        )
+      }
+
+      const data = await parseJsonResponse(response)
+      const content = flattenOpenAiMessageContent(
+        data.choices?.[0]?.message?.content,
+      )
+      const trimmedContent = content.trim()
+      pushUsage(
+        hooks,
+        normalizeOpenAiUsage(data.usage) ||
+          buildEstimatedUsage(estimatedInputTokens, trimmedContent, settings),
+      )
+      return trimmedContent
+    },
+    {
+      messages,
+      maxRetries,
+      stage,
       hooks,
-      normalizeOpenAiUsage(data.usage) ||
-        buildEstimatedUsage(estimatedInputTokens, trimmedContent, settings),
-    )
-    return trimmedContent
-  }, {
-    messages,
-    maxRetries,
-    stage,
-    hooks,
-  })
+    },
+  )
   return {
     message: attemptResult.value,
     retryInfo: buildProviderRetryInfo(attemptResult.retryCount, maxRetries, {
@@ -2492,95 +2751,101 @@ export async function finalizeGoogleAnswer({
   reasoningText,
   draftMessage,
   completionState,
-  deliveryPolicy = completionState ? buildDeliveryPolicy(completionState) : undefined,
+  deliveryPolicy = completionState
+    ? buildDeliveryPolicy(completionState)
+    : undefined,
   responseStyle,
   stage = 'finalization',
   hooks,
 }) {
   const maxRetries = getProviderFailureRecoveryMaxRetries()
-  const attemptResult = await runProviderOperationWithRetry(async () => {
-    const apiBase = normalizeBaseUrl(
-      settings.baseUrl,
-      'https://generativelanguage.googleapis.com/v1beta',
-    )
-    const requestContents = toGeminiContents([
-      ...messages,
-      ...(draftMessage?.trim()
-        ? [
-            {
-              role: 'assistant',
-              content: draftMessage,
-            },
-          ]
-        : []),
-      {
-        role: 'user',
-        content: buildFinalizerPrompt({
-          toolEvents,
-          reasoningText,
-          draftMessage,
-          completionState,
-          deliveryPolicy,
-          responseStyle,
-        }),
-      },
-    ])
-    const estimatedInputTokens = estimateGoogleRequestInputTokens(
-      systemPrompt,
-      requestContents,
-      [],
-      settings,
-    )
-    const response = await fetchWithTimeout(
-      `${apiBase}/models/${settings.model}:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-goog-api-key': settings.apiKey,
-        },
-        body: JSON.stringify({
-          system_instruction: {
-            parts: [{ text: systemPrompt }],
-          },
-          contents: requestContents,
-        }),
-      },
-      {
-        timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
-        timeoutMessage: 'Timed out while waiting for the final answer completion request.',
-        messages,
-        settings,
-      },
-    )
-
-    if (!response.ok) {
-      const data = await parseJsonResponse(response)
-      throw buildProviderHttpError(
-        response,
-        data.error?.message || 'Google finalization request failed',
-        messages,
+  const attemptResult = await runProviderOperationWithRetry(
+    async () => {
+      const apiBase = normalizeBaseUrl(
+        settings.baseUrl,
+        'https://generativelanguage.googleapis.com/v1beta',
       )
-    }
+      const requestContents = toGeminiContents([
+        ...messages,
+        ...(draftMessage?.trim()
+          ? [
+              {
+                role: 'assistant',
+                content: draftMessage,
+              },
+            ]
+          : []),
+        {
+          role: 'user',
+          content: buildFinalizerPrompt({
+            toolEvents,
+            reasoningText,
+            draftMessage,
+            completionState,
+            deliveryPolicy,
+            responseStyle,
+          }),
+        },
+      ])
+      const estimatedInputTokens = estimateGoogleRequestInputTokens(
+        systemPrompt,
+        requestContents,
+        [],
+        settings,
+      )
+      const response = await fetchWithTimeout(
+        `${apiBase}/models/${settings.model}:generateContent`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-goog-api-key': settings.apiKey,
+          },
+          body: JSON.stringify({
+            system_instruction: {
+              parts: [{ text: systemPrompt }],
+            },
+            contents: requestContents,
+          }),
+        },
+        {
+          timeoutMs: PROVIDER_FINALIZATION_TIMEOUT_MS,
+          timeoutMessage:
+            'Timed out while waiting for the final answer completion request.',
+          messages,
+          settings,
+        },
+      )
 
-    const data = await parseJsonResponse(response)
-    const parts = data.candidates?.[0]?.content?.parts || []
-    const content = parts
-      .map(part => (typeof part.text === 'string' ? part.text : ''))
-      .join('\n')
-      .trim()
-    pushUsage(
+      if (!response.ok) {
+        const data = await parseJsonResponse(response)
+        throw buildProviderHttpError(
+          response,
+          data.error?.message || 'Google finalization request failed',
+          messages,
+        )
+      }
+
+      const data = await parseJsonResponse(response)
+      const parts = data.candidates?.[0]?.content?.parts || []
+      const content = parts
+        .map((part) => (typeof part.text === 'string' ? part.text : ''))
+        .join('\n')
+        .trim()
+      pushUsage(
+        hooks,
+        normalizeGoogleUsage(data.usageMetadata) ||
+          buildEstimatedUsage(estimatedInputTokens, content, settings),
+      )
+      return content
+    },
+    {
+      messages,
+      maxRetries,
+      stage,
       hooks,
-      normalizeGoogleUsage(data.usageMetadata) ||
-        buildEstimatedUsage(estimatedInputTokens, content, settings),
-    )
-    return content
-  }, {
-    messages,
-    maxRetries,
-    stage,
-    hooks,
-  })
+    },
+  )
   return {
     message: attemptResult.value,
     retryInfo: buildProviderRetryInfo(attemptResult.retryCount, maxRetries, {
@@ -2597,9 +2862,12 @@ export async function runOpenAiCompatibleAgent({
   toolEvents,
   hooks,
 }) {
-  const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
+  const apiBase = normalizeBaseUrl(
+    settings.baseUrl,
+    'https://api.openai.com/v1',
+  )
   const activeTools = [...tools]
-  const registry = new Map(activeTools.map(tool => [tool.name, tool]))
+  const registry = new Map(activeTools.map((tool) => [tool.name, tool]))
   const conversationMessages = [...messages]
   let transcript = toOpenAiTranscript(systemPrompt, conversationMessages)
   let latestUsage
@@ -2626,7 +2894,11 @@ export async function runOpenAiCompatibleAgent({
       if (isRepairIteration) {
         repairTurns += 1
       }
-      appendQueuedInputsToOpenAiTranscript(transcript, conversationMessages, hooks)
+      appendQueuedInputsToOpenAiTranscript(
+        transcript,
+        conversationMessages,
+        hooks,
+      )
       const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
         systemPrompt,
         hooks?.workMemoryContext,
@@ -2648,159 +2920,182 @@ export async function runOpenAiCompatibleAgent({
       const reasoningOrder = step * 2
       const toolOrder = reasoningOrder + 1
 
-      const attemptResult = await runProviderOperationWithRetry(async attemptState => {
-        hooks?.onPhaseChange?.('model_connecting')
-        const estimatedInputTokens = estimateOpenAiRequestInputTokens(
-          transcript,
-          activeTools,
-          settings,
-        )
-        const response = await fetchWithTimeout(
-          `${apiBase}/chat/completions`,
-          {
-            method: 'POST',
-            headers: openAiCompatibleHeaders(settings),
-            body: JSON.stringify({
-              model: settings.model,
-              messages: transcript,
-              tools: openAiToolDefs(activeTools),
-              tool_choice: 'auto',
-              stream: true,
-              ...(settings.provider === 'openai'
-                ? {
-                    stream_options: {
-                      include_usage: true,
-                    },
-                  }
-                : {}),
-            }),
-          },
-          {
-            timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
-            timeoutMessage: 'Timed out while waiting for the streaming response to start.',
-            messages: conversationMessages,
+      const attemptResult = await runProviderOperationWithRetry(
+        async (attemptState) => {
+          hooks?.onPhaseChange?.('model_connecting')
+          const estimatedInputTokens = estimateOpenAiRequestInputTokens(
+            transcript,
+            activeTools,
             settings,
-          },
-        )
+          )
+          const response = await fetchWithTimeout(
+            `${apiBase}/chat/completions`,
+            {
+              method: 'POST',
+              headers: openAiCompatibleHeaders(settings),
+              body: JSON.stringify({
+                model: settings.model,
+                messages: transcript,
+                tools: openAiToolDefs(activeTools),
+                tool_choice: 'auto',
+                stream: true,
+                ...(settings.provider === 'openai'
+                  ? {
+                      stream_options: {
+                        include_usage: true,
+                      },
+                    }
+                  : {}),
+              }),
+            },
+            {
+              timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+              timeoutMessage:
+                'Timed out while waiting for the streaming response to start.',
+              messages: conversationMessages,
+              settings,
+            },
+          )
 
-        if (!response.ok) {
-          const data = await parseJsonResponse(response)
-          throw buildProviderHttpError(
+          if (!response.ok) {
+            const data = await parseJsonResponse(response)
+            throw buildProviderHttpError(
+              response,
+              data.error?.message || 'OpenAI-compatible request failed',
+              messages,
+            )
+          }
+          hooks?.onPhaseChange?.('model_streaming')
+
+          let content = ''
+          let phaseReasoning = ''
+          const toolCalls = []
+          let usageForAttempt
+          const applyPatchStreamingReporter = createApplyPatchStreamingReporter(
+            {
+              hooks,
+              order: toolOrder,
+            },
+          )
+          const streamParser = createThinkStreamParser({
+            onContent(text) {
+              content += text
+              attemptState.receivedOutput = true
+              attemptState.partialMessage += text
+              hooks?.onTextDelta?.(text, {
+                blockId: reasoningBlockId,
+                order: reasoningOrder,
+              })
+            },
+            onReasoning(text) {
+              providerReasoning += text
+              phaseReasoning += text
+              attemptState.receivedOutput = true
+              attemptState.partialReasoning += text
+              hooks?.onReasoningDelta?.(text, {
+                blockId: reasoningBlockId,
+                kind: 'provider',
+                order: reasoningOrder,
+              })
+            },
+          })
+
+          await readSseStream(
             response,
-            data.error?.message || 'OpenAI-compatible request failed',
-            messages,
+            async (payload) => {
+              const data = JSON.parse(payload)
+              const usage = attachEstimatedInputTokens(
+                normalizeOpenAiUsage(data.usage),
+                estimatedInputTokens,
+              )
+              if (usage) {
+                usageForAttempt = usage
+              }
+
+              const choice = data.choices?.[0]
+              if (!choice) {
+                return
+              }
+
+              const reasoningDelta =
+                choice.delta?.reasoning ||
+                choice.delta?.reasoning_content ||
+                choice.delta?.thinking
+              if (typeof reasoningDelta === 'string' && reasoningDelta) {
+                streamParser.consume(`<think>${reasoningDelta}</think>`)
+              }
+
+              if (
+                typeof choice.delta?.content === 'string' &&
+                choice.delta.content
+              ) {
+                streamParser.consume(choice.delta.content)
+              }
+
+              if (
+                Array.isArray(choice.delta?.tool_calls) &&
+                choice.delta.tool_calls.length > 0
+              ) {
+                attemptState.receivedOutput = true
+                mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
+                applyPatchStreamingReporter.inspect(toolCalls)
+              }
+            },
+            {
+              messages: conversationMessages,
+              firstChunkTimeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+              idleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+              onChunk() {
+                attemptState.receivedOutput = true
+                hooks?.onProgress?.()
+              },
+            },
           )
-        }
-        hooks?.onPhaseChange?.('model_streaming')
 
-        let content = ''
-        let phaseReasoning = ''
-        const toolCalls = []
-        let usageForAttempt
-        const applyPatchStreamingReporter = createApplyPatchStreamingReporter({
-          hooks,
-          order: toolOrder,
-        })
-        const streamParser = createThinkStreamParser({
-          onContent(text) {
-            content += text
-            attemptState.receivedOutput = true
-            attemptState.partialMessage += text
-            hooks?.onTextDelta?.(text, {
-              blockId: reasoningBlockId,
-              order: reasoningOrder,
-            })
-          },
-          onReasoning(text) {
-            providerReasoning += text
-            phaseReasoning += text
-            attemptState.receivedOutput = true
-            attemptState.partialReasoning += text
-            hooks?.onReasoningDelta?.(text, {
-              blockId: reasoningBlockId,
-              kind: 'provider',
-              order: reasoningOrder,
-            })
-          },
-        })
-
-        await readSseStream(response, async payload => {
-          const data = JSON.parse(payload)
-          const usage = attachEstimatedInputTokens(
-            normalizeOpenAiUsage(data.usage),
-            estimatedInputTokens,
+          streamParser.flush()
+          const inlineReasoningToolCalls = extractInlineToolCalls(
+            phaseReasoning,
+            toolCalls.length,
           )
-          if (usage) {
-            usageForAttempt = usage
-          }
+          phaseReasoning = inlineReasoningToolCalls.text
+          mergeOpenAiToolCalls(
+            toolCalls,
+            dedupeInlineToolCalls(
+              toolCalls,
+              inlineReasoningToolCalls.toolCalls,
+            ),
+          )
+          applyPatchStreamingReporter.inspect(toolCalls)
 
-          const choice = data.choices?.[0]
-          if (!choice) {
-            return
-          }
+          const inlineContentToolCalls = extractInlineToolCalls(
+            content,
+            toolCalls.length,
+          )
+          content = inlineContentToolCalls.text
+          mergeOpenAiToolCalls(
+            toolCalls,
+            dedupeInlineToolCalls(toolCalls, inlineContentToolCalls.toolCalls),
+          )
+          applyPatchStreamingReporter.inspect(toolCalls)
 
-          const reasoningDelta =
-            choice.delta?.reasoning ||
-            choice.delta?.reasoning_content ||
-            choice.delta?.thinking
-          if (typeof reasoningDelta === 'string' && reasoningDelta) {
-            streamParser.consume(`<think>${reasoningDelta}</think>`)
+          return {
+            content,
+            phaseReasoning,
+            finalizedToolCalls: toolCalls.filter((toolCall) =>
+              toolCall?.function?.name?.trim(),
+            ),
+            usage:
+              usageForAttempt ||
+              buildEstimatedUsage(estimatedInputTokens, content, settings),
           }
-
-          if (typeof choice.delta?.content === 'string' && choice.delta.content) {
-            streamParser.consume(choice.delta.content)
-          }
-
-          if (Array.isArray(choice.delta?.tool_calls) && choice.delta.tool_calls.length > 0) {
-            attemptState.receivedOutput = true
-            mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
-            applyPatchStreamingReporter.inspect(toolCalls)
-          }
-        }, {
+        },
+        {
           messages: conversationMessages,
-          firstChunkTimeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
-          idleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
-          onChunk() {
-            attemptState.receivedOutput = true
-            hooks?.onProgress?.()
-          },
-        })
-
-        streamParser.flush()
-        const inlineReasoningToolCalls = extractInlineToolCalls(
-          phaseReasoning,
-          toolCalls.length,
-        )
-        phaseReasoning = inlineReasoningToolCalls.text
-        mergeOpenAiToolCalls(
-          toolCalls,
-          dedupeInlineToolCalls(toolCalls, inlineReasoningToolCalls.toolCalls),
-        )
-        applyPatchStreamingReporter.inspect(toolCalls)
-
-        const inlineContentToolCalls = extractInlineToolCalls(
-          content,
-          toolCalls.length,
-        )
-        content = inlineContentToolCalls.text
-        mergeOpenAiToolCalls(
-          toolCalls,
-          dedupeInlineToolCalls(toolCalls, inlineContentToolCalls.toolCalls),
-        )
-        applyPatchStreamingReporter.inspect(toolCalls)
-
-        return {
-          content,
-          phaseReasoning,
-          finalizedToolCalls: toolCalls.filter(toolCall => toolCall?.function?.name?.trim()),
-          usage: usageForAttempt || buildEstimatedUsage(estimatedInputTokens, content, settings),
-        }
-      }, {
-        messages: conversationMessages,
-        maxRetries,
-        stage: 'response',
-        hooks,
-      })
+          maxRetries,
+          stage: 'response',
+          hooks,
+        },
+      )
       const stepResult = attemptResult.value
       providerRetryCount += attemptResult.retryCount
 
@@ -2858,18 +3153,21 @@ export async function runOpenAiCompatibleAgent({
         return {
           message: content || '模型没有返回文本内容。',
           toolEvents,
-          reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
+          reasoning:
+            providerReasoningBlocks.length > 0
+              ? providerReasoningBlocks
+              : undefined,
           usage: latestUsage,
           messages: conversationMessages,
           retryInfo: buildProviderRetryInfo(providerRetryCount, maxRetries, {
             stage: 'response',
-          })
+          }),
         }
       }
 
       loopGuard.record(
         JSON.stringify(
-          finalizedToolCalls.map(toolCall => ({
+          finalizedToolCalls.map((toolCall) => ({
             name: toolCall.function.name,
             args: toolCall.function.arguments || '{}',
           })),
@@ -2892,7 +3190,10 @@ export async function runOpenAiCompatibleAgent({
 
       transcript.push({
         role: 'assistant',
-        content: assistantContent,
+        content: truncateAssistantContentForTranscript(
+          assistantContent,
+          settings,
+        ),
         tool_calls: finalizedToolCalls,
       })
       conversationMessages.push({
@@ -2913,7 +3214,9 @@ export async function runOpenAiCompatibleAgent({
               ...hooks,
               timelineOrder: toolOrder,
               registerDynamicTools(nextTools) {
-                for (const nextTool of Array.isArray(nextTools) ? nextTools : []) {
+                for (const nextTool of Array.isArray(nextTools)
+                  ? nextTools
+                  : []) {
                   if (!nextTool?.name || registry.has(nextTool.name)) {
                     continue
                   }
@@ -2927,7 +3230,7 @@ export async function runOpenAiCompatibleAgent({
         transcript.push({
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: result,
+          content: truncateToolOutputForTranscript(result, settings),
         })
       }
       hasUnresolvedToolError = updateUnresolvedToolErrorForRepair(
@@ -2935,7 +3238,10 @@ export async function runOpenAiCompatibleAgent({
         toolEventStartIndex,
         hasUnresolvedToolError,
       )
-      if (isRepairIteration && hasWriteRepairAttemptSince(toolEvents, toolEventStartIndex)) {
+      if (
+        isRepairIteration &&
+        hasWriteRepairAttemptSince(toolEvents, toolEventStartIndex)
+      ) {
         writeRepairAttempts += 1
       }
       step += 1
@@ -2955,7 +3261,10 @@ export async function runOpenAiCompatibleAgent({
       hooks,
     })
   } catch (error) {
-    const normalized = maybeNormalizeProviderTermination(error, conversationMessages)
+    const normalized = maybeNormalizeProviderTermination(
+      error,
+      conversationMessages,
+    )
     const aggregateRetryInfo = mergeProviderRetryInfo(
       buildProviderRetryInfo(providerRetryCount, maxRetries, {
         stage: 'response',
@@ -2974,7 +3283,7 @@ function collectGeminiFunctionCalls(existingCalls, parts) {
 
     const args = part.functionCall.args || {}
     const signature = `${part.functionCall.name}:${JSON.stringify(args)}`
-    if (existingCalls.some(entry => entry.signature === signature)) {
+    if (existingCalls.some((entry) => entry.signature === signature)) {
       continue
     }
 
@@ -2999,7 +3308,7 @@ export async function runGoogleAgent({
     'https://generativelanguage.googleapis.com/v1beta',
   )
   const activeTools = [...tools]
-  const registry = new Map(activeTools.map(tool => [tool.name, tool]))
+  const registry = new Map(activeTools.map((tool) => [tool.name, tool]))
   const conversationMessages = [...messages]
   let transcript = toGeminiContents(conversationMessages)
   let latestUsage
@@ -3026,7 +3335,11 @@ export async function runGoogleAgent({
       if (isRepairIteration) {
         repairTurns += 1
       }
-      appendQueuedInputsToGeminiTranscript(transcript, conversationMessages, hooks)
+      appendQueuedInputsToGeminiTranscript(
+        transcript,
+        conversationMessages,
+        hooks,
+      )
       const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
         systemPrompt,
         hooks?.workMemoryContext,
@@ -3042,125 +3355,139 @@ export async function runGoogleAgent({
       const reasoningOrder = step * 2
       const toolOrder = reasoningOrder + 1
 
-      const attemptResult = await runProviderOperationWithRetry(async attemptState => {
-        hooks?.onPhaseChange?.('model_connecting')
-        const estimatedInputTokens = estimateGoogleRequestInputTokens(
-          activeSystemPrompt,
-          transcript,
-          activeTools,
-          settings,
-        )
-        const response = await fetchWithTimeout(
-          `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
-          {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              'x-goog-api-key': settings.apiKey,
-            },
-            body: JSON.stringify({
-              system_instruction: {
-                parts: [{ text: activeSystemPrompt }],
-              },
-              contents: transcript,
-              tools: geminiToolDefs(activeTools),
-            }),
-          },
-          {
-            timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
-            timeoutMessage: 'Timed out while waiting for the streaming response to start.',
-            messages: conversationMessages,
+      const attemptResult = await runProviderOperationWithRetry(
+        async (attemptState) => {
+          hooks?.onPhaseChange?.('model_connecting')
+          const estimatedInputTokens = estimateGoogleRequestInputTokens(
+            activeSystemPrompt,
+            transcript,
+            activeTools,
             settings,
-          },
-        )
+          )
+          const response = await fetchWithTimeout(
+            `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
+            {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'x-goog-api-key': settings.apiKey,
+              },
+              body: JSON.stringify({
+                system_instruction: {
+                  parts: [{ text: activeSystemPrompt }],
+                },
+                contents: transcript,
+                tools: geminiToolDefs(activeTools),
+              }),
+            },
+            {
+              timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+              timeoutMessage:
+                'Timed out while waiting for the streaming response to start.',
+              messages: conversationMessages,
+              settings,
+            },
+          )
 
-        if (!response.ok) {
-          const data = await parseJsonResponse(response)
-          throw buildProviderHttpError(
+          if (!response.ok) {
+            const data = await parseJsonResponse(response)
+            throw buildProviderHttpError(
+              response,
+              data.error?.message || 'Google request failed',
+              messages,
+            )
+          }
+          hooks?.onPhaseChange?.('model_streaming')
+
+          let content = ''
+          let phaseReasoning = ''
+          const functionCalls = []
+          let usageForAttempt
+          const streamParser = createThinkStreamParser({
+            onContent(text) {
+              content += text
+              attemptState.receivedOutput = true
+              attemptState.partialMessage += text
+              hooks?.onTextDelta?.(text, {
+                blockId: reasoningBlockId,
+                order: reasoningOrder,
+              })
+            },
+            onReasoning(text) {
+              providerReasoning += text
+              phaseReasoning += text
+              attemptState.receivedOutput = true
+              attemptState.partialReasoning += text
+              hooks?.onReasoningDelta?.(text, {
+                blockId: reasoningBlockId,
+                kind: 'provider',
+                order: reasoningOrder,
+              })
+            },
+          })
+
+          await readSseStream(
             response,
-            data.error?.message || 'Google request failed',
-            messages,
+            async (payload) => {
+              const data = JSON.parse(payload)
+              const usage = attachEstimatedInputTokens(
+                normalizeGoogleUsage(data.usageMetadata),
+                estimatedInputTokens,
+              )
+              if (usage) {
+                usageForAttempt = usage
+              }
+
+              const candidate = data.candidates?.[0]
+              const parts = candidate?.content?.parts || []
+
+              for (const part of parts) {
+                if (
+                  typeof part.text === 'string' &&
+                  part.text &&
+                  part.thought
+                ) {
+                  streamParser.consume(`<think>${part.text}</think>`)
+                  continue
+                }
+                if (typeof part.text === 'string' && part.text) {
+                  streamParser.consume(part.text)
+                }
+              }
+
+              if (parts.length > 0) {
+                attemptState.receivedOutput = true
+              }
+              collectGeminiFunctionCalls(functionCalls, parts)
+            },
+            {
+              messages: conversationMessages,
+              firstChunkTimeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+              idleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+              onChunk() {
+                attemptState.receivedOutput = true
+                hooks?.onProgress?.()
+              },
+            },
           )
-        }
-        hooks?.onPhaseChange?.('model_streaming')
 
-        let content = ''
-        let phaseReasoning = ''
-        const functionCalls = []
-        let usageForAttempt
-        const streamParser = createThinkStreamParser({
-          onContent(text) {
-            content += text
-            attemptState.receivedOutput = true
-            attemptState.partialMessage += text
-            hooks?.onTextDelta?.(text, {
-              blockId: reasoningBlockId,
-              order: reasoningOrder,
-            })
-          },
-          onReasoning(text) {
-            providerReasoning += text
-            phaseReasoning += text
-            attemptState.receivedOutput = true
-            attemptState.partialReasoning += text
-            hooks?.onReasoningDelta?.(text, {
-              blockId: reasoningBlockId,
-              kind: 'provider',
-              order: reasoningOrder,
-            })
-          },
-        })
-
-        await readSseStream(response, async payload => {
-          const data = JSON.parse(payload)
-          const usage = attachEstimatedInputTokens(
-            normalizeGoogleUsage(data.usageMetadata),
-            estimatedInputTokens,
-          )
-          if (usage) {
-            usageForAttempt = usage
+          streamParser.flush()
+          return {
+            content,
+            phaseReasoning,
+            functionCalls,
+            usage:
+              usageForAttempt ||
+              buildEstimatedUsage(estimatedInputTokens, content, settings),
           }
-
-          const candidate = data.candidates?.[0]
-          const parts = candidate?.content?.parts || []
-
-          for (const part of parts) {
-            if (typeof part.text === 'string' && part.text && part.thought) {
-              streamParser.consume(`<think>${part.text}</think>`)
-              continue
-            }
-            if (typeof part.text === 'string' && part.text) {
-              streamParser.consume(part.text)
-            }
-          }
-
-          if (parts.length > 0) {
-            attemptState.receivedOutput = true
-          }
-          collectGeminiFunctionCalls(functionCalls, parts)
-        }, {
+        },
+        {
           messages: conversationMessages,
-          firstChunkTimeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
-          idleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
-          onChunk() {
-            attemptState.receivedOutput = true
-            hooks?.onProgress?.()
-          },
-        })
-
-        streamParser.flush()
-        return {
-          content,
-          phaseReasoning,
-          functionCalls,
-          usage: usageForAttempt || buildEstimatedUsage(estimatedInputTokens, content, settings),
-        }
-      }, {
-        messages: conversationMessages,
-        maxRetries,
-        stage: 'response',
-        hooks,
-      })
+          maxRetries,
+          stage: 'response',
+          hooks,
+        },
+      )
       const stepResult = attemptResult.value
       providerRetryCount += attemptResult.retryCount
 
@@ -3218,18 +3545,21 @@ export async function runGoogleAgent({
         return {
           message: content || '模型没有返回文本内容。',
           toolEvents,
-          reasoning: providerReasoningBlocks.length > 0 ? providerReasoningBlocks : undefined,
+          reasoning:
+            providerReasoningBlocks.length > 0
+              ? providerReasoningBlocks
+              : undefined,
           usage: latestUsage,
           messages: conversationMessages,
           retryInfo: buildProviderRetryInfo(providerRetryCount, maxRetries, {
             stage: 'response',
-          })
+          }),
         }
       }
 
       loopGuard.record(
         JSON.stringify(
-          functionCalls.map(entry => ({
+          functionCalls.map((entry) => ({
             name: entry.name,
             args: entry.args || {},
           })),
@@ -3253,8 +3583,17 @@ export async function runGoogleAgent({
       transcript.push({
         role: 'model',
         parts: [
-          ...(assistantContent ? [{ text: assistantContent }] : []),
-          ...functionCalls.map(entry => ({
+          ...(assistantContent
+            ? [
+                {
+                  text: truncateAssistantContentForTranscript(
+                    assistantContent,
+                    settings,
+                  ),
+                },
+              ]
+            : []),
+          ...functionCalls.map((entry) => ({
             functionCall: {
               name: entry.name,
               args: entry.args,
@@ -3277,7 +3616,9 @@ export async function runGoogleAgent({
               ...hooks,
               timelineOrder: toolOrder,
               registerDynamicTools(nextTools) {
-                for (const nextTool of Array.isArray(nextTools) ? nextTools : []) {
+                for (const nextTool of Array.isArray(nextTools)
+                  ? nextTools
+                  : []) {
                   if (!nextTool?.name || registry.has(nextTool.name)) {
                     continue
                   }
@@ -3292,7 +3633,7 @@ export async function runGoogleAgent({
           functionResponse: {
             name: entry.name,
             response: {
-              output: result,
+              output: truncateToolOutputForTranscript(result, settings),
             },
           },
         })
@@ -3307,7 +3648,10 @@ export async function runGoogleAgent({
         toolEventStartIndex,
         hasUnresolvedToolError,
       )
-      if (isRepairIteration && hasWriteRepairAttemptSince(toolEvents, toolEventStartIndex)) {
+      if (
+        isRepairIteration &&
+        hasWriteRepairAttemptSince(toolEvents, toolEventStartIndex)
+      ) {
         writeRepairAttempts += 1
       }
       step += 1
@@ -3331,7 +3675,10 @@ export async function runGoogleAgent({
       hooks,
     })
   } catch (error) {
-    const normalized = maybeNormalizeProviderTermination(error, conversationMessages)
+    const normalized = maybeNormalizeProviderTermination(
+      error,
+      conversationMessages,
+    )
     const aggregateRetryInfo = mergeProviderRetryInfo(
       buildProviderRetryInfo(providerRetryCount, maxRetries, {
         stage: 'response',
