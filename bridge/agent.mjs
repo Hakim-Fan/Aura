@@ -63,6 +63,9 @@ import {
   runOrchestratedAgent,
 } from './agentModes/orchestrated.mjs'
 import { createExecutionStepIdFactory } from './executionIds.mjs'
+import {
+  createCheckpointManager,
+} from './checkpoint.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ROUTE_ESCALATION_TOOL_NAME = 'route_request_escalation'
@@ -1362,6 +1365,9 @@ function createTaskTracker(hooks, rootTitle) {
     kind: 'main',
     status: 'running',
     children: [],
+    errors: [],
+    retryAttempts: 0,
+    checkpoint: null,
   }
 
   function emit() {
@@ -1394,6 +1400,45 @@ function createTaskTracker(hooks, rootTitle) {
       }
       emit()
     },
+    recordError(id, errorInfo) {
+      const node = findNode(root, id)
+      if (!node) return
+      if (!node.errors) node.errors = []
+      node.errors.push({
+        timestamp: Date.now(),
+        ...errorInfo,
+      })
+      emit()
+    },
+    recordRetry(id) {
+      const node = findNode(root, id)
+      if (!node) return
+      node.retryAttempts = (node.retryAttempts || 0) + 1
+      emit()
+    },
+    getErrorChain(id) {
+      const node = findNode(root, id)
+      return node?.errors || []
+    },
+    saveCheckpoint(id, context) {
+      const node = findNode(root, id)
+      if (!node) return
+      node.checkpoint = {
+        timestamp: Date.now(),
+        contextSnapshot: clone(context),
+      }
+      emit()
+    },
+    getCheckpoint(id) {
+      const node = findNode(root, id)
+      return node?.checkpoint || null
+    },
+    clearCheckpoint(id) {
+      const node = findNode(root, id)
+      if (!node) return
+      node.checkpoint = null
+      emit()
+    },
     createChildTask({ parentId, title, summary }) {
       const parent = findNode(root, parentId || root.id)
       if (!parent) {
@@ -1409,6 +1454,9 @@ function createTaskTracker(hooks, rootTitle) {
         kind: 'subagent',
         status: 'running',
         children: [],
+        errors: [],
+        retryAttempts: 0,
+        checkpoint: null,
       }
       parent.children.push(child)
       emit()
@@ -1426,9 +1474,13 @@ function createTaskTracker(hooks, rootTitle) {
       }
       emit()
     },
-    failRoot(message) {
+    failRoot(message, errorInfo = {}) {
       root.status = 'failed'
       root.summary = message
+      root.errors.push({
+        timestamp: Date.now(),
+        ...errorInfo,
+      })
       emit()
     },
     completeRoot(message) {
@@ -1623,8 +1675,39 @@ export async function runRouteFirstAgent(request) {
     tierHistory: [routeState.capabilityTier],
   }
 
+  const checkpointManager = createCheckpointManager({
+    hooks: {
+      onCheckpointCreated: (checkpoint) => {
+        hooks?.onProgress?.({ type: 'checkpoint', checkpoint })
+      },
+      onCheckpointCommitted: (checkpoint) => {
+        hooks?.onProgress?.({ type: 'checkpoint_committed', checkpoint })
+      },
+    },
+  })
+  let checkpointId = null
+
   try {
     for (let pass = 0; pass < MAX_ROUTE_RUNTIME_PASSES; pass += 1) {
+      const snapshot = checkpointManager.createSnapshot({
+        messages,
+        toolEvents,
+        routeState,
+        workMemories: context.workMemories,
+        taskTree: taskTracker.getTree(),
+      })
+      const checkpoint = checkpointManager.createCheckpoint(
+        currentTaskId,
+        `pass-${pass}`,
+        snapshot,
+        {
+          pass,
+          routeState: { capabilityTier: routeState.capabilityTier },
+        }
+      )
+      checkpointId = checkpoint.id
+      hooks?.onProgress?.({ type: 'checkpoint_created', checkpointId, pass })
+
       const availableEscalations = getRouteEscalationTargets(routeState, {
         visitedTiers,
       })
@@ -2072,6 +2155,10 @@ export async function runRouteFirstAgent(request) {
         (normalized.code === 'ROUTE_RUNTIME_EXHAUSTED'
           ? 'runtime_pass_limit'
           : lastRouteDecision?.stopReason),
+    }
+    enriched.checkpointId = checkpointId
+    if (checkpointId) {
+      checkpointManager.commitCheckpoint(checkpointId)
     }
     throw enriched
   } finally {

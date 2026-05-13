@@ -5498,7 +5498,7 @@ fn sanitize_workspace_directory_name(value: &str) -> String {
     const MAX_WORKSPACE_DIR_NAME_LEN: usize = 80;
 
     for character in value.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+        if character.is_alphanumeric() || matches!(character, '-' | '_') {
             name.push(character);
         } else {
             name.push('-');
@@ -5530,7 +5530,7 @@ fn sanitize_file_name(value: &str) -> String {
     let sanitized = candidate
         .chars()
         .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+            if character.is_alphanumeric() || matches!(character, '.' | '-' | '_') {
                 character
             } else {
                 '-'

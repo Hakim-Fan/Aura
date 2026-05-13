@@ -1,9 +1,16 @@
 import {
   appendRuntimeToolEvidenceToSystemPrompt,
   invokeTool,
+  invokeToolWithRetry,
   spillRuntimeArtifact,
 } from './tools.mjs'
-import { createStructuredError } from './runtimeErrors.mjs'
+import {
+  createStructuredError,
+} from './runtimeErrors.mjs'
+import {
+  ToolResult,
+  ToolExecutionError,
+} from './toolErrors.mjs'
 import { buildDeliveryPolicy } from './agentEvidence.mjs'
 import { normalizeBaseUrl, stringifyOutput, truncate } from './utils.mjs'
 import { guardedFetch } from './web/net/guardedFetch.mjs'
@@ -97,6 +104,17 @@ function truncateToolOutputForTranscript(toolOutput, settings = {}) {
     return toolOutput
   }
   return truncated
+}
+
+function formatToolErrorForTranscript(error, toolName, errorReport = {}) {
+  const lines = [
+    `Tool ${toolName} execution failed.`,
+    errorReport.category ? `Error category: ${errorReport.category}` : null,
+    errorReport.suggestedAction ? `Suggested action: ${errorReport.suggestedAction}` : null,
+    errorReport.repairHint ? `Repair hint: ${JSON.stringify(errorReport.repairHint)}` : null,
+    errorReport.detail ? `Detail: ${errorReport.detail}` : null,
+  ].filter(Boolean)
+  return lines.join('\n')
 }
 
 function summarizeSpilloverText(content = '') {
@@ -3287,30 +3305,61 @@ export async function runOpenAiCompatibleAgent({
           toolCall.function.arguments || '{}',
           toolCall.function.name,
         )
-        const result = tool
-          ? await invokeTool(tool, args, toolEvents, {
-              ...hooks,
-              timelineOrder: toolOrder,
-              registerDynamicTools(nextTools) {
-                for (const nextTool of Array.isArray(nextTools)
-                  ? nextTools
-                  : []) {
-                  if (!nextTool?.name || registry.has(nextTool.name)) {
-                    continue
-                  }
-                  registry.set(nextTool.name, nextTool)
-                  activeTools.push(nextTool)
+        let result
+        if (!tool) {
+          result = new ToolResult({
+            success: false,
+            output: null,
+            error: new ToolExecutionError({
+              toolName: toolCall.function.name,
+              category: 'not_found',
+              severity: 'permanent',
+              detail: `Tool not found: ${toolCall.function.name}`,
+              suggestedAction: '请确认工具名称拼写正确，或检查该工具是否已正确加载。',
+              retryable: false,
+            }),
+            toolName: toolCall.function.name,
+            toolCallId: toolCall.id,
+          })
+        } else {
+          result = await invokeToolWithRetry(tool, args, toolEvents, {
+            ...hooks,
+            timelineOrder: toolOrder,
+            toolCallId: toolCall.id,
+            registerDynamicTools(nextTools) {
+              for (const nextTool of Array.isArray(nextTools)
+                ? nextTools
+                : []) {
+                if (!nextTool?.name || registry.has(nextTool.name)) {
+                  continue
                 }
+                registry.set(nextTool.name, nextTool)
+                activeTools.push(nextTool)
               }
             },
-          )
-          : `Tool not found: ${toolCall.function.name}`
+          })
+        }
 
-        transcript.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: truncateToolOutputForTranscript(result, settings),
-        })
+        const toolEventEntry = result.toToolEventEntry()
+        toolEvents.push(toolEventEntry)
+
+        if (result instanceof ToolResult && result.success) {
+          transcript.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: truncateToolOutputForTranscript(result.output, settings),
+          })
+        } else {
+          const errorReport = result.error instanceof ToolExecutionError
+            ? result.error.toStructuredReport()
+            : { message: String(result.error) }
+          const errorMessage = formatToolErrorForTranscript(result.error, toolCall.function.name, errorReport)
+          transcript.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: errorMessage,
+          })
+        }
       }
       hasUnresolvedToolError = updateUnresolvedToolErrorForRepair(
         toolEvents,
@@ -3690,30 +3739,42 @@ export async function runGoogleAgent({
       const toolEventStartIndex = toolEvents.length
       for (const entry of functionCalls) {
         const tool = registry.get(entry.name)
-        const result = tool
-          ? await invokeTool(tool, entry.args || {}, toolEvents, {
-              ...hooks,
-              timelineOrder: toolOrder,
-              registerDynamicTools(nextTools) {
-                for (const nextTool of Array.isArray(nextTools)
-                  ? nextTools
-                  : []) {
-                  if (!nextTool?.name || registry.has(nextTool.name)) {
-                    continue
-                  }
-                  registry.set(nextTool.name, nextTool)
-                  activeTools.push(nextTool)
-                }
-              }
-            },
-          )
-          : `Tool not found: ${entry.name}`
+        let result
+        if (!tool) {
+          const toolError = new ToolExecutionError({
+            toolName: entry.name,
+            category: 'not_found',
+            severity: 'permanent',
+            detail: `Tool not found: ${entry.name}`,
+            suggestedAction: '请确认工具名称拼写正确，或检查该工具是否已正确加载。',
+            retryable: false,
+          })
+          result = new ToolResult({
+            success: false,
+            output: null,
+            error: toolError,
+            toolName: entry.name,
+          })
+        } else {
+          result = await invokeToolWithRetry(tool, entry.args || {}, toolEvents, {
+            ...hooks,
+            timelineOrder: toolOrder,
+          })
+        }
+
+        const toolEventEntry = result.toToolEventEntry()
+        toolEvents.push(toolEventEntry)
+
+        const outputContent = result.success
+          ? truncateToolOutputForTranscript(result.output, settings)
+          : formatToolErrorForTranscript(result.error, entry.name,
+              result.error instanceof ToolExecutionError ? result.error.toStructuredReport() : {})
 
         toolResponses.push({
           functionResponse: {
             name: entry.name,
             response: {
-              output: truncateToolOutputForTranscript(result, settings),
+              output: outputContent,
             },
           },
         })

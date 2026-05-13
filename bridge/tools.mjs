@@ -11,7 +11,20 @@ import {
   stringifyOutput,
   truncate,
 } from './utils.mjs'
-import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
+import {
+  createStructuredError,
+  normalizeRuntimeError,
+} from './runtimeErrors.mjs'
+import {
+  ToolExecutionError,
+  ToolResult,
+  ErrorCategory,
+  ErrorSeverity,
+  getRetryDelay,
+  shouldRetry,
+  buildToolErrorReport,
+  mergeToolErrors,
+} from './toolErrors.mjs'
 import { createWebTools } from './webTools.mjs'
 import { applyPatchInWorkspace } from './editing/applyPatchTool.mjs'
 import { parseApplyPatchShellCommand } from './editing/applyPatchShell.mjs'
@@ -2941,7 +2954,12 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         error: deniedError.rawMessage,
         errorInfo: deniedError.errorInfo,
       })
-      return `Tool ${effectiveTool.name} was denied by the user.`
+      return new ToolResult({
+        success: false,
+        output: null,
+        error: deniedError,
+        toolName: effectiveTool.name,
+      })
     }
   }
 
@@ -2968,7 +2986,12 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         structuredOutput: undefined,
         error: undefined,
       })
-      return stringifyOutput(repeatedFullReadGuardOutput)
+      return new ToolResult({
+        success: true,
+        output: stringifyOutput(repeatedFullReadGuardOutput),
+        error: null,
+        toolName: effectiveTool.name,
+      })
     }
     const output = await runAbortable(
       Promise.resolve(
@@ -3047,7 +3070,12 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         },
       )
     }
-    return stringifyOutput(output)
+    return new ToolResult({
+      success: !commandExitError,
+      output: stringifyOutput(output),
+      error: commandExitError,
+      toolName: effectiveTool.name,
+    })
   } catch (error) {
     const detail = formatToolError(error)
     const normalized = normalizeRuntimeError(error, {
@@ -3062,22 +3090,84 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     if (hooks.rethrowToolError?.(error, normalized, effectiveTool) === true) {
       throw error
     }
+    const toolError = ToolExecutionError.fromNormalizedError(normalized, effectiveTool.name)
     updateEvent({
       status: 'error',
       error: detail,
-      errorInfo: normalized.errorInfo,
+      errorInfo: toolError.toStructuredReport(),
     })
-    return [
-      normalized.errorInfo.summary,
-      normalized.errorInfo.suggestedAction || null,
-      normalized.errorInfo.repairHint
-        ? `repairHint:\n${stringifyOutput(normalized.errorInfo.repairHint)}`
-        : null,
-      detail ? `原始错误:\n${detail}` : null,
-    ]
-      .filter(Boolean)
-      .join('\n\n')
+    return new ToolResult({
+      success: false,
+      output: null,
+      error: toolError,
+      toolName: effectiveTool.name,
+    })
   } finally {
     hooks.releaseCurrentStepAbortController?.(abortController)
   }
+}
+
+export async function invokeToolWithRetry(tool, args, toolEvents, hooks = {}) {
+  const maxRetries = hooks.maxToolRetries ?? 2
+  let lastError
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      const result = await invokeTool(tool, args, toolEvents, {
+        ...hooks,
+        attempt,
+      })
+      if (result instanceof ToolResult && !result.success && result.error instanceof ToolExecutionError) {
+        if (!shouldRetry(result.error, attempt)) {
+          return result
+        }
+        lastError = result.error
+        const delay = getRetryDelay(attempt, result.error.retryConfig)
+        hooks?.onPhaseChange?.('tool_retrying')
+        await new Promise(resolve => setTimeout(resolve, delay))
+        continue
+      }
+      return result
+    } catch (error) {
+      if (attempt > maxRetries) {
+        const normalized = normalizeRuntimeError(error, {
+          source: tool.source === 'plugin' ? 'plugin' : tool.source === 'mcp' ? 'mcp' : 'tool',
+          operationLabel: tool.description || tool.name,
+        })
+        const toolError = ToolExecutionError.fromNormalizedError(normalized, tool.name)
+        return new ToolResult({
+          success: false,
+          output: null,
+          error: toolError,
+          toolName: tool.name,
+          attempt,
+        })
+      }
+      lastError = error
+      const normalized = normalizeRuntimeError(error, {
+        source: tool.source === 'plugin' ? 'plugin' : tool.source === 'mcp' ? 'mcp' : 'tool',
+        operationLabel: tool.description || tool.name,
+      })
+      const toolError = ToolExecutionError.fromNormalizedError(normalized, tool.name)
+      if (!toolError.retryable) {
+        return new ToolResult({
+          success: false,
+          output: null,
+          error: toolError,
+          toolName: tool.name,
+          attempt,
+        })
+      }
+      const delay = getRetryDelay(attempt, toolError.retryConfig)
+      hooks?.onPhaseChange?.('tool_retrying')
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+  }
+
+  return new ToolResult({
+    success: false,
+    output: null,
+    error: lastError,
+    toolName: tool.name,
+  })
 }
