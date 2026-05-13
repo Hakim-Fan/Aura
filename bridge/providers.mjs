@@ -2767,6 +2767,30 @@ function createLongTaskGuard(loopConfig) {
   }
 }
 
+const CONCRETE_EXECUTION_TOOLS = new Set([
+  'write_file',
+  'apply_patch',
+  'edit_file',
+  'multi_edit_file',
+  'replace_line_range',
+  'run_shell',
+  'exec_command',
+  'write_stdin',
+  'computer_type_text',
+  'computer_press_shortcut',
+  'computer_open_app',
+])
+
+function hasConcreteExecution(toolEvents) {
+  return toolEvents.some(event => {
+    const name = event?.name || ''
+    return (
+      event?.status === 'success' &&
+      CONCRETE_EXECUTION_TOOLS.has(name)
+    )
+  })
+}
+
 function shouldFinalizeAnswer(message, toolEvents, reasoningText) {
   const normalized = (message || '').trim()
   const hasContext = toolEvents.length > 0 || reasoningText.trim().length > 200
@@ -2778,6 +2802,12 @@ function shouldFinalizeAnswer(message, toolEvents, reasoningText) {
   }
   if (normalized.length >= 120) {
     return false
+  }
+  if (hasConcreteExecution(toolEvents)) {
+    return true
+  }
+  if (normalized.length < 60) {
+    return true
   }
   return !/[。！？!?\n]/u.test(normalized.slice(60))
 }

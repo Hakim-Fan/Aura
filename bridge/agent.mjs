@@ -1113,7 +1113,23 @@ function shouldRunFinalization(
     return true
   }
 
-  if (routeState?.answerMode === 'execute' && finalMessage.length < 90) {
+  const hasConcreteExecution = hasToolContext && recentToolEvents.some(event => {
+    const name = event?.name || ''
+    return (
+      event?.status === 'success' &&
+      (name === 'write_file' || name === 'apply_patch' || name === 'edit_file' ||
+       name === 'multi_edit_file' || name === 'replace_line_range' ||
+       name === 'run_shell' || name === 'exec_command' || name === 'write_stdin' ||
+       name === 'computer_type_text' || name === 'computer_press_shortcut' ||
+       name === 'computer_open_app')
+    )
+  })
+
+  if (
+    routeState?.answerMode === 'execute' &&
+    finalMessage.length < 90 &&
+    !hasConcreteExecution
+  ) {
     return true
   }
 
