@@ -104,20 +104,21 @@ function buildEntry(tool, layer) {
           ? 'advanced'
           : 'builtin'
 
+  const canonicalName = tool?.name || ''
   const materializedTool =
     tool && typeof tool === 'object'
       ? {
           ...tool,
           toolKey: tool.toolKey || key,
-          callName: tool.callName || tool.name,
+          canonicalName,
         }
       : tool
   const visibility = inferEntryVisibility(materializedTool, layer)
 
   return {
     key,
-    name: tool.name,
-    callName: materializedTool?.callName || tool.name,
+    name: canonicalName,
+    canonicalName,
     namespace,
     source: tool.source,
     layer,
@@ -162,19 +163,10 @@ export function createToolRegistry({
     ...mcpTools.map(tool => buildEntry(tool, 'mcp')),
     ...discoverableTools.map(tool => buildEntry(tool, inferDiscoverableLayer(tool))),
   ]
-  const byCallName = new Map()
   const byName = new Map()
-  const duplicateCallNames = new Set()
   const duplicateNames = new Set()
 
   for (const entry of entries) {
-    const existing = byCallName.get(entry.callName) || []
-    existing.push(entry)
-    byCallName.set(entry.callName, existing)
-    if (existing.length > 1) {
-      duplicateCallNames.add(entry.callName)
-    }
-
     const existingByName = byName.get(entry.name) || []
     existingByName.push(entry)
     byName.set(entry.name, existingByName)
@@ -183,13 +175,8 @@ export function createToolRegistry({
     }
   }
 
-  function getUniqueEntryByCallName(callName) {
-    const matches = byCallName.get(callName) || []
-    return matches.length === 1 ? matches[0] : null
-  }
-
-  function getUniqueEntryByName(name) {
-    const matches = byName.get(name) || []
+  function getUniqueEntryByCanonicalName(canonicalName) {
+    const matches = byName.get(canonicalName) || []
     return matches.length === 1 ? matches[0] : null
   }
 
@@ -201,19 +188,20 @@ export function createToolRegistry({
     discoverableOnlyEntries: entries.filter(entry => entry.visibility === 'discoverable'),
     byKey: new Map(entries.map(entry => [entry.key, entry])),
     byName,
-    byCallName,
-    duplicateCallNames,
     duplicateNames,
     getEntry(identifier) {
       if (!identifier) {
         return null
       }
-      return (
-        this.byKey.get(identifier) ||
-        getUniqueEntryByCallName(identifier) ||
-        getUniqueEntryByName(identifier) ||
-        null
-      )
+      const byKeyMatch = this.byKey.get(identifier)
+      if (byKeyMatch) {
+        return byKeyMatch
+      }
+      const canonicalMatch = getUniqueEntryByCanonicalName(identifier)
+      if (canonicalMatch) {
+        return canonicalMatch
+      }
+      return null
     },
   }
 }

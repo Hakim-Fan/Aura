@@ -77,7 +77,6 @@ export function createToolRouter(registry, routeState) {
     new Map(
       [
         ...modelVisibleEntries,
-        ...deferredEntries,
         ...discoverableOnlyEntries,
       ].map(entry => [entry.key, entry]),
     ).values(),

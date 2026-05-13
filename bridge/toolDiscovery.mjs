@@ -71,7 +71,7 @@ function buildDeferredEntryCacheKey(entry) {
     JSON.stringify({
       key: entry?.key || '',
       name: entry?.name || '',
-      callName: entry?.callName || '',
+      canonicalName: entry?.canonicalName || '',
       namespace: entry?.namespace || '',
       source: entry?.source || '',
       capabilityId: entry?.tool?.capabilityId || '',
@@ -90,7 +90,7 @@ function buildSerializedSearchRecord(entry, key) {
   return {
     key,
     toolKey: entry?.key || '',
-    callName: entry?.callName || '',
+    canonicalName: entry?.canonicalName || entry?.name || '',
     corpus: data.corpus,
     terms: data.terms,
     normalizedName: data.normalizedName,
@@ -107,7 +107,7 @@ function normalizeSerializedSearchRecord(record) {
   return {
     key: typeof record.key === 'string' ? record.key : '',
     toolKey: typeof record.toolKey === 'string' ? record.toolKey : '',
-    callName: typeof record.callName === 'string' ? record.callName : '',
+    canonicalName: typeof record.canonicalName === 'string' ? record.canonicalName : '',
     corpus: typeof record.corpus === 'string' ? record.corpus : '',
     terms: Array.isArray(record.terms)
       ? record.terms.filter(term => typeof term === 'string' && term)
@@ -250,7 +250,7 @@ export function createDeferredToolIndex(entries) {
       records: index.records.map(record => ({
         key: record.key,
         toolKey: record.toolKey,
-        callName: record.callName,
+        canonicalName: record.canonicalName,
         corpus: record.corpus,
         terms: record.terms,
         normalizedName: record.normalizedName,
@@ -367,7 +367,7 @@ function summarizeMatch(result) {
   return {
     toolKey: entry.key,
     name: entry.name,
-    callName: entry.callName || entry.name,
+    canonicalName: entry.canonicalName || entry.name,
     source: entry.source,
     namespace: entry.namespace,
     capabilityId: entry.tool?.capabilityId || '',
@@ -452,7 +452,7 @@ export function createToolSearchTool({
       return {
         query,
         noResults: false,
-        directToolNames: directEntries.map(entry => entry.callName || entry.name),
+        directToolNames: directEntries.map(entry => entry.canonicalName || entry.name),
         loadedToolKeys: loadedTools.map(tool => tool.toolKey || tool.name),
         loadedToolNames: loadedTools.map(tool => tool.name),
         activationRequiredCount: activationRequiredEntries.length,

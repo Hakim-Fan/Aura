@@ -2030,7 +2030,9 @@ function wait(ms) {
 const PROVIDER_CONNECT_TIMEOUT_MS = 45_000
 const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 90_000
 const PROVIDER_FINALIZATION_TIMEOUT_MS = 60_000
-const PROVIDER_RETRY_DELAYS_MS = [0, 1_200, 3_000, 7_000, 15_000]
+const PROVIDER_RETRY_DELAYS_MS = [0, 1000, 3000, 8000, 20000]
+const PROVIDER_RETRY_MAX_DELAY_MS = 30000
+const PROVIDER_RETRY_BACKOFF_MULTIPLIER = 2.0
 const STEP_LIMIT_TOOL_ERROR_REPAIR_TURNS = 6
 const STEP_LIMIT_TOOL_ERROR_WRITE_REPAIR_ATTEMPTS = 4
 
@@ -2054,11 +2056,11 @@ function getProviderRetryDelayMs(retryNumber) {
     typeof retryNumber === 'number' && Number.isFinite(retryNumber)
       ? Math.max(1, Math.round(retryNumber))
       : 1
-  const index = Math.min(
-    PROVIDER_RETRY_DELAYS_MS.length - 1,
-    normalizedRetryNumber - 1,
+  const delay = Math.min(
+    PROVIDER_RETRY_DELAYS_MS[0] * Math.pow(PROVIDER_RETRY_BACKOFF_MULTIPLIER, normalizedRetryNumber - 1),
+    PROVIDER_RETRY_MAX_DELAY_MS,
   )
-  return PROVIDER_RETRY_DELAYS_MS[index] || 0
+  return delay
 }
 
 function buildProviderRetryInfo(retryCount, maxRetries, extras = {}) {
@@ -2369,19 +2371,49 @@ async function runProviderOperationWithRetry(
 function maybeNormalizeProviderTermination(error, messages) {
   const message = error instanceof Error ? error.message : String(error)
   const normalized = message.trim().toLowerCase()
+
+  if (
+    normalized === 'aborted' ||
+    normalized.includes('aborted')
+  ) {
+    return createClassifiedError(
+      '模型请求已被取消。',
+      {
+        code: 'provider_aborted',
+        source: 'provider',
+        category: 'cancelled',
+        rawMessage: presentProviderError(message, messages),
+        suggestedAction: '用户取消了请求，可以重新开始。',
+        retryable: false,
+      },
+    )
+  }
+
+  if (
+    normalized.includes('eof') ||
+    normalized.includes('econnreset') ||
+    normalized.includes('econnrefused')
+  ) {
+    return createClassifiedError(
+      '模型连接异常断开。这可能表示当前模型或兼容接口不支持工具调用，或连接被中间设备终止。',
+      {
+        code: 'provider_eof',
+        source: 'provider',
+        category: 'unsupported',
+        rawMessage: presentProviderError(message, messages),
+        suggestedAction: '请切换到对工具调用支持更稳定的模型 / Provider，或检查网络连接。',
+        retryable: false,
+      },
+    )
+  }
+
   if (
     normalized === 'terminated' ||
     normalized.includes('terminated') ||
     normalized.includes('socket hang up') ||
-    normalized.includes('eof') ||
-    normalized.includes('aborted') ||
     normalized.includes('fetch failed') ||
     normalized.includes('network error') ||
     normalized.includes('networkerror') ||
-    normalized.includes('timeout') ||
-    normalized.includes('timed out') ||
-    normalized.includes('econnreset') ||
-    normalized.includes('econnrefused') ||
     normalized.includes('enotfound') ||
     normalized.includes('eai_again')
   ) {
@@ -2398,6 +2430,24 @@ function maybeNormalizeProviderTermination(error, messages) {
       },
     )
   }
+
+  if (
+    normalized.includes('timeout') ||
+    normalized.includes('timed out')
+  ) {
+    return createClassifiedError(
+      '模型响应超时。可能是模型处理时间过长或网络延迟。',
+      {
+        code: 'provider_timeout',
+        source: 'provider',
+        category: 'timeout',
+        rawMessage: presentProviderError(message, messages),
+        suggestedAction: '请稍后重试，或尝试减少任务复杂度。',
+        retryable: true,
+      },
+    )
+  }
+
   return error
 }
 

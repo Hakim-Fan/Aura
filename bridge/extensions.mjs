@@ -281,6 +281,7 @@ function summarizeSkillContent(skillId, content) {
     summary: summary || 'Use this skill when it is directly relevant to the task.',
     keywords: [title, paragraph, ...bullets].filter(Boolean),
     allowedTools: extractListMetadataField(frontmatter, 'allowed-tools'),
+    triggers: extractMetadataField(frontmatter, 'triggers') || '',
     body: normalizeSkillBody(body),
   }
 }
@@ -535,6 +536,7 @@ function normalizeCachedSkillMetadata(value, fallbackSkillId, fallbackPath) {
     allowedTools: Array.isArray(value.allowedTools)
       ? value.allowedTools.filter(entry => typeof entry === 'string' && entry.trim())
       : [],
+    triggers: typeof value.triggers === 'string' ? value.triggers : '',
   }
 }
 
@@ -755,11 +757,17 @@ export function buildSkillPrompt(skillEntries) {
   return skillEntries
     .map(skill => {
       const details = []
+      if (skill.triggers) {
+        details.push(`触发条件: ${skill.triggers}`)
+      }
       if (skill.description) {
         details.push(skill.description)
       }
       if (skill.summary && skill.summary !== skill.description) {
         details.push(skill.summary)
+      }
+      if (skill.allowedTools?.length) {
+        details.push(`可用工具: ${skill.allowedTools.join(', ')}`)
       }
       details.push(
         `if this matches the user request, call aura_read_skill with skillId "${skill.id}" before applying it.`,

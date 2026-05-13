@@ -98,7 +98,10 @@ export class ExecutorContext {
     }
 
     let lastError
-    for (let attempt = 1; attempt <= (taskNode.maxRetries + 1); attempt++) {
+    const maxAttempts = typeof taskNode.maxRetries === 'number' && taskNode.maxRetries >= 0
+      ? taskNode.maxRetries + 1
+      : 1
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const result = await this.hooks?.invokeToolWithRetry?.(tool, args, this.hooks?.toolEvents || [], {
           ...this.hooks,
@@ -124,7 +127,7 @@ export class ExecutorContext {
           attempt,
         }
       } catch (error) {
-        if (attempt > taskNode.maxRetries) {
+        if (attempt >= maxAttempts) {
           throw error
         }
         lastError = error
