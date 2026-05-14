@@ -75,15 +75,11 @@ const AUTO_WORK_MEMORY_TOOL_NAMES = new Set([
   'write_file',
 ])
 
-// 修改前
-// const COMMAND_EXIT_STATUS_TOOLS = new Set([
-//   'exec_command',
-//   'run_shell',
-//   'write_stdin',
-// ])
-
-// 修改后
-const COMMAND_EXIT_STATUS_TOOLS = new Set([])
+const COMMAND_EXIT_STATUS_TOOLS = new Set([
+  'exec_command',
+  'run_shell',
+  'write_stdin',
+])
 
 const MAX_AUTO_TOOL_EVIDENCE_ENTRIES = 24
 const MAX_PROGRESS_LIST_ITEMS = 12
