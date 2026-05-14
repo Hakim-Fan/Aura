@@ -485,7 +485,13 @@ function normalizeSessionContextCompression(value: unknown): SessionContextCompr
 }
 
 function normalizeAgentMode(value: unknown): AgentArchitectureMode | undefined {
-  return value === 'route-first' || value === 'orchestrated' ? value : undefined
+  return value === 'route-first' ||
+    value === 'orchestrated' ||
+    value === 'legacy' ||
+    value === 'hybrid' ||
+    value === 'graph'
+    ? value
+    : undefined
 }
 
 function normalizeCompletionState(value: unknown): CompletionState | undefined {
@@ -1418,7 +1424,12 @@ function parseSettings(raw: string | null): AgentSettings {
 }
 
 function normalizeAgentArchitectureMode(value: unknown): AgentArchitectureMode {
-  return value === 'orchestrated' ? 'orchestrated' : 'route-first'
+  return value === 'orchestrated' ||
+    value === 'legacy' ||
+    value === 'hybrid' ||
+    value === 'graph'
+    ? value
+    : 'route-first'
 }
 
 function normalizeExecutionMode(value: unknown): ExecutionMode {

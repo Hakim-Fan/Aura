@@ -1431,6 +1431,18 @@ fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> 
         "retry_progress" => agent_log_details(context, serde_json::json!({
             "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
         })),
+        "runtime_log" => {
+            let runtime_event = event.get("event").unwrap_or(&serde_json::Value::Null);
+            let details = runtime_event
+                .get("details")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            agent_log_details(context, serde_json::json!({
+                "runtimeEvent": runtime_event.get("event").and_then(|value| value.as_str()),
+                "runtimeLevel": runtime_event.get("level").and_then(|value| value.as_str()),
+                "details": details,
+            }))
+        }
         "context_compression" => {
             let compression = event
                 .get("contextCompression")
@@ -3513,6 +3525,27 @@ fn spawn_agent_task<R: Runtime>(
                         event_log_details(&stdout_log_context, &event),
                     );
                     current.retry_info = extract_object(event.get("retryInfo"));
+                }),
+                Some("runtime_log") => with_snapshot(&stdout_snapshot, |_current| {
+                    let runtime_event = event.get("event").unwrap_or(&serde_json::Value::Null);
+                    let event_name = runtime_event
+                        .get("event")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("agent.runtime_log");
+                    let level = runtime_event
+                        .get("level")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("info");
+                    let details = runtime_event
+                        .get("details")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    append_app_log(
+                        &stdout_log_app,
+                        normalize_app_log_level(Some(level.to_string())),
+                        event_name,
+                        agent_log_details(&stdout_log_context, details),
+                    );
                 }),
                 Some("tool_event") => with_snapshot(&stdout_snapshot, |current| {
                     clear_retry_progress_if_connected(current);

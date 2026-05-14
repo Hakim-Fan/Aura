@@ -220,7 +220,12 @@ export type CapabilityUsageSnapshot = {
   mcpServers: CapabilityUsageEntry[]
 }
 
-export type AgentArchitectureMode = 'route-first' | 'orchestrated'
+export type AgentArchitectureMode =
+  | 'route-first'
+  | 'orchestrated'
+  | 'legacy'
+  | 'hybrid'
+  | 'graph'
 
 export type RouteAnswerMode = 'advise' | 'diagnose' | 'execute'
 

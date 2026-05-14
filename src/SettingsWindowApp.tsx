@@ -1724,7 +1724,10 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <div className="settings-mode-stack">
               <label className="toggle-inline">
                 <input
-                  checked={draftSettings.agentArchitectureMode === 'route-first'}
+                  checked={
+                    draftSettings.agentArchitectureMode === 'route-first' ||
+                    draftSettings.agentArchitectureMode === 'legacy'
+                  }
                   type="radio"
                   onChange={() => handleSettingsChange('agentArchitectureMode', 'route-first')}
                 />

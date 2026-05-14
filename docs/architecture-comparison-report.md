@@ -3,6 +3,7 @@
 > 日期：2026-05-14
 > 版本：v1.0
 > 分支：`feature_1.1.3-fix` (旧) vs `feature_1.2.0` (新)
+> 后续计划：`docs/reference-1.2.0-architecture-refactor-plan.md`
 
 ---
 

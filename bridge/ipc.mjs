@@ -367,6 +367,10 @@ rl.on('line', (line) => {
       executionMonitor.markProgress()
       emit({ type: 'route_decision', routeDecision })
     },
+    onRuntimeLog(event) {
+      executionMonitor.markProgress()
+      emit({ type: 'runtime_log', event })
+    },
     onWorkMemory(memory) {
       executionMonitor.markProgress()
       emit({ type: 'work_memory', memory })

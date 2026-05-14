@@ -590,6 +590,57 @@ sequenceDiagram
 5. 需要人工参与时进入 takeover
 6. 用户完成后继续执行
 
+## 4.5 Agent Runtime 日志与合约
+
+Agent Runtime 的执行状态通过两条链路输出：
+
+1. **任务事件流**：`bridge/ipc.mjs` 将 `text_delta`、`reasoning_delta`、`tool_event`、`task_tree`、`route_decision`、`context_compression` 等事件写到 stdout，Rust 侧合并进 `AgentTaskSnapshot`，前端通过 `get_agent_task` 轮询展示。
+2. **结构化运行日志**：`bridge/agentRuntimeLogs.mjs` 通过 `runtime_log` 事件输出 `agent.*` 日志，Rust 侧写入 Aura app log，日志看板可按 `runId`、`taskId`、`assistantMessageId` 追踪一次完整运行。
+
+当前 Step 1 的日志事件包括：
+
+- `agent.run.started`
+- `agent.path.selected`
+- `agent.architecture.fallback`
+- `agent.classifier.result`
+- `agent.fast_path.started`
+- `agent.fast_path.finished`
+- `agent.plan.created`
+- `agent.plan.updated`
+- `agent.graph.transition`
+- `agent.step.started`
+- `agent.step.finished`
+- `agent.checkpoint.created`
+- `agent.route.decision`
+- `agent.tool.event`
+- `agent.context.compression`
+- `agent.retry.progress`
+- `agent.memory.updated`
+- `agent.recovery.event`
+- `agent.completion.checked`
+- `agent.error.classified`
+- `agent.run.finished`
+
+这些日志遵守几个约束：
+
+- `route-first` 是当前稳定执行内核，在 runtime 日志中归一为 `architectureMode: "legacy"`。
+- `fast` 路径只处理简单无工具问答；工作区、写入、附件、网页/最新信息、复杂任务仍会进入标准或长任务路径。
+- `long` 路径进入 Hybrid State Graph，图中的执行节点仍委托 route-first，以保留现有工具路由、恢复和证据策略。
+- `hybrid` / `graph` 是阶段性架构模式；需要回退时会记录 `agent.architecture.fallback`。
+- 日志只记录摘要、状态、id、token、耗时、错误分类等诊断字段，不记录完整文件内容、API key 或大段模型输出。
+- 日志失败不能影响 Agent 主执行路径。
+
+关键运行时数据合约：
+
+| 数据 | 作用 |
+|------|------|
+| `messages` | 传给模型的对话上下文，会被上下文压缩影响 |
+| `toolEvents` | 完整工具事件轨迹，用于 UI 展示、evidence policy、recovery |
+| `workMemories` | 可复用工作记忆，供后续任务 carryover |
+| `routeDecision` | 当前能力层、预算、挂载工具、stop reason 的快照 |
+| `contextCompression` | 最近一次压缩摘要和 token 统计 |
+| `runtime_log` | 结构化诊断日志，不直接参与模型上下文 |
+
 ---
 
 ## 5. 权限与安全边界

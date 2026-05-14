@@ -66,6 +66,15 @@ import { createExecutionStepIdFactory } from './executionIds.mjs'
 import {
   createCheckpointManager,
 } from './checkpoint.mjs'
+import {
+  buildErrorDetails,
+  buildRunFinishedDetails,
+  createAgentRuntimeLogger,
+  resolveAgentExecutionMode,
+  wrapAgentRuntimeHooks,
+} from './agentRuntimeLogs.mjs'
+import { classifyAgentTask } from './agent/taskClassifier.mjs'
+import { runHybridStateGraph } from './agent/stateGraphRuntime.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ROUTE_ESCALATION_TOOL_NAME = 'route_request_escalation'
@@ -2187,16 +2196,235 @@ export async function runRouteFirstAgent(request) {
   }
 }
 
-function resolveAgentMode(settings) {
-  return settings?.agentArchitectureMode === 'orchestrated'
-    ? 'orchestrated'
-    : 'route-first'
+async function runFastPathAgent(request, classification) {
+  const {
+    settings,
+    messages: requestedMessages,
+    hooks = {},
+  } = request
+  const messages = Array.isArray(requestedMessages) ? requestedMessages : []
+
+  hooks?.onPhaseChange?.('model_connecting')
+  if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
+    throw createStructuredError('模型调用失败，当前缺少 API Key。', {
+      source: 'provider',
+      category: 'authentication',
+      code: 'MISSING_API_KEY',
+      detail: 'Missing API key.',
+      suggestedAction: '请先在设置页填写可用的 Provider API Key。',
+    })
+  }
+
+  const toolEvents = []
+  const routeState = {
+    answerMode: 'advise',
+    capabilityTier: 'none',
+    budgets: {},
+    allowEscalationTo: [],
+    responseStyle: 'concise',
+    completionPolicy: {
+      requiresEvidenceForDone: false,
+    },
+  }
+  const systemPrompt = [
+    'You are Aura running the fast path for a simple request.',
+    'Answer directly and concisely without using tools.',
+    'Do not claim to inspect local files, run commands, browse the web, or use current external facts.',
+    'If the user request actually requires local files, tools, web lookup, or current information, say that standard execution is required.',
+  ].join('\n')
+
+  const turnResult = await runProviderTurn({
+    settings,
+    systemPrompt,
+    messages,
+    tools: [],
+    toolEvents,
+    routeState,
+    hooks,
+  })
+
+  const result = sanitizeResultMessage(turnResult.result, toolEvents)
+  return {
+    ...result,
+    status: 'completed',
+    completionState: 'not_executed',
+    agentMode: 'route-first',
+    pathMode: 'fast',
+    routeDecision: {
+      answerMode: 'advise',
+      capabilityTier: 'none',
+      budgets: {},
+      allowEscalationTo: [],
+      availableEscalations: [],
+      escalationCount: 0,
+      tierHistory: ['none'],
+      stopReason: 'completed',
+      mountedCapabilities: {
+        skills: [],
+        plugins: [],
+        mcpServers: [],
+        tools: [],
+      },
+    },
+    toolEvents,
+    reasoning: result.reasoning || [],
+    taskTree: [],
+    classifier: classification,
+  }
 }
 
 export async function runAgent(request) {
-  const agentMode = resolveAgentMode(request?.settings)
-  if (agentMode === 'orchestrated') {
-    return runOrchestratedAgent(request)
+  const mode = resolveAgentExecutionMode(request?.settings)
+  const runtimeLogger = createAgentRuntimeLogger({
+    hooks: request?.hooks,
+    settings: request?.settings,
+    logContext: request?.logContext,
+    mode,
+  })
+  const hooks = wrapAgentRuntimeHooks(request?.hooks || {}, runtimeLogger)
+  const effectiveSettings =
+    mode.effectiveAgentMode === 'route-first' &&
+    request?.settings?.agentArchitectureMode !== 'route-first'
+      ? {
+          ...(request?.settings || {}),
+          agentArchitectureMode: 'route-first',
+        }
+      : request?.settings
+  const effectiveRequest = {
+    ...request,
+    hooks,
+    settings: effectiveSettings,
   }
-  return runRouteFirstAgent(request)
+  const classification = classifyAgentTask({
+    messages: effectiveRequest.messages,
+    settings: effectiveSettings,
+  })
+  const executionPathMode =
+    mode.architectureMode === 'graph' || mode.architectureMode === 'orchestrated'
+      ? 'long'
+      : classification.pathMode
+  runtimeLogger.setPathMode(executionPathMode)
+
+  runtimeLogger.emit('agent.run.started', {
+    model: request?.settings?.model,
+    provider: request?.settings?.provider,
+    cwd: request?.settings?.cwd,
+    effectiveAgentMode: mode.effectiveAgentMode,
+  })
+  runtimeLogger.emit('agent.classifier.result', {
+    pathMode: classification.pathMode,
+    complexity: classification.complexity,
+    risk: classification.risk,
+    requiresTools: classification.requiresTools,
+    requiresWrite: classification.requiresWrite,
+    reason: classification.reason,
+    confidence: classification.confidence,
+    latestUserTextLength: classification.latestUserTextLength,
+  })
+  runtimeLogger.emit('agent.path.selected', {
+    pathMode: executionPathMode,
+    reason:
+      executionPathMode === 'fast'
+        ? 'simple no-tool request selected for fast path'
+        : executionPathMode === 'long'
+          ? 'hybrid state graph selected for complex or graph-requested execution'
+        : mode.architectureMode === 'legacy'
+        ? 'route-first legacy execution remains the default stable path'
+        : mode.fallbackToLegacy
+          ? `${mode.architectureMode} is not implemented yet; falling back to route-first`
+          : `${mode.architectureMode} execution requested`,
+    confidence: classification.confidence,
+    estimatedRisk: classification.risk,
+  })
+  if (mode.fallbackToLegacy) {
+    runtimeLogger.emit(
+      'agent.architecture.fallback',
+      {
+        fromMode: mode.architectureMode,
+        toMode: 'legacy',
+        reason: 'requested architecture mode is staged but not implemented in this build',
+      },
+      { level: 'warn' },
+    )
+  }
+
+  try {
+    let result
+    if (
+      executionPathMode === 'fast' &&
+      mode.effectiveAgentMode === 'route-first' &&
+      !mode.fallbackToLegacy
+    ) {
+      runtimeLogger.emit('agent.fast_path.started', {
+        reason: classification.reason,
+      })
+      result = await runFastPathAgent(effectiveRequest, classification)
+      runtimeLogger.emit('agent.fast_path.finished', {
+        status: result?.status || 'completed',
+        toolCount: 0,
+        inputTokens: result?.usage?.inputTokens,
+        outputTokens: result?.usage?.outputTokens,
+        durationMs: runtimeLogger.elapsedMs(),
+      })
+    } else if (
+      executionPathMode === 'long' &&
+      mode.effectiveAgentMode === 'route-first'
+    ) {
+      result = await runHybridStateGraph({
+        request: effectiveRequest,
+        classification,
+        logger: runtimeLogger,
+        executeRouteFirst: runRouteFirstAgent,
+      })
+    } else if (mode.effectiveAgentMode === 'orchestrated') {
+      result = await runOrchestratedAgent(effectiveRequest)
+    } else {
+      result = await runRouteFirstAgent(effectiveRequest)
+    }
+    if (result?.recovered === true || result?.retryInfo?.recovered === true) {
+      runtimeLogger.emit('agent.recovery.event', {
+        stage: 'completed',
+        recovered: true,
+        fallbackUsed: false,
+      })
+    }
+    runtimeLogger.emit(
+      'agent.completion.checked',
+      {
+        completionState: result?.completionState,
+        isComplete:
+          result?.status === 'completed' &&
+          result?.completionState !== 'executed_unverified' &&
+          result?.completionState !== 'failed_after_execution',
+        evidence: result?.evidenceSummary,
+      },
+    )
+    runtimeLogger.emit(
+      'agent.run.finished',
+      buildRunFinishedDetails(result, runtimeLogger, 'completed'),
+    )
+    return result
+  } catch (error) {
+    runtimeLogger.emit(
+      'agent.error.classified',
+      buildErrorDetails(error),
+      { level: 'error' },
+    )
+    runtimeLogger.emit(
+      'agent.run.finished',
+      {
+        status: 'failed',
+        terminationReason:
+          error?.code ||
+          error?.routeDecision?.stopReason ||
+          error?.completionState ||
+          'failed',
+        agentMode: error?.agentMode,
+        completionState: error?.completionState,
+        durationMs: runtimeLogger.elapsedMs(),
+      },
+      { level: 'error' },
+    )
+    throw error
+  }
 }
