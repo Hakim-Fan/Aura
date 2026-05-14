@@ -75,11 +75,15 @@ const AUTO_WORK_MEMORY_TOOL_NAMES = new Set([
   'write_file',
 ])
 
-const COMMAND_EXIT_STATUS_TOOLS = new Set([
-  'exec_command',
-  'run_shell',
-  'write_stdin',
-])
+// 修改前
+// const COMMAND_EXIT_STATUS_TOOLS = new Set([
+//   'exec_command',
+//   'run_shell',
+//   'write_stdin',
+// ])
+
+// 修改后
+const COMMAND_EXIT_STATUS_TOOLS = new Set([])
 
 const MAX_AUTO_TOOL_EVIDENCE_ENTRIES = 24
 const MAX_PROGRESS_LIST_ITEMS = 12
@@ -280,7 +284,7 @@ function throwIfAborted(signal, tool) {
 
 function waitForAbort(signal, tool) {
   if (!signal) {
-    return new Promise(() => {})
+    return new Promise(() => { })
   }
 
   if (signal.aborted) {
@@ -335,7 +339,7 @@ async function runShellStreaming(
       onUpdate?.(
         truncate(
           [stdout.trim(), stderr.trim()].filter(Boolean).join('\n\n') ||
-            'Command is running...',
+          'Command is running...',
         ),
       )
     }
@@ -1465,10 +1469,10 @@ function normalizeMcpServerEntries(items) {
       fingerprint,
       existing
         ? {
-            ...existing,
-            ...normalized,
-            id: existing.id || normalized.id,
-          }
+          ...existing,
+          ...normalized,
+          id: existing.id || normalized.id,
+        }
         : normalized,
     )
   }
@@ -1544,34 +1548,34 @@ async function upsertMcpServer(context, serverInput) {
       serverInput.enabled !== false,
     healthStatus:
       matchedServer &&
-      matchedServer.command === commandSpec.command &&
-      matchedServer.args === commandSpec.args.join(' ') &&
-      matchedServer.cwd === cwd &&
-      matchedServer.env === env
+        matchedServer.command === commandSpec.command &&
+        matchedServer.args === commandSpec.args.join(' ') &&
+        matchedServer.cwd === cwd &&
+        matchedServer.env === env
         ? matchedServer.healthStatus || 'unknown'
         : 'unknown',
     healthMessage:
       matchedServer &&
-      matchedServer.command === commandSpec.command &&
-      matchedServer.args === commandSpec.args.join(' ') &&
-      matchedServer.cwd === cwd &&
-      matchedServer.env === env
+        matchedServer.command === commandSpec.command &&
+        matchedServer.args === commandSpec.args.join(' ') &&
+        matchedServer.cwd === cwd &&
+        matchedServer.env === env
         ? matchedServer.healthMessage || ''
         : '',
     lastCheckedAt:
       matchedServer &&
-      matchedServer.command === commandSpec.command &&
-      matchedServer.args === commandSpec.args.join(' ') &&
-      matchedServer.cwd === cwd &&
-      matchedServer.env === env
+        matchedServer.command === commandSpec.command &&
+        matchedServer.args === commandSpec.args.join(' ') &&
+        matchedServer.cwd === cwd &&
+        matchedServer.env === env
         ? matchedServer.lastCheckedAt
         : undefined,
     toolCount:
       matchedServer &&
-      matchedServer.command === commandSpec.command &&
-      matchedServer.args === commandSpec.args.join(' ') &&
-      matchedServer.cwd === cwd &&
-      matchedServer.env === env
+        matchedServer.command === commandSpec.command &&
+        matchedServer.args === commandSpec.args.join(' ') &&
+        matchedServer.cwd === cwd &&
+        matchedServer.env === env
         ? matchedServer.toolCount
         : undefined,
     isDefault: serverInput.isDefault === true,
@@ -2821,15 +2825,15 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         ? `$ ${shellPatchInterception.originalCommand}`
         : shellFileMutationInterception?.originalCommand
           ? `$ ${shellFileMutationInterception.originalCommand}`
-        : (
-              effectiveTool.name === 'run_shell' &&
-              typeof effectiveArgs?.command === 'string'
-            ) || (
+          : (
+            effectiveTool.name === 'run_shell' &&
+            typeof effectiveArgs?.command === 'string'
+          ) || (
               effectiveTool.name === 'exec_command' &&
               typeof effectiveArgs?.cmd === 'string'
             )
-          ? `$ ${effectiveTool.name === 'exec_command' ? effectiveArgs.cmd : effectiveArgs.command}`
-          : stringifyOutput(effectiveArgs ?? {}),
+            ? `$ ${effectiveTool.name === 'exec_command' ? effectiveArgs.cmd : effectiveArgs.command}`
+            : stringifyOutput(effectiveArgs ?? {}),
   }
 
   function updateEvent(partial) {
@@ -3023,10 +3027,10 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
           },
           ...(typeof hooks.createExecutionStepId === 'function'
             ? {
-                createExecutionStepId(type, hint) {
-                  return hooks.createExecutionStepId(type, hint)
-                },
-              }
+              createExecutionStepId(type, hint) {
+                return hooks.createExecutionStepId(type, hint)
+              },
+            }
             : {}),
           onWorkMemory(memory) {
             hooks.onWorkMemory?.(memory)
@@ -3042,14 +3046,14 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       nonzeroExitCode === null
         ? null
         : createStructuredError(`命令退出码为 ${nonzeroExitCode}。`, {
-            source: 'tool',
-            category: 'execution_failed',
-            code: 'COMMAND_EXIT_NONZERO',
-            detail: `Command "${effectiveTool.name}" exited with code ${nonzeroExitCode}.`,
-            suggestedAction:
-              '请查看命令输出中的错误信息，修复后重新执行；不要在非零退出码后宣称任务已完成。',
-            retryable: true,
-          })
+          source: 'tool',
+          category: 'execution_failed',
+          code: 'COMMAND_EXIT_NONZERO',
+          detail: `Command "${effectiveTool.name}" exited with code ${nonzeroExitCode}.`,
+          suggestedAction:
+            '请查看命令输出中的错误信息，修复后重新执行；不要在非零退出码后宣称任务已完成。',
+          retryable: true,
+        })
     updateEvent({
       status: commandExitError ? 'error' : 'success',
       output: stringifyOutput(output),
