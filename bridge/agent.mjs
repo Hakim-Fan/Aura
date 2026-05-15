@@ -75,11 +75,16 @@ import {
 } from './agentRuntimeLogs.mjs'
 import { classifyAgentTask } from './agent/taskClassifier.mjs'
 import { runHybridStateGraph } from './agent/stateGraphRuntime.mjs'
+import {
+  buildToolFailureContinuationNote,
+  shouldContinueAfterToolFailure,
+} from './agent/toolFailureContinuationGate.mjs'
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ROUTE_ESCALATION_TOOL_NAME = 'route_request_escalation'
 const ROUTE_ESCALATION_REQUEST_CODE = 'ROUTE_ESCALATION_REQUEST'
 const MAX_ROUTE_RUNTIME_PASSES = 5
+const MAX_TOOL_FAILURE_CONTINUATION_ATTEMPTS = 2
 const CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
 
 function createId(prefix = 'task') {
@@ -1678,6 +1683,7 @@ export async function runRouteFirstAgent(request) {
   const routeNotes = []
   const routeHistory = []
   let routeEscalationCount = 0
+  let toolFailureContinuationCount = 0
   let lastSelectedCapabilities = null
   let lastSystemPrompt = ''
   let lastRouteDecision = {
@@ -1935,6 +1941,30 @@ export async function runRouteFirstAgent(request) {
       const runtimeBlocks = buildRuntimeBlocks(routeStopReason)
       result = enforceEvidencePolicy(result, toolEvents, promptRouteState, runtimeBlocks)
       result = applyCompletionGate(result, promptRouteState)
+
+      const toolFailureContinuation = shouldContinueAfterToolFailure({
+        result,
+        toolEvents,
+        routeState: promptRouteState,
+        continuationAttempts: toolFailureContinuationCount,
+        maxContinuationAttempts: MAX_TOOL_FAILURE_CONTINUATION_ATTEMPTS,
+      })
+      if (toolFailureContinuation.shouldContinue && !routeStopReason) {
+        toolFailureContinuationCount += 1
+        routeNotes.push(
+          buildToolFailureContinuationNote({
+            decision: toolFailureContinuation,
+            tools: allTools,
+          }),
+        )
+        taskTracker.setStatus(
+          currentTaskId,
+          'running',
+          '检测到执行型工具失败，继续尝试修复或替代执行路径',
+        )
+        hooks?.onPhaseChange?.('preparing')
+        continue
+      }
 
       routeHistory.push(turnSummary)
       lastRouteDecision = buildRouteDecisionSnapshot({

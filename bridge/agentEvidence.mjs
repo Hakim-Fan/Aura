@@ -21,6 +21,7 @@ const WRITE_EFFECT_TOOLS = new Set([
   'edit_file',
   'multi_edit_file',
   'replace_line_range',
+  'aura_install_skill',
   'aura_enable_skill',
   'aura_enable_plugin',
   'aura_import_skill',

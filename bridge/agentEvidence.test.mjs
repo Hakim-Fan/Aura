@@ -169,6 +169,28 @@ test('failed command execution is not hidden by advise route mode', () => {
   )
 })
 
+test('failed Aura skill installation is treated as unresolved execution failure', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'aura_install_skill',
+      source: 'builtin',
+      status: 'error',
+      errorInfo: {
+        category: 'execution_failed',
+        summary: 'GitHub API returned HTTP 403',
+      },
+    },
+  ])
+
+  assert.equal(evidence.hasAnyExecution, true)
+  assert.equal(evidence.hasWriteEffect, true)
+  assert.equal(evidence.hasExecutionFailure, true)
+  assert.equal(
+    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    'failed_after_execution',
+  )
+})
+
 test('execute route with only read tool progress is executed_unverified', () => {
   const evidence = collectEvidenceFromToolEvents([
     {

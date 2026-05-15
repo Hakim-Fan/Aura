@@ -1,3 +1,5 @@
+import { shouldContinueAfterToolFailure } from './toolFailureContinuationGate.mjs'
+
 const INCOMPLETE_COMPLETION_STATES = new Set([
   'executed_unverified',
   'failed_after_execution',
@@ -42,13 +44,24 @@ export function decideGraphCompletion({
   }
 
   if (completionState === 'failed_after_execution' || executionStatus === 'failed') {
+    const failureContinuation = shouldContinueAfterToolFailure({
+      result,
+      toolEvents: executionResult?.toolEvents,
+      routeState: { answerMode: 'execute' },
+      continuationAttempts: passIndex,
+      maxContinuationAttempts: maxPasses,
+    })
+    const shouldContinue =
+      failureContinuation.shouldContinue ||
+      (executionStatus === 'failed' && canContinue)
     return {
       isComplete: false,
       graphState: 'BLOCKED',
-      status: canContinue ? 'running' : 'blocked',
+      status: shouldContinue ? 'running' : 'blocked',
       reason: 'failed_after_execution',
-      nextAction: canContinue ? 'attempt_recovery' : 'recover_or_report_failure',
-      canContinue,
+      nextAction: shouldContinue ? 'attempt_recovery' : 'recover_or_report_failure',
+      canContinue: shouldContinue,
+      continuationGate: failureContinuation,
     }
   }
 

@@ -266,7 +266,7 @@ export function getRetryDelay(attempt, retryConfig) {
 export function shouldRetry(toolExecutionError, currentAttempt) {
   if (!toolExecutionError?.retryable) return false
   if (!toolExecutionError?.retryConfig) return false
-  return currentAttempt < toolExecutionError.retryConfig.maxRetries
+  return currentAttempt <= toolExecutionError.retryConfig.maxRetries
 }
 
 export function mergeToolErrors(existing, incoming) {
