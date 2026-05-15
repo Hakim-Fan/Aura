@@ -74,6 +74,10 @@ import {
   wrapAgentRuntimeHooks,
 } from './agentRuntimeLogs.mjs'
 import { classifyAgentTask } from './agent/taskClassifier.mjs'
+import {
+  applyTaskFrameToClassification,
+  resolveTaskFrame,
+} from './agent/taskFrame.mjs'
 import { runHybridStateGraph } from './agent/stateGraphRuntime.mjs'
 import {
   buildToolFailureContinuationNote,
@@ -495,12 +499,26 @@ function isLongTaskCompletionBlocked(settings, routeState, result = {}) {
   )
 }
 
-function completeCurrentTaskWithResult(taskTracker, currentTaskId, settings, routeState, result) {
+function isCompletionStateIncompleteForExecution(result = {}, routeState = {}, taskFrame = {}) {
   if (
     result?.completionState === 'failed_after_execution' ||
     result?.completionState === 'blocked_by_capability' ||
-    result?.completionState === 'blocked_by_approval'
+    result?.completionState === 'blocked_by_approval' ||
+    result?.completionState === 'executed_unverified'
   ) {
+    return true
+  }
+
+  const requiresEvidence =
+    routeState?.answerMode === 'execute' ||
+    result?.routeDecision?.answerMode === 'execute' ||
+    taskFrame?.requiresEvidenceForDone === true
+
+  return result?.completionState === 'not_executed' && requiresEvidence
+}
+
+function completeCurrentTaskWithResult(taskTracker, currentTaskId, settings, routeState, result) {
+  if (isCompletionStateIncompleteForExecution(result, routeState)) {
     taskTracker.completeTask(
       currentTaskId,
       result?.deliveryPolicy?.deliveryNote || '执行未完成，未标记为完成',
@@ -1328,16 +1346,34 @@ function buildToolCallOnlyFallbackMessage(toolEvents) {
   ].join('\n\n')
 }
 
+function detectProtocolLeak(message) {
+  const value = String(message || '')
+  const hasToolCall = /<tool_call>|<\|tool_calls_section_begin\|>/iu.test(value)
+  const hasToolResult = /<tool_result>/iu.test(value)
+  if (!hasToolCall && !hasToolResult) {
+    return null
+  }
+  return {
+    hasToolCall,
+    hasToolResult,
+    originalMessageLength: value.length,
+  }
+}
+
 function sanitizeResultMessage(result, toolEvents = []) {
   const originalMessage = typeof result?.message === 'string' ? result.message : ''
+  const protocolLeak = detectProtocolLeak(originalMessage)
   const strippedMessage = stripInlineToolCallText(originalMessage).trim()
   if (strippedMessage) {
-    return strippedMessage === originalMessage ? result : { ...result, message: strippedMessage }
+    return strippedMessage === originalMessage
+      ? result
+      : { ...result, message: strippedMessage, protocolLeak }
   }
   if (originalMessage.trim() && originalMessage !== strippedMessage) {
     return {
       ...result,
       message: buildToolCallOnlyFallbackMessage(toolEvents),
+      protocolLeak,
     }
   }
   return result
@@ -2226,7 +2262,7 @@ export async function runRouteFirstAgent(request) {
   }
 }
 
-async function runFastPathAgent(request, classification) {
+async function runFastPathAgent(request, classification, taskFrame) {
   const {
     settings,
     messages: requestedMessages,
@@ -2300,6 +2336,7 @@ async function runFastPathAgent(request, classification) {
     reasoning: result.reasoning || [],
     taskTree: [],
     classifier: classification,
+    taskFrame,
   }
 }
 
@@ -2325,10 +2362,19 @@ export async function runAgent(request) {
     hooks,
     settings: effectiveSettings,
   }
-  const classification = classifyAgentTask({
+  const legacyClassification = classifyAgentTask({
     messages: effectiveRequest.messages,
     settings: effectiveSettings,
   })
+  const taskFrame = resolveTaskFrame({
+    messages: effectiveRequest.messages,
+    runtime: effectiveRequest.runtime,
+    settings: effectiveSettings,
+  })
+  const classification = applyTaskFrameToClassification(
+    legacyClassification,
+    taskFrame,
+  )
   const graphCheckpoint =
     effectiveRequest?.runtime?.graphCheckpoint ||
     effectiveRequest?.runtime?.restoreGraphCheckpoint ||
@@ -2354,6 +2400,17 @@ export async function runAgent(request) {
     reason: classification.reason,
     confidence: classification.confidence,
     latestUserTextLength: classification.latestUserTextLength,
+    legacyPathMode: legacyClassification.pathMode,
+    taskFrameBlockedFastPath: classification.taskFrameBlockedFastPath === true,
+  })
+  runtimeLogger.emit('agent.task_frame.resolved', {
+    source: taskFrame.source,
+    blocksFastPath: taskFrame.blocksFastPath,
+    recommendedPathMode: taskFrame.recommendedPathMode,
+    pendingActionCount: taskFrame.pendingActions.length,
+    priorExecutionState: taskFrame.priorExecution?.completionState,
+    requiresEvidenceForDone: taskFrame.requiresEvidenceForDone,
+    reasons: taskFrame.reasons,
   })
   runtimeLogger.emit('agent.path.selected', {
     pathMode: executionPathMode,
@@ -2392,7 +2449,7 @@ export async function runAgent(request) {
       runtimeLogger.emit('agent.fast_path.started', {
         reason: classification.reason,
       })
-      result = await runFastPathAgent(effectiveRequest, classification)
+      result = await runFastPathAgent(effectiveRequest, classification, taskFrame)
       runtimeLogger.emit('agent.fast_path.finished', {
         status: result?.status || 'completed',
         toolCount: 0,
@@ -2423,14 +2480,28 @@ export async function runAgent(request) {
         fallbackUsed: false,
       })
     }
+    if (result?.protocolLeak) {
+      runtimeLogger.emit(
+        'agent.protocol_leak.detected',
+        {
+          hasToolCall: result.protocolLeak.hasToolCall,
+          hasToolResult: result.protocolLeak.hasToolResult,
+          originalMessageLength: result.protocolLeak.originalMessageLength,
+          toolEventCount: Array.isArray(result?.toolEvents) ? result.toolEvents.length : 0,
+          action: result.protocolLeak.hasToolResult
+            ? 'discarded_simulated_tool_transcript'
+            : 'stripped_inline_tool_markers',
+        },
+        { level: 'warn' },
+      )
+    }
     runtimeLogger.emit(
       'agent.completion.checked',
       {
         completionState: result?.completionState,
         isComplete:
           result?.status === 'completed' &&
-          result?.completionState !== 'executed_unverified' &&
-          result?.completionState !== 'failed_after_execution',
+          !isCompletionStateIncompleteForExecution(result, {}, taskFrame),
         evidence: result?.evidenceSummary,
       },
     )

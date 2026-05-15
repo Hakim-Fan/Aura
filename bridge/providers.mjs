@@ -1675,10 +1675,16 @@ function normalizeInlineToolName(rawName) {
     return ''
   }
 
-  return normalized
+  const cleaned = normalized
     .replace(/^functions\./, '')
     .replace(/:\d+$/, '')
     .trim()
+
+  if (cleaned === 'bash' || cleaned === 'shell' || cleaned === 'terminal') {
+    return 'run_shell'
+  }
+
+  return cleaned
 }
 
 function normalizeInlineToolArgs(toolName, args) {
@@ -1724,7 +1730,8 @@ function extractInlineToolCalls(text, startIndex = 0) {
   const normalizedText = typeof text === 'string' ? text : ''
   if (
     !normalizedText.includes('<|tool_calls_section_begin|>') &&
-    !normalizedText.includes('<tool_call>')
+    !normalizedText.includes('<tool_call>') &&
+    !normalizedText.includes('<tool_result>')
   ) {
     return {
       text: normalizedText,
@@ -1732,8 +1739,13 @@ function extractInlineToolCalls(text, startIndex = 0) {
     }
   }
 
+  const firstSimulatedToolResultIndex = normalizedText.search(/<tool_result>/iu)
+  const inlineText =
+    firstSimulatedToolResultIndex >= 0
+      ? normalizedText.slice(0, firstSimulatedToolResultIndex)
+      : normalizedText
   const toolCalls = []
-  const withCodexMarkersRemoved = normalizedText
+  const withCodexMarkersRemoved = inlineText
     .replace(
       /<\|tool_calls_section_begin\|>([\s\S]*?)<\|tool_calls_section_end\|>/gu,
       (_, sectionBody) => {
@@ -1777,6 +1789,43 @@ function extractInlineToolCalls(text, startIndex = 0) {
 
   const cleanedText = withCodexMarkersRemoved
     .replace(
+      /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/giu,
+      (_, rawJson) => {
+        let parsed
+        try {
+          parsed = JSON.parse(String(rawJson || '').trim())
+        } catch {
+          return ''
+        }
+
+        const toolName = normalizeInlineToolName(parsed?.name || parsed?.tool)
+        if (!toolName) {
+          return ''
+        }
+
+        const rawArguments =
+          parsed?.arguments && typeof parsed.arguments === 'object'
+            ? parsed.arguments
+            : parsed?.args && typeof parsed.args === 'object'
+              ? parsed.args
+              : {}
+
+        toolCalls.push({
+          index: startIndex + toolCalls.length,
+          id: `inline-tool-call-${startIndex + toolCalls.length}`,
+          type: 'function',
+          function: {
+            name: toolName,
+            arguments: JSON.stringify(
+              normalizeInlineToolArgs(toolName, rawArguments),
+            ),
+          },
+        })
+
+        return ''
+      },
+    )
+    .replace(
       /<tool_call>\s*<function=([^\s>]+)>\s*([\s\S]*?)<\/function>\s*<\/tool_call>/giu,
       (_, rawName, functionBody) => {
         const toolName = normalizeInlineToolName(rawName)
@@ -1808,6 +1857,7 @@ function extractInlineToolCalls(text, startIndex = 0) {
         return ''
       },
     )
+    .replace(/<tool_result>[\s\S]*?<\/tool_result>/giu, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 

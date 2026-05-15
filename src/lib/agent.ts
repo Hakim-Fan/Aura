@@ -499,6 +499,14 @@ async function buildAgentRuntimeMessage(
     content: message.content,
     parts: nextParts as ChatContentPart[],
     researchMode: message.researchMode,
+    activity: message.activity,
+    events: message.events || [],
+    steps: message.steps || [],
+    agentMode: message.agentMode,
+    routeDecision: message.routeDecision,
+    completionState: message.completionState,
+    evidenceSummary: message.evidenceSummary,
+    deliveryNote: message.deliveryNote,
   }
 }
 

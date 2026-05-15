@@ -6,6 +6,11 @@ import {
   createHybridPlan,
 } from './agent/stateGraphRuntime.mjs'
 import { createGraphCheckpointRuntime } from './agent/checkpointRuntime.mjs'
+import { classifyAgentTask } from './agent/taskClassifier.mjs'
+import {
+  applyTaskFrameToClassification,
+  resolveTaskFrame,
+} from './agent/taskFrame.mjs'
 
 test('runAgent selects fast path before provider validation for simple no-tool tasks', async () => {
   const runtimeEvents = []
@@ -54,6 +59,109 @@ test('runAgent selects fast path before provider validation for simple no-tool t
   const pathEvent = runtimeEvents.find(event => event.event === 'agent.path.selected')
   assert.equal(pathEvent.details.pathMode, 'fast')
   assert.equal(pathEvent.details.architectureMode, 'legacy')
+})
+
+test('task frame blocks fast path for prior incomplete execution', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      content: '我需要继续执行后才能完成。',
+      completionState: 'not_executed',
+      routeDecision: {
+        answerMode: 'execute',
+        completionPolicy: {
+          requiresEvidenceForDone: true,
+        },
+      },
+    },
+    {
+      role: 'user',
+      content: '可以',
+    },
+  ]
+  const legacyClassification = classifyAgentTask({
+    messages,
+  })
+  const taskFrame = resolveTaskFrame({
+    messages,
+  })
+  const classification = applyTaskFrameToClassification(
+    legacyClassification,
+    taskFrame,
+  )
+
+  assert.equal(legacyClassification.pathMode, 'fast')
+  assert.equal(taskFrame.blocksFastPath, true)
+  assert.equal(taskFrame.priorExecution.completionState, 'not_executed')
+  assert.equal(classification.pathMode, 'standard')
+  assert.equal(classification.requiresTools, true)
+})
+
+test('runAgent uses task frame gate instead of fast path for incomplete execution continuation', async () => {
+  const runtimeEvents = []
+
+  await assert.rejects(
+    () => runAgent({
+      settings: {
+        provider: 'openai',
+        apiKey: '',
+        model: 'test-model',
+        agentArchitectureMode: 'route-first',
+        executionMode: 'bounded',
+      },
+      messages: [
+        {
+          role: 'assistant',
+          content: '我需要继续执行后才能完成。',
+          completionState: 'not_executed',
+          routeDecision: {
+            answerMode: 'execute',
+            completionPolicy: {
+              requiresEvidenceForDone: true,
+            },
+          },
+        },
+        {
+          role: 'user',
+          content: '可以',
+        },
+      ],
+      hooks: {
+        onRuntimeLog(event) {
+          runtimeEvents.push(event)
+        },
+      },
+      logContext: {
+        sessionId: 'session-task-frame',
+        taskId: 'task-frame-gate',
+        assistantMessageId: 'assistant-task-frame',
+      },
+    }),
+    error => error?.code === 'MISSING_API_KEY',
+  )
+
+  const eventNames = runtimeEvents.map(event => event.event)
+  assert.ok(!eventNames.includes('agent.fast_path.started'))
+  const taskFrameEvent = runtimeEvents.find(event => event.event === 'agent.task_frame.resolved')
+  assert.equal(taskFrameEvent.details.blocksFastPath, true)
+  const classifierEvent = runtimeEvents.find(event => event.event === 'agent.classifier.result')
+  assert.equal(classifierEvent.details.legacyPathMode, 'fast')
+  assert.equal(classifierEvent.details.pathMode, 'standard')
+})
+
+test('legacy classifier no longer treats bare git clone wording as a durable continuation signal', () => {
+  const classification = classifyAgentTask({
+    messages: [
+      {
+        role: 'user',
+        content: '你可以 git clone',
+      },
+    ],
+  })
+
+  assert.equal(classification.pathMode, 'fast')
+  assert.equal(classification.requiresTools, false)
+  assert.equal(classification.requiresWrite, false)
 })
 
 test('runAgent sends complex tasks through the hybrid graph wrapper', async () => {

@@ -159,6 +159,34 @@ test('extractInlineToolCalls removes xml-style raw tool markers from visible tex
   })
 })
 
+test('extractInlineToolCalls converts json tool markers and strips hallucinated tool results', () => {
+  const extracted = extractInlineToolCalls(
+    [
+      '我先执行。',
+      '<tool_call>',
+      '{"name":"bash","arguments":{"command":"git clone https://github.com/anthropics/skills.git /tmp/skills 2>&1"}}',
+      '</tool_call>',
+      '<tool_result>',
+      'Cloning into /tmp/skills...',
+      '</tool_result>',
+      '<tool_call>',
+      '{"name":"bash","arguments":{"command":"cat /tmp/skills/skills/docx/skill.md"}}',
+      '</tool_call>',
+      '<tool_result>',
+      '# Docx Skill',
+      '</tool_result>',
+      '已完成安装。',
+    ].join('\n'),
+  )
+
+  assert.equal(extracted.text, '我先执行。')
+  assert.equal(extracted.toolCalls.length, 1)
+  assert.equal(extracted.toolCalls[0].function.name, 'run_shell')
+  assert.deepEqual(parseToolArguments(extracted.toolCalls[0].function.arguments), {
+    command: 'git clone https://github.com/anthropics/skills.git /tmp/skills 2>&1',
+  })
+})
+
 test('provider failure recovery uses a fixed five-retry policy', () => {
   assert.equal(getProviderFailureRecoveryMaxRetries(), 5)
 })
