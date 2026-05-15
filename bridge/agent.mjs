@@ -2299,8 +2299,12 @@ export async function runAgent(request) {
     messages: effectiveRequest.messages,
     settings: effectiveSettings,
   })
+  const graphCheckpoint =
+    effectiveRequest?.runtime?.graphCheckpoint ||
+    effectiveRequest?.runtime?.restoreGraphCheckpoint ||
+    null
   const executionPathMode =
-    mode.architectureMode === 'graph' || mode.architectureMode === 'orchestrated'
+    graphCheckpoint || mode.architectureMode === 'graph' || mode.architectureMode === 'orchestrated'
       ? 'long'
       : classification.pathMode
   runtimeLogger.setPathMode(executionPathMode)
@@ -2375,6 +2379,7 @@ export async function runAgent(request) {
         classification,
         logger: runtimeLogger,
         executeRouteFirst: runRouteFirstAgent,
+        restoreCheckpoint: graphCheckpoint,
       })
     } else if (mode.effectiveAgentMode === 'orchestrated') {
       result = await runOrchestratedAgent(effectiveRequest)
@@ -2401,7 +2406,7 @@ export async function runAgent(request) {
     )
     runtimeLogger.emit(
       'agent.run.finished',
-      buildRunFinishedDetails(result, runtimeLogger, 'completed'),
+      buildRunFinishedDetails(result, runtimeLogger, result?.status || 'completed'),
     )
     return result
   } catch (error) {

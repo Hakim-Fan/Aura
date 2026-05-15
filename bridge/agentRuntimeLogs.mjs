@@ -171,6 +171,8 @@ export function wrapAgentRuntimeHooks(hooks = {}, logger) {
   if (!logger) {
     return hooks
   }
+  let lastRouteTier = null
+  let lastEscalationCount = 0
 
   return {
     ...hooks,
@@ -178,6 +180,7 @@ export function wrapAgentRuntimeHooks(hooks = {}, logger) {
       hooks?.onRuntimeLog?.(event)
     },
     onRouteDecision(routeDecision) {
+      const escalationCount = safeNumber(routeDecision?.escalationCount) || 0
       logger.emit('agent.route.decision', {
         capabilityTier: routeDecision?.capabilityTier,
         answerMode: routeDecision?.answerMode,
@@ -185,8 +188,22 @@ export function wrapAgentRuntimeHooks(hooks = {}, logger) {
         mountedTools: compactArray(routeDecision?.mountedCapabilities?.tools),
         budgets: routeDecision?.budgets,
         stopReason: routeDecision?.stopReason,
-        escalationCount: routeDecision?.escalationCount,
+        escalationCount,
       })
+      if (escalationCount > lastEscalationCount) {
+        const tierHistory = compactArray(routeDecision?.tierHistory)
+        const fromTier =
+          tierHistory.length > 1 ? tierHistory[tierHistory.length - 2] : lastRouteTier
+        logger.emit('agent.escalation.event', {
+          fromTier,
+          toTier: routeDecision?.capabilityTier,
+          reason: routeDecision?.stopReason || 'route capability escalation',
+          budgetAfter: routeDecision?.budgets,
+          escalationCount,
+        })
+      }
+      lastRouteTier = routeDecision?.capabilityTier || lastRouteTier
+      lastEscalationCount = escalationCount
       hooks?.onRouteDecision?.(routeDecision)
     },
     onToolEvent(event) {
