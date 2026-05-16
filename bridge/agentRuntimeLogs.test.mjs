@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   buildErrorDetails,
+  buildMetricsSummaryDetails,
   buildRunFinishedDetails,
   createAgentRuntimeLogger,
   normalizeAgentArchitectureMode,
@@ -154,6 +155,11 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
 test('run finished and error detail helpers expose validation-friendly summaries', () => {
   const logger = {
     elapsedMs: () => 42,
+    baseDetails: {
+      architectureMode: 'graph',
+      requestedArchitectureMode: 'graph',
+      pathMode: 'long',
+    },
   }
   const finished = buildRunFinishedDetails({
     status: 'completed',
@@ -169,6 +175,37 @@ test('run finished and error detail helpers expose validation-friendly summaries
   assert.equal(finished.inputTokens, 11)
   assert.equal(finished.outputTokens, 7)
   assert.equal(finished.durationMs, 42)
+
+  const metrics = buildMetricsSummaryDetails({
+    status: 'blocked',
+    pathMode: 'long',
+    completionState: 'executed_unverified',
+    graphState: 'BLOCKED',
+    graphCompletion: {
+      reason: 'verification_required',
+      nextAction: 'run_verification',
+    },
+    graphExecutions: [
+      { status: 'completed' },
+      { status: 'failed', nextRecommendation: 'recover using recent evidence' },
+    ],
+    graphCheckpoints: [{ id: 'checkpoint-1' }, { id: 'checkpoint-2' }],
+    usage: { inputTokens: 17, outputTokens: 9 },
+    toolEvents: [{ id: 'tool-1' }],
+  }, logger, 'blocked')
+
+  assert.equal(metrics.status, 'blocked')
+  assert.equal(metrics.architectureMode, 'graph')
+  assert.equal(metrics.pathMode, 'long')
+  assert.equal(metrics.checkpointCount, 2)
+  assert.equal(metrics.graphExecutionCount, 2)
+  assert.equal(metrics.recovered, true)
+  assert.equal(metrics.recoveryCount, 1)
+  assert.equal(metrics.graphState, 'BLOCKED')
+  assert.equal(metrics.graphCompletionReason, 'verification_required')
+  assert.equal(metrics.graphNextAction, 'run_verification')
+  assert.equal(metrics.inputTokens, 17)
+  assert.equal(metrics.outputTokens, 9)
 
   const error = new Error('Provider failed with a long message')
   error.code = 'PROVIDER_FAILED'

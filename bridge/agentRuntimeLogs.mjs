@@ -155,6 +155,38 @@ export function buildRunFinishedDetails(result = {}, logger, status = 'completed
   }
 }
 
+export function buildMetricsSummaryDetails(result = {}, logger, status = 'completed') {
+  const finished = buildRunFinishedDetails(result, logger, status)
+  const graphExecutions = Array.isArray(result?.graphExecutions) ? result.graphExecutions : []
+  const graphCheckpoints = Array.isArray(result?.graphCheckpoints) ? result.graphCheckpoints : []
+  const recovered =
+    finished.recovered ||
+    graphExecutions.some(execution =>
+      execution?.status === 'recovered' ||
+      String(execution?.nextRecommendation || '').toLowerCase().includes('recover'),
+    )
+  const recoveryCount =
+    (finished.recovered ? 1 : 0) +
+    graphExecutions.filter(execution =>
+      execution?.status === 'recovered' ||
+      String(execution?.nextRecommendation || '').toLowerCase().includes('recover'),
+    ).length
+
+  return {
+    ...finished,
+    architectureMode: logger?.baseDetails?.architectureMode,
+    requestedArchitectureMode: logger?.baseDetails?.requestedArchitectureMode,
+    pathMode: result?.pathMode || logger?.baseDetails?.pathMode,
+    checkpointCount: graphCheckpoints.length,
+    recoveryCount,
+    recovered,
+    graphState: result?.graphState,
+    graphExecutionCount: graphExecutions.length,
+    graphCompletionReason: result?.graphCompletion?.reason,
+    graphNextAction: result?.graphCompletion?.nextAction,
+  }
+}
+
 export function buildErrorDetails(error = {}) {
   const errorInfo = error?.errorInfo || {}
   return {

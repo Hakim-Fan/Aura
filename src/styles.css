@@ -2100,6 +2100,7 @@ textarea:focus {
 }
 
 .log-viewer-segment,
+.log-viewer-scopes,
 .log-viewer-levels {
   display: inline-flex;
   align-items: center;
@@ -2111,6 +2112,7 @@ textarea:focus {
 }
 
 .log-viewer-segment button,
+.log-viewer-scopes button,
 .log-viewer-levels button {
   height: 30px;
   display: inline-flex;
@@ -2125,6 +2127,7 @@ textarea:focus {
 }
 
 .log-viewer-segment button.active,
+.log-viewer-scopes button.active,
 .log-viewer-levels button.active {
   background: rgba(79, 123, 116, 0.12);
   color: var(--accent-soft-strong);

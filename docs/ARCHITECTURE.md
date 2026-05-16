@@ -620,6 +620,8 @@ Agent Runtime 的执行状态通过两条链路输出：
 - `agent.completion.checked`
 - `agent.error.classified`
 - `agent.run.finished`
+- `agent.metrics.summary`
+- `agent.validation.summary`
 
 这些日志遵守几个约束：
 
@@ -629,6 +631,8 @@ Agent Runtime 的执行状态通过两条链路输出：
 - `hybrid` / `graph` 是阶段性架构模式；需要回退时会记录 `agent.architecture.fallback`。
 - 日志只记录摘要、状态、id、token、耗时、错误分类等诊断字段，不记录完整文件内容、API key 或大段模型输出。
 - 日志失败不能影响 Agent 主执行路径。
+- `agent.metrics.summary` 是每次 run 的收口指标，成功和失败都会记录；`agent.validation.summary` 留给测试脚本或人工验收场景写入。
+- 工具错误的 `errorInfo` 必须保留 `code`，让日志看板和回归测试可以直接识别具体失败类型。
 
 关键运行时数据合约：
 

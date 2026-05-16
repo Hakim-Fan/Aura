@@ -15,6 +15,39 @@ async function withTempWorkspace(run) {
   }
 }
 
+function toolResultText(value) {
+  if (typeof value === 'string') {
+    return value
+  }
+  if (!value || typeof value !== 'object') {
+    return String(value)
+  }
+  if ('output' in value && value.output != null) {
+    return typeof value.output === 'string'
+      ? value.output
+      : JSON.stringify(value.output)
+  }
+  const error = value.error
+  const parts = [
+    error?.message,
+    error?.rawMessage,
+    error?.errorInfo?.summary,
+    error?.errorInfo?.detail,
+    error?.originalError?.message,
+    error?.originalError?.rawMessage,
+    error?.originalError?.errorInfo?.summary,
+    error?.originalError?.errorInfo?.detail,
+    typeof error?.toStructuredReport === 'function'
+      ? JSON.stringify(error.toStructuredReport(), null, 2)
+      : '',
+  ]
+  return parts.filter(Boolean).join('\n')
+}
+
+function parseToolResultJson(value) {
+  return JSON.parse(toolResultText(value))
+}
+
 test('parseApplyPatchShellCommand parses heredoc invocations with optional cd', () => {
   const parsed = parseApplyPatchShellCommand(
     [
@@ -86,7 +119,7 @@ test('invokeTool routes run_shell apply_patch invocations through the verified p
       await cleanup()
     }
 
-    const result = JSON.parse(output)
+    const result = parseToolResultJson(output)
     assert.equal(result.ok, true)
     assert.equal(toolEvents.at(-1).name, 'apply_patch')
     assert.equal(toolEvents.at(-1).status, 'success')
@@ -127,7 +160,7 @@ test('invokeTool blocks invalid apply_patch shell invocations before normal shel
       await cleanup()
     }
 
-    assert.match(output, /无效的 apply_patch shell 调用/)
+    assert.match(toolResultText(output), /无效的 apply_patch shell 调用/)
     assert.equal(toolEvents.at(-1).name, 'apply_patch')
     assert.equal(toolEvents.at(-1).status, 'error')
     assert.equal(toolEvents.at(-1).errorInfo?.code, 'INVALID_APPLY_PATCH_INVOCATION')

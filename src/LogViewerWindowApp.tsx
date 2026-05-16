@@ -24,9 +24,16 @@ import { openPathInDefaultApp } from './lib/workspace'
 
 type ViewerMode = 'live' | 'history'
 type LevelFilter = 'all' | AppLogLevel
+type LogScopeFilter = 'all' | 'agent' | 'metrics' | 'troubleshooting'
 
 const MAX_LIVE_LOG_ENTRIES = 300
 const LEVEL_FILTERS: LevelFilter[] = ['all', 'debug', 'info', 'warn', 'error']
+const LOG_SCOPE_FILTERS: Array<{ value: LogScopeFilter; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'agent', label: 'Agent' },
+  { value: 'metrics', label: '指标' },
+  { value: 'troubleshooting', label: '排障' },
+]
 
 function normalizeLevel(level: string): AppLogLevel {
   if (level === 'debug' || level === 'warn' || level === 'error') {
@@ -140,6 +147,20 @@ function summarizeEntry(entry: AppLogEntry) {
     'provider',
     'model',
     'cwd',
+    'pathMode',
+    'architectureMode',
+    'terminationReason',
+    'completionState',
+    'graphState',
+    'graphCompletionReason',
+    'graphNextAction',
+    'totalPasses',
+    'toolCount',
+    'checkpointCount',
+    'recoveryCount',
+    'durationMs',
+    'inputTokens',
+    'outputTokens',
   ]
   const parts = fields
     .map(key => {
@@ -161,6 +182,7 @@ function logSearchText(entry: AppLogEntry) {
     entry.timestamp,
     entry.level,
     entry.event,
+    findStringByKey(entry.details, 'runId'),
     findStringByKey(entry.details, 'sessionId'),
     findStringByKey(entry.details, 'messageId'),
     findStringByKey(entry.details, 'taskId'),
@@ -178,11 +200,16 @@ function logEntryKey(entry: AppLogEntry, index: number) {
 
 function getCorrelationId(entry: AppLogEntry) {
   return (
+    findStringByKey(entry.details, 'runId') ||
     findStringByKey(entry.details, 'taskId') ||
     findStringByKey(entry.details, 'messageId') ||
     findStringByKey(entry.details, 'sessionId') ||
     ''
   )
+}
+
+function isAgentEntry(entry: AppLogEntry) {
+  return entry.event.startsWith('agent.') || entry.event.startsWith('agent_')
 }
 
 function isTroubleshootingEntry(entry: AppLogEntry) {
@@ -201,6 +228,21 @@ function isTroubleshootingEntry(entry: AppLogEntry) {
   )
 }
 
+function matchesLogScope(entry: AppLogEntry, scope: LogScopeFilter) {
+  if (scope === 'all') {
+    return true
+  }
+  if (scope === 'agent') {
+    return isAgentEntry(entry)
+  }
+  if (scope === 'metrics') {
+    return entry.event === 'agent.metrics.summary' ||
+      entry.event === 'agent.validation.summary' ||
+      entry.event === 'agent.run.finished'
+  }
+  return isTroubleshootingEntry(entry)
+}
+
 function LogEntryRow({
   entry,
   index,
@@ -217,6 +259,7 @@ function LogEntryRow({
   onToggle: () => void
 }) {
   const level = normalizeLevel(entry.level)
+  const runId = findStringByKey(entry.details, 'runId')
   const sessionId = findStringByKey(entry.details, 'sessionId')
   const messageId = findStringByKey(entry.details, 'messageId')
   const taskId = findStringByKey(entry.details, 'taskId')
@@ -248,6 +291,7 @@ function LogEntryRow({
         <span className="log-entry__time">{formatTime(entry.timestamp)}</span>
         <span className="log-entry__event">{entry.event}</span>
         <span className="log-entry__ids">
+          {runId ? <span title={runId}>run {truncateMiddle(runId, 28)}</span> : null}
           {sessionId ? <span title={sessionId}>session {truncateMiddle(sessionId, 28)}</span> : null}
           {messageId ? <span title={messageId}>msg {truncateMiddle(messageId, 28)}</span> : null}
           {taskId ? <span title={taskId}>task {truncateMiddle(taskId, 28)}</span> : null}
@@ -331,6 +375,7 @@ export function LogViewerWindowApp() {
   const [logFiles, setLogFiles] = useState<AppLogFile[]>([])
   const [selectedDate, setSelectedDate] = useState('')
   const [levelFilter, setLevelFilter] = useState<LevelFilter>('all')
+  const [scopeFilter, setScopeFilter] = useState<LogScopeFilter>('all')
   const [search, setSearch] = useState('')
   const [expandedKey, setExpandedKey] = useState('')
   const [autoFollow, setAutoFollow] = useState(true)
@@ -346,12 +391,15 @@ export function LogViewerWindowApp() {
       if (levelFilter !== 'all' && level !== levelFilter) {
         return false
       }
+      if (!matchesLogScope(entry, scopeFilter)) {
+        return false
+      }
       if (!normalizedSearch) {
         return true
       }
       return logSearchText(entry).includes(normalizedSearch)
     })
-  }, [levelFilter, search, sourceEntries])
+  }, [levelFilter, scopeFilter, search, sourceEntries])
 
   const relatedEntriesById = useMemo(() => {
     const groups = new Map<string, AppLogEntry[]>()
@@ -538,9 +586,22 @@ export function LogViewerWindowApp() {
           <Search size={14} />
           <input
             onChange={event => setSearch(event.target.value)}
-            placeholder="搜索 event / sessionId / messageId / taskId / 内容"
+            placeholder="搜索 event / runId / sessionId / messageId / taskId / 内容"
             value={search}
           />
+        </div>
+
+        <div className="log-viewer-scopes">
+          {LOG_SCOPE_FILTERS.map(scope => (
+            <button
+              className={scopeFilter === scope.value ? 'active' : ''}
+              key={scope.value}
+              onClick={() => setScopeFilter(scope.value)}
+              type="button"
+            >
+              <span>{scope.label}</span>
+            </button>
+          ))}
         </div>
 
         <div className="log-viewer-levels">

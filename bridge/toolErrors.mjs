@@ -153,6 +153,7 @@ export class ToolExecutionError extends Error {
       name: this.name,
       toolName: this.toolName,
       category: this.category,
+      code: this.originalError?.code || this.originalError?.errorInfo?.code,
       severity: this.severity,
       message: this.message,
       detail: this.message,

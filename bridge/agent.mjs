@@ -68,6 +68,7 @@ import {
 } from './checkpoint.mjs'
 import {
   buildErrorDetails,
+  buildMetricsSummaryDetails,
   buildRunFinishedDetails,
   createAgentRuntimeLogger,
   resolveAgentExecutionMode,
@@ -2509,6 +2510,10 @@ export async function runAgent(request) {
       'agent.run.finished',
       buildRunFinishedDetails(result, runtimeLogger, result?.status || 'completed'),
     )
+    runtimeLogger.emit(
+      'agent.metrics.summary',
+      buildMetricsSummaryDetails(result, runtimeLogger, result?.status || 'completed'),
+    )
     return result
   } catch (error) {
     runtimeLogger.emit(
@@ -2529,6 +2534,23 @@ export async function runAgent(request) {
         completionState: error?.completionState,
         durationMs: runtimeLogger.elapsedMs(),
       },
+      { level: 'error' },
+    )
+    runtimeLogger.emit(
+      'agent.metrics.summary',
+      buildMetricsSummaryDetails({
+        status: 'failed',
+        terminationReason:
+          error?.code ||
+          error?.routeDecision?.stopReason ||
+          error?.completionState ||
+          'failed',
+        agentMode: error?.agentMode,
+        completionState: error?.completionState,
+        graphState: error?.graphState,
+        graphCheckpoints: error?.graphCheckpoints,
+        pathMode: executionPathMode,
+      }, runtimeLogger, 'failed'),
       { level: 'error' },
     )
     throw error

@@ -2080,9 +2080,7 @@ function wait(ms) {
 const PROVIDER_CONNECT_TIMEOUT_MS = 45_000
 const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 90_000
 const PROVIDER_FINALIZATION_TIMEOUT_MS = 60_000
-const PROVIDER_RETRY_DELAYS_MS = [0, 1000, 3000, 8000, 20000]
-const PROVIDER_RETRY_MAX_DELAY_MS = 30000
-const PROVIDER_RETRY_BACKOFF_MULTIPLIER = 2.0
+const PROVIDER_RETRY_DELAYS_MS = [0, 1_200, 3_000, 7_000, 15_000]
 const STEP_LIMIT_TOOL_ERROR_REPAIR_TURNS = 6
 const STEP_LIMIT_TOOL_ERROR_WRITE_REPAIR_ATTEMPTS = 4
 
@@ -2106,11 +2104,9 @@ function getProviderRetryDelayMs(retryNumber) {
     typeof retryNumber === 'number' && Number.isFinite(retryNumber)
       ? Math.max(1, Math.round(retryNumber))
       : 1
-  const delay = Math.min(
-    PROVIDER_RETRY_DELAYS_MS[0] * Math.pow(PROVIDER_RETRY_BACKOFF_MULTIPLIER, normalizedRetryNumber - 1),
-    PROVIDER_RETRY_MAX_DELAY_MS,
-  )
-  return delay
+  return PROVIDER_RETRY_DELAYS_MS[
+    Math.min(normalizedRetryNumber - 1, PROVIDER_RETRY_DELAYS_MS.length - 1)
+  ]
 }
 
 function buildProviderRetryInfo(retryCount, maxRetries, extras = {}) {

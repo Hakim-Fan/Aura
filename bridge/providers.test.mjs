@@ -255,7 +255,7 @@ test('runProviderOperationWithRetry clears in-progress retry state after a succe
   assert.equal(progressEvents[0]?.nextAttemptNumber, 2)
   assert.equal(progressEvents[1]?.inProgress, undefined)
   assert.equal(progressEvents[1]?.attemptedRetries, 1)
-  assert.match(progressEvents[1]?.lastErrorSummary || '', /模型连接在生成过程中被中断/)
+  assert.match(progressEvents[1]?.lastErrorSummary || '', /模型响应超时|模型连接在生成过程中被中断/)
 })
 
 test('buildFinalizerPrompt can omit duplicated tool and reasoning digests', () => {

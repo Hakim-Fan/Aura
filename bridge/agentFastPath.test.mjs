@@ -51,6 +51,7 @@ test('runAgent selects fast path before provider validation for simple no-tool t
   assert.ok(eventNames.includes('agent.fast_path.started'))
   assert.ok(eventNames.includes('agent.error.classified'))
   assert.ok(eventNames.includes('agent.run.finished'))
+  assert.ok(eventNames.includes('agent.metrics.summary'))
 
   const classifierEvent = runtimeEvents.find(event => event.event === 'agent.classifier.result')
   assert.equal(classifierEvent.details.pathMode, 'fast')
@@ -59,6 +60,11 @@ test('runAgent selects fast path before provider validation for simple no-tool t
   const pathEvent = runtimeEvents.find(event => event.event === 'agent.path.selected')
   assert.equal(pathEvent.details.pathMode, 'fast')
   assert.equal(pathEvent.details.architectureMode, 'legacy')
+
+  const metricsEvent = runtimeEvents.find(event => event.event === 'agent.metrics.summary')
+  assert.equal(metricsEvent.details.status, 'failed')
+  assert.equal(metricsEvent.details.pathMode, 'fast')
+  assert.equal(metricsEvent.details.architectureMode, 'legacy')
 })
 
 test('task frame blocks fast path for prior incomplete execution', () => {
@@ -203,9 +209,16 @@ test('runAgent sends complex tasks through the hybrid graph wrapper', async () =
   assert.ok(eventNames.includes('agent.step.started'))
   assert.ok(eventNames.includes('agent.error.classified'))
   assert.ok(eventNames.includes('agent.run.finished'))
+  assert.ok(eventNames.includes('agent.metrics.summary'))
 
   const pathEvent = runtimeEvents.find(event => event.event === 'agent.path.selected')
   assert.equal(pathEvent.details.pathMode, 'long')
+
+  const metricsEvent = runtimeEvents.find(event => event.event === 'agent.metrics.summary')
+  assert.equal(metricsEvent.details.status, 'failed')
+  assert.equal(metricsEvent.details.pathMode, 'long')
+  assert.equal(metricsEvent.details.graphState, 'RECOVER')
+  assert.equal(metricsEvent.details.checkpointCount, 2)
 })
 
 test('runAgent restores graph checkpoints through the hybrid graph path', async () => {

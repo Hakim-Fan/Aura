@@ -64,6 +64,41 @@ function buildStoredZip(entries) {
   return Buffer.concat([localFiles, centralDirectory, eocd])
 }
 
+function toolResultText(value) {
+  if (typeof value === 'string') {
+    return value
+  }
+  if (!value || typeof value !== 'object') {
+    return String(value)
+  }
+  if ('output' in value && value.output != null) {
+    return typeof value.output === 'string'
+      ? value.output
+      : JSON.stringify(value.output)
+  }
+  const error = value.error
+  const parts = [
+    error?.message,
+    error?.rawMessage,
+    error?.errorInfo?.summary,
+    error?.errorInfo?.detail,
+    error?.originalError?.message,
+    error?.originalError?.rawMessage,
+    error?.originalError?.errorInfo?.summary,
+    error?.originalError?.errorInfo?.detail,
+    error?.suggestedAction,
+    error?.repairHint ? JSON.stringify({ repairHint: error.repairHint }, null, 2) : '',
+    typeof error?.toStructuredReport === 'function'
+      ? JSON.stringify(error.toStructuredReport(), null, 2)
+      : '',
+  ]
+  return parts.filter(Boolean).join('\n')
+}
+
+function parseToolResultJson(value) {
+  return JSON.parse(toolResultText(value))
+}
+
 test('invokeTool uses live settings for approval checks before falling back to task snapshot', async () => {
   let approvalRequested = false
 
@@ -104,7 +139,7 @@ test('invokeTool uses live settings for approval checks before falling back to t
   )
 
   assert.equal(approvalRequested, false)
-  assert.match(output, /"ok": true/)
+  assert.match(toolResultText(output), /"ok": true/)
 })
 
 test('invokeTool falls back to task-start settings when live settings are unavailable', async () => {
@@ -141,7 +176,7 @@ test('invokeTool falls back to task-start settings when live settings are unavai
   )
 
   assert.equal(approvalRequested, false)
-  assert.match(output, /"ok": true/)
+  assert.match(toolResultText(output), /"ok": true/)
 })
 
 test('invokeTool honors task-scoped approval grants for matching categories', async () => {
@@ -178,7 +213,7 @@ test('invokeTool honors task-scoped approval grants for matching categories', as
   )
 
   assert.equal(approvalRequested, false)
-  assert.match(output, /"ok": true/)
+  assert.match(toolResultText(output), /"ok": true/)
 })
 
 test('todo_write accepts todos JSON string compatibility input', async () => {
@@ -205,8 +240,8 @@ test('todo_write accepts todos JSON string compatibility input', async () => {
     {},
   )
 
-  assert.match(output, /\[~\] 编写 Node\.js 脚本生成 17 个数据实体表的 Word 文档/)
-  assert.match(output, /\[ \] 运行脚本生成 docx 文件/)
+  assert.match(toolResultText(output), /\[~\] 编写 Node\.js 脚本生成 17 个数据实体表的 Word 文档/)
+  assert.match(toolResultText(output), /\[ \] 运行脚本生成 docx 文件/)
   assert.equal(context.todoState.items.length, 2)
 })
 
@@ -335,7 +370,7 @@ test('record_work_memory stores a normalized phase artifact without a visible to
     },
   )
 
-  const parsed = JSON.parse(output)
+  const parsed = parseToolResultJson(output)
   assert.equal(parsed.recorded, true)
   assert.equal(parsed.persisted, true)
   assert.equal(parsed.memory.id, 'work-memory-1')
@@ -450,7 +485,7 @@ test('update_progress records and injects a current-task progress ledger', async
     },
   )
 
-  const parsed = JSON.parse(output)
+  const parsed = parseToolResultJson(output)
   assert.equal(parsed.updated, true)
   assert.equal(context.progressLedger.phase, 'append_rows')
   assert.match(buildRuntimeProgressPrompt(context), /heading-3/)
@@ -489,9 +524,9 @@ test('read_file repeat guard avoids returning an unchanged full file twice', asy
     },
   )
 
-  assert.match(firstOutput, /Reusable facts/)
-  assert.match(secondOutput, /repeat_full_read_guard/)
-  assert.doesNotMatch(secondOutput, /^# Notes\nReusable facts/m)
+  assert.match(toolResultText(firstOutput), /Reusable facts/)
+  assert.match(toolResultText(secondOutput), /repeat_full_read_guard/)
+  assert.doesNotMatch(toolResultText(secondOutput), /^# Notes\nReusable facts/m)
 })
 
 test('runtime artifact tools keep large intermediate chunks out of tool output', async () => {
@@ -502,7 +537,7 @@ test('runtime artifact tools keep large intermediate chunks out of tool output',
   const summarizeArtifact = tools.find(tool => tool.name === 'summarize_artifact')
   const readSlice = tools.find(tool => tool.name === 'read_artifact_slice')
 
-  const created = JSON.parse(await invokeTool(
+  const created = parseToolResultJson(await invokeTool(
     createArtifact,
     {
       type: 'table',
@@ -527,11 +562,11 @@ test('runtime artifact tools keep large intermediate chunks out of tool output',
     [],
     {},
   )
-  const parsedAppend = JSON.parse(appended)
+  const parsedAppend = parseToolResultJson(appended)
 
   assert.equal(parsedAppend.appended, true)
   assert.equal(parsedAppend.artifact.itemCount, 5)
-  assert.doesNotMatch(appended, /entity-5/)
+  assert.doesNotMatch(toolResultText(appended), /entity-5/)
   assert.match(buildRuntimeArtifactPrompt(context), /Document table/)
   assert.match(buildRuntimeArtifactPrompt(context), /Rows for headings 1-5/)
   assert.match(
@@ -539,9 +574,9 @@ test('runtime artifact tools keep large intermediate chunks out of tool output',
     /Runtime artifact summaries from this ongoing task/,
   )
 
-  const summary = JSON.parse(await invokeTool(summarizeArtifact, { artifactId }, [], {}))
+  const summary = parseToolResultJson(await invokeTool(summarizeArtifact, { artifactId }, [], {}))
   assert.equal(summary.artifact.chunkCount, 1)
-  const slice = JSON.parse(await invokeTool(readSlice, { artifactId, limit: 1 }, [], {}))
+  const slice = parseToolResultJson(await invokeTool(readSlice, { artifactId, limit: 1 }, [], {}))
   assert.equal(slice.chunks[0].content.rows.length, 5)
 })
 
@@ -581,9 +616,9 @@ test('invokeTool includes editing transaction preview in apply_patch approval re
     },
   )
 
-  assert.match(output, /denied by the user/)
+  assert.match(toolResultText(output), /denied by the user/)
   assert.equal(await fs.readFile(path.join(workspace, 'src', 'sample.txt'), 'utf8'), 'old\n')
-  const preview = JSON.parse(approvalRequest.output)
+  const preview = parseToolResultJson(approvalRequest.output)
   assert.equal(preview.stage, 'edit_transaction_preview')
   assert.equal(preview.phase, 'approval_preview')
   assert.equal(preview.sourceOperation, 'apply_patch')
@@ -623,9 +658,9 @@ test('invokeTool includes editing transaction preview for exact edit approval re
     },
   )
 
-  assert.match(output, /denied by the user/)
+  assert.match(toolResultText(output), /denied by the user/)
   assert.equal(await fs.readFile(path.join(workspace, 'src', 'sample.txt'), 'utf8'), 'old\n')
-  const preview = JSON.parse(approvalRequest.output)
+  const preview = parseToolResultJson(approvalRequest.output)
   assert.equal(preview.stage, 'edit_transaction_preview')
   assert.equal(preview.phase, 'approval_preview')
   assert.equal(preview.sourceOperation, 'edit_file')
@@ -667,7 +702,7 @@ test('invokeTool blocks shell scripts that write source files', async () => {
   )
 
   assert.equal(shellRan, false)
-  assert.match(output, /已阻止使用 shell 脚本直接修改源码文件/)
+  assert.match(toolResultText(output), /已阻止使用 shell 脚本直接修改源码文件/)
   assert.equal(events.at(-1)?.status, 'error')
   assert.equal(events.at(-1)?.errorInfo?.code, 'SHELL_FILE_MUTATION_BLOCKED')
 })
@@ -707,7 +742,7 @@ test('invokeTool forces approval for shell commands that access external paths',
   )
 
   assert.equal(shellRan, false)
-  assert.match(output, /denied by the user/)
+  assert.match(toolResultText(output), /denied by the user/)
   assert.equal(approvalRequest.policy.code, 'SHELL_EXTERNAL_PATH_ACCESS')
 })
 
@@ -740,7 +775,7 @@ test('invokeTool blocks dangerous shell commands even when shell is auto approve
   )
 
   assert.equal(shellRan, false)
-  assert.match(output, /危险 shell 命令/)
+  assert.match(toolResultText(output), /危险 shell 命令/)
 })
 
 test('invokeTool still allows shell commands used for verification', async () => {
@@ -771,7 +806,7 @@ test('invokeTool still allows shell commands used for verification', async () =>
   )
 
   assert.equal(shellRan, true)
-  assert.match(output, /"ok": true/)
+  assert.match(toolResultText(output), /"ok": true/)
 })
 
 test('builtin run_shell returns structured exit evidence for successful commands', async () => {
@@ -793,7 +828,7 @@ test('builtin run_shell returns structured exit evidence for successful commands
       },
     },
   )
-  const parsed = JSON.parse(output)
+  const parsed = parseToolResultJson(output)
 
   assert.equal(parsed.status, 'exited')
   assert.equal(parsed.running, false)
@@ -824,7 +859,7 @@ test('builtin run_shell marks nonzero exit as tool error', async () => {
       },
     },
   )
-  const parsed = JSON.parse(output)
+  const parsed = parseToolResultJson(output)
 
   assert.equal(parsed.running, false)
   assert.equal(parsed.exitCode, 7)
@@ -879,7 +914,7 @@ test('read_file edit_context mode returns structured edit metadata', async () =>
     mode: 'edit_context',
   })
 
-  const parsed = JSON.parse(output)
+  const parsed = parseToolResultJson(output)
   assert.equal(parsed.path, 'sample.ts')
   assert.equal(parsed.startLine, 2)
   assert.equal(parsed.endLine, 3)
@@ -915,7 +950,7 @@ test('read_block returns a structured indentation block around an anchor', async
     anchorText: 'function demo',
   })
 
-  const parsed = JSON.parse(output)
+  const parsed = parseToolResultJson(output)
   assert.equal(parsed.path, 'sample.ts')
   assert.equal(parsed.anchorLine, 3)
   assert.equal(parsed.startLine, 3)
@@ -1004,7 +1039,7 @@ test('search_code returns suggested read_file ranges for matches', async () => {
     path: 'src',
     contextLines: 2,
   })
-  const parsed = JSON.parse(output)
+  const parsed = parseToolResultJson(output)
 
   assert.equal(parsed.query, 'targetThing')
   assert.equal(parsed.total, 1)
@@ -1037,7 +1072,7 @@ test('search_code structured output stays valid JSON when compacted', async () =
     path: 'src',
     maxMatches: 120,
   })
-  const parsed = JSON.parse(output)
+  const parsed = parseToolResultJson(output)
 
   assert.ok(output.length <= 12000)
   assert.equal(parsed.query, 'targetCompact')
@@ -1107,9 +1142,9 @@ test('invokeTool includes structured repair hints in tool error output', async (
     },
   )
 
-  assert.match(output, /repairHint/)
-  assert.match(output, /"useTool": "read_file"/)
-  assert.match(output, /"nextTool": "replace_line_range"/)
+  assert.match(toolResultText(output), /repairHint/)
+  assert.match(toolResultText(output), /"useTool": "read_file"/)
+  assert.match(toolResultText(output), /"nextTool": "replace_line_range"/)
 })
 
 test('aura_install_skill installs inline content into Aura skills and enables it', async () => {
@@ -1172,7 +1207,7 @@ test('aura_install_skill installs inline content into Aura skills and enables it
     },
   }).find(tool => tool.name === 'aura_install_skill')
 
-  const output = JSON.parse(
+  const output = parseToolResultJson(
     await installSkill.run({
       content: [
         '---',
