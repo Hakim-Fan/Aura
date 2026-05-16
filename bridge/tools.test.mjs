@@ -11,6 +11,7 @@ import {
   createBuiltinTools,
   invokeTool,
 } from './tools.mjs'
+import { AgentHookEvent, createAgentHookBus } from './agent/hookBus.mjs'
 
 function buildStoredZip(entries) {
   const localParts = []
@@ -214,6 +215,102 @@ test('invokeTool honors task-scoped approval grants for matching categories', as
 
   assert.equal(approvalRequested, false)
   assert.match(toolResultText(output), /"ok": true/)
+})
+
+test('invokeTool emits standard hook and audit events for successful tools', async () => {
+  const hookEvents = []
+  const auditEvents = []
+  const toolEvents = []
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'read_file',
+      description: 'Read a file.',
+      async run() {
+        return { ok: true }
+      },
+    },
+    {
+      path: 'README.md',
+    },
+    toolEvents,
+    {
+      createExecutionStepId() {
+        return 'tool-read-1'
+      },
+      onAgentHookEvent(event) {
+        hookEvents.push(event)
+      },
+      onToolAuditEvent(event) {
+        auditEvents.push(event)
+      },
+    },
+  )
+
+  assert.match(toolResultText(output), /"ok": true/)
+  assert.deepEqual(
+    hookEvents
+      .filter(event => event.status === 'started')
+      .map(event => event.eventName),
+    [AgentHookEvent.PreToolUse, AgentHookEvent.PostToolUse],
+  )
+  assert.equal(auditEvents.length, 1)
+  assert.equal(auditEvents[0].toolName, 'read_file')
+  assert.equal(auditEvents[0].status, 'success')
+  assert.equal(auditEvents[0].permissionScope, 'workspace_read')
+  assert.equal(toolEvents[0].riskLevel, 'low')
+  assert.equal(toolEvents[0].permissionScope, 'workspace_read')
+})
+
+test('invokeTool lets PreToolUse hook block execution without running the tool', async () => {
+  let ran = false
+  const auditEvents = []
+  const hookBus = createAgentHookBus({
+    handlers: [
+      {
+        event: AgentHookEvent.PreToolUse,
+        handle() {
+          return {
+            blocked: true,
+            code: 'TEST_HOOK_BLOCK',
+            reason: 'Blocked by test hook.',
+          }
+        },
+      },
+    ],
+  })
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'write_file',
+      approvalCategory: 'file_write',
+      description: 'Write a file.',
+      async run() {
+        ran = true
+        return { ok: true }
+      },
+    },
+    {
+      path: 'blocked.txt',
+      content: 'blocked',
+    },
+    [],
+    {
+      hookBus,
+      onToolAuditEvent(event) {
+        auditEvents.push(event)
+      },
+    },
+  )
+
+  assert.equal(ran, false)
+  assert.equal(output.success, false)
+  assert.equal(output.error.errorInfo.code, 'TEST_HOOK_BLOCK')
+  assert.equal(auditEvents[0].status, 'blocked')
+  assert.equal(auditEvents[0].riskLevel, 'medium')
+  assert.equal(auditEvents[0].permissionScope, 'workspace_write')
 })
 
 test('todo_write accepts todos JSON string compatibility input', async () => {

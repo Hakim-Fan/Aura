@@ -493,6 +493,7 @@ export type ApprovalCategory =
   | 'shell'
   | 'file_write'
   | 'computer_use'
+  | 'plan'
 
 export type ApprovalDecision =
   | 'approve'
@@ -527,7 +528,18 @@ export type TaskNode = {
   id: string
   title: string
   summary: string
-  kind: 'main' | 'subagent'
+  kind:
+    | 'main'
+    | 'subagent'
+    | 'plan'
+    | 'plan_step'
+    | 'classify'
+    | 'execute'
+    | 'inspect_step'
+    | 'research_step'
+    | 'verification_step'
+    | 'recovery_step'
+    | 'verify'
   status: TaskStatus
   children: TaskNode[]
 }
@@ -645,6 +657,7 @@ export type AgentSettings = {
   providerProfiles: ProviderProfile[]
   agentArchitectureMode: AgentArchitectureMode
   cwd: string
+  locale: string
   providerProxyEnabled: boolean
   networkProxy?: string
   maxSteps: number
@@ -704,6 +717,48 @@ export type AgentResponse = {
   completionState?: CompletionState
   evidenceSummary?: ExecutionEvidenceSummary
   deliveryNote?: string
+}
+
+export type AgentRunCheckpointRecord = {
+  checkpointId: string
+  graphState?: string
+  planId?: string
+  subtaskId?: string
+  reason?: string
+  restored?: boolean
+  createdAt: number
+  details?: Record<string, unknown>
+}
+
+export type AgentRunRecord = {
+  runId: string
+  sessionId?: string
+  taskId?: string
+  assistantMessageId?: string
+  userMessageId?: string
+  status: string
+  architectureMode?: AgentArchitectureMode
+  requestedArchitectureMode?: string
+  pathMode?: string
+  provider?: ProviderMode | string
+  model?: string
+  cwd?: string
+  startedAt: number
+  finishedAt?: number
+  updatedAt: number
+  terminationReason?: string
+  completionState?: CompletionState | string
+  graphState?: string
+  checkpointCount?: number
+  recoveryCount?: number
+  toolCount?: number
+  inputTokens?: number
+  outputTokens?: number
+  durationMs?: number
+  errorCode?: string
+  errorCategory?: string
+  summary?: Record<string, unknown>
+  checkpoints?: AgentRunCheckpointRecord[]
 }
 
 export type AgentTaskSnapshot = {

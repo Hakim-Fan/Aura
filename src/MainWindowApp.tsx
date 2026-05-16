@@ -845,6 +845,8 @@ function approvalCategoryLabel(category?: string) {
       return '文件写入'
     case 'computer_use':
       return 'Computer Use'
+    case 'plan':
+      return '执行计划'
     default:
       return '工具执行'
   }
@@ -1267,21 +1269,67 @@ function mergeMessageEvents(existing: MessageEvent[] = [], incoming: MessageEven
   return mergeEntriesById(preservedExisting, incoming)
 }
 
-function mergeTaskTreeRoots(existing: TaskNode[] = [], incoming: TaskNode[] = []): TaskNode[] {
-  if (existing.length === 0) {
-    return incoming
+function isInternalPlanTaskNode(node?: TaskNode) {
+  if (!node) {
+    return false
   }
-  if (incoming.length === 0) {
-    return existing
+  return (
+    node.kind === 'classify' ||
+    node.title === 'Understand goal and approved plan' ||
+    node.title === 'Understand goal and execution constraints' ||
+    node.title === '理解目标与执行约束'
+  )
+}
+
+function filterVisibleTaskNodes(nodes: TaskNode[] = []): TaskNode[] {
+  return nodes.flatMap(node => {
+    if (isInternalPlanTaskNode(node)) {
+      return []
+    }
+    return [
+      {
+        ...node,
+        children: filterVisibleTaskNodes(node.children || []),
+      },
+    ]
+  })
+}
+
+function mergeTaskTreeNode(existing: TaskNode, incoming: TaskNode): TaskNode {
+  return {
+    ...existing,
+    ...incoming,
+    children: mergeTaskTreeRoots(existing.children || [], incoming.children || []),
+  }
+}
+
+function mergeTaskTreeRoots(existing: TaskNode[] = [], incoming: TaskNode[] = []): TaskNode[] {
+  const visibleExisting = filterVisibleTaskNodes(existing)
+  const visibleIncoming = filterVisibleTaskNodes(incoming)
+
+  const existingHasPlanRoot = visibleExisting.some(node => node.kind !== 'main')
+  const incomingNonMainRoots = visibleIncoming.filter(node => node.kind !== 'main')
+  const normalizedIncoming =
+    existingHasPlanRoot && incomingNonMainRoots.length > 0
+      ? incomingNonMainRoots
+      : existingHasPlanRoot && visibleIncoming.every(node => node.kind === 'main')
+        ? []
+        : visibleIncoming
+
+  if (visibleExisting.length === 0) {
+    return normalizedIncoming
+  }
+  if (normalizedIncoming.length === 0) {
+    return visibleExisting
   }
 
-  const merged = [...existing]
+  const merged = [...visibleExisting]
   const indexById = new Map(merged.map((node, index) => [node.id, index]))
 
-  for (const node of incoming) {
+  for (const node of normalizedIncoming) {
     const existingIndex = indexById.get(node.id)
     if (typeof existingIndex === 'number') {
-      merged[existingIndex] = node
+      merged[existingIndex] = mergeTaskTreeNode(merged[existingIndex], node)
       continue
     }
     indexById.set(node.id, merged.length)
@@ -1879,8 +1927,6 @@ export function MainWindowApp() {
     agentTask?.status === 'awaiting_approval' ||
     agentTask?.status === 'awaiting_user_input'
 
-  const hasActiveRunningTasks = Object.keys(runningTasksBySession).length > 0
-
   const displayedToolEvents = agentTask?.toolEvents || []
 
   const displayedTaskTree = agentTask?.taskTree || []
@@ -1922,11 +1968,8 @@ export function MainWindowApp() {
     if (!storageReady) {
       return
     }
-    if (hasActiveRunningTasks) {
-      return
-    }
     saveSessions(sessions)
-  }, [hasActiveRunningTasks, sessions, storageReady])
+  }, [sessions, storageReady])
 
   useEffect(() => {
     const previousBindings = previousRunningTasksBySessionRef.current
@@ -2202,7 +2245,7 @@ export function MainWindowApp() {
                             ...currentVariant,
                             content:
                               snapshot.status === 'completed'
-                                ? snapshot.message || ''
+                                ? snapshot.message || currentVariant.content
                                 : snapshot.message || currentVariant.content,
                             reasoning: mergedArtifacts.reasoning,
                             phaseOutputs: mergedArtifacts.phaseOutputs,

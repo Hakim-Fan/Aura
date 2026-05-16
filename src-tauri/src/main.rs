@@ -1876,6 +1876,50 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               created_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS agent_runs (
+              run_id TEXT PRIMARY KEY,
+              session_id TEXT,
+              task_id TEXT,
+              assistant_message_id TEXT,
+              user_message_id TEXT,
+              status TEXT NOT NULL,
+              architecture_mode TEXT,
+              requested_architecture_mode TEXT,
+              path_mode TEXT,
+              provider TEXT,
+              model TEXT,
+              cwd TEXT,
+              started_at INTEGER NOT NULL,
+              finished_at INTEGER,
+              updated_at INTEGER NOT NULL,
+              termination_reason TEXT,
+              completion_state TEXT,
+              graph_state TEXT,
+              checkpoint_count INTEGER,
+              recovery_count INTEGER,
+              tool_count INTEGER,
+              input_tokens INTEGER,
+              output_tokens INTEGER,
+              duration_ms INTEGER,
+              error_code TEXT,
+              error_category TEXT,
+              summary_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_run_checkpoints (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL,
+              checkpoint_id TEXT NOT NULL,
+              graph_state TEXT,
+              plan_id TEXT,
+              subtask_id TEXT,
+              reason TEXT,
+              restored INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL,
+              details_json TEXT NOT NULL,
+              UNIQUE(run_id, checkpoint_id)
+            );
+
             CREATE TABLE IF NOT EXISTS user_memory (
               id TEXT PRIMARY KEY,
               scope TEXT NOT NULL,
@@ -1897,6 +1941,12 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               ON work_memories(session_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_work_memories_session_assistant
               ON work_memories(session_id, assistant_message_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_runs_session_updated
+              ON agent_runs(session_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_agent_runs_task_updated
+              ON agent_runs(task_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_agent_run_checkpoints_run
+              ON agent_run_checkpoints(run_id, created_at);
             "#,
         )
         .map_err(|error| format!("Failed to initialize SQLite schema: {error}"))?;
@@ -2230,6 +2280,188 @@ fn get_json_object_field(value: &serde_json::Value, key: &str) -> serde_json::Va
         .cloned()
         .filter(|entry| entry.is_object())
         .unwrap_or(serde_json::Value::Null)
+}
+
+fn get_optional_json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|entry| entry.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.to_string())
+}
+
+fn get_optional_json_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(|entry| {
+        entry
+            .as_i64()
+            .or_else(|| entry.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .or_else(|| entry.as_f64().map(|value| value.round() as i64))
+    })
+}
+
+fn runtime_run_status(event_name: &str, details: &serde_json::Value, level: &str) -> Option<String> {
+    match event_name {
+        "agent.run.started" => Some("running".to_string()),
+        "agent.run.finished" | "agent.metrics.summary" => get_optional_json_string(details, "status")
+            .or_else(|| {
+                if level == "error" {
+                    Some("failed".to_string())
+                } else {
+                    Some("completed".to_string())
+                }
+            }),
+        "agent.error.classified" => Some("failed".to_string()),
+        _ => None,
+    }
+}
+
+fn persist_agent_runtime_log<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    runtime_event: &serde_json::Value,
+) -> Result<(), String> {
+    let event_name = runtime_event
+        .get("event")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let level = runtime_event
+        .get("level")
+        .and_then(|value| value.as_str())
+        .unwrap_or("info");
+    let details = runtime_event
+        .get("details")
+        .unwrap_or(&serde_json::Value::Null);
+    let Some(run_id) = get_optional_json_string(details, "runId") else {
+        return Ok(());
+    };
+
+    let now = current_timestamp_ms() as i64;
+    let status = runtime_run_status(event_name, details, level);
+    let finished_at = match event_name {
+        "agent.run.finished" | "agent.metrics.summary" => Some(now),
+        _ => None,
+    };
+    let started_at = if event_name == "agent.run.started" {
+        now
+    } else {
+        0
+    };
+    let summary_json = value_to_json_string(details)?;
+    let connection = open_app_db(app)?;
+
+    connection
+        .execute(
+            "INSERT INTO agent_runs (
+                run_id, session_id, task_id, assistant_message_id, user_message_id, status,
+                architecture_mode, requested_architecture_mode, path_mode, provider, model, cwd,
+                started_at, finished_at, updated_at, termination_reason, completion_state, graph_state,
+                checkpoint_count, recovery_count, tool_count, input_tokens, output_tokens, duration_ms,
+                error_code, error_category, summary_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
+             ON CONFLICT(run_id) DO UPDATE SET
+                session_id = COALESCE(excluded.session_id, agent_runs.session_id),
+                task_id = COALESCE(excluded.task_id, agent_runs.task_id),
+                assistant_message_id = COALESCE(excluded.assistant_message_id, agent_runs.assistant_message_id),
+                user_message_id = COALESCE(excluded.user_message_id, agent_runs.user_message_id),
+                status = COALESCE(excluded.status, agent_runs.status),
+                architecture_mode = COALESCE(excluded.architecture_mode, agent_runs.architecture_mode),
+                requested_architecture_mode = COALESCE(excluded.requested_architecture_mode, agent_runs.requested_architecture_mode),
+                path_mode = COALESCE(excluded.path_mode, agent_runs.path_mode),
+                provider = COALESCE(excluded.provider, agent_runs.provider),
+                model = COALESCE(excluded.model, agent_runs.model),
+                cwd = COALESCE(excluded.cwd, agent_runs.cwd),
+                started_at = CASE
+                  WHEN agent_runs.started_at <= 0 AND excluded.started_at > 0 THEN excluded.started_at
+                  ELSE agent_runs.started_at
+                END,
+                finished_at = COALESCE(excluded.finished_at, agent_runs.finished_at),
+                updated_at = excluded.updated_at,
+                termination_reason = COALESCE(excluded.termination_reason, agent_runs.termination_reason),
+                completion_state = COALESCE(excluded.completion_state, agent_runs.completion_state),
+                graph_state = COALESCE(excluded.graph_state, agent_runs.graph_state),
+                checkpoint_count = COALESCE(excluded.checkpoint_count, agent_runs.checkpoint_count),
+                recovery_count = COALESCE(excluded.recovery_count, agent_runs.recovery_count),
+                tool_count = COALESCE(excluded.tool_count, agent_runs.tool_count),
+                input_tokens = COALESCE(excluded.input_tokens, agent_runs.input_tokens),
+                output_tokens = COALESCE(excluded.output_tokens, agent_runs.output_tokens),
+                duration_ms = COALESCE(excluded.duration_ms, agent_runs.duration_ms),
+                error_code = COALESCE(excluded.error_code, agent_runs.error_code),
+                error_category = COALESCE(excluded.error_category, agent_runs.error_category),
+                summary_json = excluded.summary_json",
+            params![
+                &run_id,
+                get_optional_json_string(details, "sessionId"),
+                get_optional_json_string(details, "taskId"),
+                get_optional_json_string(details, "assistantMessageId"),
+                get_optional_json_string(details, "userMessageId"),
+                status.unwrap_or_else(|| "observed".to_string()),
+                get_optional_json_string(details, "architectureMode"),
+                get_optional_json_string(details, "requestedArchitectureMode"),
+                get_optional_json_string(details, "pathMode"),
+                get_optional_json_string(details, "provider"),
+                get_optional_json_string(details, "model"),
+                get_optional_json_string(details, "cwd"),
+                started_at,
+                finished_at,
+                now,
+                get_optional_json_string(details, "terminationReason"),
+                get_optional_json_string(details, "completionState"),
+                get_optional_json_string(details, "graphState")
+                    .or_else(|| get_optional_json_string(details, "restoredState"))
+                    .or_else(|| get_optional_json_string(details, "state")),
+                get_optional_json_i64(details, "checkpointCount"),
+                get_optional_json_i64(details, "recoveryCount"),
+                get_optional_json_i64(details, "toolCount"),
+                get_optional_json_i64(details, "inputTokens"),
+                get_optional_json_i64(details, "outputTokens"),
+                get_optional_json_i64(details, "durationMs"),
+                get_optional_json_string(details, "code")
+                    .or_else(|| get_optional_json_string(details, "errorCode")),
+                get_optional_json_string(details, "category")
+                    .or_else(|| get_optional_json_string(details, "errorCategory")),
+                summary_json,
+            ],
+        )
+        .map_err(|error| format!("Failed to persist agent run: {error}"))?;
+
+    if matches!(event_name, "agent.checkpoint.created" | "agent.checkpoint.restored") {
+        if let Some(checkpoint_id) = get_optional_json_string(details, "checkpointId") {
+            let id = format!("{run_id}:{checkpoint_id}");
+            let restored = if event_name == "agent.checkpoint.restored" { 1 } else { 0 };
+            connection
+                .execute(
+                    "INSERT INTO agent_run_checkpoints (
+                        id, run_id, checkpoint_id, graph_state, plan_id, subtask_id, reason, restored, created_at, details_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     ON CONFLICT(run_id, checkpoint_id) DO UPDATE SET
+                        graph_state = COALESCE(excluded.graph_state, agent_run_checkpoints.graph_state),
+                        plan_id = COALESCE(excluded.plan_id, agent_run_checkpoints.plan_id),
+                        subtask_id = COALESCE(excluded.subtask_id, agent_run_checkpoints.subtask_id),
+                        reason = COALESCE(excluded.reason, agent_run_checkpoints.reason),
+                        restored = CASE
+                          WHEN excluded.restored = 1 THEN 1
+                          ELSE agent_run_checkpoints.restored
+                        END,
+                        details_json = excluded.details_json",
+                    params![
+                        id,
+                        &run_id,
+                        &checkpoint_id,
+                        get_optional_json_string(details, "state")
+                            .or_else(|| get_optional_json_string(details, "restoredState")),
+                        get_optional_json_string(details, "planId"),
+                        get_optional_json_string(details, "subtaskId"),
+                        get_optional_json_string(details, "reason"),
+                        restored,
+                        now,
+                        value_to_json_string(details)?,
+                    ],
+                )
+                .map_err(|error| format!("Failed to persist agent checkpoint index: {error}"))?;
+        }
+    }
+
+    Ok(())
 }
 
 fn upsert_kv(connection: &Connection, key: &str, value: &serde_json::Value) -> Result<(), String> {
@@ -3540,6 +3772,17 @@ fn spawn_agent_task<R: Runtime>(
                         .get("details")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
+                    if let Err(error) = persist_agent_runtime_log(&stdout_log_app, runtime_event) {
+                        append_app_log(
+                            &stdout_log_app,
+                            "warn",
+                            "agent_run_persist_failed",
+                            agent_log_details(&stdout_log_context, serde_json::json!({
+                                "runtimeEvent": event_name,
+                                "error": error,
+                            })),
+                        );
+                    }
                     append_app_log(
                         &stdout_log_app,
                         normalize_app_log_level(Some(level.to_string())),
@@ -4871,6 +5114,186 @@ fn load_work_memories_sqlite<R: Runtime>(
 }
 
 #[tauri::command]
+fn list_agent_runs_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    session_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    let safe_limit = limit.unwrap_or(24).clamp(1, 100);
+    let normalized_session_id = session_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let connection = open_app_db(&app)?;
+
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok(serde_json::json!({
+            "runId": row.get::<_, String>(0)?,
+            "sessionId": row.get::<_, Option<String>>(1)?,
+            "taskId": row.get::<_, Option<String>>(2)?,
+            "assistantMessageId": row.get::<_, Option<String>>(3)?,
+            "userMessageId": row.get::<_, Option<String>>(4)?,
+            "status": row.get::<_, String>(5)?,
+            "architectureMode": row.get::<_, Option<String>>(6)?,
+            "requestedArchitectureMode": row.get::<_, Option<String>>(7)?,
+            "pathMode": row.get::<_, Option<String>>(8)?,
+            "provider": row.get::<_, Option<String>>(9)?,
+            "model": row.get::<_, Option<String>>(10)?,
+            "cwd": row.get::<_, Option<String>>(11)?,
+            "startedAt": row.get::<_, i64>(12)?,
+            "finishedAt": row.get::<_, Option<i64>>(13)?,
+            "updatedAt": row.get::<_, i64>(14)?,
+            "terminationReason": row.get::<_, Option<String>>(15)?,
+            "completionState": row.get::<_, Option<String>>(16)?,
+            "graphState": row.get::<_, Option<String>>(17)?,
+            "checkpointCount": row.get::<_, Option<i64>>(18)?,
+            "recoveryCount": row.get::<_, Option<i64>>(19)?,
+            "toolCount": row.get::<_, Option<i64>>(20)?,
+            "inputTokens": row.get::<_, Option<i64>>(21)?,
+            "outputTokens": row.get::<_, Option<i64>>(22)?,
+            "durationMs": row.get::<_, Option<i64>>(23)?,
+            "errorCode": row.get::<_, Option<String>>(24)?,
+            "errorCategory": row.get::<_, Option<String>>(25)?,
+            "summary": parse_json_object_column(row.get::<_, Option<String>>(26)?),
+        }))
+    };
+
+    let mut runs = Vec::new();
+    if let Some(session_id) = normalized_session_id {
+        let mut statement = connection
+            .prepare(
+                "SELECT run_id, session_id, task_id, assistant_message_id, user_message_id, status,
+                        architecture_mode, requested_architecture_mode, path_mode, provider, model, cwd,
+                        started_at, finished_at, updated_at, termination_reason, completion_state, graph_state,
+                        checkpoint_count, recovery_count, tool_count, input_tokens, output_tokens, duration_ms,
+                        error_code, error_category, summary_json
+                 FROM agent_runs
+                 WHERE session_id = ?1
+                 ORDER BY updated_at DESC
+                 LIMIT ?2",
+            )
+            .map_err(|error| format!("Failed to prepare agent runs query: {error}"))?;
+        let rows = statement
+            .query_map(params![session_id, safe_limit], map_row)
+            .map_err(|error| format!("Failed to read agent runs: {error}"))?;
+        for row in rows {
+            runs.push(row.map_err(|error| format!("Failed to decode agent run row: {error}"))?);
+        }
+    } else {
+        let mut statement = connection
+            .prepare(
+                "SELECT run_id, session_id, task_id, assistant_message_id, user_message_id, status,
+                        architecture_mode, requested_architecture_mode, path_mode, provider, model, cwd,
+                        started_at, finished_at, updated_at, termination_reason, completion_state, graph_state,
+                        checkpoint_count, recovery_count, tool_count, input_tokens, output_tokens, duration_ms,
+                        error_code, error_category, summary_json
+                 FROM agent_runs
+                 ORDER BY updated_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(|error| format!("Failed to prepare agent runs query: {error}"))?;
+        let rows = statement
+            .query_map(params![safe_limit], map_row)
+            .map_err(|error| format!("Failed to read agent runs: {error}"))?;
+        for row in rows {
+            runs.push(row.map_err(|error| format!("Failed to decode agent run row: {error}"))?);
+        }
+    }
+    Ok(serde_json::Value::Array(runs))
+}
+
+#[tauri::command]
+fn load_agent_run_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
+    let normalized_run_id = run_id.trim();
+    if normalized_run_id.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    let connection = open_app_db(&app)?;
+    let run: Option<serde_json::Value> = connection
+        .query_row(
+            "SELECT run_id, session_id, task_id, assistant_message_id, user_message_id, status,
+                    architecture_mode, requested_architecture_mode, path_mode, provider, model, cwd,
+                    started_at, finished_at, updated_at, termination_reason, completion_state, graph_state,
+                    checkpoint_count, recovery_count, tool_count, input_tokens, output_tokens, duration_ms,
+                    error_code, error_category, summary_json
+             FROM agent_runs
+             WHERE run_id = ?1",
+            params![normalized_run_id],
+            |row| {
+                Ok(serde_json::json!({
+                    "runId": row.get::<_, String>(0)?,
+                    "sessionId": row.get::<_, Option<String>>(1)?,
+                    "taskId": row.get::<_, Option<String>>(2)?,
+                    "assistantMessageId": row.get::<_, Option<String>>(3)?,
+                    "userMessageId": row.get::<_, Option<String>>(4)?,
+                    "status": row.get::<_, String>(5)?,
+                    "architectureMode": row.get::<_, Option<String>>(6)?,
+                    "requestedArchitectureMode": row.get::<_, Option<String>>(7)?,
+                    "pathMode": row.get::<_, Option<String>>(8)?,
+                    "provider": row.get::<_, Option<String>>(9)?,
+                    "model": row.get::<_, Option<String>>(10)?,
+                    "cwd": row.get::<_, Option<String>>(11)?,
+                    "startedAt": row.get::<_, i64>(12)?,
+                    "finishedAt": row.get::<_, Option<i64>>(13)?,
+                    "updatedAt": row.get::<_, i64>(14)?,
+                    "terminationReason": row.get::<_, Option<String>>(15)?,
+                    "completionState": row.get::<_, Option<String>>(16)?,
+                    "graphState": row.get::<_, Option<String>>(17)?,
+                    "checkpointCount": row.get::<_, Option<i64>>(18)?,
+                    "recoveryCount": row.get::<_, Option<i64>>(19)?,
+                    "toolCount": row.get::<_, Option<i64>>(20)?,
+                    "inputTokens": row.get::<_, Option<i64>>(21)?,
+                    "outputTokens": row.get::<_, Option<i64>>(22)?,
+                    "durationMs": row.get::<_, Option<i64>>(23)?,
+                    "errorCode": row.get::<_, Option<String>>(24)?,
+                    "errorCategory": row.get::<_, Option<String>>(25)?,
+                    "summary": parse_json_object_column(row.get::<_, Option<String>>(26)?),
+                }))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load agent run: {error}"))?;
+
+    let Some(mut run) = run else {
+        return Ok(serde_json::Value::Null);
+    };
+
+    let mut statement = connection
+        .prepare(
+            "SELECT checkpoint_id, graph_state, plan_id, subtask_id, reason, restored, created_at, details_json
+             FROM agent_run_checkpoints
+             WHERE run_id = ?1
+             ORDER BY created_at ASC",
+        )
+        .map_err(|error| format!("Failed to prepare agent run checkpoints query: {error}"))?;
+    let rows = statement
+        .query_map(params![normalized_run_id], |row| {
+            Ok(serde_json::json!({
+                "checkpointId": row.get::<_, String>(0)?,
+                "graphState": row.get::<_, Option<String>>(1)?,
+                "planId": row.get::<_, Option<String>>(2)?,
+                "subtaskId": row.get::<_, Option<String>>(3)?,
+                "reason": row.get::<_, Option<String>>(4)?,
+                "restored": row.get::<_, i64>(5)? == 1,
+                "createdAt": row.get::<_, i64>(6)?,
+                "details": parse_json_object_column(row.get::<_, Option<String>>(7)?),
+            }))
+        })
+        .map_err(|error| format!("Failed to load agent run checkpoints: {error}"))?;
+
+    let mut checkpoints = Vec::new();
+    for row in rows {
+        checkpoints.push(row.map_err(|error| format!("Failed to decode checkpoint row: {error}"))?);
+    }
+    if let Some(object) = run.as_object_mut() {
+        object.insert("checkpoints".to_string(), serde_json::Value::Array(checkpoints));
+    }
+    Ok(run)
+}
+
+#[tauri::command]
 fn save_settings_sqlite<R: Runtime>(
     app: tauri::AppHandle<R>,
     settings: serde_json::Value,
@@ -4967,6 +5390,16 @@ fn purge_session_sqlite<R: Runtime>(
     session_id: String,
 ) -> Result<(), String> {
     let connection = open_app_db(&app)?;
+    connection
+        .execute(
+            "DELETE FROM agent_run_checkpoints
+             WHERE run_id IN (SELECT run_id FROM agent_runs WHERE session_id = ?1)",
+            params![&session_id],
+        )
+        .map_err(|error| format!("Failed to purge session agent run checkpoints from SQLite: {error}"))?;
+    connection
+        .execute("DELETE FROM agent_runs WHERE session_id = ?1", params![&session_id])
+        .map_err(|error| format!("Failed to purge session agent runs from SQLite: {error}"))?;
     connection
         .execute(
             "DELETE FROM work_memories WHERE session_id = ?1",
@@ -5767,6 +6200,8 @@ fn main() {
             load_session_messages_sqlite,
             search_sessions_sqlite,
             load_work_memories_sqlite,
+            list_agent_runs_sqlite,
+            load_agent_run_sqlite,
             save_settings_sqlite,
             save_project_capability_overrides_sqlite,
             save_session_folders_sqlite,

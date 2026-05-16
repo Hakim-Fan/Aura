@@ -120,3 +120,27 @@ test('route-first prompt separates scratchpad reasoning from reusable work memor
   assert.match(prompt, /record_work_memory/i)
   assert.match(prompt, /draft, and mark unverified assumptions as assumption/i)
 })
+
+test('route-first prompt carries the configured locale policy', () => {
+  const prompt = buildRouteFirstSystemPrompt(
+    {
+      cwd: '/tmp/workspace',
+      locale: 'zh-CN',
+      autoApproveShell: false,
+      autoApproveFileWrite: false,
+      autoApproveComputerUse: false,
+      reasoningEffort: 'medium',
+    },
+    '',
+    '',
+    {
+      answerMode: 'advise',
+      needsExternalFacts: false,
+      researchMode: 'auto',
+      responseStyle: 'adaptive-default',
+    },
+  )
+
+  assert.match(prompt, /简体中文/)
+  assert.match(prompt, /all user-facing answers, plan previews, step titles/i)
+})

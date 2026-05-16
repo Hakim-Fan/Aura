@@ -246,6 +246,9 @@ export function wrapAgentRuntimeHooks(hooks = {}, logger) {
           toolName: event?.name,
           source: event?.source,
           status: event?.status,
+          riskLevel: event?.riskLevel,
+          permissionScope: event?.permissionScope,
+          approvalCategory: event?.approvalCategory,
           summary: compactString(event?.summary || event?.error, 500),
           errorCode: event?.errorInfo?.code,
           errorCategory: event?.errorInfo?.category,
@@ -254,6 +257,78 @@ export function wrapAgentRuntimeHooks(hooks = {}, logger) {
         { level: event?.status === 'error' ? 'error' : 'info' },
       )
       hooks?.onToolEvent?.(event)
+    },
+    onAgentHookEvent(event) {
+      const blocked = event?.status === 'blocked'
+      logger.emit(
+        blocked ? 'agent.hook.blocked' : 'agent.hook.invoked',
+        {
+          hookName: event?.eventName,
+          status: event?.status,
+          toolName: event?.toolName,
+          toolEventId: event?.toolEventId,
+          durationMs: safeNumber(event?.durationMs),
+          reason: compactString(event?.reason, 500),
+          code: event?.code,
+        },
+        { level: blocked || event?.status === 'error' ? 'warn' : 'info' },
+      )
+      hooks?.onAgentHookEvent?.(event)
+    },
+    onToolPermissionEvent(event) {
+      const runtimeEvent =
+        event?.status === 'requested'
+          ? 'agent.tool.permission.requested'
+          : 'agent.tool.permission.resolved'
+      logger.emit(
+        runtimeEvent,
+        {
+          toolEventId: event?.toolEventId,
+          toolName: event?.toolName,
+          source: event?.source,
+          approvalCategory: event?.approvalCategory,
+          permissionScope: event?.permissionScope,
+          riskLevel: event?.riskLevel,
+          decision: event?.decision,
+          reason: compactString(event?.reason, 500),
+          code: event?.code,
+        },
+        {
+          level:
+            event?.decision === 'denied' || event?.status === 'denied'
+              ? 'warn'
+              : 'info',
+        },
+      )
+      hooks?.onToolPermissionEvent?.(event)
+    },
+    onToolAuditEvent(event) {
+      logger.emit(
+        'agent.tool.audit',
+        {
+          toolEventId: event?.toolEventId,
+          toolName: event?.toolName,
+          source: event?.source,
+          status: event?.status,
+          approvalCategory: event?.approvalCategory,
+          permissionScope: event?.permissionScope,
+          riskLevel: event?.riskLevel,
+          errorCode: event?.errorCode,
+          errorCategory: event?.errorCategory,
+        },
+        { level: event?.status === 'success' ? 'info' : 'warn' },
+      )
+      hooks?.onToolAuditEvent?.(event)
+    },
+    onToolCatalogEvent(event) {
+      logger.emit('agent.tool.catalog.loaded', {
+        totalToolCount: safeNumber(event?.totalToolCount),
+        directToolCount: safeNumber(event?.directToolCount),
+        deferredToolCount: safeNumber(event?.deferredToolCount),
+        discoverableToolCount: safeNumber(event?.discoverableToolCount),
+        highRiskToolCount: safeNumber(event?.highRiskToolCount),
+      })
+      hooks?.onToolCatalogEvent?.(event)
     },
     onContextCompression(contextCompression) {
       logger.emit('agent.context.compression', {

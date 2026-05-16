@@ -605,12 +605,24 @@ Agent Runtime 的执行状态通过两条链路输出：
 - `agent.classifier.result`
 - `agent.fast_path.started`
 - `agent.fast_path.finished`
+- `agent.planning.started`
+- `agent.planning.resolved`
 - `agent.plan.created`
 - `agent.plan.updated`
+- `agent.plan.preview.created`
+- `agent.plan.risk.summarized`
+- `agent.plan.approval.requested`
+- `agent.plan.approval.resolved`
 - `agent.graph.transition`
 - `agent.step.started`
 - `agent.step.finished`
 - `agent.checkpoint.created`
+- `agent.hook.invoked`
+- `agent.hook.blocked`
+- `agent.tool.catalog.loaded`
+- `agent.tool.permission.requested`
+- `agent.tool.permission.resolved`
+- `agent.tool.audit`
 - `agent.route.decision`
 - `agent.tool.event`
 - `agent.context.compression`
@@ -644,6 +656,8 @@ Agent Runtime 的执行状态通过两条链路输出：
 | `routeDecision` | 当前能力层、预算、挂载工具、stop reason 的快照 |
 | `contextCompression` | 最近一次压缩摘要和 token 统计 |
 | `runtime_log` | 结构化诊断日志，不直接参与模型上下文 |
+| `agent_runs` | SQLite 中按 `runId` 持久化的一次 Agent run 复盘记录，来源于 `runtime_log` |
+| `agent_run_checkpoints` | SQLite 中按 `runId` 关联的 graph/checkpoint 索引，来源于 `agent.checkpoint.created/restored` |
 
 ---
 
@@ -726,6 +740,10 @@ Aura 当前第一阶段 MVP 已经覆盖：
 - 更完整的插件市场与技能生态
 - 更丰富的跨平台桌面自动化能力
 
+下一阶段的产品化架构增强计划见：
+
+- [agent-product-architecture-enhancement-plan.md](/Users/fanhuaze/Documents/YunWork/desk-agent/docs/agent-product-architecture-enhancement-plan.md)
+
 ---
 
 ## 8. 开发者阅读顺序建议
@@ -746,6 +764,8 @@ Aura 当前第一阶段 MVP 已经覆盖：
 12. [bridge/advancedTools.mjs](/Users/fanhuaze/Documents/YunWork/desk-agent/bridge/advancedTools.mjs)
 13. [bridge/browserRuntime.mjs](/Users/fanhuaze/Documents/YunWork/desk-agent/bridge/browserRuntime.mjs)
 14. [bridge/mcp.mjs](/Users/fanhuaze/Documents/YunWork/desk-agent/bridge/mcp.mjs)
+15. [docs/agent-four-step-modernization-plan.md](/Users/fanhuaze/Documents/YunWork/desk-agent/docs/agent-four-step-modernization-plan.md)
+16. [docs/agent-product-architecture-enhancement-plan.md](/Users/fanhuaze/Documents/YunWork/desk-agent/docs/agent-product-architecture-enhancement-plan.md)
 
 ---
 

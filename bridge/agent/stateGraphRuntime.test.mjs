@@ -5,6 +5,7 @@ import {
   createHybridPlan,
   runHybridStateGraph,
 } from './stateGraphRuntime.mjs'
+import { createHybridPlanFromModelPlan } from './plannerRuntime.mjs'
 import { createGraphCheckpointRuntime } from './checkpointRuntime.mjs'
 
 function createLogger() {
@@ -167,8 +168,8 @@ test('runHybridStateGraph continues into verification when first execution is un
   })
 
   assert.equal(requests.length, 2)
-  assert.match(requests[1].messages.at(-1).content, /Graph continuation step/)
-  assert.match(requests[1].messages.at(-1).content, /Verify the previous work/)
+  assert.match(requests[1].messages.at(-1).content, /继续图执行|Graph continuation step/)
+  assert.match(requests[1].messages.at(-1).content, /Verify the previous work|验证上一步工作/)
   assert.equal(result.status, 'completed')
   assert.equal(result.graphState, AgentGraphState.COMPLETED)
   assert.equal(result.graphCompletion.isComplete, true)
@@ -212,14 +213,71 @@ test('runHybridStateGraph executes dynamic planned subtasks before finalizing', 
   })
 
   assert.equal(requests.length, 2)
-  assert.match(requests[0].messages.at(-1).content, /Graph planned subtask/)
-  assert.match(requests[0].messages.at(-1).content, /do not mutate files/i)
+  assert.match(requests[0].messages.at(-1).content, /继续图执行|Graph planned subtask/)
+  assert.match(requests[0].messages.at(-1).content, /do not mutate files|不要修改文件/)
   assert.match(requests[1].messages.at(-1).content, /execute_next_planned_subtask/)
   assert.equal(result.graphState, AgentGraphState.COMPLETED)
   assert.equal(result.graphExecutions.length, 2)
   assert.equal(result.graphPlan.subtasks[1].status, 'completed')
   assert.equal(result.graphPlan.subtasks[2].status, 'completed')
   assert.equal(result.graphPlan.subtasks[3].status, 'completed')
+})
+
+test('runHybridStateGraph sizes the default graph pass budget to the plan', async () => {
+  const logger = createLogger()
+  const request = {
+    messages: [{ role: 'user', content: '处理docx文档，将每个子标题生成对应的数据实体表' }],
+  }
+  const initialPlan = createHybridPlanFromModelPlan({
+    request,
+    classification: {
+      risk: 'medium',
+      complexity: 'complex',
+      hasAttachments: true,
+    },
+    modelPlan: {
+      goal: '处理docx文档，将每个子标题生成对应的数据实体表',
+      risk: 'medium',
+      steps: [
+        { id: '1', description: '读取并解析用户提供的docx文档附件' },
+        { id: '2', description: '提取文档中所有子标题及其相关内容' },
+        { id: '3', description: '基于子标题设计数据实体表结构' },
+        { id: '4', description: '生成并输出对应的数据实体表' },
+      ],
+    },
+    now: () => 1_700_000_000_000,
+    random: () => 0.123456,
+  })
+  const requests = []
+  const result = await runHybridStateGraph({
+    request,
+    classification: {
+      risk: 'medium',
+      complexity: 'complex',
+      hasAttachments: true,
+    },
+    initialPlan,
+    logger,
+    executeRouteFirst: async stepRequest => {
+      requests.push(stepRequest)
+      return {
+        status: 'completed',
+        message: `step ${requests.length}`,
+        completionState: 'executed_verified',
+        toolEvents: [{ id: `tool-${requests.length}`, status: 'success' }],
+      }
+    },
+  })
+
+  assert.equal(requests.length, 4)
+  assert.equal(result.status, 'completed')
+  assert.equal(result.graphState, AgentGraphState.COMPLETED)
+  assert.deepEqual(
+    result.graphPlan.subtasks
+      .filter(subtask => subtask.kind !== 'classify')
+      .map(subtask => subtask.status),
+    ['completed', 'completed', 'completed', 'completed', 'completed'],
+  )
 })
 
 test('runHybridStateGraph blocks unverified execute results after graph pass limit', async () => {

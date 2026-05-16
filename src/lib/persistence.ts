@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
   AgentSettings,
+  AgentRunRecord,
   ChatMessage,
   ChatMessageVariant,
   ProjectCapabilityOverrides,
@@ -30,6 +31,17 @@ export function searchPersistedSessionIds(keyword: string) {
 
 export function loadPersistedWorkMemories(sessionId: string, limit = 8) {
   return invoke<WorkMemory[]>('load_work_memories_sqlite', { sessionId, limit })
+}
+
+export function listPersistedAgentRuns(sessionId?: string, limit = 24) {
+  return invoke<AgentRunRecord[]>('list_agent_runs_sqlite', {
+    sessionId: sessionId || null,
+    limit,
+  })
+}
+
+export function loadPersistedAgentRun(runId: string) {
+  return invoke<AgentRunRecord | null>('load_agent_run_sqlite', { runId })
 }
 
 export function savePersistedSettings(settings: AgentSettings) {

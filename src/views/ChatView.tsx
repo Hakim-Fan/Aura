@@ -3386,6 +3386,8 @@ function dockedApprovalCategoryLabel(category?: string) {
       return '文件写入'
     case 'computer_use':
       return '桌面操作'
+    case 'plan':
+      return '执行计划'
     default:
       return '工具执行'
   }
@@ -3399,6 +3401,8 @@ function dockedApprovalGrantLabel(category?: string) {
       return '本轮文件写入都允许'
     case 'computer_use':
       return '本轮桌面操作都允许'
+    case 'plan':
+      return '批准计划'
     default:
       return '本轮同类都允许'
   }
@@ -3432,6 +3436,17 @@ function buildDockedApprovalViewModel(
   const path = readStringField(inputRecord, ['path', 'filePath', 'targetPath', 'target'])
   const action = readStringField(inputRecord, ['action', 'operation'])
   const fallbackInput = sanitizeTerminalOutput(approval.input).trim()
+
+  if (approval.category === 'plan') {
+    const goal = readStringField(inputRecord, ['goal'])
+    const planId = readStringField(inputRecord, ['planId'])
+    return {
+      eyebrow: '执行计划',
+      primaryLabel: '将执行计划',
+      primaryText: goal || planId || fallbackInput || approval.summary || '执行计划',
+      summary: approval.summary,
+    }
+  }
 
   if (approval.category === 'shell') {
     return {

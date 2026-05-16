@@ -108,6 +108,18 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
     onToolEvent(event) {
       forwarded.push(['tool', event.name])
     },
+    onAgentHookEvent(event) {
+      forwarded.push(['hook', event.eventName])
+    },
+    onToolPermissionEvent(event) {
+      forwarded.push(['permission', event.status])
+    },
+    onToolAuditEvent(event) {
+      forwarded.push(['audit', event.status])
+    },
+    onToolCatalogEvent(event) {
+      forwarded.push(['catalog', event.totalToolCount])
+    },
     onContextCompression(contextCompression) {
       forwarded.push(['compression', contextCompression.id])
     },
@@ -129,6 +141,41 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
     source: 'builtin',
     status: 'success',
     summary: 'patched file',
+    riskLevel: 'medium',
+    permissionScope: 'workspace_write',
+    approvalCategory: 'file_write',
+  })
+  hooks.onAgentHookEvent({
+    eventName: 'PreToolUse',
+    status: 'completed',
+    toolName: 'apply_patch',
+    toolEventId: 'tool-1',
+    durationMs: 3,
+  })
+  hooks.onToolPermissionEvent({
+    toolEventId: 'tool-1',
+    toolName: 'apply_patch',
+    source: 'builtin',
+    status: 'requested',
+    approvalCategory: 'file_write',
+    permissionScope: 'workspace_write',
+    riskLevel: 'medium',
+  })
+  hooks.onToolAuditEvent({
+    toolEventId: 'tool-1',
+    toolName: 'apply_patch',
+    source: 'builtin',
+    status: 'success',
+    approvalCategory: 'file_write',
+    permissionScope: 'workspace_write',
+    riskLevel: 'medium',
+  })
+  hooks.onToolCatalogEvent({
+    totalToolCount: 10,
+    directToolCount: 7,
+    deferredToolCount: 2,
+    discoverableToolCount: 3,
+    highRiskToolCount: 4,
   })
   hooks.onContextCompression({
     id: 'compression-1',
@@ -141,15 +188,28 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
   assert.deepEqual(forwarded, [
     ['route', 'local-write'],
     ['tool', 'apply_patch'],
+    ['hook', 'PreToolUse'],
+    ['permission', 'requested'],
+    ['audit', 'success'],
+    ['catalog', 10],
     ['compression', 'compression-1'],
     ['phase', 'recovering'],
   ])
   assert.deepEqual(runtimeEvents.map(event => event.event), [
     'agent.route.decision',
     'agent.tool.event',
+    'agent.hook.invoked',
+    'agent.tool.permission.requested',
+    'agent.tool.audit',
+    'agent.tool.catalog.loaded',
     'agent.context.compression',
     'agent.recovery.event',
   ])
+  const toolRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.tool.event')
+  assert.equal(toolRuntimeEvent.details.riskLevel, 'medium')
+  assert.equal(toolRuntimeEvent.details.permissionScope, 'workspace_write')
+  const catalogRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.tool.catalog.loaded')
+  assert.equal(catalogRuntimeEvent.details.highRiskToolCount, 4)
 })
 
 test('run finished and error detail helpers expose validation-friendly summaries', () => {

@@ -45,6 +45,11 @@ import {
   normalizeWorkMemoryInput,
   upsertWorkMemory,
 } from './workMemory.mjs'
+import {
+  AgentHookEvent,
+  invokeAgentHook,
+} from './agent/hookBus.mjs'
+import { createToolCatalogEntry } from './tools/catalog.mjs'
 
 const ALWAYS_ON_SKILL_IDS = new Set([
   'aura-browser-operator',
@@ -2787,6 +2792,22 @@ function emitToolEvent(event, toolEvents, hooks) {
   hooks?.onToolEvent?.(event)
 }
 
+function emitToolAuditEvent(hooks, event) {
+  try {
+    hooks?.onToolAuditEvent?.(event)
+  } catch {
+    // Audit hooks must not alter tool execution.
+  }
+}
+
+function emitToolPermissionEvent(hooks, event) {
+  try {
+    hooks?.onToolPermissionEvent?.(event)
+  } catch {
+    // Permission diagnostics must not alter tool execution.
+  }
+}
+
 export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   const shellPatchInterception = resolveShellPatchInterception(tool, args, hooks)
   const shellFileMutationInterception = shellPatchInterception
@@ -2807,10 +2828,25 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     (typeof effectiveTool.getSummary === 'function'
       ? effectiveTool.getSummary(effectiveArgs) || effectiveTool.description
       : effectiveTool.description)
+  const catalogEntry = createToolCatalogEntry(effectiveTool, {
+    key: effectiveTool.toolKey,
+    layer: effectiveTool.layer,
+  })
+  const auditBase = {
+    toolEventId: eventId,
+    toolName: effectiveTool.name,
+    source: effectiveTool.source,
+    approvalCategory: catalogEntry.approvalCategory,
+    riskLevel: catalogEntry.riskLevel,
+    permissionScope: catalogEntry.permissionScope,
+  }
   const baseEvent = {
     id: eventId,
     source: effectiveTool.source,
     name: effectiveTool.name,
+    riskLevel: catalogEntry.riskLevel,
+    permissionScope: catalogEntry.permissionScope,
+    approvalCategory: catalogEntry.approvalCategory,
     summary: eventSummary,
     order:
       typeof hooks.timelineOrder === 'number'
@@ -2830,6 +2866,66 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
             )
             ? `$ ${effectiveTool.name === 'exec_command' ? effectiveArgs.cmd : effectiveArgs.command}`
             : stringifyOutput(effectiveArgs ?? {}),
+  }
+
+  const preToolHook = await invokeAgentHook(
+    hooks,
+    AgentHookEvent.PreToolUse,
+    {
+      toolEventId: eventId,
+      tool: catalogEntry,
+      args: effectiveArgs,
+      summary: eventSummary,
+    },
+  )
+  if (preToolHook.blocked) {
+    const blockedError = createStructuredError(
+      preToolHook.reason || '工具调用被 Hook 阻止。',
+      {
+        source:
+          effectiveTool.source === 'plugin'
+            ? 'plugin'
+            : effectiveTool.source === 'mcp'
+              ? 'mcp'
+              : 'tool',
+        category: 'permission_denied',
+        code: preToolHook.code || 'HOOK_BLOCKED_TOOL_USE',
+        detail: preToolHook.reason || 'PreToolUse hook blocked this tool call.',
+        retryable: false,
+        suggestedAction:
+          preToolHook.suggestedAction ||
+          '请调整请求、工具权限或 Hook 配置后重试。',
+        riskLevel: catalogEntry.riskLevel,
+        details: preToolHook.details,
+      },
+    )
+    updateEvent({
+      summary: `${eventSummary} (blocked by hook)`,
+      status: 'error',
+      error: blockedError.rawMessage,
+      errorInfo: blockedError.errorInfo,
+    })
+    await invokeAgentHook(
+      hooks,
+      AgentHookEvent.PostToolUseFailure,
+      {
+        toolEventId: eventId,
+        tool: catalogEntry,
+        errorInfo: blockedError.errorInfo,
+      },
+    )
+    emitToolAuditEvent(hooks, {
+      ...auditBase,
+      status: 'blocked',
+      errorCode: blockedError.errorInfo?.code,
+      errorCategory: blockedError.errorInfo?.category,
+    })
+    return new ToolResult({
+      success: false,
+      output: null,
+      error: blockedError,
+      toolName: effectiveTool.name,
+    })
   }
 
   function updateEvent(partial) {
@@ -2874,6 +2970,37 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       error: policyError.rawMessage,
       errorInfo: policyError.errorInfo,
     })
+    emitToolPermissionEvent(hooks, {
+      ...auditBase,
+      status: 'resolved',
+      decision: 'denied',
+      reason: executionPolicy.reason,
+      code: executionPolicy.code,
+    })
+    await invokeAgentHook(
+      hooks,
+      AgentHookEvent.PermissionDenied,
+      {
+        toolEventId: eventId,
+        tool: catalogEntry,
+        errorInfo: policyError.errorInfo,
+      },
+    )
+    await invokeAgentHook(
+      hooks,
+      AgentHookEvent.PostToolUseFailure,
+      {
+        toolEventId: eventId,
+        tool: catalogEntry,
+        errorInfo: policyError.errorInfo,
+      },
+    )
+    emitToolAuditEvent(hooks, {
+      ...auditBase,
+      status: 'denied',
+      errorCode: policyError.errorInfo?.code,
+      errorCategory: policyError.errorInfo?.category,
+    })
     return [
       executionPolicy.summary,
       executionPolicy.suggestedAction || null,
@@ -2884,7 +3011,6 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   }
 
   const requiresPolicyApproval = executionPolicy.action === 'prompt'
-
   const approvalCategory = effectiveTool.approvalCategory || executionPolicy.approvalCategory
   const hasTaskScopedApproval =
     approvalCategory &&
@@ -2894,6 +3020,13 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       args: effectiveArgs,
       executionPolicy,
     })
+  if (approvalCategory && hasTaskScopedApproval) {
+    emitToolPermissionEvent(hooks, {
+      ...auditBase,
+      status: 'resolved',
+      decision: 'task_grant',
+    })
+  }
   if (
     approvalCategory &&
     !hasTaskScopedApproval &&
@@ -2915,6 +3048,22 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
             : effectiveArgs?.chars,
       )
       : undefined
+    emitToolPermissionEvent(hooks, {
+      ...auditBase,
+      status: 'requested',
+      reason: executionPolicy.reason,
+      code: executionPolicy.code,
+    })
+    await invokeAgentHook(
+      hooks,
+      AgentHookEvent.PermissionRequest,
+      {
+        toolEventId: eventId,
+        tool: catalogEntry,
+        approvalCategory,
+        executionPolicy,
+      },
+    )
     const decision = await hooks.requestApproval?.({
       id: eventId,
       category: approvalCategory,
@@ -2933,6 +3082,12 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
           guardian: executionPolicy.guardian,
         }
         : undefined,
+    })
+    emitToolPermissionEvent(hooks, {
+      ...auditBase,
+      status: 'resolved',
+      decision: decision === 'approve' ? 'approved' : 'denied',
+      reason: decision === 'approve' ? '' : 'user_denied',
     })
 
     if (decision !== 'approve') {
@@ -2954,6 +3109,31 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         error: deniedError.rawMessage,
         errorInfo: deniedError.errorInfo,
       })
+      await invokeAgentHook(
+        hooks,
+        AgentHookEvent.PermissionDenied,
+        {
+          toolEventId: eventId,
+          tool: catalogEntry,
+          approvalCategory,
+          errorInfo: deniedError.errorInfo,
+        },
+      )
+      await invokeAgentHook(
+        hooks,
+        AgentHookEvent.PostToolUseFailure,
+        {
+          toolEventId: eventId,
+          tool: catalogEntry,
+          errorInfo: deniedError.errorInfo,
+        },
+      )
+      emitToolAuditEvent(hooks, {
+        ...auditBase,
+        status: 'denied',
+        errorCode: deniedError.errorInfo?.code,
+        errorCategory: deniedError.errorInfo?.category,
+      })
       return new ToolResult({
         success: false,
         output: null,
@@ -2961,6 +3141,12 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         toolName: effectiveTool.name,
       })
     }
+  } else if (approvalCategory && !hasTaskScopedApproval) {
+    emitToolPermissionEvent(hooks, {
+      ...auditBase,
+      status: 'resolved',
+      decision: 'auto_approved',
+    })
   }
 
   const abortController = hooks.createCurrentStepAbortController?.()
@@ -2985,6 +3171,19 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         output: stringifyOutput(repeatedFullReadGuardOutput),
         structuredOutput: undefined,
         error: undefined,
+      })
+      await invokeAgentHook(
+        hooks,
+        AgentHookEvent.PostToolUse,
+        {
+          toolEventId: eventId,
+          tool: catalogEntry,
+          outputSummary: stringifyOutput(repeatedFullReadGuardOutput),
+        },
+      )
+      emitToolAuditEvent(hooks, {
+        ...auditBase,
+        status: 'success',
       })
       return new ToolResult({
         success: true,
@@ -3070,6 +3269,22 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         },
       )
     }
+    await invokeAgentHook(
+      hooks,
+      commandExitError ? AgentHookEvent.PostToolUseFailure : AgentHookEvent.PostToolUse,
+      {
+        toolEventId: eventId,
+        tool: catalogEntry,
+        outputSummary: commandExitError ? undefined : stringifyOutput(output),
+        errorInfo: commandExitError?.errorInfo,
+      },
+    )
+    emitToolAuditEvent(hooks, {
+      ...auditBase,
+      status: commandExitError ? 'error' : 'success',
+      errorCode: commandExitError?.errorInfo?.code,
+      errorCategory: commandExitError?.errorInfo?.category,
+    })
     return new ToolResult({
       success: !commandExitError,
       output: stringifyOutput(output),
@@ -3095,6 +3310,21 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       status: 'error',
       error: detail,
       errorInfo: toolError.toStructuredReport(),
+    })
+    await invokeAgentHook(
+      hooks,
+      AgentHookEvent.PostToolUseFailure,
+      {
+        toolEventId: eventId,
+        tool: catalogEntry,
+        errorInfo: toolError.toStructuredReport(),
+      },
+    )
+    emitToolAuditEvent(hooks, {
+      ...auditBase,
+      status: 'error',
+      errorCode: toolError.errorInfo?.code,
+      errorCategory: toolError.errorInfo?.category,
     })
     return new ToolResult({
       success: false,

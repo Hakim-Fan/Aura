@@ -1,3 +1,7 @@
+import {
+  getRuntimeTaskLabels,
+} from '../runtimeLanguage.mjs'
+
 function createId(prefix, now = Date.now, random = Math.random) {
   return `${prefix}-${now().toString(36)}-${random().toString(36).slice(2, 8)}`
 }
@@ -30,7 +34,7 @@ function requiredExecutionCapability(classification = {}) {
   return 'auto'
 }
 
-function createExecutionSubtasks(planId, classification = {}) {
+function createExecutionSubtasks(planId, classification = {}, labels = getRuntimeTaskLabels()) {
   const subtasks = []
   const addSubtask = ({
     title,
@@ -57,7 +61,7 @@ function createExecutionSubtasks(planId, classification = {}) {
 
   if (classification?.needsCurrentInfo) {
     addSubtask({
-      title: 'Gather current external context',
+      title: labels.gatherCurrentContext,
       kind: 'research_step',
       requiredCapability: 'web-lookup',
       successCriteria: [
@@ -72,7 +76,7 @@ function createExecutionSubtasks(planId, classification = {}) {
 
   if (classification?.requiresWrite && classification?.workspaceRelated) {
     addSubtask({
-      title: 'Inspect relevant workspace state',
+      title: labels.inspectWorkspace,
       kind: 'inspect_step',
       requiredCapability: 'read-only',
       successCriteria: [
@@ -88,8 +92,8 @@ function createExecutionSubtasks(planId, classification = {}) {
   const previousId = subtasks.at(-1)?.id || `${planId}-subtask-1`
   addSubtask({
     title: classification?.requiresWrite
-      ? 'Apply requested workspace changes through route-first runtime'
-      : 'Execute requested work through route-first runtime',
+      ? labels.applyWorkspaceChanges
+      : labels.executeRequest,
     kind: 'execute',
     requiredCapability: requiredExecutionCapability(classification),
     successCriteria: [
@@ -111,15 +115,17 @@ export function createHybridPlan({
   now = Date.now,
   random = Math.random,
 } = {}) {
+  const labels = getRuntimeTaskLabels(request?.settings || {})
+  const locale = request?.settings?.locale || 'zh-CN'
   const planId = createId('plan', now, random)
   const goal = deriveGoal(request.messages)
   const createdAt = now()
-  const executionSubtasks = createExecutionSubtasks(planId, classification)
+  const executionSubtasks = createExecutionSubtasks(planId, classification, labels)
   const verifySubtaskId = `${planId}-subtask-${executionSubtasks.length + 2}`
   const subtasks = [
     {
       id: `${planId}-subtask-1`,
-      title: 'Understand goal and execution constraints',
+      title: labels.understandGoal,
       kind: 'classify',
       requiredCapability: 'read-only',
       successCriteria: [
@@ -133,7 +139,7 @@ export function createHybridPlan({
     ...executionSubtasks,
     {
       id: verifySubtaskId,
-      title: 'Verify completion and merge final result',
+      title: labels.verifyCompletion,
       kind: 'verify',
       requiredCapability: 'auto',
       successCriteria: [
@@ -164,8 +170,129 @@ export function createHybridPlan({
       createAfterObserve: true,
       restoreSupported: true,
     },
+    locale,
     subtasks,
   }
+}
+
+function normalizePlanStep(step, index) {
+  if (!step || typeof step !== 'object') {
+    return {
+      id: String(index + 1),
+      description: truncateText(step || `Step ${index + 1}`, 160),
+    }
+  }
+  return {
+    id: truncateText(step.id || step.stepId || String(index + 1), 80) || String(index + 1),
+    description:
+      truncateText(step.description || step.title || step.summary || `Step ${index + 1}`, 180) ||
+      `Step ${index + 1}`,
+    kind: truncateText(step.kind || step.type || '', 80),
+    requiredCapability: truncateText(step.requiredCapability || step.capability || '', 80),
+  }
+}
+
+export function createHybridPlanFromModelPlan({
+  modelPlan = {},
+  request = {},
+  classification = {},
+  now = Date.now,
+  random = Math.random,
+} = {}) {
+  const base = createHybridPlan({ request, classification, now, random })
+  const planId = base.id
+  const rawSteps = Array.isArray(modelPlan.steps) ? modelPlan.steps : []
+  const normalizedSteps = rawSteps.map(normalizePlanStep).filter(step => step.description)
+  if (normalizedSteps.length === 0) {
+    return base
+  }
+
+  const labels = getRuntimeTaskLabels(request?.settings || {})
+  const classifySubtask = {
+    ...base.subtasks[0],
+    title: labels.understandGoal,
+  }
+  const executionSubtasks = normalizedSteps.map((step, index) => {
+    const previousId = index === 0
+      ? classifySubtask.id
+      : `${planId}-subtask-${index + 1}`
+    return {
+      id: `${planId}-subtask-${index + 2}`,
+      title: step.description,
+      kind: step.kind || 'execute',
+      requiredCapability:
+        step.requiredCapability ||
+        (classification?.requiresWrite ? 'local-write' : 'auto'),
+      successCriteria: [
+        'Step produces observable progress or a clear blocker',
+      ],
+      dependencies: [previousId],
+      status: 'pending',
+      evidence: [],
+      metadata: {
+        modelPlanStepId: step.id,
+      },
+    }
+  })
+  const verifySubtask = {
+    ...base.subtasks.at(-1),
+    id: `${planId}-subtask-${executionSubtasks.length + 2}`,
+    dependencies: executionSubtasks.map(subtask => subtask.id),
+  }
+
+  return {
+    ...base,
+    goal: truncateText(modelPlan.goal || base.goal, 240),
+    risk: modelPlan.risk || classification?.risk || base.risk,
+    estimatedSteps: executionSubtasks.length + 2,
+    successCriteria: Array.isArray(modelPlan.successCriteria) && modelPlan.successCriteria.length > 0
+      ? modelPlan.successCriteria.map(entry => truncateText(entry, 180)).filter(Boolean)
+      : base.successCriteria,
+    notes: truncateText(modelPlan.notes || modelPlan.note || '', 600),
+    plannerSource: 'model_planning_prompt',
+    locale: request?.settings?.locale || base.locale || 'zh-CN',
+    subtasks: [
+      classifySubtask,
+      ...executionSubtasks,
+      verifySubtask,
+    ],
+  }
+}
+
+export function planToTaskTree(plan = {}) {
+  const labels = getRuntimeTaskLabels(plan?.locale || 'zh-CN')
+  const subtasks = Array.isArray(plan.subtasks)
+    ? plan.subtasks.filter(subtask => subtask?.kind !== 'classify')
+    : []
+  return [
+    {
+      id: `${plan.id || 'plan'}-task-tree-root`,
+      title: plan.goal || labels.planTitle,
+      summary: plan.notes || '',
+      kind: 'plan',
+      status: subtasks.some(subtask => subtask.status === 'failed' || subtask.status === 'blocked')
+        ? 'failed'
+        : subtasks.length > 0 && subtasks.every(subtask => subtask.status === 'completed')
+          ? 'completed'
+          : 'running',
+      children: subtasks.map(subtask => ({
+        id: subtask.id,
+        title: subtask.title || subtask.id,
+        summary: Array.isArray(subtask.successCriteria) && subtask.successCriteria.length > 0
+          ? subtask.successCriteria.join('\n')
+          : '',
+        kind: subtask.kind || 'plan_step',
+        status: subtask.status || 'pending',
+        children: [],
+        errors: [],
+        retryAttempts: 0,
+        checkpoint: null,
+      })),
+      errors: [],
+      retryAttempts: 0,
+      checkpoint: null,
+    },
+  ]
 }
 
 export function findPlanSubtask(plan, kindOrId) {
@@ -195,8 +322,10 @@ export function appendPlanSubtask(plan, {
   dependencies,
   afterSubtaskId,
   metadata = {},
+  locale = 'zh-CN',
 } = {}) {
   if (!plan || !Array.isArray(plan.subtasks)) return null
+  const labels = getRuntimeTaskLabels(locale)
   const insertionIndex = afterSubtaskId
     ? plan.subtasks.findIndex(subtask => subtask.id === afterSubtaskId) + 1
     : plan.subtasks.length
@@ -205,7 +334,7 @@ export function appendPlanSubtask(plan, {
   const previous = plan.subtasks[normalizedInsertionIndex - 1] || plan.subtasks.at(-1)
   const subtask = {
     id: `${plan.id}-subtask-${plan.subtasks.length + 1}`,
-    title: title || 'Continue graph execution',
+    title: title || labels.continueExecution,
     kind,
     requiredCapability,
     successCriteria: Array.isArray(successCriteria) ? successCriteria : [],

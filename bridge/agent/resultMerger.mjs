@@ -12,6 +12,14 @@ function normalizeStatus(value, fallback = 'completed') {
   return normalized || fallback
 }
 
+function normalizeCompletedResultStatus(value) {
+  const normalized = normalizeStatus(value)
+  if (normalized === 'failed' || normalized === 'cancelled') {
+    return normalized
+  }
+  return 'completed'
+}
+
 export function decideGraphCompletion({
   result = {},
   executionResult = {},
@@ -90,7 +98,7 @@ export function decideGraphCompletion({
   return {
     isComplete: true,
     graphState: 'COMPLETED',
-    status: normalizeStatus(result?.status),
+    status: normalizeCompletedResultStatus(result?.status),
     reason: completionState || result?.terminationReason || 'completed',
     nextAction: 'finalize',
     canContinue: false,

@@ -1,3 +1,5 @@
+import { createToolCatalogEntry } from './tools/catalog.mjs'
+
 function normalizeKeyPart(value) {
   return String(value || '')
     .trim()
@@ -114,6 +116,10 @@ function buildEntry(tool, layer) {
         }
       : tool
   const visibility = inferEntryVisibility(materializedTool, layer)
+  const catalog = createToolCatalogEntry(materializedTool, {
+    key,
+    layer,
+  })
 
   return {
     key,
@@ -144,6 +150,7 @@ function buildEntry(tool, layer) {
       typeof materializedTool?.activationHint === 'string'
         ? materializedTool.activationHint
         : '',
+    catalog,
     tool: materializedTool,
   }
 }
@@ -163,6 +170,7 @@ export function createToolRegistry({
     ...mcpTools.map(tool => buildEntry(tool, 'mcp')),
     ...discoverableTools.map(tool => buildEntry(tool, inferDiscoverableLayer(tool))),
   ]
+  const catalogEntries = entries.map(entry => entry.catalog)
   const byName = new Map()
   const duplicateNames = new Set()
 
@@ -182,6 +190,14 @@ export function createToolRegistry({
 
   return {
     entries,
+    catalogEntries,
+    catalog: {
+      entries: catalogEntries,
+      byName: new Map(catalogEntries.map(entry => [entry.name, entry])),
+      highRiskCount: catalogEntries.filter(entry =>
+        entry.riskLevel === 'high' || entry.riskLevel === 'critical',
+      ).length,
+    },
     directEntries: entries.filter(entry => entry.visibility === 'direct'),
     deferredEntries: entries.filter(entry => entry.visibility === 'deferred'),
     discoverableEntries: entries.filter(entry => entry.discoverability === 'discoverable'),

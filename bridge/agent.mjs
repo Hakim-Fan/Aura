@@ -79,7 +79,23 @@ import {
   applyTaskFrameToClassification,
   resolveTaskFrame,
 } from './agent/taskFrame.mjs'
-import { runHybridStateGraph } from './agent/stateGraphRuntime.mjs'
+import {
+  createHybridPlan,
+  runHybridStateGraph,
+} from './agent/stateGraphRuntime.mjs'
+import {
+  createHybridPlanFromModelPlan,
+  planToTaskTree,
+} from './agent/plannerRuntime.mjs'
+import {
+  buildModelPlanningSystemPrompt,
+  buildModelPlanningUserPrompt,
+  parseModelPlanningResult,
+} from './agent/modelPlanningRuntime.mjs'
+import {
+  buildRejectedPlanResult,
+  requestPlanApproval,
+} from './agent/planApprovalRuntime.mjs'
 import {
   buildToolFailureContinuationNote,
   shouldContinueAfterToolFailure,
@@ -1696,6 +1712,13 @@ export async function runRouteFirstAgent(request) {
       ...mcpInventory.discoverableTools,
     ],
   })
+  hooks?.onToolCatalogEvent?.({
+    totalToolCount: toolRegistry.entries.length,
+    directToolCount: toolRegistry.directEntries.length,
+    deferredToolCount: toolRegistry.deferredEntries.length,
+    discoverableToolCount: toolRegistry.discoverableEntries.length,
+    highRiskToolCount: toolRegistry.catalog?.highRiskCount || 0,
+  })
   const classification = classificationResult?.classification || null
   const normalizedClassification = classification
     ? applyHardSignalIntentOverrides(classification, hardSignals)
@@ -2341,6 +2364,162 @@ async function runFastPathAgent(request, classification, taskFrame) {
   }
 }
 
+function buildDirectPlanningAnswerResult(planning, classification, taskFrame) {
+  return {
+    status: 'completed',
+    message: planning.answer || '',
+    toolEvents: [],
+    taskTree: [],
+    reasoning: [],
+    completionState: 'not_executed',
+    agentMode: 'route-first',
+    pathMode: 'fast',
+    routeDecision: {
+      answerMode: 'advise',
+      capabilityTier: 'none',
+      budgets: {},
+      allowEscalationTo: [],
+      availableEscalations: [],
+      escalationCount: 0,
+      tierHistory: ['none'],
+      stopReason: 'direct_answer',
+      mountedCapabilities: {
+        skills: [],
+        plugins: [],
+        mcpServers: [],
+        tools: [],
+      },
+    },
+    classifier: classification,
+    taskFrame,
+    planningDecision: planning,
+  }
+}
+
+async function runModelPlanningGate({
+  request,
+  classification,
+  taskFrame,
+  logger,
+}) {
+  const settings = request?.settings || {}
+  const hooks = request?.hooks || {}
+  if (request?.runtime?.modelPlanningResult) {
+    const planning = parseModelPlanningResult(
+      typeof request.runtime.modelPlanningResult === 'string'
+        ? request.runtime.modelPlanningResult
+        : JSON.stringify(request.runtime.modelPlanningResult),
+    )
+    logger?.emit?.('agent.planning.resolved', {
+      planner: 'runtime_override',
+      decision: planning.type,
+      risk: planning.risk,
+      stepCount: Array.isArray(planning.steps) ? planning.steps.length : 0,
+      parseError: planning.parseError === true,
+    })
+    if (planning.type === 'direct_answer') {
+      return {
+        type: 'direct_answer',
+        result: buildDirectPlanningAnswerResult(planning, classification, taskFrame),
+        planning,
+      }
+    }
+    return {
+      type: 'plan',
+      planning,
+      plan: createHybridPlanFromModelPlan({
+        modelPlan: planning,
+        request,
+        classification: {
+          ...classification,
+          pathMode: 'long',
+          complexity: 'complex',
+          risk: planning.risk || classification?.risk,
+        },
+      }),
+    }
+  }
+  if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
+    throw createStructuredError('模型调用失败，当前缺少 API Key。', {
+      source: 'provider',
+      category: 'authentication',
+      code: 'MISSING_API_KEY',
+      detail: 'Missing API key.',
+      suggestedAction: '请先在设置页填写可用的 Provider API Key。',
+    })
+  }
+
+  logger?.emit?.('agent.planning.started', {
+    planner: 'model_planning_prompt',
+    legacyPathMode: classification?.pathMode,
+    reason: classification?.reason,
+  })
+  hooks?.onPhaseChange?.('planning')
+
+  const planningHooks = {
+    ...hooks,
+    onTextDelta: undefined,
+    onReasoningDelta: undefined,
+  }
+    const planningTurn = await runProviderTurn({
+      settings,
+      systemPrompt: buildModelPlanningSystemPrompt(settings),
+      messages: [
+        {
+          role: 'user',
+          content: buildModelPlanningUserPrompt({
+            messages: request?.messages,
+            settings,
+          }),
+        },
+      ],
+    tools: [],
+    toolEvents: [],
+    routeState: {
+      answerMode: 'advise',
+      capabilityTier: 'none',
+      budgets: {},
+      allowEscalationTo: [],
+      responseStyle: 'concise',
+      completionPolicy: {
+        requiresEvidenceForDone: false,
+      },
+    },
+    hooks: planningHooks,
+  })
+  const planning = parseModelPlanningResult(planningTurn?.result?.message || '')
+  logger?.emit?.('agent.planning.resolved', {
+    planner: 'model_planning_prompt',
+    decision: planning.type,
+    risk: planning.risk,
+    stepCount: Array.isArray(planning.steps) ? planning.steps.length : 0,
+    parseError: planning.parseError === true,
+  })
+
+  if (planning.type === 'direct_answer') {
+    return {
+      type: 'direct_answer',
+      result: buildDirectPlanningAnswerResult(planning, classification, taskFrame),
+      planning,
+    }
+  }
+
+  return {
+    type: 'plan',
+    planning,
+    plan: createHybridPlanFromModelPlan({
+      modelPlan: planning,
+      request,
+      classification: {
+        ...classification,
+        pathMode: 'long',
+        complexity: 'complex',
+        risk: planning.risk || classification?.risk,
+      },
+    }),
+  }
+}
+
 export async function runAgent(request) {
   const mode = resolveAgentExecutionMode(request?.settings)
   const runtimeLogger = createAgentRuntimeLogger({
@@ -2380,7 +2559,7 @@ export async function runAgent(request) {
     effectiveRequest?.runtime?.graphCheckpoint ||
     effectiveRequest?.runtime?.restoreGraphCheckpoint ||
     null
-  const executionPathMode =
+  let executionPathMode =
     graphCheckpoint || mode.architectureMode === 'graph' || mode.architectureMode === 'orchestrated'
       ? 'long'
       : classification.pathMode
@@ -2413,21 +2592,25 @@ export async function runAgent(request) {
     requiresEvidenceForDone: taskFrame.requiresEvidenceForDone,
     reasons: taskFrame.reasons,
   })
-  runtimeLogger.emit('agent.path.selected', {
-    pathMode: executionPathMode,
-    reason:
-      executionPathMode === 'fast'
-        ? 'simple no-tool request selected for fast path'
-        : executionPathMode === 'long'
-          ? 'hybrid state graph selected for complex or graph-requested execution'
-        : mode.architectureMode === 'legacy'
-        ? 'route-first legacy execution remains the default stable path'
-        : mode.fallbackToLegacy
-          ? `${mode.architectureMode} is not implemented yet; falling back to route-first`
-          : `${mode.architectureMode} execution requested`,
-    confidence: classification.confidence,
-    estimatedRisk: classification.risk,
-  })
+  let pathSelectionEmitted = false
+  function emitPathSelected(reason, estimatedRisk = classification.risk) {
+    runtimeLogger.emit('agent.path.selected', {
+      pathMode: executionPathMode,
+      reason: reason ||
+        (executionPathMode === 'fast'
+          ? 'simple no-tool request selected for fast path'
+          : executionPathMode === 'long'
+            ? 'hybrid state graph selected for complex or graph-requested execution'
+          : mode.architectureMode === 'legacy'
+          ? 'route-first legacy execution remains the default stable path'
+          : mode.fallbackToLegacy
+            ? `${mode.architectureMode} is not implemented yet; falling back to route-first`
+            : `${mode.architectureMode} execution requested`),
+      confidence: classification.confidence,
+      estimatedRisk,
+    })
+    pathSelectionEmitted = true
+  }
   if (mode.fallbackToLegacy) {
     runtimeLogger.emit(
       'agent.architecture.fallback',
@@ -2442,11 +2625,38 @@ export async function runAgent(request) {
 
   try {
     let result
-    if (
+    let plannedInitialPlan = null
+    if (!graphCheckpoint && mode.effectiveAgentMode === 'route-first') {
+      const planningGate = await runModelPlanningGate({
+        request: effectiveRequest,
+        classification,
+        taskFrame,
+        logger: runtimeLogger,
+      })
+      if (planningGate.type === 'direct_answer') {
+        executionPathMode = 'fast'
+        runtimeLogger.setPathMode(executionPathMode)
+        emitPathSelected('model planning prompt returned direct_answer', 'low')
+        result = planningGate.result
+      } else {
+        plannedInitialPlan = planningGate.plan
+        executionPathMode = 'long'
+        runtimeLogger.setPathMode(executionPathMode)
+        hooks?.onTaskTree?.(planToTaskTree(plannedInitialPlan))
+        emitPathSelected(
+          'model planning prompt returned executable plan',
+          plannedInitialPlan?.risk || classification.risk,
+        )
+      }
+    }
+    if (!pathSelectionEmitted) {
+      emitPathSelected()
+    }
+    if (!result && (
       executionPathMode === 'fast' &&
       mode.effectiveAgentMode === 'route-first' &&
       !mode.fallbackToLegacy
-    ) {
+    )) {
       runtimeLogger.emit('agent.fast_path.started', {
         reason: classification.reason,
       })
@@ -2458,20 +2668,47 @@ export async function runAgent(request) {
         outputTokens: result?.usage?.outputTokens,
         durationMs: runtimeLogger.elapsedMs(),
       })
-    } else if (
+    } else if (!result && (
       executionPathMode === 'long' &&
       mode.effectiveAgentMode === 'route-first'
-    ) {
-      result = await runHybridStateGraph({
-        request: effectiveRequest,
-        classification,
-        logger: runtimeLogger,
-        executeRouteFirst: runRouteFirstAgent,
-        restoreCheckpoint: graphCheckpoint,
-      })
-    } else if (mode.effectiveAgentMode === 'orchestrated') {
+    )) {
+      if (graphCheckpoint) {
+        result = await runHybridStateGraph({
+          request: effectiveRequest,
+          classification,
+          logger: runtimeLogger,
+          executeRouteFirst: runRouteFirstAgent,
+          restoreCheckpoint: graphCheckpoint,
+        })
+      } else {
+        const initialPlan = plannedInitialPlan || createHybridPlan({
+          request: effectiveRequest,
+          classification,
+        })
+        const planApproval = await requestPlanApproval({
+          hooks,
+          logger: runtimeLogger,
+          plan: initialPlan,
+          classification,
+        })
+        if (!planApproval.approved) {
+          result = buildRejectedPlanResult({
+            plan: initialPlan,
+            approval: planApproval,
+          })
+        } else {
+          result = await runHybridStateGraph({
+            request: effectiveRequest,
+            classification,
+            logger: runtimeLogger,
+            executeRouteFirst: runRouteFirstAgent,
+            initialPlan,
+          })
+        }
+      }
+    } else if (!result && mode.effectiveAgentMode === 'orchestrated') {
       result = await runOrchestratedAgent(effectiveRequest)
-    } else {
+    } else if (!result) {
       result = await runRouteFirstAgent(effectiveRequest)
     }
     if (result?.recovered === true || result?.retryInfo?.recovered === true) {

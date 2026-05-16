@@ -2,8 +2,10 @@ import {
   appendPlanSubtask,
   createHybridPlan as createPlannerHybridPlan,
   findPlanSubtask,
+  planToTaskTree,
   updatePlanSubtask,
 } from './plannerRuntime.mjs'
+import { buildLanguagePolicyInstruction, getRuntimeTaskLabels } from '../runtimeLanguage.mjs'
 import { executeGraphStep } from './executorRuntime.mjs'
 import {
   createGraphCheckpointRuntime,
@@ -53,53 +55,60 @@ function buildContinuationPrompt({
   executionResult,
   result,
   subtask,
+  locale = 'zh-CN',
 } = {}) {
+  const labels = getRuntimeTaskLabels(locale)
   const evidence = safeArray(executionResult?.evidence).slice(-8)
   const errors = safeArray(executionResult?.errors)
     .slice(-4)
     .map(error => [error?.toolName, error?.code, error?.message].filter(Boolean).join(': '))
     .filter(Boolean)
   const lines = [
-    'Graph continuation step.',
-    `Original goal: ${plan?.goal || 'Complete the user request'}`,
-    `Current subtask: ${subtask?.title || 'Continue execution'}`,
-    `Previous completion state: ${result?.completionState || 'unknown'}`,
-    `Graph decision: ${decision?.reason || 'continue'} / ${decision?.nextAction || 'continue'}`,
+    `${labels.continueExecution}。`,
+    `原始目标：${plan?.goal || labels.planTitle}`,
+    `当前子任务：${subtask?.title || labels.continueExecution}`,
+    `上一次完成态：${result?.completionState || 'unknown'}`,
+    `图决策：${decision?.reason || 'continue'} / ${decision?.nextAction || 'continue'}`,
   ]
 
   if (evidence.length > 0) {
-    lines.push(`Recent evidence: ${evidence.join(', ')}`)
+    lines.push(`最近证据：${evidence.join(', ')}`)
   }
   if (errors.length > 0) {
-    lines.push(`Recent errors: ${errors.join(' | ')}`)
+    lines.push(`最近错误：${errors.join(' | ')}`)
   }
 
   if (decision?.nextAction === 'run_verification') {
     lines.push(
-      'Verify the previous work using the safest available read, test, or build checks.',
-      'Do not re-apply the same changes unless verification reveals a concrete issue.',
-      'Return the final answer only after verification evidence is available, or explain the exact blocker.',
+      '请使用当前最安全的读取、测试或构建检查来验证上一步工作。',
+      '除非验证明确暴露问题，否则不要重复应用同一批修改。',
+      '只有在拿到验证证据后才返回最终答案，否则要明确说明具体阻塞点。',
     )
   } else if (decision?.nextAction === 'attempt_recovery') {
     lines.push(
-      'Recover from the concrete failure using the previous evidence.',
-      'Prefer a targeted fix or a narrow verification command; do not restart unrelated work.',
-      'If recovery is not possible, report the blocker with the failed evidence.',
+      '请根据前一步的失败证据进行恢复。',
+      '优先采用定点修复或窄范围验证命令，不要重启无关工作。',
+      '如果无法恢复，请带着失败证据直接报告阻塞原因。',
     )
   } else {
-    lines.push('Continue only if the next action is necessary to satisfy the original goal.')
+    lines.push('只有当前一步确实有必要继续满足原始目标时，才继续推进。')
   }
 
   const previousMessage = compactString(result?.message, 700)
   if (previousMessage) {
-    lines.push(`Previous assistant summary: ${previousMessage}`)
+    lines.push(`上一次助手摘要：${previousMessage}`)
   }
+
+  lines.push(buildLanguagePolicyInstruction({ locale }))
 
   return lines.join('\n')
 }
 
 function buildContinuationRequest(request, context = {}) {
-  const prompt = buildContinuationPrompt(context)
+  const prompt = buildContinuationPrompt({
+    ...context,
+    locale: request?.settings?.locale,
+  })
   const carryover = [
     'Hybrid graph continuation context:',
     `Plan: ${context.plan?.id}`,
@@ -125,9 +134,10 @@ function buildContinuationRequest(request, context = {}) {
 }
 
 function createContinuationSubtask(plan, decision, previousSubtask) {
+  const labels = getRuntimeTaskLabels(plan?.locale || 'zh-CN')
   if (decision?.nextAction === 'run_verification') {
     return appendPlanSubtask(plan, {
-      title: 'Verify previous route-first execution',
+      title: labels.verifyPrevious,
       kind: 'verification_step',
       requiredCapability: 'auto',
       afterSubtaskId: previousSubtask?.id,
@@ -141,12 +151,13 @@ function createContinuationSubtask(plan, decision, previousSubtask) {
         nextAction: decision.nextAction,
         previousSubtaskId: previousSubtask?.id,
       },
+      locale: plan?.locale || 'zh-CN',
     })
   }
 
   if (decision?.nextAction === 'attempt_recovery') {
     return appendPlanSubtask(plan, {
-      title: 'Recover failed route-first execution',
+      title: labels.recoverFailed,
       kind: 'recovery_step',
       requiredCapability: 'auto',
       afterSubtaskId: previousSubtask?.id,
@@ -160,6 +171,7 @@ function createContinuationSubtask(plan, decision, previousSubtask) {
         nextAction: decision.nextAction,
         previousSubtaskId: previousSubtask?.id,
       },
+      locale: plan?.locale || 'zh-CN',
     })
   }
 
@@ -198,6 +210,12 @@ function findNextExecutableSubtask(plan, previousSubtask = null) {
     .find(subtask => isRunnableSubtask(plan, subtask)) || null
 }
 
+function countExecutableSubtasks(plan) {
+  return safeArray(plan?.subtasks)
+    .filter(subtask => EXECUTABLE_SUBTASK_KINDS.has(subtask?.kind))
+    .length
+}
+
 function findRestoredActiveSubtask(plan, restoredContext = {}) {
   const metadataSubtaskId =
     restoredContext?.metadata?.subtaskId ||
@@ -220,29 +238,31 @@ function buildPlannedSubtaskRequest(request, {
   previousResult,
   previousExecutionResult,
 } = {}) {
+  const labels = getRuntimeTaskLabels(plan?.locale || request?.settings?.locale || 'zh-CN')
   if (!shouldFocusPlannedSubtask(subtask)) {
     return request
   }
   const lines = [
-    'Graph planned subtask.',
-    `Original goal: ${plan?.goal || 'Complete the user request'}`,
-    `Current subtask: ${subtask?.title || 'Execute planned subtask'}`,
-    'Focus on this subtask only; preserve evidence for the later graph steps.',
+    `${labels.continueExecution}。`,
+    `原始目标：${plan?.goal || labels.planTitle}`,
+    `当前子任务：${subtask?.title || labels.continueExecution}`,
+    '只聚焦当前子任务，并保留后续图步骤需要的证据。',
   ]
   if (subtask.kind === 'inspect_step') {
-    lines.push('Inspect relevant files and behavior, but do not mutate files in this subtask.')
+    lines.push('请检查相关文件与行为，但这一子任务不要修改文件。')
   }
   if (subtask.kind === 'research_step') {
-    lines.push('Gather the current external evidence needed for the later execution or final answer.')
+    lines.push('请收集后续执行或最终回答所需的当前外部证据。')
   }
   const previousMessage = compactString(previousResult?.message, 500)
   if (previousMessage) {
-    lines.push(`Previous graph step summary: ${previousMessage}`)
+    lines.push(`上一步图摘要：${previousMessage}`)
   }
   const evidence = safeArray(previousExecutionResult?.evidence).slice(-8)
   if (evidence.length > 0) {
-    lines.push(`Previous evidence: ${evidence.join(', ')}`)
+    lines.push(`上一步证据：${evidence.join(', ')}`)
   }
+  lines.push(buildLanguagePolicyInstruction({ locale: plan?.locale || request?.settings?.locale }))
 
   return {
     ...request,
@@ -268,8 +288,9 @@ export async function runHybridStateGraph({
   classification,
   logger,
   executeRouteFirst,
-  maxGraphPasses = 3,
+  maxGraphPasses,
   restoreCheckpoint,
+  initialPlan,
   now = Date.now,
   random = Math.random,
 } = {}) {
@@ -279,7 +300,7 @@ export async function runHybridStateGraph({
 
   let currentState = AgentGraphState.INIT
   let passIndex = 0
-  let plan = createHybridPlan({ request, classification, now, random })
+  let plan = initialPlan || createHybridPlan({ request, classification, now, random })
   const checkpointRuntime = createGraphCheckpointRuntime({
     logger,
     taskId: request?.logContext?.taskId || plan.id,
@@ -295,6 +316,10 @@ export async function runHybridStateGraph({
       currentState = restoredContext.graphState || AgentGraphState.INIT
     }
   }
+  const effectiveMaxGraphPasses =
+    typeof maxGraphPasses === 'number' && Number.isFinite(maxGraphPasses)
+      ? Math.max(1, Math.round(maxGraphPasses))
+      : Math.max(1, countExecutableSubtasks(plan) + 2)
   const verifySubtask = findPlanSubtask(plan, 'verify')
   const executionHistory = []
   let activeRequest =
@@ -313,6 +338,10 @@ export async function runHybridStateGraph({
   let activeSubtask = restoredContext?.success
     ? findRestoredActiveSubtask(plan, restoredContext)
     : findNextExecutableSubtask(plan)
+
+  function emitPlanTaskTree() {
+    request?.hooks?.onTaskTree?.(planToTaskTree(plan))
+  }
 
   function emitTransition(to, reason, extra = {}) {
     const from = currentState
@@ -340,6 +369,7 @@ export async function runHybridStateGraph({
       newStatus: updated.newStatus,
       evidenceCount,
     })
+    emitPlanTaskTree()
   }
 
   logger?.emit?.(restoredContext?.success ? 'agent.plan.restored' : 'agent.plan.created', {
@@ -350,6 +380,7 @@ export async function runHybridStateGraph({
     goal: plan.goal,
     successCriteria: plan.successCriteria,
   })
+  emitPlanTaskTree()
 
   if (!restoredContext?.success) {
     emitTransition(AgentGraphState.CLASSIFY, 'task classification is available')
@@ -367,7 +398,7 @@ export async function runHybridStateGraph({
     let latestExecutionResult = null
     let latestDecision = null
 
-    for (let pass = 0; pass < Math.max(1, maxGraphPasses); pass += 1) {
+    for (let pass = 0; pass < effectiveMaxGraphPasses; pass += 1) {
       passIndex = pass
       if (!activeSubtask) {
         updateSubtask(verifySubtask.id, 'blocked', 0)
@@ -447,7 +478,7 @@ export async function runHybridStateGraph({
         classification,
         plan,
         passIndex: pass,
-        maxPasses: maxGraphPasses,
+        maxPasses: effectiveMaxGraphPasses,
       })
       latestDecision = decision
       emitTransition(AgentGraphState.DECIDE_NEXT, decision.reason, {

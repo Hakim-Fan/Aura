@@ -193,6 +193,7 @@ export const defaultSettings: AgentSettings = {
   providerProfiles: defaultProfiles(),
   agentArchitectureMode: 'route-first',
   cwd: '',
+  locale: 'zh-CN',
   providerProxyEnabled: false,
   networkProxy: '',
   maxSteps: 8,
@@ -1154,6 +1155,7 @@ function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
   return {
     ...settings,
     providerProfiles: normalizeProviderProfiles(settings.providerProfiles),
+    locale: normalizeLocale(settings.locale),
     analysisProviderProfileId:
       typeof settings.analysisProviderProfileId === 'string'
         ? settings.analysisProviderProfileId
@@ -1451,6 +1453,28 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort {
     return value
   }
   return defaultSettings.reasoningEffort
+}
+
+function normalizeLocale(value: unknown) {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  if (!normalized) {
+    return defaultSettings.locale
+  }
+
+  const lower = normalized.toLowerCase().replace('_', '-')
+  if (lower === 'zh-cn' || lower === 'zh-hans') {
+    return 'zh-CN'
+  }
+  if (lower === 'zh-tw' || lower === 'zh-hant') {
+    return 'zh-TW'
+  }
+  if (lower === 'en-us') {
+    return 'en-US'
+  }
+  if (lower === 'en-gb') {
+    return 'en-GB'
+  }
+  return normalized
 }
 
 function normalizeDetailedExecutionSetting(value: unknown) {

@@ -1,3 +1,9 @@
+import {
+  buildLanguagePolicyInstruction,
+  getLocaleDisplayName,
+  normalizeRuntimeLocale,
+} from './runtimeLanguage.mjs'
+
 function buildCurrentDateContext() {
   const now = new Date()
   const timezone =
@@ -189,6 +195,8 @@ export function buildRouteFirstSystemPrompt(
   routeState,
   toolAvailability = {},
 ) {
+  const locale = normalizeRuntimeLocale(settings?.locale)
+  const localeLabel = getLocaleDisplayName(locale)
   const sections = [
     'You are Aura, a runtime-governed tool-using agent for workspace work, web retrieval, and browser tasks within mounted capabilities.',
     `The active workspace is: ${settings.cwd}`,
@@ -210,8 +218,9 @@ export function buildRouteFirstSystemPrompt(
       'The runtime may also save compact progress/tool checkpoints automatically; treat those checkpoints as handoff hints and avoid repeating already successful extraction or setup steps.',
       'For long tasks, treat context as a working window rather than durable storage. Process one bounded chunk at a time, call update_progress after durable chunks, and keep ordinary assistant text short until final delivery.',
       'Do not write full intermediate tables, large drafts, long logs, or raw reasoning into assistant content. If a large result must persist, write or update a file/artifact and keep only its reference, counts, decisions, open questions, and next action in progress/work memory.',
-      'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
+    'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
     ].join('\n'),
+    `Primary response locale: ${localeLabel} (${locale}).`,
   ]
 
   if (routeState) {
@@ -396,6 +405,8 @@ export function buildRouteFirstSystemPrompt(
   if (exposureNote?.trim()) {
     sections.push(exposureNote)
   }
+
+  sections.push(buildLanguagePolicyInstruction(settings))
 
   return sections.join('\n\n')
 }
