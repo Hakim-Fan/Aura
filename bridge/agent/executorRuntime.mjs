@@ -71,6 +71,23 @@ function deriveStepStatus(result = {}, errors = []) {
   return 'completed'
 }
 
+function isolateGraphStepTaskTree(request = {}) {
+  if (typeof request?.hooks?.onTaskTree !== 'function') {
+    return request
+  }
+
+  return {
+    ...request,
+    hooks: {
+      ...request.hooks,
+      onTaskTree() {
+        // The graph plan owns the user-visible task tree. Nested route-first
+        // task trackers still run, but must not replace the active plan steps.
+      },
+    },
+  }
+}
+
 export async function executeGraphStep({
   request,
   plan,
@@ -96,7 +113,7 @@ export async function executeGraphStep({
   })
 
   try {
-    const routeResult = await executeRouteFirst(request)
+    const routeResult = await executeRouteFirst(isolateGraphStepTaskTree(request))
     const toolEvents = safeToolEvents(routeResult)
     const evidence = collectEvidenceRefs(toolEvents, routeResult)
     const artifacts = collectArtifacts(routeResult)

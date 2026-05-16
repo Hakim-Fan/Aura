@@ -507,6 +507,7 @@ export type ApprovalRequest = {
   summary: string
   input?: string
   output?: string
+  preview?: Record<string, unknown>
 }
 
 export type UserInputRequest = {
@@ -666,6 +667,7 @@ export type AgentSettings = {
   contextCompressionThresholdTokens: number
   reasoningEffort: ReasoningEffort
   showDetailedExecutionDetails: boolean
+  requireLongTaskPlanApproval: boolean
   enableMultiAgent: boolean
   enableComputerUse: boolean
   autoApproveShell: boolean

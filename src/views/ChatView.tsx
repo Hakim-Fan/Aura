@@ -3772,6 +3772,42 @@ function DockedAwaitingActionPanel({
   return null
 }
 
+function DockedTaskStepsPanel({
+  nodes,
+  visible,
+}: {
+  nodes: TaskNode[]
+  visible: boolean
+}) {
+  const visibleNodes = sanitizeTaskNodes(nodes, '')
+
+  if (!visible || visibleNodes.length === 0) {
+    return null
+  }
+
+  return (
+    <section
+      aria-live="polite"
+      className="mb-3 w-full pointer-events-auto rounded-2xl border border-[rgba(79,123,116,0.14)] bg-white/96 px-4 py-3 shadow-[0_18px_50px_-24px_rgba(15,23,42,0.45)] ring-1 ring-[rgba(79,123,116,0.08)] backdrop-blur-xl"
+    >
+      <TaskTreeView nodes={visibleNodes} />
+    </section>
+  )
+}
+
+function findLatestLiveAssistantSteps(messages: ChatMessage[]) {
+  for (const message of [...messages].reverse()) {
+    if (
+      message.role === 'assistant' &&
+      (message.status === 'pending' || message.status === 'streaming') &&
+      (message.steps || []).length > 0
+    ) {
+      return message.steps || []
+    }
+  }
+  return []
+}
+
 function MessageEventCard({
   event,
   onHandleApproval,
@@ -4897,12 +4933,12 @@ function AssistantMessageCard({
   const latestReasoningId = displayReasoning.at(-1)?.id || ''
   const executionDigestEntries = buildExecutionDigestEntries({
     executionTimeline: nonApprovalTimeline,
-    taskNodes: visibleSteps,
+    taskNodes: [],
   })
   const shouldShowDetailedTimeline =
     activity?.expanded === true &&
     showDetailedExecutionDetails &&
-    (nonApprovalTimeline.length > 0 || visibleSteps.length > 0)
+    nonApprovalTimeline.length > 0
   const shouldShowCompactDigest =
     activity?.expanded === true &&
     !showDetailedExecutionDetails &&
@@ -5118,11 +5154,6 @@ function AssistantMessageCard({
                     />
                   ),
                 )}
-                {visibleSteps.length > 0 ? (
-                  <div className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2.5">
-                    <TaskTreeView nodes={visibleSteps} />
-                  </div>
-                ) : null}
               </div>
             </section>
           ) : null}
@@ -5557,6 +5588,17 @@ export function ChatView({
     () => capabilityItems.filter(item => item.effectiveEnabled).length,
     [capabilityItems],
   )
+  const liveTaskStepsVisible =
+    isRunning &&
+    Boolean(agentTask) &&
+    agentTask?.status !== 'completed' &&
+    agentTask?.status !== 'failed'
+  const liveTaskStepNodes = useMemo(() => {
+    if (displayedTaskTree.length > 0) {
+      return displayedTaskTree
+    }
+    return findLatestLiveAssistantSteps(messages)
+  }, [displayedTaskTree, messages])
 
   const sessionUsage = useMemo(() => collectSessionUsage(messages), [messages])
   const sessionTotalTokens = sessionUsage.inputTokens + sessionUsage.outputTokens
@@ -5808,6 +5850,11 @@ export function ChatView({
                   <ArrowDown size={18} strokeWidth={2.5} className="text-[var(--text-secondary)] group-hover:text-[var(--accent-soft-strong)] transition-colors" />
                 </button>
               )}
+
+              <DockedTaskStepsPanel
+                nodes={liveTaskStepNodes}
+                visible={liveTaskStepsVisible}
+              />
 
               <DockedAwaitingActionPanel
                 task={agentTask}

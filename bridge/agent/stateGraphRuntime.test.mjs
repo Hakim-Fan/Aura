@@ -135,6 +135,50 @@ test('runHybridStateGraph logs graph states, checkpoints, and merges route-first
   ])
 })
 
+test('runHybridStateGraph keeps delegated route-first task trees from replacing the plan tree', async () => {
+  const logger = createLogger()
+  const taskTrees = []
+  const result = await runHybridStateGraph({
+    request: {
+      messages: [{ role: 'user', content: '根据附件生成数据实体表' }],
+      hooks: {
+        onTaskTree(tree) {
+          taskTrees.push(tree)
+        },
+      },
+    },
+    classification: {
+      risk: 'medium',
+      complexity: 'complex',
+      requiresWrite: false,
+    },
+    logger,
+    executeRouteFirst: async request => {
+      request.hooks.onTaskTree([
+        {
+          id: 'inner-route-first-main',
+          title: '内部 route-first 执行树',
+          summary: '',
+          kind: 'main',
+          status: 'running',
+          children: [],
+        },
+      ])
+      return {
+        status: 'completed',
+        message: 'done',
+        completionState: 'executed_verified',
+        toolEvents: [{ id: 'tool-1', name: 'read_file', status: 'success' }],
+      }
+    },
+  })
+
+  assert.equal(result.status, 'completed')
+  assert.ok(taskTrees.length > 0)
+  assert.ok(taskTrees.every(tree => tree[0]?.kind === 'plan'))
+  assert.ok(!taskTrees.some(tree => tree[0]?.id === 'inner-route-first-main'))
+})
+
 test('runHybridStateGraph continues into verification when first execution is unverified', async () => {
   const logger = createLogger()
   const requests = []
@@ -168,7 +212,7 @@ test('runHybridStateGraph continues into verification when first execution is un
   })
 
   assert.equal(requests.length, 2)
-  assert.match(requests[1].messages.at(-1).content, /继续图执行|Graph continuation step/)
+  assert.match(requests[1].messages.at(-1).content, /继续图执行|继续执行|Graph continuation step/)
   assert.match(requests[1].messages.at(-1).content, /Verify the previous work|验证上一步工作/)
   assert.equal(result.status, 'completed')
   assert.equal(result.graphState, AgentGraphState.COMPLETED)
@@ -213,7 +257,7 @@ test('runHybridStateGraph executes dynamic planned subtasks before finalizing', 
   })
 
   assert.equal(requests.length, 2)
-  assert.match(requests[0].messages.at(-1).content, /继续图执行|Graph planned subtask/)
+  assert.match(requests[0].messages.at(-1).content, /继续图执行|继续执行|Graph planned subtask/)
   assert.match(requests[0].messages.at(-1).content, /do not mutate files|不要修改文件/)
   assert.match(requests[1].messages.at(-1).content, /execute_next_planned_subtask/)
   assert.equal(result.graphState, AgentGraphState.COMPLETED)

@@ -54,6 +54,7 @@ function buildApprovalPolicy(settings) {
     `Approval policy: shell is ${settings.autoApproveShell ? 'auto-approved' : 'approval-required'}.`,
     `Approval policy: file writes are ${settings.autoApproveFileWrite ? 'auto-approved' : 'approval-required'}.`,
     `Approval policy: computer use is ${settings.autoApproveComputerUse ? 'auto-approved' : 'approval-required'}.`,
+    `Approval policy: long task plan approval is ${settings.requireLongTaskPlanApproval ? 'approval-required' : 'not required'}.`,
   ].join('\n')
 }
 

@@ -1917,6 +1917,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 { key: 'autoApproveShell', label: 'Shell 默认自动允许' },
                 { key: 'autoApproveFileWrite', label: '文件写入默认自动允许' },
                 { key: 'autoApproveComputerUse', label: 'Computer Use 默认自动允许' },
+                { key: 'requireLongTaskPlanApproval', label: '长任务规划需要审批' },
               ].map(item => (
                 <label key={item.key} className="relative flex items-center gap-3 cursor-pointer group">
                   <input
@@ -1938,7 +1939,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
               ))}
             </div>
             <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-70">
-              这组开关会在保存后同步到主窗口。注意: `Shell` 只覆盖命令执行，文件写入和桌面交互仍按各自开关审批。
+              这组开关会在保存后同步到主窗口。长任务规划审批默认关闭；关闭时计划会直接展示并执行，Shell、文件写入和桌面交互仍按各自开关审批。
             </p>
           </section>
 

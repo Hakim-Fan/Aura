@@ -202,6 +202,7 @@ export const defaultSettings: AgentSettings = {
   contextCompressionThresholdTokens: 256_000,
   reasoningEffort: 'medium',
   showDetailedExecutionDetails: false,
+  requireLongTaskPlanApproval: false,
   enableMultiAgent: true,
   enableComputerUse: true,
   autoApproveShell: false,
@@ -1416,6 +1417,10 @@ function parseSettings(raw: string | null): AgentSettings {
       showDetailedExecutionDetails: normalizeDetailedExecutionSetting(
         parsed.showDetailedExecutionDetails,
       ),
+      requireLongTaskPlanApproval:
+        typeof parsed.requireLongTaskPlanApproval === 'boolean'
+          ? parsed.requireLongTaskPlanApproval
+          : defaultSettings.requireLongTaskPlanApproval,
       browser: normalizeBrowserSettings(parsed.browser),
       web: normalizeWebToolsSettings(parsed.web),
       mcpServers: normalizeMcpServers(parsed.mcpServers),

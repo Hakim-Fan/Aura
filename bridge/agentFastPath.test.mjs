@@ -230,6 +230,8 @@ test('runAgent sends complex tasks through the hybrid graph wrapper', async () =
 
   const eventNames = runtimeEvents.map(event => event.event)
   assert.ok(eventNames.includes('agent.classifier.result'))
+  assert.ok(eventNames.includes('agent.plan.approval.skipped'))
+  assert.ok(!eventNames.includes('agent.plan.approval.requested'))
   assert.ok(eventNames.includes('agent.plan.created'))
   assert.ok(eventNames.includes('agent.graph.transition'))
   assert.ok(eventNames.includes('agent.step.started'))
@@ -258,6 +260,7 @@ test('runAgent stops long path before execution when plan approval is rejected',
       model: 'test-model',
       agentArchitectureMode: 'route-first',
       executionMode: 'bounded',
+      requireLongTaskPlanApproval: true,
     },
     messages: [
       {

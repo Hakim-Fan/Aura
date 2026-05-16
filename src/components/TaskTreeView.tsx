@@ -1,11 +1,32 @@
 import { memo } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { CheckCircle2, ChevronDown, CircleDashed, Clock3, PauseCircle, XCircle } from 'lucide-react'
+import { CheckCircle2, Circle, LoaderCircle, PauseCircle, XCircle } from 'lucide-react'
 import type { TaskNode } from '../types'
+
+const STRUCTURAL_STEP_KINDS = new Set(['main', 'plan'])
+
+function collectStepNodes(nodes: TaskNode[] = []) {
+  const steps: TaskNode[] = []
+
+  function visit(node: TaskNode) {
+    const children = node.children || []
+    if (STRUCTURAL_STEP_KINDS.has(node.kind) && children.length > 0) {
+      children.forEach(visit)
+      return
+    }
+
+    steps.push(node)
+    if (children.length > 0) {
+      children.forEach(visit)
+    }
+  }
+
+  nodes.forEach(visit)
+  return steps
+}
 
 function statusLabel(status?: string) {
   switch (status) {
+    case 'pending':
     case 'queued':
       return '已排队'
     case 'running':
@@ -17,80 +38,61 @@ function statusLabel(status?: string) {
     case 'completed':
       return '已完成'
     case 'failed':
+    case 'blocked':
       return '失败'
     default:
-      return '空闲'
+      return '等待中'
   }
 }
 
 function StatusIcon({ status }: { status?: string }) {
   switch (status) {
     case 'running':
-      return <Clock3 size={15} />
+      return <LoaderCircle size={14} className="animate-spin" />
     case 'awaiting_approval':
     case 'awaiting_user_input':
-      return <PauseCircle size={15} />
+      return <PauseCircle size={14} />
     case 'completed':
-      return <CheckCircle2 size={15} />
+      return <CheckCircle2 size={14} />
     case 'failed':
-      return <XCircle size={15} />
+    case 'blocked':
+      return <XCircle size={14} />
     default:
-      return <CircleDashed size={15} />
+      return <Circle size={14} />
   }
 }
 
-function TaskTreeNode({ node }: { node: TaskNode }) {
-  const hasSummary = Boolean(node.summary.trim())
-  const hasChildren = node.children.length > 0
+function stepTone(status?: string) {
+  switch (status) {
+    case 'running':
+      return 'border-[rgba(79,123,116,0.32)] bg-[rgba(79,123,116,0.08)] text-[var(--accent-soft-strong)]'
+    case 'completed':
+      return 'border-[rgba(34,197,94,0.28)] bg-[rgba(34,197,94,0.08)] text-green-600'
+    case 'failed':
+    case 'blocked':
+      return 'border-red-200 bg-red-50 text-red-500'
+    case 'awaiting_approval':
+    case 'awaiting_user_input':
+      return 'border-amber-200 bg-amber-50 text-amber-600'
+    default:
+      return 'border-[rgba(15,23,42,0.10)] bg-white text-[var(--text-secondary)]'
+  }
+}
 
+function TaskStep({ node }: { node: TaskNode }) {
   return (
-    <article className="grid grid-cols-[18px_1fr] gap-3">
-      <div className="relative flex flex-col items-center">
-        <div className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-white text-[var(--text-secondary)] opacity-70">
-          <StatusIcon status={node.status} />
-        </div>
-        <div className="mt-1 w-px flex-1 bg-[rgba(15,23,42,0.08)]" />
-      </div>
-
-      <div className="min-w-0 pb-1">
-        <details className="group" open={node.status === 'running' ? true : undefined}>
-          <summary className="list-none cursor-pointer">
-            <div className="flex min-w-0 items-start justify-between gap-3">
-              <div className="min-w-0 flex items-start gap-2">
-                {(hasSummary || hasChildren) ? (
-                  <span className="mt-0.5 rounded-md p-0.5 text-[var(--text-secondary)] opacity-55 transition-transform group-open:rotate-180">
-                    <ChevronDown size={12} />
-                  </span>
-                ) : (
-                  <span className="mt-0.5 h-4 w-4 shrink-0" />
-                )}
-                <strong className="min-w-0 text-13px font-600 leading-relaxed text-[var(--text-primary)]">
-                  {node.title}
-                </strong>
-              </div>
-              <span className="shrink-0 rounded-full bg-[rgba(15,23,42,0.05)] px-2 py-0.5 text-10px font-600 text-[var(--text-secondary)] opacity-70">
-                {statusLabel(node.status)}
-              </span>
-            </div>
-          </summary>
-
-          {(hasSummary || hasChildren) ? (
-            <div className="mt-2 pl-6">
-              {hasSummary ? (
-                <div className="markdown-summary text-12px text-[var(--text-secondary)] opacity-78">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{node.summary}</ReactMarkdown>
-                </div>
-              ) : null}
-              {hasChildren ? (
-                <div className={hasSummary ? 'mt-3' : ''}>
-                  <TaskTreeView nodes={node.children} />
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </details>
-      </div>
-    </article>
+    <li className="flex min-w-0 items-start gap-2.5">
+      <span
+        className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${stepTone(node.status)}`}
+        title={statusLabel(node.status)}
+        aria-label={statusLabel(node.status)}
+      >
+        <StatusIcon status={node.status} />
+      </span>
+      <span className="min-w-0 flex-1 text-13px font-600 leading-relaxed text-[var(--text-primary)]">
+        {node.title}
+      </span>
+    </li>
   )
 }
 
@@ -99,15 +101,17 @@ export const TaskTreeView = memo(function TaskTreeView({
 }: {
   nodes: TaskNode[]
 }) {
-  if (nodes.length === 0) {
-    return <p className="text-12px text-[var(--text-secondary)] opacity-60 leading-relaxed">还没有执行步骤。</p>
+  const steps = collectStepNodes(nodes)
+
+  if (steps.length === 0) {
+    return null
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      {nodes.map(node => (
-        <TaskTreeNode key={node.id} node={node} />
+    <ol className="flex flex-col gap-2">
+      {steps.map(node => (
+        <TaskStep key={node.id} node={node} />
       ))}
-    </div>
+    </ol>
   )
 })

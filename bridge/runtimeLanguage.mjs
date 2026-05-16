@@ -20,7 +20,7 @@ const TASK_LABELS = {
     verifyCompletion: '验证完成情况并合并最终结果',
     verifyPrevious: '验证上一次 route-first 执行',
     recoverFailed: '恢复失败的 route-first 执行',
-    continueExecution: '继续图执行',
+    continueExecution: '继续执行',
   },
   'en-US': {
     planTitle: 'Execution Plan',
@@ -32,7 +32,7 @@ const TASK_LABELS = {
     verifyCompletion: 'Verify completion and merge final result',
     verifyPrevious: 'Verify previous route-first execution',
     recoverFailed: 'Recover failed route-first execution',
-    continueExecution: 'Continue graph execution',
+    continueExecution: 'Continue execution',
   },
 }
 

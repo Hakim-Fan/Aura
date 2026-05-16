@@ -51,6 +51,7 @@ import type {
   AgentSettings,
   AgentTaskSnapshot,
   ApprovalDecision,
+  ApprovalRequest,
   AppendedInput,
   CapabilityOverrideMode,
   CapabilityPanelItem,
@@ -1295,6 +1296,88 @@ function filterVisibleTaskNodes(nodes: TaskNode[] = []): TaskNode[] {
   })
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function parseJsonRecord(value?: string): Record<string, unknown> | null {
+  if (!value?.trim()) {
+    return null
+  }
+  try {
+    const parsed = JSON.parse(value)
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function readTextField(record: Record<string, unknown> | null | undefined, key: string) {
+  const value = record?.[key]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function readPlanApprovalSteps(approval?: ApprovalRequest): Array<Record<string, unknown>> {
+  if (approval?.category !== 'plan') {
+    return []
+  }
+
+  const preview = isRecord(approval.preview) ? approval.preview : null
+  const input = parseJsonRecord(approval.input)
+  const steps = preview?.subtasks || input?.subtasks
+  return Array.isArray(steps)
+    ? steps.filter((step): step is Record<string, unknown> => isRecord(step))
+    : []
+}
+
+function taskTreeFromPlanApproval(approval?: ApprovalRequest): TaskNode[] {
+  const steps = readPlanApprovalSteps(approval)
+  if (steps.length === 0) {
+    return []
+  }
+
+  const preview = isRecord(approval?.preview) ? approval.preview : null
+  const input = parseJsonRecord(approval?.input)
+  const planId =
+    readTextField(preview, 'planId') ||
+    readTextField(input, 'planId') ||
+    approval?.id ||
+    'approved-plan'
+  const goal =
+    readTextField(preview, 'goal') ||
+    readTextField(input, 'goal') ||
+    approval?.summary ||
+    '执行计划'
+
+  return [
+    {
+      id: `${planId}-task-tree-root`,
+      title: goal,
+      summary: '',
+      kind: 'plan',
+      status: 'running',
+      children: steps.map((step, index) => ({
+        id: readTextField(step, 'id') || `${planId}-approval-step-${index + 1}`,
+        title:
+          readTextField(step, 'title') ||
+          readTextField(step, 'description') ||
+          `步骤 ${index + 1}`,
+        summary: '',
+        kind: (readTextField(step, 'kind') || 'plan_step') as TaskNode['kind'],
+        status: index === 0 ? 'running' : 'queued',
+        children: [],
+      })),
+    },
+  ]
+}
+
+function resolveVisibleTaskTree(
+  taskTree: TaskNode[] = [],
+  approval?: ApprovalRequest,
+): TaskNode[] {
+  return taskTree.length > 0 ? taskTree : taskTreeFromPlanApproval(approval)
+}
+
 function mergeTaskTreeNode(existing: TaskNode, incoming: TaskNode): TaskNode {
   return {
     ...existing,
@@ -1929,7 +2012,9 @@ export function MainWindowApp() {
 
   const displayedToolEvents = agentTask?.toolEvents || []
 
-  const displayedTaskTree = agentTask?.taskTree || []
+  const displayedTaskTree = agentTask
+    ? resolveVisibleTaskTree(agentTask.taskTree || [], agentTask.pendingApproval)
+    : []
 
   const activeWorkspacePath =
     activeSession?.workspacePath || activeSession?.workspaceRoot || ''
@@ -3663,14 +3748,18 @@ export function MainWindowApp() {
     await respondToApproval(agentTask.id, decision)
     setAgentTasksBySession(current => ({
       ...current,
-        [activeSession.id]: current[activeSession.id]
-          ? {
-            ...current[activeSession.id],
-            status: 'running',
-            pendingApproval: undefined,
-            pendingUserInput: undefined,
-          }
-          : current[activeSession.id],
+      [activeSession.id]: current[activeSession.id]
+        ? {
+          ...current[activeSession.id],
+          status: 'running',
+          taskTree: resolveVisibleTaskTree(
+            current[activeSession.id].taskTree || [],
+            current[activeSession.id].pendingApproval,
+          ),
+          pendingApproval: undefined,
+          pendingUserInput: undefined,
+        }
+        : current[activeSession.id],
     }))
   }
 

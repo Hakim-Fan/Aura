@@ -2685,18 +2685,27 @@ export async function runAgent(request) {
           request: effectiveRequest,
           classification,
         })
-        const planApproval = await requestPlanApproval({
-          hooks,
-          logger: runtimeLogger,
-          plan: initialPlan,
-          classification,
-        })
-        if (!planApproval.approved) {
-          result = buildRejectedPlanResult({
+        if (effectiveRequest?.settings?.requireLongTaskPlanApproval === true) {
+          const planApproval = await requestPlanApproval({
+            hooks,
+            logger: runtimeLogger,
             plan: initialPlan,
-            approval: planApproval,
+            classification,
           })
+          if (!planApproval.approved) {
+            result = buildRejectedPlanResult({
+              plan: initialPlan,
+              approval: planApproval,
+            })
+          }
         } else {
+          runtimeLogger.emit('agent.plan.approval.skipped', {
+            planId: initialPlan?.id,
+            reason: 'long_task_plan_approval_disabled',
+          })
+        }
+
+        if (!result) {
           result = await runHybridStateGraph({
             request: effectiveRequest,
             classification,
