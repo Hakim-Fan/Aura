@@ -3779,6 +3779,7 @@ function DockedTaskStepsPanel({
   nodes: TaskNode[]
   visible: boolean
 }) {
+  const [collapsed, setCollapsed] = useState(false)
   const visibleNodes = sanitizeTaskNodes(nodes, '')
 
   if (!visible || visibleNodes.length === 0) {
@@ -3788,9 +3789,22 @@ function DockedTaskStepsPanel({
   return (
     <section
       aria-live="polite"
-      className="mb-3 w-full pointer-events-auto rounded-2xl border border-[rgba(79,123,116,0.14)] bg-white/96 px-4 py-3 shadow-[0_18px_50px_-24px_rgba(15,23,42,0.45)] ring-1 ring-[rgba(79,123,116,0.08)] backdrop-blur-xl"
+      className="mb-3 w-full sm:w-2/3 pointer-events-auto rounded-2xl border border-[rgba(79,123,116,0.14)] bg-white/96 px-3.5 py-2.5 shadow-[0_18px_50px_-24px_rgba(15,23,42,0.45)] ring-1 ring-[rgba(79,123,116,0.08)] backdrop-blur-xl"
     >
-      <TaskTreeView nodes={visibleNodes} />
+      <div className="flex min-w-0 items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <TaskTreeView nodes={visibleNodes} collapsed={collapsed} />
+        </div>
+        <button
+          type="button"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[rgba(15,23,42,0.08)] bg-white/80 text-[var(--text-secondary)] transition-colors hover:border-[rgba(79,123,116,0.28)] hover:text-[var(--text-primary)]"
+          aria-label={collapsed ? '展开执行步骤' : '折叠执行步骤'}
+          title={collapsed ? '展开执行步骤' : '折叠执行步骤'}
+          onClick={() => setCollapsed(value => !value)}
+        >
+          {collapsed ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
+        </button>
+      </div>
     </section>
   )
 }

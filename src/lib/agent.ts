@@ -304,19 +304,6 @@ function buildWorkMemoryCarryoverContext(memories: WorkMemory[]): string | undef
   return clipText(lines.join('\n'), 5_200)
 }
 
-async function loadWorkMemoryCarryoverContext(logContext?: AgentTaskLogContext) {
-  const sessionId = typeof logContext?.sessionId === 'string' ? logContext.sessionId.trim() : ''
-  if (!sessionId) {
-    return undefined
-  }
-
-  try {
-    return buildWorkMemoryCarryoverContext(await loadPersistedWorkMemories(sessionId, 8))
-  } catch {
-    return undefined
-  }
-}
-
 function mergeCarryoverContext(...sections: Array<string | undefined>): string | undefined {
   const normalized = sections
     .map(section => (typeof section === 'string' ? section.trim() : ''))
@@ -596,14 +583,20 @@ export async function startAgentTask(
   extraCarryoverContext?: string,
   logContext?: AgentTaskLogContext,
 ): Promise<string> {
-  const [runtimeMessages, workMemoryCarryoverContext] = await Promise.all([
+  const [runtimeMessages, persistedWorkMemories] = await Promise.all([
     buildAgentRuntimeMessages(messages),
-    loadWorkMemoryCarryoverContext(logContext),
+    logContext?.sessionId
+      ? loadPersistedWorkMemories(logContext.sessionId, 8).catch(() => [])
+      : Promise.resolve([]),
   ])
+  const workMemoryCarryoverContext = buildWorkMemoryCarryoverContext(persistedWorkMemories)
   const payload = {
     settings,
     capabilities,
     logContext,
+    runtime: {
+      persistedWorkMemories,
+    },
     carryoverContext: mergeCarryoverContext(
       workMemoryCarryoverContext,
       buildCarryoverWebContext(messages),

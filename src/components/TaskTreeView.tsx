@@ -79,17 +79,34 @@ function stepTone(status?: string) {
   }
 }
 
-function TaskStep({ node }: { node: TaskNode }) {
+function pickFocusedStep(steps: TaskNode[] = []) {
   return (
-    <li className="flex min-w-0 items-start gap-2.5">
+    steps.find(node =>
+      ['running', 'awaiting_approval', 'awaiting_user_input'].includes(node.status || ''),
+    ) ||
+    steps.find(node => ['failed', 'blocked'].includes(node.status || '')) ||
+    [...steps].reverse().find(node => node.status === 'completed') ||
+    steps.find(node => ['pending', 'queued'].includes(node.status || '')) ||
+    steps[0]
+  )
+}
+
+function TaskStep({ node, compact = false }: { node: TaskNode; compact?: boolean }) {
+  return (
+    <li className={`flex min-w-0 ${compact ? 'items-center' : 'items-start'} gap-2.5`}>
       <span
-        className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${stepTone(node.status)}`}
+        className={`${compact ? '' : 'mt-0.5'} flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${stepTone(node.status)}`}
         title={statusLabel(node.status)}
         aria-label={statusLabel(node.status)}
       >
         <StatusIcon status={node.status} />
       </span>
-      <span className="min-w-0 flex-1 text-13px font-600 leading-relaxed text-[var(--text-primary)]">
+      <span
+        className={`min-w-0 flex-1 text-13px font-600 text-[var(--text-primary)] ${
+          compact ? 'truncate leading-5' : 'leading-relaxed'
+        }`}
+        title={compact ? node.title : undefined}
+      >
         {node.title}
       </span>
     </li>
@@ -98,19 +115,22 @@ function TaskStep({ node }: { node: TaskNode }) {
 
 export const TaskTreeView = memo(function TaskTreeView({
   nodes,
+  collapsed = false,
 }: {
   nodes: TaskNode[]
+  collapsed?: boolean
 }) {
   const steps = collectStepNodes(nodes)
+  const displayedSteps = collapsed ? [pickFocusedStep(steps)].filter(Boolean) : steps
 
-  if (steps.length === 0) {
+  if (displayedSteps.length === 0) {
     return null
   }
 
   return (
-    <ol className="flex flex-col gap-2">
-      {steps.map(node => (
-        <TaskStep key={node.id} node={node} />
+    <ol className={collapsed ? 'flex flex-col gap-0' : 'flex flex-col gap-2'}>
+      {displayedSteps.map(node => (
+        <TaskStep key={node.id} node={node} compact={collapsed} />
       ))}
     </ol>
   )

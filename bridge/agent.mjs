@@ -218,6 +218,133 @@ function appendCarryoverContextToPrompt(systemPrompt, carryoverContext) {
   ].join('\n\n')
 }
 
+function normalizePersistedToolEvidence(memories = []) {
+  const entries = []
+  for (const memory of Array.isArray(memories) ? memories : []) {
+    if (memory?.kind !== 'tool_evidence') {
+      continue
+    }
+    const recentSuccesses = Array.isArray(memory?.content?.recentSuccesses)
+      ? memory.content.recentSuccesses
+      : []
+    for (const entry of recentSuccesses) {
+      if (!entry || typeof entry !== 'object' || !entry.tool) {
+        continue
+      }
+      entries.push({
+        ...entry,
+        restoredFromWorkMemory: true,
+        workMemoryId: memory.id,
+      })
+    }
+  }
+  return entries.slice(-12)
+}
+
+function attachmentObservationKey(attachment = {}) {
+  return [
+    attachment.path || attachment.filePath || '',
+    attachment.name || attachment.filename || '',
+    attachment.mimeType || attachment.type || '',
+  ].join('::')
+}
+
+function summarizeAttachmentObservation(attachment = {}) {
+  return {
+    name: truncateText(attachment.name || attachment.filename || '', 120),
+    path: truncateText(attachment.path || attachment.filePath || '', 320),
+    type: truncateText(attachment.mimeType || attachment.type || '', 120),
+  }
+}
+
+function collectAttachmentObservations(messages = []) {
+  const seen = new Set()
+  const observations = []
+  const add = (attachment) => {
+    const normalized = summarizeAttachmentObservation(attachment)
+    if (!normalized.name && !normalized.path) {
+      return
+    }
+    const key = attachmentObservationKey(normalized)
+    if (seen.has(key)) {
+      return
+    }
+    seen.add(key)
+    observations.push(normalized)
+  }
+
+  for (const message of Array.isArray(messages) ? messages : []) {
+    for (const attachment of Array.isArray(message?.attachments) ? message.attachments : []) {
+      add(attachment)
+    }
+    for (const part of Array.isArray(message?.parts) ? message.parts : []) {
+      if (part?.type === 'file' || part?.type === 'image') {
+        add(part)
+      }
+    }
+  }
+  return observations.slice(-12)
+}
+
+async function recordInitialContextObservations(request = {}, logger) {
+  const hooks = request?.hooks || {}
+  const logContext = request?.logContext || {}
+  const sessionId = typeof logContext.sessionId === 'string' ? logContext.sessionId.trim() : ''
+  if (!sessionId || typeof hooks.appControl !== 'function') {
+    return []
+  }
+
+  const attachments = collectAttachmentObservations(request.messages)
+  if (attachments.length === 0) {
+    return []
+  }
+
+  const taskId = typeof logContext.taskId === 'string' ? logContext.taskId.trim() : ''
+  const memory = {
+    id: `work-memory-${sessionId || 'session'}-${taskId || 'task'}-attachment-observations`,
+    sessionId,
+    taskId,
+    assistantMessageId: logContext.assistantMessageId || '',
+    kind: 'file_observation',
+    title: 'User attachment observations',
+    summary: `Current or recent user messages include ${attachments.length} attachment(s): ${attachments
+      .map(attachment => attachment.path || attachment.name)
+      .filter(Boolean)
+      .slice(0, 5)
+      .join('; ')}.`,
+    status: 'confirmed',
+    content: {
+      attachments,
+    },
+    sourceRefs: attachments.map(attachment => ({
+      path: attachment.path,
+      name: attachment.name,
+      type: attachment.type,
+    })),
+    nextUse:
+      'Use these attachment paths as recoverable task context. Read the file only when exact content is needed; otherwise reuse summaries and prior file observations.',
+  }
+
+  try {
+    const stored = await hooks.appControl('record_work_memory', { memory })
+    logger?.emit?.('agent.memory.attachment_observations_recorded', {
+      memoryId: stored?.id || memory.id,
+      attachmentCount: attachments.length,
+    })
+    return [stored || memory]
+  } catch (error) {
+    logger?.emit?.(
+      'agent.memory.attachment_observations_failed',
+      {
+        attachmentCount: attachments.length,
+        error: error?.message || String(error),
+      },
+      { level: 'warn' },
+    )
+    return []
+  }
+}
+
 function buildPreflightSystemPromptEstimate({
   messages,
   settings,
@@ -901,7 +1028,13 @@ function summarizeMessages(messages) {
 
 function summarizeReasoning(messages, toolEvents, finalMessage, hooks = {}) {
   const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')
-  const userIntent = latestUserMessage?.content?.replace(/\s+/g, ' ').trim() || '处理当前任务'
+  const latestUserContent = String(latestUserMessage?.content || '')
+  const currentSubtask =
+    latestUserContent.match(/当前子任务[:：]\s*([^\n]+)/)?.[1]?.trim() ||
+    latestUserContent.match(/Current subtask[:：]\s*([^\n]+)/i)?.[1]?.trim()
+  const userIntent = (currentSubtask || latestUserContent)
+    .replace(/\s+/g, ' ')
+    .trim() || '处理当前任务'
   const imageCount = (latestUserMessage?.parts || []).filter(part => part.type === 'image').length
   const fileCount = (latestUserMessage?.parts || []).filter(part => part.type === 'file').length
   const lines = [
@@ -1641,6 +1774,7 @@ export async function runRouteFirstAgent(request) {
     logContext: request.logContext || {},
     todoState: runtime.todoState || { items: [] },
     workMemories: runtime.workMemories || [],
+    autoToolEvidence: normalizePersistedToolEvidence(runtime.persistedWorkMemories),
     settings,
     cleanupHandlers: [],
   }
@@ -2416,6 +2550,9 @@ async function runModelPlanningGate({
       risk: planning.risk,
       stepCount: Array.isArray(planning.steps) ? planning.steps.length : 0,
       parseError: planning.parseError === true,
+      taskRelationType: planning.taskRelation?.type,
+      taskRelationConfidence: planning.taskRelation?.confidence,
+      contextRequest: planning.contextRequest,
     })
     if (planning.type === 'direct_answer') {
       return {
@@ -2470,6 +2607,8 @@ async function runModelPlanningGate({
           content: buildModelPlanningUserPrompt({
             messages: request?.messages,
             settings,
+            carryoverContext: request?.carryoverContext,
+            logContext: request?.logContext,
           }),
         },
       ],
@@ -2494,6 +2633,9 @@ async function runModelPlanningGate({
     risk: planning.risk,
     stepCount: Array.isArray(planning.steps) ? planning.steps.length : 0,
     parseError: planning.parseError === true,
+    taskRelationType: planning.taskRelation?.type,
+    taskRelationConfidence: planning.taskRelation?.confidence,
+    contextRequest: planning.contextRequest,
   })
 
   if (planning.type === 'direct_answer') {
@@ -2541,6 +2683,27 @@ export async function runAgent(request) {
     ...request,
     hooks,
     settings: effectiveSettings,
+  }
+  const initialObservedMemories = await recordInitialContextObservations(
+    effectiveRequest,
+    runtimeLogger,
+  )
+  if (initialObservedMemories.length > 0) {
+    effectiveRequest.runtime = {
+      ...(effectiveRequest.runtime || {}),
+      persistedWorkMemories: [
+        ...((Array.isArray(effectiveRequest.runtime?.persistedWorkMemories)
+          ? effectiveRequest.runtime.persistedWorkMemories
+          : [])),
+        ...initialObservedMemories,
+      ],
+      workMemories: [
+        ...((Array.isArray(effectiveRequest.runtime?.workMemories)
+          ? effectiveRequest.runtime.workMemories
+          : [])),
+        ...initialObservedMemories,
+      ],
+    }
   }
   const legacyClassification = classifyAgentTask({
     messages: effectiveRequest.messages,

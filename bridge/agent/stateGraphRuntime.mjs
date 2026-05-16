@@ -15,6 +15,7 @@ import {
   decideGraphCompletion,
   mergeGraphResult,
 } from './resultMerger.mjs'
+import { createExecutionStepIdFactory } from '../executionIds.mjs'
 
 export const AgentGraphState = {
   INIT: 'INIT',
@@ -150,6 +151,8 @@ function createContinuationSubtask(plan, decision, previousSubtask) {
         reason: decision.reason,
         nextAction: decision.nextAction,
         previousSubtaskId: previousSubtask?.id,
+        hiddenFromTaskTree: true,
+        internal: true,
       },
       locale: plan?.locale || 'zh-CN',
     })
@@ -230,6 +233,27 @@ function findRestoredActiveSubtask(plan, restoredContext = {}) {
 
 function shouldFocusPlannedSubtask(subtask = {}) {
   return ['inspect_step', 'research_step'].includes(subtask.kind)
+}
+
+function isInternalVerificationSubtask(subtask = {}) {
+  return subtask?.kind === 'verification_step' && subtask?.metadata?.internal === true
+}
+
+function shouldAcceptVerificationAttempt({ decision, subtask, executionResult } = {}) {
+  return (
+    decision?.nextAction === 'run_verification' &&
+    isInternalVerificationSubtask(subtask) &&
+    executionResult?.status === 'completed' &&
+    safeArray(executionResult?.evidence).length > 0
+  )
+}
+
+function markGraphResultVerified(result = {}, reason = 'verification_attempt_completed') {
+  return {
+    ...result,
+    completionState: 'executed_verified',
+    terminationReason: result?.terminationReason || reason,
+  }
 }
 
 function buildPlannedSubtaskRequest(request, {
@@ -316,15 +340,25 @@ export async function runHybridStateGraph({
       currentState = restoredContext.graphState || AgentGraphState.INIT
     }
   }
-  const effectiveMaxGraphPasses =
+  let effectiveMaxGraphPasses =
     typeof maxGraphPasses === 'number' && Number.isFinite(maxGraphPasses)
       ? Math.max(1, Math.round(maxGraphPasses))
       : Math.max(1, countExecutableSubtasks(plan) + 2)
   const verifySubtask = findPlanSubtask(plan, 'verify')
   const executionHistory = []
+  const sharedExecutionStepIds =
+    request?.runtime?.executionStepIds ||
+    createExecutionStepIdFactory(request?.logContext || {})
+  const withSharedRuntime = value => ({
+    ...value,
+    runtime: {
+      ...(value?.runtime || {}),
+      executionStepIds: sharedExecutionStepIds,
+    },
+  })
   let activeRequest =
     restoredContext?.success && restoredContext?.graphContext?.request
-      ? {
+      ? withSharedRuntime({
           ...request,
           messages: safeArray(restoredContext.graphContext.request.messages).length > 0
             ? restoredContext.graphContext.request.messages
@@ -333,8 +367,8 @@ export async function runHybridStateGraph({
             ...(request?.logContext || {}),
             ...(restoredContext.graphContext.request.logContext || {}),
           },
-        }
-      : request
+        })
+      : withSharedRuntime(request)
   let activeSubtask = restoredContext?.success
     ? findRestoredActiveSubtask(plan, restoredContext)
     : findNextExecutableSubtask(plan)
@@ -488,7 +522,33 @@ export async function runHybridStateGraph({
         nextAction: decision.nextAction,
       })
 
-      if (decision.isComplete) {
+      const acceptedVerificationAttempt = shouldAcceptVerificationAttempt({
+        decision,
+        subtask: activeSubtask,
+        executionResult,
+      })
+      const effectiveDecision = acceptedVerificationAttempt
+        ? {
+            ...decision,
+            isComplete: true,
+            status: 'completed',
+            reason: 'verification_attempt_completed',
+            nextAction: 'finalize',
+            graphState: AgentGraphState.COMPLETED,
+          }
+        : decision
+      if (acceptedVerificationAttempt) {
+        latestResult = markGraphResultVerified(result)
+        latestDecision = effectiveDecision
+        logger?.emit?.('agent.graph.verification.accepted', {
+          planId: plan.id,
+          subtaskId: activeSubtask?.id,
+          evidenceCount,
+          reason: effectiveDecision.reason,
+        })
+      }
+
+      if (effectiveDecision.isComplete) {
         if (activeSubtask.kind === 'recovery_step' && activeSubtask.metadata?.previousSubtaskId) {
           updateSubtask(activeSubtask.metadata.previousSubtaskId, 'completed', evidenceCount)
         }
@@ -497,12 +557,12 @@ export async function runHybridStateGraph({
           activeRequest = buildContinuationRequest(stepRequest, {
             plan,
             decision: {
-              ...decision,
+              ...effectiveDecision,
               reason: 'continue_planned_subtasks',
               nextAction: 'execute_next_planned_subtask',
             },
             executionResult,
-            result,
+            result: latestResult || result,
             subtask: nextPlannedSubtask,
           })
           activeSubtask = nextPlannedSubtask
@@ -513,12 +573,12 @@ export async function runHybridStateGraph({
         emitTransition(AgentGraphState.COMPLETED, 'structured completion gate accepted result')
 
         return mergeGraphResult({
-          result,
+          result: latestResult || result,
           plan,
           executionResult,
           executionHistory,
           decision: {
-            ...decision,
+            ...effectiveDecision,
             graphState: AgentGraphState.COMPLETED,
           },
           checkpoints: checkpointRuntime.records,
@@ -551,7 +611,6 @@ export async function runHybridStateGraph({
         })
       }
 
-      updateSubtask(verifySubtask.id, 'running', evidenceCount)
       const continuationSubtask = createContinuationSubtask(plan, decision, activeSubtask)
       if (!continuationSubtask) {
         updateSubtask(verifySubtask.id, 'blocked', evidenceCount)
@@ -578,6 +637,9 @@ export async function runHybridStateGraph({
         newStatus: continuationSubtask.status,
         evidenceCount: 0,
       })
+      if (!(typeof maxGraphPasses === 'number' && Number.isFinite(maxGraphPasses))) {
+        effectiveMaxGraphPasses += 1
+      }
       activeRequest = buildContinuationRequest(stepRequest, {
         plan,
         decision,

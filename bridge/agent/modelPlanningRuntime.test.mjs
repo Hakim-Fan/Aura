@@ -28,6 +28,43 @@ test('model planning parser accepts executable plans', () => {
   assert.equal(result.successCriteria[0], '每个子标题都有表')
 })
 
+test('model planning parser accepts planning router output', () => {
+  const result = parseModelPlanningResult(JSON.stringify({
+    taskRelation: {
+      type: 'continue_current',
+      targetTaskId: 'task-123',
+      confidence: 0.91,
+      reason: '用户要求继续刚才的文档任务',
+    },
+    executionMode: 'plan_then_execute',
+    contextRequest: {
+      includeRecentMessages: true,
+      includeCurrentTaskSummary: true,
+      includeWorkMemory: true,
+      includeArtifacts: true,
+      includeFileSummaries: true,
+      needsFreshFileRead: false,
+      reason: '已有读取摘要可复用',
+    },
+    response: {
+      type: 'plan',
+      goal: '继续生成 Markdown 文档',
+      risk: 'medium',
+      steps: [
+        { id: '1', description: '恢复上次任务结果' },
+        { id: '2', description: '写入 Markdown 文件' },
+      ],
+    },
+  }))
+
+  assert.equal(result.type, 'plan')
+  assert.equal(result.goal, '继续生成 Markdown 文档')
+  assert.equal(result.taskRelation.type, 'continue_current')
+  assert.equal(result.taskRelation.targetTaskId, 'task-123')
+  assert.equal(result.contextRequest.includeWorkMemory, true)
+  assert.equal(result.contextRequest.needsFreshFileRead, false)
+})
+
 test('model planning user prompt includes attachment summaries', () => {
   const prompt = buildModelPlanningUserPrompt({
     settings: {
@@ -53,6 +90,47 @@ test('model planning user prompt includes attachment summaries', () => {
   assert.equal(parsed.hasAttachments, true)
   assert.equal(parsed.attachments[0].name, '建设内容.docx')
   assert.equal(parsed.locale, 'zh-CN')
+})
+
+test('model planning user prompt includes carryover memory and task ids', () => {
+  const prompt = buildModelPlanningUserPrompt({
+    settings: {
+      locale: 'zh-CN',
+    },
+    logContext: {
+      sessionId: 'session-1',
+      taskId: 'task-1',
+    },
+    carryoverContext:
+      'Prior work memory: 已读取 requirements.docx，文件未变化，摘要可复用。',
+    messages: [
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: '上次读取了文档但还没有生成 markdown。',
+        completionState: 'not_executed',
+        steps: [
+          {
+            id: 'step-1',
+            title: '读取文档',
+            status: 'completed',
+          },
+        ],
+      },
+      {
+        id: 'latest-user',
+        role: 'user',
+        content: '继续输出 markdown',
+      },
+    ],
+  })
+  const parsed = JSON.parse(prompt)
+
+  assert.equal(parsed.latestUserRequest, '继续输出 markdown')
+  assert.equal(parsed.logContext.sessionId, 'session-1')
+  assert.match(parsed.priorWorkMemoryAndCarryover, /requirements\.docx/)
+  assert.equal(parsed.recentAssistantExecutions[0].completionState, 'not_executed')
+  assert.equal(parsed.recentAssistantExecutions[0].steps[0].status, 'completed')
 })
 
 test('model planning user prompt carries recent file parts as attachment context', () => {

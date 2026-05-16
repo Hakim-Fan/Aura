@@ -5,7 +5,7 @@ import {
   createHybridPlan,
   runHybridStateGraph,
 } from './stateGraphRuntime.mjs'
-import { createHybridPlanFromModelPlan } from './plannerRuntime.mjs'
+import { createHybridPlanFromModelPlan, planToTaskTree } from './plannerRuntime.mjs'
 import { createGraphCheckpointRuntime } from './checkpointRuntime.mjs'
 
 function createLogger() {
@@ -182,9 +182,16 @@ test('runHybridStateGraph keeps delegated route-first task trees from replacing 
 test('runHybridStateGraph continues into verification when first execution is unverified', async () => {
   const logger = createLogger()
   const requests = []
+  const executionStepIds = []
+  const taskTrees = []
   const result = await runHybridStateGraph({
     request: {
       messages: [{ role: 'user', content: '修改文件并验证结果' }],
+      hooks: {
+        onTaskTree(tree) {
+          taskTrees.push(tree)
+        },
+      },
     },
     classification: {
       risk: 'high',
@@ -194,6 +201,7 @@ test('runHybridStateGraph continues into verification when first execution is un
     logger,
     executeRouteFirst: async request => {
       requests.push(request)
+      executionStepIds.push(request.runtime.executionStepIds.next('reasoning', 'probe'))
       if (requests.length === 1) {
         return {
           status: 'completed',
@@ -219,7 +227,15 @@ test('runHybridStateGraph continues into verification when first execution is un
   assert.equal(result.graphCompletion.isComplete, true)
   assert.equal(result.graphExecutions.length, 2)
   assert.equal(result.graphPlan.subtasks.length, 4)
-  assert.ok(result.graphPlan.subtasks.some(subtask => subtask.kind === 'verification_step'))
+  const verificationStep = result.graphPlan.subtasks.find(subtask => subtask.kind === 'verification_step')
+  assert.equal(verificationStep?.metadata?.hiddenFromTaskTree, true)
+  assert.ok(taskTrees.some(tree => tree[0]?.children?.some(node => node.kind === 'verification_step')))
+  const visibleVerification = taskTrees
+    .flatMap(tree => tree[0]?.children || [])
+    .find(node => node.kind === 'verification_step')
+  assert.equal(visibleVerification?.title, '确认上一步执行结果')
+  assert.doesNotMatch(visibleVerification?.summary || '', /route-first/i)
+  assert.notEqual(executionStepIds[0], executionStepIds[1])
 
   const transitions = logger.events
     .filter(entry => entry.event === 'agent.graph.transition')
@@ -229,6 +245,154 @@ test('runHybridStateGraph continues into verification when first execution is un
     2,
   )
   assert.ok(transitions.includes(AgentGraphState.COMPLETED))
+})
+
+test('runHybridStateGraph does not chain internal verification subtasks', async () => {
+  const logger = createLogger()
+  let calls = 0
+  const result = await runHybridStateGraph({
+    request: {
+      messages: [{ role: 'user', content: '读取文件并总结' }],
+    },
+    classification: {
+      risk: 'medium',
+      complexity: 'complex',
+    },
+    logger,
+    executeRouteFirst: async () => {
+      calls += 1
+      return {
+        status: 'completed',
+        message: calls === 1 ? 'read file' : 'checked output',
+        completionState: 'executed_unverified',
+        toolEvents: [{ id: `tool-${calls}`, name: 'read_file', status: 'success' }],
+      }
+    },
+  })
+
+  assert.equal(calls, 2)
+  assert.equal(result.status, 'completed')
+  assert.equal(result.completionState, 'executed_verified')
+  assert.equal(
+    result.graphPlan.subtasks.filter(subtask => subtask.kind === 'verification_step').length,
+    1,
+  )
+  assert.ok(logger.events.some(entry => entry.event === 'agent.graph.verification.accepted'))
+})
+
+test('planToTaskTree merges consecutive internal verification steps into one visible status', () => {
+  const plan = {
+    id: 'plan-test',
+    goal: '测试连续验证展示',
+    locale: 'zh-CN',
+    subtasks: [
+      {
+        id: 'plan-test-subtask-1',
+        kind: 'execute',
+        title: '执行一步',
+        status: 'completed',
+        successCriteria: [],
+      },
+      {
+        id: 'plan-test-subtask-2',
+        kind: 'verification_step',
+        title: 'internal verification',
+        status: 'completed',
+        metadata: { internal: true, hiddenFromTaskTree: true },
+      },
+      {
+        id: 'plan-test-subtask-3',
+        kind: 'verification_step',
+        title: 'internal verification again',
+        status: 'running',
+        metadata: { internal: true, hiddenFromTaskTree: true },
+      },
+      {
+        id: 'plan-test-subtask-4',
+        kind: 'execute',
+        title: '继续下一步',
+        status: 'pending',
+        successCriteria: [],
+      },
+    ],
+  }
+
+  const tree = planToTaskTree(plan)
+  const children = tree[0]?.children || []
+  assert.equal(children.length, 3)
+  assert.equal(children[1].kind, 'verification_step')
+  assert.equal(children[1].status, 'running')
+  assert.equal(children[1].title, '确认上一步执行结果')
+  assert.equal(children[1].summary, '确认上一步已经产生有效结果；如果发现问题，会先修复再继续后续步骤。')
+})
+
+test('runHybridStateGraph expands pass budget for hidden verification steps', async () => {
+  const logger = createLogger()
+  const taskTrees = []
+  let calls = 0
+  const initialPlan = createHybridPlanFromModelPlan({
+    modelPlan: {
+      goal: '完成四个顺序步骤',
+      steps: [
+        { description: '步骤一' },
+        { description: '步骤二' },
+        { description: '步骤三' },
+        { description: '步骤四' },
+      ],
+    },
+    request: {
+      messages: [{ role: 'user', content: '完成四个顺序步骤' }],
+    },
+    classification: {
+      risk: 'medium',
+      complexity: 'complex',
+    },
+  })
+
+  const result = await runHybridStateGraph({
+    request: {
+      messages: [{ role: 'user', content: '完成四个顺序步骤' }],
+      hooks: {
+        onTaskTree(tree) {
+          taskTrees.push(tree)
+        },
+      },
+    },
+    classification: {
+      risk: 'medium',
+      complexity: 'complex',
+    },
+    initialPlan,
+    logger,
+    executeRouteFirst: async () => {
+      calls += 1
+      return {
+        status: 'completed',
+        message: `step ${calls}`,
+        completionState: 'executed_unverified',
+        toolEvents: [{ id: `tool-${calls}`, name: 'run_shell', status: 'success' }],
+      }
+    },
+  })
+
+  assert.equal(calls, 8)
+  assert.equal(result.status, 'completed')
+  assert.equal(result.completionState, 'executed_verified')
+  assert.equal(
+    result.graphPlan.subtasks.filter(subtask => subtask.kind === 'verification_step').length,
+    4,
+  )
+  const visibleExecuteNodes = taskTrees.at(-1)?.[0]?.children?.filter(node => node.kind === 'execute') || []
+  assert.equal(visibleExecuteNodes.length, 4)
+  assert.ok(visibleExecuteNodes.every(node => node.status === 'completed'))
+  assert.ok(
+    taskTrees.every(tree => {
+      const children = tree[0]?.children || []
+      const hasPendingExecute = children.some(node => node.kind === 'execute' && node.status !== 'completed')
+      const verifyNode = children.find(node => node.kind === 'verify')
+      return !hasPendingExecute || verifyNode?.status !== 'running'
+    }),
+  )
 })
 
 test('runHybridStateGraph executes dynamic planned subtasks before finalizing', async () => {

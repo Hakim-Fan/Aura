@@ -261,9 +261,10 @@ export function createHybridPlanFromModelPlan({
 
 export function planToTaskTree(plan = {}) {
   const labels = getRuntimeTaskLabels(plan?.locale || 'zh-CN')
-  const subtasks = Array.isArray(plan.subtasks)
+  const rawSubtasks = Array.isArray(plan.subtasks)
     ? plan.subtasks.filter(subtask => subtask?.kind !== 'classify')
     : []
+  const subtasks = mergeVisibleVerificationSubtasks(rawSubtasks, labels)
   return [
     {
       id: `${plan.id || 'plan'}-task-tree-root`,
@@ -278,9 +279,10 @@ export function planToTaskTree(plan = {}) {
       children: subtasks.map(subtask => ({
         id: subtask.id,
         title: subtask.title || subtask.id,
-        summary: Array.isArray(subtask.successCriteria) && subtask.successCriteria.length > 0
-          ? subtask.successCriteria.join('\n')
-          : '',
+        summary: subtask.summary ||
+          (Array.isArray(subtask.successCriteria) && subtask.successCriteria.length > 0
+            ? subtask.successCriteria.join('\n')
+            : ''),
         kind: subtask.kind || 'plan_step',
         status: subtask.status || 'pending',
         children: [],
@@ -293,6 +295,68 @@ export function planToTaskTree(plan = {}) {
       checkpoint: null,
     },
   ]
+}
+
+function isHiddenNonVerificationSubtask(subtask = {}) {
+  return subtask?.metadata?.hiddenFromTaskTree === true && subtask?.kind !== 'verification_step'
+}
+
+function isInternalVerificationSubtask(subtask = {}) {
+  return subtask?.kind === 'verification_step' && subtask?.metadata?.internal === true
+}
+
+function mergeVerificationStatus(items = []) {
+  if (items.some(item => item?.status === 'failed')) return 'failed'
+  if (items.some(item => item?.status === 'blocked')) return 'blocked'
+  if (items.some(item => item?.status === 'running')) return 'running'
+  if (items.length > 0 && items.every(item => item?.status === 'completed')) return 'completed'
+  return items.find(item => item?.status)?.status || 'pending'
+}
+
+function buildVisibleVerificationSubtask(items = [], labels = getRuntimeTaskLabels()) {
+  const first = items[0] || {}
+  return {
+    ...first,
+    id: items.length > 1 ? `${first.id || 'verification'}-merged` : first.id,
+    title: labels.verifyPrevious,
+    summary: labels.verifyPreviousSummary,
+    kind: 'verification_step',
+    status: mergeVerificationStatus(items),
+    successCriteria: [],
+    metadata: {
+      ...(first.metadata || {}),
+      mergedVerificationCount: items.length,
+      visibleMergedVerification: true,
+    },
+  }
+}
+
+function mergeVisibleVerificationSubtasks(subtasks = [], labels = getRuntimeTaskLabels()) {
+  const merged = []
+  let pendingVerificationGroup = []
+
+  const flushVerificationGroup = () => {
+    if (pendingVerificationGroup.length === 0) {
+      return
+    }
+    merged.push(buildVisibleVerificationSubtask(pendingVerificationGroup, labels))
+    pendingVerificationGroup = []
+  }
+
+  for (const subtask of subtasks) {
+    if (isHiddenNonVerificationSubtask(subtask)) {
+      continue
+    }
+    if (isInternalVerificationSubtask(subtask)) {
+      pendingVerificationGroup.push(subtask)
+      continue
+    }
+    flushVerificationGroup()
+    merged.push(subtask)
+  }
+
+  flushVerificationGroup()
+  return merged
 }
 
 export function findPlanSubtask(plan, kindOrId) {
