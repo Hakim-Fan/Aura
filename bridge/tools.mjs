@@ -2836,6 +2836,7 @@ function emitToolPermissionEvent(hooks, event) {
 }
 
 export async function invokeTool(tool, args, toolEvents, hooks = {}) {
+  const toolStartedAt = Date.now()
   const shellPatchInterception = resolveShellPatchInterception(tool, args, hooks)
   const shellFileMutationInterception = shellPatchInterception
     ? null
@@ -2878,6 +2879,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     permissionScope: catalogEntry.permissionScope,
     approvalCategory: catalogEntry.approvalCategory,
     summary: eventSummary,
+    startedAt: toolStartedAt,
     order:
       typeof hooks.timelineOrder === 'number'
         ? hooks.timelineOrder
@@ -2932,6 +2934,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     updateEvent({
       summary: `${eventSummary} (blocked by hook)`,
       status: 'error',
+      ...completeEventTiming(),
       error: blockedError.rawMessage,
       errorInfo: blockedError.errorInfo,
     })
@@ -2959,6 +2962,14 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       eventId,
       ...activePlanStep,
     })
+  }
+
+  function completeEventTiming() {
+    const finishedAt = Date.now()
+    return {
+      finishedAt,
+      durationMs: Math.max(0, finishedAt - toolStartedAt),
+    }
   }
 
   function updateEvent(partial) {
@@ -3000,6 +3011,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     updateEvent({
       summary: executionPolicy.summary,
       status: 'error',
+      ...completeEventTiming(),
       error: policyError.rawMessage,
       errorInfo: policyError.errorInfo,
     })
@@ -3139,6 +3151,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       updateEvent({
         summary: `${tool.description} (denied by user)`,
         status: 'error',
+        ...completeEventTiming(),
         error: deniedError.rawMessage,
         errorInfo: deniedError.errorInfo,
       })
@@ -3204,6 +3217,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     if (repeatedFullReadGuardOutput) {
       updateEvent({
         status: 'success',
+        ...completeEventTiming(),
         output: stringifyOutput(repeatedFullReadGuardOutput),
         structuredOutput: undefined,
         error: undefined,
@@ -3290,6 +3304,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         })
     updateEvent({
       status: commandExitError ? 'error' : 'success',
+      ...completeEventTiming(),
       output: stringifyOutput(output),
       structuredOutput,
       error: commandExitError?.rawMessage,
@@ -3350,6 +3365,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     const toolError = ToolExecutionError.fromNormalizedError(normalized, effectiveTool.name)
     updateEvent({
       status: 'error',
+      ...completeEventTiming(),
       error: detail,
       errorInfo: toolError.toStructuredReport(),
     })

@@ -830,6 +830,9 @@ function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
         : event.status === 'error'
           ? 'error'
           : 'success',
+    startedAt: event.startedAt,
+    finishedAt: event.finishedAt,
+    durationMs: event.durationMs,
     input: event.input,
     output: event.output,
     structuredOutput: event.structuredOutput,

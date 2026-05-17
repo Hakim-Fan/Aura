@@ -26,6 +26,7 @@ export type MessageEventKind =
   | 'tool'
   | 'shell'
   | 'skill'
+  | 'progress'
   | 'approval'
   | 'user_input'
   | 'subagent'
@@ -113,6 +114,9 @@ export type MessageEvent = {
   order?: number
   source?: 'builtin' | 'mcp' | 'plugin' | 'subagent'
   status: MessageEventStatus
+  startedAt?: number
+  finishedAt?: number
+  durationMs?: number
   input?: string
   output?: string
   structuredOutput?: Record<string, unknown>
@@ -492,6 +496,9 @@ export type ToolEvent = {
   summary: string
   order?: number
   status: 'running' | 'success' | 'error'
+  startedAt?: number
+  finishedAt?: number
+  durationMs?: number
   input?: string
   output?: string
   structuredOutput?: Record<string, unknown>

@@ -783,7 +783,7 @@ function activityStatusLabel(status?: string) {
     case 'queued':
       return '准备执行'
     case 'running':
-      return '思考中'
+      return '执行中'
     case 'awaiting_approval':
       return '等待审批'
     case 'awaiting_user_input':
@@ -1038,6 +1038,8 @@ function eventKindLabel(event: MessageEvent) {
       return '命令'
     case 'skill':
       return '技能'
+    case 'progress':
+      return '进展'
     case 'approval':
       return '审批'
     case 'user_input':
@@ -1062,6 +1064,64 @@ function eventStatusLabel(status: MessageEvent['status']) {
     default:
       return '成功'
   }
+}
+
+function eventStatusPillClassName(status: MessageEvent['status']) {
+  switch (status) {
+    case 'running':
+      return 'border-[rgba(79,123,116,0.18)] bg-[rgba(79,123,116,0.07)] text-[var(--accent-soft-strong)]'
+    case 'awaiting_approval':
+    case 'awaiting_user_input':
+      return 'border-amber-200 bg-amber-50 text-amber-700'
+    case 'error':
+      return 'border-red-200 bg-red-50 text-red-600'
+    default:
+      return 'border-emerald-100 bg-emerald-50 text-emerald-700'
+  }
+}
+
+function eventKindPillClassName(event: MessageEvent) {
+  if (event.status === 'error') {
+    return 'bg-red-50 text-red-500'
+  }
+  if (event.status === 'awaiting_approval' || event.status === 'awaiting_user_input') {
+    return 'bg-amber-50 text-amber-700'
+  }
+  if (event.kind === 'progress') {
+    return 'bg-[rgba(79,123,116,0.08)] text-[var(--accent-soft-strong)]'
+  }
+  return 'bg-[rgba(15,23,42,0.04)] text-[var(--text-secondary)]'
+}
+
+function eventSourceLabel(source?: MessageEvent['source']) {
+  switch (source) {
+    case 'plugin':
+      return 'Plugin'
+    case 'mcp':
+      return 'MCP'
+    case 'subagent':
+      return '子 Agent'
+    case 'builtin':
+      return '内置'
+    default:
+      return ''
+  }
+}
+
+function isGenericToolSummary(event: MessageEvent) {
+  const summary = normalizeComparableText(event.summary)
+  if (!summary) {
+    return false
+  }
+  return (
+    /^read the full content of an installed aura skill by id/i.test(summary) ||
+    /^run a shell command/i.test(summary) ||
+    /^execute a shell command/i.test(summary) ||
+    /^execute command/i.test(summary) ||
+    /^apply a patch/i.test(summary) ||
+    /^write a file/i.test(summary) ||
+    /^read a file/i.test(summary)
+  )
 }
 
 function appendedInputStatusLabel(status: AppendedInput['status']) {
@@ -2278,6 +2338,93 @@ function summarizeReasoningPreview(content: string) {
   return firstLine.length > 96 ? `${firstLine.slice(0, 96)}...` : firstLine
 }
 
+type ReasoningDisplayModel = {
+  label: string
+  title: string
+  summary: string
+}
+
+const INTERNAL_REASONING_PATTERNS = [
+  /\bthe user wants me to\b/i,
+  /\blet me\b/i,
+  /\bi need to\b/i,
+  /\bi should\b/i,
+  /\bi have to\b/i,
+  /\bmy next step\b/i,
+  /用户(希望|要求|让我)/,
+  /我(需要|应该|先|将|要)/,
+]
+
+function inferReasoningTitle(content: string, kind: MessageReasoning['kind']) {
+  const normalized = normalizeComparableText(content).toLowerCase()
+
+  if (/context compression|runtime transcript compression|上下文压缩|压缩上下文/.test(normalized)) {
+    return '压缩上下文'
+  }
+  if (/blocked|denied|error|failed|失败|错误|阻止|受限|限制/.test(normalized)) {
+    return '调整策略'
+  }
+  if (/evidence|证据|补充上下文|补足/.test(normalized)) {
+    return '补充证据'
+  }
+  if (/skill|工具说明|能力|read skill/.test(normalized)) {
+    return '查找可用能力'
+  }
+  if (/python-docx|docx|document|binary|readfile|fileread|附件|文档|文件/.test(normalized)) {
+    return '分析文件读取方式'
+  }
+  if (/shell|command|script|python|命令|脚本/.test(normalized)) {
+    return '准备执行命令'
+  }
+  if (/verify|verification|validate|校验|验证|检查/.test(normalized)) {
+    return '验证结果'
+  }
+  if (/plan|strategy|approach|next step|步骤|计划|策略|下一步/.test(normalized)) {
+    return '制定策略'
+  }
+  if (/analy[sz]e|analysis|文档结构|格式|识别|分析/.test(normalized)) {
+    return '分析任务'
+  }
+  if (/final|answer|response|最终|回答|总结|整理/.test(normalized)) {
+    return '整理回答'
+  }
+  if (/user wants|用户|需求|任务|目标/.test(normalized)) {
+    return '理解任务'
+  }
+
+  return kind === 'summary' ? '执行摘要' : '分析进展'
+}
+
+function clampProgressSummary(value: string, maxChars = 140) {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return ''
+  }
+  return normalized.length > maxChars
+    ? `${normalized.slice(0, maxChars).trimEnd()}...`
+    : normalized
+}
+
+function buildReasoningDisplayModel(
+  content: string,
+  kind: MessageReasoning['kind'],
+): ReasoningDisplayModel {
+  const rawPreview = summarizeReasoningPreview(content)
+  const rawIsInternal = INTERNAL_REASONING_PATTERNS.some(pattern => pattern.test(rawPreview))
+  const title = inferReasoningTitle(content, kind)
+  const summary =
+    content.trim() ||
+    (kind === 'summary'
+      ? '已记录这一阶段的执行摘要。'
+      : '正在整理当前阶段的分析进展。')
+
+  return {
+    label: kind === 'summary' ? '摘要' : rawIsInternal ? '思路' : '分析',
+    title,
+    summary,
+  }
+}
+
 function buildExecutionTimeline(
   reasoningEntries: MessageReasoning[],
   phaseOutputs: MessagePhaseOutput[],
@@ -2329,6 +2476,21 @@ function buildExecutionTimeline(
 }
 
 type ExecutionTimelineItem = ReturnType<typeof buildExecutionTimeline>[number]
+type ExecutionTraceNarrative = {
+  key: string
+  sourceId: string
+  label: string
+  title: string
+  summary: string
+  rawContent: string
+  sourceKind: MessageReasoning['kind'] | 'phase_output'
+  order: number
+}
+type ExecutionTraceGroup = {
+  key: string
+  narratives: ExecutionTraceNarrative[]
+  items: ExecutionTimelineItem[]
+}
 type ExecutionDigestPreview = {
   label: string
   text: string
@@ -2337,6 +2499,21 @@ type ExecutionDigestPreview = {
 
 const EXECUTION_DIGEST_ENTRY_LIMIT = 80
 const EXECUTION_DIGEST_AUTO_SCROLL_THRESHOLD_PX = 24
+
+function isSyntheticRunSummary(value: string) {
+  const normalized = normalizeComparableText(value)
+  return (
+    /^围绕“.*”组织本轮处理。/.test(normalized) &&
+    /最后将结果整理成对用户可直接阅读的回复。/.test(normalized)
+  )
+}
+
+function normalizeTraceComparable(value: string) {
+  return normalizeComparableText(value)
+    .replace(/执行了\s*\d+\s*个工具步骤/g, '执行了 # 个工具步骤')
+    .replace(/本轮同时参考了\s*\d+\s*个文件/g, '本轮同时参考了 # 个文件')
+    .replace(/\d+(?:\.\d+)?\s*(?:ms|秒|s)\b/gi, '# time')
+}
 
 function isSameExecutionDigestPreview(
   left: ExecutionDigestPreview | null,
@@ -2512,13 +2689,17 @@ function buildExecutionDigestPreviewForTimelineItem(
   }
 
   if (item.kind === 'reasoning') {
-    const text = extractTailPreview(item.entry.content)
+    if (isSyntheticRunSummary(item.entry.content)) {
+      return null
+    }
+    const display = buildReasoningDisplayModel(item.entry.content, item.entry.kind)
+    const text = extractTailPreview(display.summary)
     if (!text) {
       return null
     }
 
     return {
-      label: item.entry.kind === 'summary' ? '执行摘要' : '执行进展',
+      label: display.title,
       text,
     } satisfies ExecutionDigestPreview
   }
@@ -2550,6 +2731,106 @@ function buildExecutionDigestEntries(options: {
   }
 
   return []
+}
+
+function buildExecutionTraceNarrative(
+  item: Extract<ExecutionTimelineItem, { kind: 'reasoning' | 'phase_output' }>,
+): ExecutionTraceNarrative | null {
+  if (item.kind === 'reasoning') {
+    if (isSyntheticRunSummary(item.entry.content)) {
+      return null
+    }
+    const display = buildReasoningDisplayModel(item.entry.content, item.entry.kind)
+    if (!normalizeComparableText(display.summary)) {
+      return null
+    }
+    return {
+      key: item.key,
+      sourceId: item.entry.id,
+      label: display.label,
+      title: display.title,
+      summary: display.summary,
+      rawContent: item.entry.content.trim(),
+      sourceKind: item.entry.kind,
+      order: item.order,
+    }
+  }
+
+  const content = item.output.content.trim()
+  if (!content) {
+    return null
+  }
+  return {
+    key: item.key,
+    sourceId: item.output.id,
+    label: '输出',
+    title: phaseOutputLabel(item.output),
+    summary: clampProgressSummary(stripMarkdownForPreview(content), 180),
+    rawContent: content,
+    sourceKind: 'phase_output',
+    order: item.order,
+  }
+}
+
+function appendNarrativeToTraceGroup(
+  group: ExecutionTraceGroup,
+  narrative: ExecutionTraceNarrative,
+) {
+  const comparable = normalizeTraceComparable(`${narrative.title} ${narrative.summary}`)
+  const exists = group.narratives.some(entry =>
+    normalizeTraceComparable(`${entry.title} ${entry.summary}`) === comparable,
+  )
+  if (!exists) {
+    group.narratives.push(narrative)
+  }
+}
+
+function buildExecutionTraceGroups(timeline: ExecutionTimelineItem[]) {
+  const groups: ExecutionTraceGroup[] = []
+  const seenNarratives = new Set<string>()
+  let currentGroup: ExecutionTraceGroup | null = null
+
+  function ensureFallbackGroup(item: ExecutionTimelineItem) {
+    if (!currentGroup) {
+      currentGroup = {
+        key: `trace-group-${item.key}`,
+        narratives: [],
+        items: [],
+      }
+      groups.push(currentGroup)
+    }
+    return currentGroup
+  }
+
+  for (const item of timeline) {
+    if (item.kind === 'reasoning' || item.kind === 'phase_output') {
+      const narrative = buildExecutionTraceNarrative(item)
+      if (!narrative) {
+        continue
+      }
+      const comparable = normalizeTraceComparable(`${narrative.title} ${narrative.summary}`)
+      if (seenNarratives.has(comparable)) {
+        continue
+      }
+      seenNarratives.add(comparable)
+
+      if (!currentGroup || currentGroup.items.length > 0) {
+        currentGroup = {
+          key: `trace-group-${narrative.key}`,
+          narratives: [narrative],
+          items: [],
+        }
+        groups.push(currentGroup)
+      } else {
+        appendNarrativeToTraceGroup(currentGroup, narrative)
+      }
+      continue
+    }
+
+    ensureFallbackGroup(item).items.push(item)
+  }
+
+  return groups.filter(group => group.narratives.length > 0 || group.items.length > 0)
 }
 
 function ExecutionDigestLog({ entries }: { entries: ExecutionDigestPreview[] }) {
@@ -2674,77 +2955,129 @@ function ExecutionDigest({
   )
 }
 
-function ReasoningPhaseCard({
-  content,
-  outputContent,
-  isActive,
+function ExecutionTraceHeader({
+  activity,
+  itemCount,
 }: {
-  content: string
-  outputContent?: string
-  isActive: boolean
+  activity?: ChatMessage['activity']
+  itemCount: number
 }) {
-  const [expanded, setExpanded] = useState(isActive)
-  const previousActiveRef = useRef(isActive)
-  const trimmedContent = content.trim()
-  const firstLine = trimmedContent
-    .split('\n')
-    .map(line => line.trim())
-    .find(Boolean) || summarizeReasoningPreview(trimmedContent)
-  const remainingContent = trimmedContent.startsWith(firstLine)
-    ? trimmedContent.slice(firstLine.length).trimStart()
-    : trimmedContent
-
-  useEffect(() => {
-    if (isActive) {
-      setExpanded(true)
-    } else if (previousActiveRef.current && !isActive) {
-      setExpanded(false)
-    }
-    previousActiveRef.current = isActive
-  }, [isActive])
+  const duration =
+    activity
+      ? (
+        activity.finishedAt ||
+        (activity.status === 'running' ||
+          activity.status === 'queued' ||
+          activity.status === 'awaiting_approval' ||
+          activity.status === 'awaiting_user_input'
+          ? Date.now()
+          : activity.startedAt)
+      ) - activity.startedAt
+      : undefined
+  const meta = [
+    activity ? activityStatusLabel(activity.status) : null,
+    duration ? formatDuration(duration) : null,
+    activity?.toolCount ? `${activity.toolCount} 个工具` : null,
+    itemCount ? `${itemCount} 个阶段` : null,
+  ].filter(Boolean)
 
   return (
-    <article className="stream-reveal-item rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.05)] px-3 py-2.5">
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <div className="min-w-0">
+        <div className="text-13px font-700 text-[var(--text-primary)]">执行轨迹</div>
+      </div>
+      {meta.length > 0 ? (
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          {meta.map(item => (
+            <span
+              key={item}
+              className="rounded-full border border-[rgba(15,23,42,0.07)] bg-white px-2 py-0.5 text-10px font-600 text-[var(--text-secondary)]"
+            >
+              {item}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ExecutionNarrativeCard({
+  narrative,
+  extraNarratives,
+  isActive,
+}: {
+  narrative: ExecutionTraceNarrative
+  extraNarratives: ExecutionTraceNarrative[]
+  isActive: boolean
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const hasRawDetails =
+    Boolean(narrative.rawContent) &&
+    normalizeComparableText(narrative.rawContent) !== normalizeComparableText(narrative.summary)
+  const canExpand = hasRawDetails || extraNarratives.length > 0
+
+  return (
+    <article className="stream-reveal-item">
       <button
         className="flex w-full items-start justify-between gap-3 text-left"
-        onClick={() => setExpanded(current => !current)}
+        onClick={() => canExpand && setExpanded(current => !current)}
         type="button"
       >
         <div className="min-w-0">
-          <div className="mb-1 flex items-center gap-2">
-            <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 min-w-12 text-center rounded bg-white/80 text-[var(--accent-soft-strong)]">
-              {isActive ? '思考中' : '思考'}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 min-w-10 text-center rounded ${isActive
+              ? 'bg-[rgba(79,123,116,0.10)] text-[var(--accent-soft-strong)]'
+              : 'bg-[rgba(15,23,42,0.04)] text-[var(--text-secondary)]'
+              }`}>
+              {narrative.label}
             </span>
-            <strong className="text-12px text-[var(--text-primary)] opacity-85">
-              <RevealTextSegments text={firstLine} inline />
+            <strong className="text-13px text-[var(--text-primary)]">
+              {narrative.title}
             </strong>
-            {/* <span className="text-10px text-[var(--text-secondary)] opacity-55">
-              {isActive ? '思考中' : ''}
-            </span> */}
-          </div>
-        </div>
-        {expanded ? (
-          <ChevronUp size={14} className="mt-0.5 shrink-0 text-[var(--text-secondary)] opacity-60" />
-        ) : (
-          <ChevronDown size={14} className="mt-0.5 shrink-0 text-[var(--text-secondary)] opacity-60" />
-        )}
-      </button>
-      {expanded && remainingContent ? (
-        <RevealTextSegments
-          text={remainingContent}
-          className="mt-2 whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-secondary)] opacity-80"
-        />
-      ) : null}
-      {outputContent?.trim() ? (
-        <div className="mt-2 rounded-lg border border-[rgba(79,123,116,0.10)] bg-white/70 px-3 py-2">
-          <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--accent-soft-strong)] opacity-75">
-            阶段输出
+            {isActive ? (
+              <span className="rounded-full bg-[rgba(79,123,116,0.08)] px-2 py-0.5 text-10px font-600 text-[var(--accent-soft-strong)]">
+                进行中
+              </span>
+            ) : null}
           </div>
           <RevealTextSegments
-            text={outputContent.trim()}
-            className="whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-primary)] opacity-80"
+            text={narrative.summary}
+            className="mt-1 whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-secondary)]"
           />
+          {extraNarratives.length > 0 ? (
+            <div className="mt-2 flex flex-col gap-1.5">
+              {extraNarratives.map(extra => (
+                <div
+                  key={extra.key}
+                  className="border-l border-[rgba(15,23,42,0.08)] pl-2 text-12px leading-relaxed text-[var(--text-secondary)]"
+                >
+                  <span className="font-700 text-[var(--text-primary)]">{extra.title}</span>
+                  <span className="mx-1 text-[var(--text-secondary)] opacity-50">·</span>
+                  <span>{extra.summary}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
+        {canExpand ? (
+          expanded ? (
+            <ChevronUp size={14} className="mt-0.5 shrink-0 text-[var(--text-secondary)] opacity-60" />
+          ) : (
+            <ChevronDown size={14} className="mt-0.5 shrink-0 text-[var(--text-secondary)] opacity-60" />
+          )
+        ) : null}
+      </button>
+      {expanded && hasRawDetails ? (
+        <details className="mt-2 rounded-lg border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.02)]">
+          <summary className="cursor-pointer px-3 py-2 text-11px font-600 text-[var(--text-secondary)] opacity-70">
+            查看原始片段
+          </summary>
+          <RevealTextSegments
+            text={narrative.rawContent}
+            className="border-t border-[rgba(15,23,42,0.05)] px-3 py-2 whitespace-pre-wrap text-11px leading-relaxed text-[var(--text-secondary)] opacity-75"
+          />
+        </details>
       ) : null}
     </article>
   )
@@ -2758,13 +3091,16 @@ function PhaseOutputCard({
   label?: string
 }) {
   return (
-    <article className="stream-reveal-item rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.04)] px-3 py-2.5">
-      <div className="mb-1 text-10px font-700 uppercase tracking-wider text-[var(--accent-soft-strong)] opacity-80">
-        {label}
+    <article className="stream-reveal-item rounded-lg border border-[rgba(15,23,42,0.07)] bg-white px-3 py-2.5 shadow-[0_1px_0_rgba(15,23,42,0.02)]">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded bg-[rgba(15,23,42,0.04)] text-[var(--text-secondary)]">
+          输出
+        </span>
+        <strong className="text-13px text-[var(--text-primary)]">{label}</strong>
       </div>
       <RevealTextSegments
         text={content.trim()}
-        className="whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-primary)] opacity-80"
+        className="whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-secondary)]"
       />
     </article>
   )
@@ -2802,7 +3138,7 @@ function SearchControllerDecisionCard({
     <article className="stream-reveal-item rounded-xl border border-[rgba(79,123,116,0.10)] bg-[rgba(79,123,116,0.05)] px-3 py-2.5">
       <div className="mb-1 flex items-center gap-2">
         <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 min-w-12 text-center rounded bg-white/80 text-[var(--accent-soft-strong)]">
-          思考
+          策略
         </span>
         <strong className="text-12px text-[var(--text-primary)] opacity-85">搜索策略调整</strong>
       </div>
@@ -3892,6 +4228,14 @@ function MessageEventCard({
     typeof parsedShellSnapshot?.wallTimeMs === 'number'
       ? formatDuration(parsedShellSnapshot.wallTimeMs)
       : ''
+  const eventDuration =
+    typeof event.durationMs === 'number' && Number.isFinite(event.durationMs)
+      ? formatDuration(event.durationMs)
+      : shellDuration
+  const eventMeta = [
+    eventDuration,
+    eventSourceLabel(event.source),
+  ].filter(Boolean)
   const shellStatusDetail = isShellLog
     ? event.status === 'running'
       ? `命令仍在执行${shellDuration ? ` · 已运行 ${shellDuration}` : ''}`
@@ -3911,7 +4255,8 @@ function MessageEventCard({
       duration: shellDuration,
     })
     : ''
-  const shouldShowGenericSummary = !isShellLog && Boolean(event.summary)
+  const shouldShowGenericSummary =
+    !isShellLog && Boolean(event.summary) && !isGenericToolSummary(event)
   const shellLogText = [
     shellCommand ? `Command\n${shellCommand}` : '',
     shellOutputText ? `Output\n${shellOutputText}` : '',
@@ -3934,20 +4279,24 @@ function MessageEventCard({
   }
 
   return (
-    <article className="rounded-xl border border-[rgba(15,23,42,0.05)] bg-[rgba(15,23,42,0.02)] px-3 py-2">
+    <article className="rounded-lg border border-[rgba(15,23,42,0.07)] bg-white px-3 py-2.5 shadow-[0_1px_0_rgba(15,23,42,0.02)]">
       <div className="mb-1 flex items-start justify-between gap-3">
-        <div className="min-w-0 flex items-center gap-2">
-          <span
-            className={`text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded ${event.status === 'error'
-              ? 'bg-red-50 text-red-500'
-              : event.status === 'awaiting_approval' || event.status === 'awaiting_user_input'
-                ? 'bg-amber-50 text-amber-600'
-                : 'bg-gray-100 text-gray-500'
-              }`}
-          >
-            {eventKindLabel(event)}
-          </span>
-          <strong className="text-12px text-[var(--text-primary)] opacity-80 leading-tight">{event.title}</strong>
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className={`text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded ${eventKindPillClassName(event)}`}
+            >
+              {eventKindLabel(event)}
+            </span>
+            <strong className="min-w-0 truncate text-13px text-[var(--text-primary)] leading-tight">{event.title}</strong>
+          </div>
+          {eventMeta.length > 0 ? (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-10px text-[var(--text-secondary)] opacity-65">
+              {eventMeta.map(meta => (
+                <span key={meta}>{meta}</span>
+              ))}
+            </div>
+          ) : null}
         </div>
         <div className="relative shrink-0 group/status">
           <div className="flex items-center gap-2">
@@ -3962,12 +4311,7 @@ function MessageEventCard({
               </button>
             ) : null}
             <span
-              className={`shrink-0 text-10px font-500 ${event.status === 'error'
-                ? 'cursor-help text-red-500'
-                : event.status === 'awaiting_approval' || event.status === 'awaiting_user_input'
-                  ? 'text-amber-600'
-                  : 'text-green-600'
-                }`}
+              className={`shrink-0 rounded-full border px-2 py-0.5 text-10px font-700 ${event.status === 'error' ? 'cursor-help ' : ''}${eventStatusPillClassName(event.status)}`}
             >
               {eventStatusLabel(event.status)}
             </span>
@@ -3985,7 +4329,7 @@ function MessageEventCard({
         </div>
       </div>
       {shouldShowGenericSummary ? (
-        <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-75">{event.summary}</p>
+        <p className="text-12px leading-relaxed text-[var(--text-secondary)]">{event.summary}</p>
       ) : null}
       {!isApproval && isStructuredWebResearchEvent && parsedOutput ? (
         <WebResearchEventCard event={event} output={parsedOutput} />
@@ -4106,7 +4450,7 @@ function MessageEventCard({
       ) : null}
       {!isApproval && !isUserInputWait && !isShellLog && (event.input || event.output || event.error) && (
         <details className="mt-1.5 group" open={!isShellLog && event.status === 'error'}>
-          <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-55">显示详细信息</summary>
+          <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-65">查看审计详情</summary>
           <div className="mt-2 flex flex-col gap-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3">
             {genericDetailText ? (
               <div className="flex items-center justify-end gap-1">
@@ -4947,9 +5291,6 @@ function AssistantMessageCard({
       : summaryReasoning.length > 0
         ? summaryReasoning
         : []
-  const phaseOutputByBlockId = new Map(
-    visiblePhaseOutputs.map(output => [output.blockId, output.content]),
-  )
   const executionTimeline = buildExecutionTimeline(
     displayReasoning,
     visiblePhaseOutputs,
@@ -4962,7 +5303,11 @@ function AssistantMessageCard({
   const nonApprovalTimeline = executionTimeline.filter(
     item => !(isExecutionEventItem(item) && isAwaitingUserResponseEvent(item.event)),
   )
-  const latestReasoningId = displayReasoning.at(-1)?.id || ''
+  const executionTraceGroups = buildExecutionTraceGroups(nonApprovalTimeline)
+  const latestReasoningId =
+    displayReasoning.filter(entry => !isSyntheticRunSummary(entry.content)).at(-1)?.id ||
+    displayReasoning.at(-1)?.id ||
+    ''
   const executionDigestEntries = buildExecutionDigestEntries({
     executionTimeline: nonApprovalTimeline,
     taskNodes: [],
@@ -4970,7 +5315,7 @@ function AssistantMessageCard({
   const shouldShowDetailedTimeline =
     activity?.expanded === true &&
     showDetailedExecutionDetails &&
-    nonApprovalTimeline.length > 0
+    executionTraceGroups.length > 0
   const shouldShowCompactDigest =
     activity?.expanded === true &&
     !showDetailedExecutionDetails &&
@@ -5048,7 +5393,7 @@ function AssistantMessageCard({
     ? (message.events?.length || 0) > 0
       ? '模型执行了操作，但没有生成最终总结回答。'
       : providerReasoning.length > 0
-        ? '模型在思考中计划了后续动作，但没有成功形成最终回答。'
+        ? '模型已规划后续动作，但没有成功形成最终回答。'
         : '模型执行了操作，但没有生成最终总结回答。'
     : ''
   const retryFailureSummary =
@@ -5160,32 +5505,49 @@ function AssistantMessageCard({
           </div>
 
           {shouldShowDetailedTimeline ? (
-            <section className="flex flex-col gap-3 border-l border-[rgba(15,23,42,0.08)] pl-4">
-              <div className="flex flex-col gap-2.5">
-                {nonApprovalTimeline.map(item =>
-                  item.kind === 'reasoning' ? (
-                    <ReasoningPhaseCard
-                      key={item.key}
-                      content={item.entry.content}
-                      outputContent={phaseOutputByBlockId.get(item.entry.id)}
-                      isActive={isStreaming && item.entry.id === latestReasoningId}
-                    />
-                  ) : item.kind === 'phase_output' ? (
-                    <PhaseOutputCard
-                      key={item.key}
-                      content={item.output.content}
-                      label={phaseOutputLabel(item.output)}
-                    />
-                  ) : (
-                    <MessageEventCard
-                      key={item.key}
-                      event={item.event}
-                      onHandleApproval={onHandleApproval}
-                      onCancelCurrentStep={onCancelCurrentStep}
-                      onCopyText={onCopyText}
-                    />
-                  ),
-                )}
+            <section className="rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.018)] px-3.5 py-3">
+              <ExecutionTraceHeader activity={activity} itemCount={executionTraceGroups.length} />
+              <div className="flex flex-col gap-4 border-l border-[rgba(15,23,42,0.08)] pl-3">
+                {executionTraceGroups.map(group => {
+                  const primaryNarrative = group.narratives[0]
+                  const extraNarratives = group.narratives.slice(1)
+                  const isGroupActive =
+                    isStreaming &&
+                    group.narratives.some(narrative => narrative.sourceId === latestReasoningId)
+
+                  return (
+                    <div key={group.key} className="stream-reveal-item">
+                      {primaryNarrative ? (
+                        <ExecutionNarrativeCard
+                          narrative={primaryNarrative}
+                          extraNarratives={extraNarratives}
+                          isActive={isGroupActive}
+                        />
+                      ) : null}
+                      {group.items.length > 0 ? (
+                        <div className={`${primaryNarrative ? 'mt-2 ' : ''}flex flex-col gap-2`}>
+                          {group.items.map(item =>
+                            item.kind === 'phase_output' ? (
+                              <PhaseOutputCard
+                                key={item.key}
+                                content={item.output.content}
+                                label={phaseOutputLabel(item.output)}
+                              />
+                            ) : item.kind === 'event' ? (
+                              <MessageEventCard
+                                key={item.key}
+                                event={item.event}
+                                onHandleApproval={onHandleApproval}
+                                onCancelCurrentStep={onCancelCurrentStep}
+                                onCopyText={onCopyText}
+                              />
+                            ) : null,
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                })}
               </div>
             </section>
           ) : null}
