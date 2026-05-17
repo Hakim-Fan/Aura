@@ -1068,6 +1068,11 @@ function summarizeReasoning(messages, toolEvents, finalMessage, hooks = {}) {
           : 'summary',
       kind: 'summary',
       content: lines.join('\n'),
+      order:
+        typeof hooks.nextTimelineOrder === 'function'
+          ? hooks.nextTimelineOrder(1)
+          : undefined,
+      createdAt: Date.now(),
     },
   ]
 }
@@ -1736,11 +1741,24 @@ export async function runRouteFirstAgent(request) {
   } = request
   const executionStepIds =
     runtime.executionStepIds || createExecutionStepIdFactory(request.logContext || {})
+  const timelineOrderCursor =
+    runtime.timelineOrderCursor && typeof runtime.timelineOrderCursor === 'object'
+      ? runtime.timelineOrderCursor
+      : { value: 0 }
   const baseHooks = {
     ...incomingHooks,
     executionMessageId: executionStepIds.messageId,
     createExecutionStepId(type, hint) {
       return executionStepIds.next(type, hint)
+    },
+    nextTimelineOrder(span = 1) {
+      const currentOrder =
+        typeof timelineOrderCursor.value === 'number' && Number.isFinite(timelineOrderCursor.value)
+          ? timelineOrderCursor.value
+          : 0
+      const increment = Math.max(1, Math.round(Number(span) || 1))
+      timelineOrderCursor.value = currentOrder + increment
+      return currentOrder
     },
   }
   const {
@@ -2236,6 +2254,8 @@ export async function runRouteFirstAgent(request) {
       hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
         blockId: summaryReasoning[0].id,
         kind: summaryReasoning[0].kind,
+        order: summaryReasoning[0].order,
+        createdAt: summaryReasoning[0].createdAt,
       })
       const reasoning = [...summaryReasoning, ...(result.reasoning || [])]
       completeCurrentTaskWithResult(
@@ -2334,6 +2354,8 @@ export async function runRouteFirstAgent(request) {
           hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
             blockId: summaryReasoning[0].id,
             kind: summaryReasoning[0].kind,
+            order: summaryReasoning[0].order,
+            createdAt: summaryReasoning[0].createdAt,
           })
           completeCurrentTaskWithResult(
             taskTracker,
@@ -2383,6 +2405,8 @@ export async function runRouteFirstAgent(request) {
       hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
         blockId: summaryReasoning[0].id,
         kind: summaryReasoning[0].kind,
+        order: summaryReasoning[0].order,
+        createdAt: summaryReasoning[0].createdAt,
       })
       completeCurrentTaskWithResult(
         taskTracker,

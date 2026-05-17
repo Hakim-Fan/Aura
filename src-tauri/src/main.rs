@@ -3327,7 +3327,11 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
         .get("kind")
         .and_then(|value| value.as_str())
         .unwrap_or("provider");
-    let order = event.get("order").and_then(|value| value.as_u64());
+    let order = event.get("order").and_then(|value| value.as_f64());
+    let created_at = event
+        .get("createdAt")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_else(current_timestamp_ms);
 
     if let Some(existing) = current.reasoning.iter_mut().find(|block| {
         block
@@ -3336,6 +3340,10 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
             .map(|value| value == block_id)
             .unwrap_or(false)
     }) {
+        let existing_created_at = existing
+            .get("createdAt")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(created_at);
         let next_content = append_snapshot_delta(
             existing
                 .get("content")
@@ -3349,6 +3357,7 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
             "kind": kind,
             "content": next_content,
             "order": order,
+            "createdAt": existing_created_at,
         });
         return;
     }
@@ -3358,6 +3367,7 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
         "kind": kind,
         "content": truncate_snapshot_text(delta, MAX_REASONING_CHARS),
         "order": order,
+        "createdAt": created_at,
     }));
 }
 
@@ -3374,7 +3384,8 @@ fn reasoning_blocks_log_summary(reasoning: &[serde_json::Value]) -> serde_json::
                     "stepId": block.get("id").and_then(|value| value.as_str()),
                     "reasoningStepId": block.get("id").and_then(|value| value.as_str()),
                     "kind": block.get("kind").and_then(|value| value.as_str()),
-                    "order": block.get("order").and_then(|value| value.as_u64()),
+                    "order": block.get("order").and_then(|value| value.as_f64()),
+                    "createdAt": block.get("createdAt").and_then(|value| value.as_u64()),
                     "contentChars": content.chars().count(),
                     "contentPreview": truncate_snapshot_text(content, MAX_LOG_DELTA_CHARS),
                 })

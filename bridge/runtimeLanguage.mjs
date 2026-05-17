@@ -70,7 +70,7 @@ export function buildLanguagePolicyInstruction(settings = {}) {
   const locale = normalizeRuntimeLocale(settings.locale)
   const localeLabel = getLocaleDisplayName(locale)
   return [
-    `Language policy: all user-facing answers, plan previews, step titles, progress updates, summaries, and verification narration must be written in ${localeLabel} (${locale}).`,
+    `Language policy: all user-facing answers, visible reasoning notes, plan previews, step titles, progress updates, summaries, and verification narration must be written in ${localeLabel} (${locale}).`,
     'Keep JSON keys, ids, code, file paths, command names, and tool identifiers in their original technical form.',
     'Do not switch languages mid-response unless the user explicitly asks for another language.',
   ].join('\n')

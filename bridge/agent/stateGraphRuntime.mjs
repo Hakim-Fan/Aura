@@ -411,11 +411,17 @@ export async function runHybridStateGraph({
   const sharedExecutionStepIds =
     request?.runtime?.executionStepIds ||
     createExecutionStepIdFactory(request?.logContext || {})
+  const sharedTimelineOrderCursor =
+    request?.runtime?.timelineOrderCursor &&
+    typeof request.runtime.timelineOrderCursor === 'object'
+      ? request.runtime.timelineOrderCursor
+      : { value: 0 }
   const withSharedRuntime = value => ({
     ...value,
     runtime: {
       ...(value?.runtime || {}),
       executionStepIds: sharedExecutionStepIds,
+      timelineOrderCursor: sharedTimelineOrderCursor,
     },
   })
   let activeRequest =

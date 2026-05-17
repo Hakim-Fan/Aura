@@ -2325,74 +2325,19 @@ function StreamingMarkdownAnswer({
   )
 }
 
-function summarizeReasoningPreview(content: string) {
-  const firstLine = content
-    .split('\n')
-    .map(line => line.trim())
-    .find(Boolean)
-
-  if (!firstLine) {
-    return '正在整理这一阶段的思路。'
-  }
-
-  return firstLine.length > 96 ? `${firstLine.slice(0, 96)}...` : firstLine
-}
-
 type ReasoningDisplayModel = {
   label: string
   title: string
   summary: string
 }
 
-const INTERNAL_REASONING_PATTERNS = [
-  /\bthe user wants me to\b/i,
-  /\blet me\b/i,
-  /\bi need to\b/i,
-  /\bi should\b/i,
-  /\bi have to\b/i,
-  /\bmy next step\b/i,
-  /用户(希望|要求|让我)/,
-  /我(需要|应该|先|将|要)/,
-]
-
 function inferReasoningTitle(content: string, kind: MessageReasoning['kind']) {
-  const normalized = normalizeComparableText(content).toLowerCase()
-
-  if (/context compression|runtime transcript compression|上下文压缩|压缩上下文/.test(normalized)) {
-    return '压缩上下文'
-  }
-  if (/blocked|denied|error|failed|失败|错误|阻止|受限|限制/.test(normalized)) {
-    return '调整策略'
-  }
-  if (/evidence|证据|补充上下文|补足/.test(normalized)) {
-    return '补充证据'
-  }
-  if (/skill|工具说明|能力|read skill/.test(normalized)) {
-    return '查找可用能力'
-  }
-  if (/python-docx|docx|document|binary|readfile|fileread|附件|文档|文件/.test(normalized)) {
-    return '分析文件读取方式'
-  }
-  if (/shell|command|script|python|命令|脚本/.test(normalized)) {
-    return '准备执行命令'
-  }
-  if (/verify|verification|validate|校验|验证|检查/.test(normalized)) {
-    return '验证结果'
-  }
-  if (/plan|strategy|approach|next step|步骤|计划|策略|下一步/.test(normalized)) {
-    return '制定策略'
-  }
-  if (/analy[sz]e|analysis|文档结构|格式|识别|分析/.test(normalized)) {
-    return '分析任务'
-  }
-  if (/final|answer|response|最终|回答|总结|整理/.test(normalized)) {
-    return '整理回答'
-  }
-  if (/user wants|用户|需求|任务|目标/.test(normalized)) {
-    return '理解任务'
+  if (kind === 'summary') {
+    return '执行摘要'
   }
 
-  return kind === 'summary' ? '执行摘要' : '分析进展'
+  const normalized = normalizeComparableText(content)
+  return normalized ? '模型思路' : '思路'
 }
 
 function clampProgressSummary(value: string, maxChars = 140) {
@@ -2409,8 +2354,6 @@ function buildReasoningDisplayModel(
   content: string,
   kind: MessageReasoning['kind'],
 ): ReasoningDisplayModel {
-  const rawPreview = summarizeReasoningPreview(content)
-  const rawIsInternal = INTERNAL_REASONING_PATTERNS.some(pattern => pattern.test(rawPreview))
   const title = inferReasoningTitle(content, kind)
   const summary =
     content.trim() ||
@@ -2419,17 +2362,61 @@ function buildReasoningDisplayModel(
       : '正在整理当前阶段的分析进展。')
 
   return {
-    label: kind === 'summary' ? '摘要' : rawIsInternal ? '思路' : '分析',
+    label: kind === 'summary' ? '摘要' : '思路',
     title,
     summary,
   }
+}
+
+type ReasoningTimelineItem = {
+  key: string
+  kind: 'reasoning'
+  order: number
+  phaseIndex: number
+  originalIndex: number
+  entry: MessageReasoning
+}
+
+type PhaseOutputTimelineItem = {
+  key: string
+  kind: 'phase_output'
+  order: number
+  originalIndex: number
+  output: MessagePhaseOutput
+}
+
+type EventTimelineItem = {
+  key: string
+  kind: 'event'
+  order: number
+  originalIndex: number
+  event: MessageEvent
+}
+
+type ExecutionTimelineItem =
+  | ReasoningTimelineItem
+  | PhaseOutputTimelineItem
+  | EventTimelineItem
+
+function timelineItemTimestamp(item: ExecutionTimelineItem): number | undefined {
+  if (item.kind === 'reasoning') {
+    return typeof item.entry.createdAt === 'number' ? item.entry.createdAt : undefined
+  }
+  if (item.kind === 'event') {
+    return typeof item.event.startedAt === 'number'
+      ? item.event.startedAt
+      : typeof item.event.finishedAt === 'number'
+        ? item.event.finishedAt
+        : undefined
+  }
+  return undefined
 }
 
 function buildExecutionTimeline(
   reasoningEntries: MessageReasoning[],
   phaseOutputs: MessagePhaseOutput[],
   events: MessageEvent[],
-) {
+): ExecutionTimelineItem[] {
   const reasoningTimeline = reasoningEntries.map((entry, index) => ({
     key: `reasoning-${entry.id}`,
     kind: 'reasoning' as const,
@@ -2460,6 +2447,15 @@ function buildExecutionTimeline(
   }))
 
   return [...reasoningTimeline, ...phaseOutputTimeline, ...eventTimeline].sort((left, right) => {
+    const leftTimestamp = timelineItemTimestamp(left)
+    const rightTimestamp = timelineItemTimestamp(right)
+    if (
+      typeof leftTimestamp === 'number' &&
+      typeof rightTimestamp === 'number' &&
+      leftTimestamp !== rightTimestamp
+    ) {
+      return leftTimestamp - rightTimestamp
+    }
     if (left.order !== right.order) {
       return left.order - right.order
     }
@@ -2475,7 +2471,6 @@ function buildExecutionTimeline(
   })
 }
 
-type ExecutionTimelineItem = ReturnType<typeof buildExecutionTimeline>[number]
 type ExecutionTraceNarrative = {
   key: string
   sourceId: string
@@ -2772,19 +2767,6 @@ function buildExecutionTraceNarrative(
   }
 }
 
-function appendNarrativeToTraceGroup(
-  group: ExecutionTraceGroup,
-  narrative: ExecutionTraceNarrative,
-) {
-  const comparable = normalizeTraceComparable(`${narrative.title} ${narrative.summary}`)
-  const exists = group.narratives.some(entry =>
-    normalizeTraceComparable(`${entry.title} ${entry.summary}`) === comparable,
-  )
-  if (!exists) {
-    group.narratives.push(narrative)
-  }
-}
-
 function buildExecutionTraceGroups(timeline: ExecutionTimelineItem[]) {
   const groups: ExecutionTraceGroup[] = []
   const seenNarratives = new Set<string>()
@@ -2814,16 +2796,12 @@ function buildExecutionTraceGroups(timeline: ExecutionTimelineItem[]) {
       }
       seenNarratives.add(comparable)
 
-      if (!currentGroup || currentGroup.items.length > 0) {
-        currentGroup = {
-          key: `trace-group-${narrative.key}`,
-          narratives: [narrative],
-          items: [],
-        }
-        groups.push(currentGroup)
-      } else {
-        appendNarrativeToTraceGroup(currentGroup, narrative)
+      currentGroup = {
+        key: `trace-group-${narrative.key}`,
+        narratives: [narrative],
+        items: [],
       }
+      groups.push(currentGroup)
       continue
     }
 
@@ -5284,13 +5262,7 @@ function AssistantMessageCard({
     }),
   )
   const providerReasoning = filteredReasoning.filter(entry => entry.kind === 'provider')
-  const summaryReasoning = filteredReasoning.filter(entry => entry.kind === 'summary')
-  const displayReasoning =
-    providerReasoning.length > 0
-      ? [...providerReasoning, ...summaryReasoning]
-      : summaryReasoning.length > 0
-        ? summaryReasoning
-        : []
+  const displayReasoning = filteredReasoning
   const executionTimeline = buildExecutionTimeline(
     displayReasoning,
     visiblePhaseOutputs,

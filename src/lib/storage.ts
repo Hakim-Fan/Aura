@@ -897,6 +897,7 @@ function normalizeMessageReasoning(value: unknown) {
           | 'provider',
         content: reasoning.content,
         order: typeof reasoning.order === 'number' ? reasoning.order : undefined,
+        createdAt: typeof reasoning.createdAt === 'number' ? reasoning.createdAt : undefined,
       }
     })
     .filter((reasoning): reasoning is NonNullable<typeof reasoning> => Boolean(reasoning))

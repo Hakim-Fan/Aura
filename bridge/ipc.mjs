@@ -341,6 +341,10 @@ rl.on('line', (line) => {
         blockId: meta.blockId,
         kind: meta.kind,
         order: meta.order,
+        createdAt:
+          typeof meta.createdAt === 'number' && Number.isFinite(meta.createdAt)
+            ? meta.createdAt
+            : Date.now(),
       })
     },
     onUsage(usage) {

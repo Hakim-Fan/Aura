@@ -142,5 +142,5 @@ test('route-first prompt carries the configured locale policy', () => {
   )
 
   assert.match(prompt, /简体中文/)
-  assert.match(prompt, /all user-facing answers, plan previews, step titles/i)
+  assert.match(prompt, /all user-facing answers, visible reasoning notes, plan previews, step titles/i)
 })

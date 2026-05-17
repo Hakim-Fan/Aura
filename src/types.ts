@@ -171,6 +171,7 @@ export type MessageReasoning = {
   kind: 'provider' | 'summary'
   content: string
   order?: number
+  createdAt?: number
 }
 
 export type WorkMemoryStatus = 'draft' | 'confirmed' | 'assumption'

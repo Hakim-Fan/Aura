@@ -48,6 +48,17 @@ function createProviderReasoningBlockId(hooks, providerKind, step) {
   )
 }
 
+function nextProviderTimelineOrders(hooks, step) {
+  const reasoningOrder =
+    typeof hooks?.nextTimelineOrder === 'function'
+      ? hooks.nextTimelineOrder(2)
+      : step * 2
+  return {
+    reasoningOrder,
+    toolOrder: reasoningOrder + 1,
+  }
+}
+
 const ASSISTANT_SPILLOVER_TRIGGER_TOKENS = 6_000
 const ASSISTANT_SPILLOVER_SUMMARY_CHARS = 1_200
 const FINALIZER_DRAFT_MESSAGE_MAX_CHARS = 6_000
@@ -3170,8 +3181,8 @@ export async function runOpenAiCompatibleAgent({
         tools: activeTools,
       })
       const reasoningBlockId = createProviderReasoningBlockId(hooks, 'openai', step)
-      const reasoningOrder = step * 2
-      const toolOrder = reasoningOrder + 1
+      const reasoningStartedAt = Date.now()
+      const { reasoningOrder, toolOrder } = nextProviderTimelineOrders(hooks, step)
 
       const attemptResult = await runProviderOperationWithRetry(
         async (attemptState) => {
@@ -3249,6 +3260,7 @@ export async function runOpenAiCompatibleAgent({
                 blockId: reasoningBlockId,
                 kind: 'provider',
                 order: reasoningOrder,
+                createdAt: reasoningStartedAt,
               })
             },
           })
@@ -3363,6 +3375,7 @@ export async function runOpenAiCompatibleAgent({
           kind: 'provider',
           content: stepResult.phaseReasoning,
           order: reasoningOrder,
+          createdAt: reasoningStartedAt,
         })
       }
 
@@ -3681,8 +3694,8 @@ export async function runGoogleAgent({
         tools: activeTools,
       })
       const reasoningBlockId = createProviderReasoningBlockId(hooks, 'google', step)
-      const reasoningOrder = step * 2
-      const toolOrder = reasoningOrder + 1
+      const reasoningStartedAt = Date.now()
+      const { reasoningOrder, toolOrder } = nextProviderTimelineOrders(hooks, step)
 
       const attemptResult = await runProviderOperationWithRetry(
         async (attemptState) => {
@@ -3751,6 +3764,7 @@ export async function runGoogleAgent({
                 blockId: reasoningBlockId,
                 kind: 'provider',
                 order: reasoningOrder,
+                createdAt: reasoningStartedAt,
               })
             },
           })
@@ -3831,6 +3845,7 @@ export async function runGoogleAgent({
           kind: 'provider',
           content: stepResult.phaseReasoning,
           order: reasoningOrder,
+          createdAt: reasoningStartedAt,
         })
       }
 
