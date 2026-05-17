@@ -42,7 +42,7 @@ test('createHybridPlan builds a deterministic single-delegation plan', () => {
   })
 
   assert.equal(plan.pathMode, 'long')
-  assert.equal(plan.subtasks.length, 3)
+  assert.equal(plan.subtasks.length, 2)
   assert.equal(plan.subtasks[0].status, 'completed')
   assert.equal(plan.subtasks[1].requiredCapability, 'local-write')
   assert.equal(plan.checkpointPolicy.restoreSupported, true)
@@ -73,14 +73,10 @@ test('createHybridPlan adds dynamic inspect and execute subtasks for workspace w
     'classify',
     'inspect_step',
     'execute',
-    'verify',
   ])
   assert.equal(plan.subtasks[1].requiredCapability, 'read-only')
   assert.equal(plan.subtasks[2].requiredCapability, 'local-write')
-  assert.deepEqual(plan.subtasks[3].dependencies, [
-    plan.subtasks[1].id,
-    plan.subtasks[2].id,
-  ])
+  assert.deepEqual(plan.subtasks[2].dependencies, [plan.subtasks[1].id])
 })
 
 test('runHybridStateGraph logs graph states, checkpoints, and merges route-first result', async () => {
@@ -101,7 +97,7 @@ test('runHybridStateGraph logs graph states, checkpoints, and merges route-first
       status: 'completed',
       message: 'done',
       completionState: 'executed_verified',
-      toolEvents: [{ id: 'tool-1' }],
+      toolEvents: [{ id: 'tool-1', name: 'exec_command', status: 'success' }],
     }),
   })
 
@@ -109,7 +105,6 @@ test('runHybridStateGraph logs graph states, checkpoints, and merges route-first
   assert.equal(result.graphState, AgentGraphState.COMPLETED)
   assert.equal(result.graphCompletion.isComplete, true)
   assert.equal(result.graphPlan.subtasks[1].status, 'completed')
-  assert.equal(result.graphPlan.subtasks[2].status, 'completed')
   assert.equal(result.graphCheckpoints.length, 2)
 
   const eventNames = logger.events.map(entry => entry.event)
@@ -168,7 +163,7 @@ test('runHybridStateGraph keeps delegated route-first task trees from replacing 
         status: 'completed',
         message: 'done',
         completionState: 'executed_verified',
-        toolEvents: [{ id: 'tool-1', name: 'read_file', status: 'success' }],
+        toolEvents: [{ id: 'tool-1', name: 'exec_command', status: 'success' }],
       }
     },
   })
@@ -221,20 +216,18 @@ test('runHybridStateGraph continues into verification when first execution is un
 
   assert.equal(requests.length, 2)
   assert.match(requests[1].messages.at(-1).content, /继续图执行|继续执行|Graph continuation step/)
-  assert.match(requests[1].messages.at(-1).content, /Verify the previous work|验证上一步工作/)
+  assert.match(requests[1].messages.at(-1).content, /验收标准|补足证据/)
   assert.equal(result.status, 'completed')
   assert.equal(result.graphState, AgentGraphState.COMPLETED)
   assert.equal(result.graphCompletion.isComplete, true)
   assert.equal(result.graphExecutions.length, 2)
-  assert.equal(result.graphPlan.subtasks.length, 4)
-  const verificationStep = result.graphPlan.subtasks.find(subtask => subtask.kind === 'verification_step')
-  assert.equal(verificationStep?.metadata?.hiddenFromTaskTree, true)
-  assert.ok(taskTrees.some(tree => tree[0]?.children?.some(node => node.kind === 'verification_step')))
-  const visibleVerification = taskTrees
-    .flatMap(tree => tree[0]?.children || [])
-    .find(node => node.kind === 'verification_step')
-  assert.equal(visibleVerification?.title, '确认上一步执行结果')
-  assert.doesNotMatch(visibleVerification?.summary || '', /route-first/i)
+  assert.deepEqual(
+    result.toolEvents.map(event => event.id),
+    ['tool-1', 'tool-2'],
+  )
+  assert.equal(result.graphPlan.subtasks.length, 2)
+  assert.equal(result.graphPlan.subtasks.filter(subtask => subtask.kind === 'verification_step').length, 0)
+  assert.ok(!taskTrees.some(tree => tree[0]?.children?.some(node => node.kind === 'verification_step')))
   assert.notEqual(executionStepIds[0], executionStepIds[1])
 
   const transitions = logger.events
@@ -264,8 +257,8 @@ test('runHybridStateGraph does not chain internal verification subtasks', async 
       return {
         status: 'completed',
         message: calls === 1 ? 'read file' : 'checked output',
-        completionState: 'executed_unverified',
-        toolEvents: [{ id: `tool-${calls}`, name: 'read_file', status: 'success' }],
+        completionState: calls === 1 ? 'executed_unverified' : 'executed_verified',
+        toolEvents: [{ id: `tool-${calls}`, name: 'exec_command', status: 'success' }],
       }
     },
   })
@@ -275,9 +268,9 @@ test('runHybridStateGraph does not chain internal verification subtasks', async 
   assert.equal(result.completionState, 'executed_verified')
   assert.equal(
     result.graphPlan.subtasks.filter(subtask => subtask.kind === 'verification_step').length,
-    1,
+    0,
   )
-  assert.ok(logger.events.some(entry => entry.event === 'agent.graph.verification.accepted'))
+  assert.ok(!logger.events.some(entry => entry.event === 'agent.graph.verification.accepted'))
 })
 
 test('planToTaskTree merges consecutive internal verification steps into one visible status', () => {
@@ -369,7 +362,7 @@ test('runHybridStateGraph expands pass budget for hidden verification steps', as
       return {
         status: 'completed',
         message: `step ${calls}`,
-        completionState: 'executed_unverified',
+        completionState: calls % 2 === 0 ? 'executed_verified' : 'executed_unverified',
         toolEvents: [{ id: `tool-${calls}`, name: 'run_shell', status: 'success' }],
       }
     },
@@ -380,7 +373,7 @@ test('runHybridStateGraph expands pass budget for hidden verification steps', as
   assert.equal(result.completionState, 'executed_verified')
   assert.equal(
     result.graphPlan.subtasks.filter(subtask => subtask.kind === 'verification_step').length,
-    4,
+    0,
   )
   const visibleExecuteNodes = taskTrees.at(-1)?.[0]?.children?.filter(node => node.kind === 'execute') || []
   assert.equal(visibleExecuteNodes.length, 4)
@@ -411,24 +404,38 @@ test('runHybridStateGraph executes dynamic planned subtasks before finalizing', 
     logger,
     executeRouteFirst: async request => {
       requests.push(request)
+      const toolName = requests.length === 1 ? 'read_file' : 'apply_patch'
       return {
         status: 'completed',
         message: requests.length === 1 ? 'inspected' : 'implemented',
         completionState: 'executed_verified',
-        toolEvents: [{ id: `tool-${requests.length}`, status: 'success' }],
+        toolEvents: [{ id: `tool-${requests.length}`, name: toolName, status: 'success' }],
       }
     },
   })
 
   assert.equal(requests.length, 2)
+  assert.deepEqual(requests[0].hooks.activePlanStep, {
+    planId: result.graphPlan.id,
+    subtaskId: result.graphPlan.subtasks[1].id,
+    subtaskTitle: result.graphPlan.subtasks[1].title,
+  })
+  assert.deepEqual(requests[1].hooks.activePlanStep, {
+    planId: result.graphPlan.id,
+    subtaskId: result.graphPlan.subtasks[2].id,
+    subtaskTitle: result.graphPlan.subtasks[2].title,
+  })
   assert.match(requests[0].messages.at(-1).content, /继续图执行|继续执行|Graph planned subtask/)
   assert.match(requests[0].messages.at(-1).content, /do not mutate files|不要修改文件/)
   assert.match(requests[1].messages.at(-1).content, /execute_next_planned_subtask/)
   assert.equal(result.graphState, AgentGraphState.COMPLETED)
   assert.equal(result.graphExecutions.length, 2)
+  assert.deepEqual(
+    result.toolEvents.map(event => event.id),
+    ['tool-1', 'tool-2'],
+  )
   assert.equal(result.graphPlan.subtasks[1].status, 'completed')
   assert.equal(result.graphPlan.subtasks[2].status, 'completed')
-  assert.equal(result.graphPlan.subtasks[3].status, 'completed')
 })
 
 test('runHybridStateGraph sizes the default graph pass budget to the plan', async () => {
@@ -472,7 +479,7 @@ test('runHybridStateGraph sizes the default graph pass budget to the plan', asyn
         status: 'completed',
         message: `step ${requests.length}`,
         completionState: 'executed_verified',
-        toolEvents: [{ id: `tool-${requests.length}`, status: 'success' }],
+        toolEvents: [{ id: `tool-${requests.length}`, name: 'exec_command', status: 'success' }],
       }
     },
   })
@@ -484,8 +491,70 @@ test('runHybridStateGraph sizes the default graph pass budget to the plan', asyn
     result.graphPlan.subtasks
       .filter(subtask => subtask.kind !== 'classify')
       .map(subtask => subtask.status),
-    ['completed', 'completed', 'completed', 'completed', 'completed'],
+    ['completed', 'completed', 'completed', 'completed'],
   )
+})
+
+test('runHybridStateGraph keeps execute steps open when only skill-read evidence is present', async () => {
+  const logger = createLogger()
+  const request = {
+    messages: [{ role: 'user', content: '使用 docx skill 解析附件并生成实体表' }],
+  }
+  const initialPlan = createHybridPlanFromModelPlan({
+    request,
+    classification: {
+      risk: 'medium',
+      complexity: 'complex',
+      hasAttachments: true,
+    },
+    modelPlan: {
+      goal: '使用 docx skill 解析附件并生成实体表',
+      risk: 'medium',
+      steps: [
+        {
+          id: '1',
+          description: '读取 docx skill 的使用说明',
+          kind: 'context',
+          acceptance: '已经了解 docx 解析方法',
+          requiredEvidence: ['skill_read'],
+        },
+        {
+          id: '2',
+          description: '解析附件并生成实体表',
+          kind: 'execute',
+          acceptance: '已经解析附件并输出结构化实体表',
+          requiredEvidence: ['file_parsed', 'structured_output'],
+        },
+      ],
+    },
+  })
+  let calls = 0
+  const result = await runHybridStateGraph({
+    request,
+    classification: {
+      risk: 'medium',
+      complexity: 'complex',
+      hasAttachments: true,
+    },
+    initialPlan,
+    logger,
+    maxGraphPasses: 2,
+    executeRouteFirst: async () => {
+      calls += 1
+      return {
+        status: 'completed',
+        message: calls === 1 ? '已读取 docx skill' : '可以使用 Python 解析 docx',
+        completionState: 'executed_verified',
+        toolEvents: [{ id: `tool-${calls}`, name: 'aura_read_skill', status: 'success' }],
+      }
+    },
+  })
+
+  assert.equal(result.status, 'blocked')
+  assert.equal(result.graphCompletion.reason, 'step_acceptance_missing_evidence')
+  const executeStep = result.graphPlan.subtasks.find(subtask => subtask.title === '解析附件并生成实体表')
+  assert.equal(executeStep?.status, 'blocked')
+  assert.deepEqual(executeStep?.missingEvidence, ['file_parsed', 'structured_output'])
 })
 
 test('runHybridStateGraph blocks unverified execute results after graph pass limit', async () => {
@@ -518,8 +587,7 @@ test('runHybridStateGraph blocks unverified execute results after graph pass lim
   assert.equal(result.graphState, AgentGraphState.BLOCKED)
   assert.equal(result.graphCompletion.isComplete, false)
   assert.equal(result.graphCompletion.reason, 'verification_required')
-  assert.equal(result.graphPlan.subtasks[1].status, 'completed')
-  assert.equal(result.graphPlan.subtasks[2].status, 'blocked')
+  assert.equal(result.graphPlan.subtasks[1].status, 'blocked')
 
   const transitions = logger.events
     .filter(entry => entry.event === 'agent.graph.transition')
@@ -608,7 +676,7 @@ test('runHybridStateGraph resumes remaining planned subtasks after recovering a 
         status: 'completed',
         message: calls.length === 2 ? 'inspection recovered' : 'implemented',
         completionState: 'executed_verified',
-        toolEvents: [{ id: `tool-${calls.length}`, status: 'success' }],
+        toolEvents: [{ id: `tool-${calls.length}`, name: 'exec_command', status: 'success' }],
       }
     },
   })
@@ -758,7 +826,7 @@ test('runHybridStateGraph restores a graph checkpoint and resumes its active sub
         status: 'completed',
         message: 'restored',
         completionState: 'executed_verified',
-        toolEvents: [{ id: 'tool-restored', status: 'success' }],
+        toolEvents: [{ id: 'tool-restored', name: 'exec_command', status: 'success' }],
       }
     },
   })

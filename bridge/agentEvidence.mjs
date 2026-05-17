@@ -206,6 +206,31 @@ function collectProducedEvidence(event, effectTypes) {
   }
 
   if (event?.status === 'success') {
+    if (name === 'aura_read_skill') {
+      producedEvidence.push('skill_read')
+    }
+
+    if (
+      name === 'read_file' ||
+      name === 'read_block' ||
+      name === 'list_files' ||
+      name === 'glob_files'
+    ) {
+      producedEvidence.push('file_read')
+    }
+
+    if (name === 'search_code') {
+      producedEvidence.push('search_result')
+    }
+
+    if (
+      structuredOutput &&
+      typeof structuredOutput === 'object' &&
+      Object.keys(structuredOutput).length > 0
+    ) {
+      producedEvidence.push('structured_output')
+    }
+
     if (effectTypes.includes('write')) {
       producedEvidence.push('file_mutation')
       if (artifactVerification.verifiedCount > 0) {
@@ -238,6 +263,10 @@ function collectProducedEvidence(event, effectTypes) {
     }
 
     if (COMMAND_SESSION_TOOLS.has(name)) {
+      const commandText = String(event?.input || event?.summary || '')
+      if (/\.(docx|xlsx|xls|csv|tsv|pdf|json|md|txt)\b/i.test(commandText)) {
+        producedEvidence.push('file_parsed')
+      }
       if (TEST_COMMAND_PATTERN.test(String(event?.input || ''))) {
         if (
           structuredOutput &&
@@ -366,9 +395,23 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
       record.producedEvidence.includes('command_exit_nonzero'),
     )
   const hasArtifactEvidence = artifactPaths.size > 0 || verifiedArtifactCount > 0
+  const hasContextEvidence = records.some(record =>
+    record.status === 'success' &&
+    (
+      record.effectTypes.includes('read') ||
+      record.producedEvidence.includes('skill_read') ||
+      record.producedEvidence.includes('file_read') ||
+      record.producedEvidence.includes('search_result') ||
+      record.producedEvidence.includes('web_search_result') ||
+      record.producedEvidence.includes('web_research_result') ||
+      record.producedEvidence.includes('web_fetch_content') ||
+      record.producedEvidence.includes('web_fetch_summary')
+    ),
+  )
 
   return {
     records,
+    hasContextEvidence,
     hasAnyExecution: records.some(record =>
       record.effectTypes.some(
         effectType =>

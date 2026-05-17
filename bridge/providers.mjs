@@ -1899,6 +1899,7 @@ export const __testInternals = {
   resolveCompactionOutputTokens,
   resolveCompactionSettings,
   runProviderOperationWithRetry,
+  shouldNudgeForObservableProgress,
   updateUnresolvedToolErrorForRepair,
 }
 
@@ -2858,6 +2859,35 @@ function shouldFinalizeAnswer(message, toolEvents, reasoningText) {
   return !/[。！？!?\n]/u.test(normalized.slice(60))
 }
 
+function shouldNudgeForObservableProgress({
+  settings = {},
+  hooks = {},
+  toolEvents = [],
+  content = '',
+  nudgeCount = 0,
+} = {}) {
+  if (nudgeCount > 0 || toolEvents.length > 0) {
+    return false
+  }
+  const routeState = hooks?.routeState || {}
+  const requiresExecution =
+    settings.executionMode === 'long-task' ||
+    routeState.answerMode === 'execute' ||
+    routeState.completionPolicy?.requiresEvidenceForDone === true
+  if (!requiresExecution) {
+    return false
+  }
+  return String(content || '').trim().length >= 80
+}
+
+function buildObservableProgressPrompt() {
+  return [
+    '当前请求是执行型任务，但上一轮没有产生任何可观察的工具进展。',
+    '请继续执行，而不是直接给最终回答：调用合适的工具读取、修改、生成产物、验证结果，或在确实无法继续时说明具体阻塞点。',
+    '如果已经有足够信息可以落地一部分，请优先产生一个可观察结果，例如文件变更、命令输出、artifact、progress 更新或验证证据。',
+  ].join('\n')
+}
+
 export async function finalizeOpenAiCompatibleAnswer({
   settings,
   systemPrompt,
@@ -3106,6 +3136,7 @@ export async function runOpenAiCompatibleAgent({
     let repairTurns = 0
     let writeRepairAttempts = 0
     let hasUnresolvedToolError = false
+    let observableProgressNudges = 0
     while (
       step < loopConfig.maxIterations ||
       (hasUnresolvedToolError &&
@@ -3337,6 +3368,49 @@ export async function runOpenAiCompatibleAgent({
 
       const { content, finalizedToolCalls } = stepResult
       if (finalizedToolCalls.length === 0) {
+        if (
+          shouldNudgeForObservableProgress({
+            settings,
+            hooks,
+            toolEvents,
+            content,
+            nudgeCount: observableProgressNudges,
+          })
+        ) {
+          const assistantContent = maybeSpillAssistantContent({
+            content,
+            settings,
+            hooks,
+            toolEvents,
+            providerKind: 'openai',
+            reason: 'observable_progress_nudge',
+            order: reasoningOrder,
+            stage: `step-${step + 1}`,
+          }).content
+          if (assistantContent.trim()) {
+            lastDraftMessage = assistantContent
+            transcript.push({
+              role: 'assistant',
+              content: assistantContent,
+            })
+            conversationMessages.push({
+              role: 'assistant',
+              content: assistantContent,
+            })
+          }
+          const progressPrompt = buildObservableProgressPrompt()
+          transcript.push({
+            role: 'user',
+            content: progressPrompt,
+          })
+          conversationMessages.push({
+            role: 'user',
+            content: progressPrompt,
+          })
+          observableProgressNudges += 1
+          step += 1
+          continue
+        }
         const queuedInputs = drainAppendedInputs(hooks)
         if (queuedInputs.length > 0) {
           const assistantContent = maybeSpillAssistantContent({
@@ -3579,6 +3653,7 @@ export async function runGoogleAgent({
     let repairTurns = 0
     let writeRepairAttempts = 0
     let hasUnresolvedToolError = false
+    let observableProgressNudges = 0
     while (
       step < loopConfig.maxIterations ||
       (hasUnresolvedToolError &&
@@ -3761,6 +3836,49 @@ export async function runGoogleAgent({
 
       const { content, functionCalls } = stepResult
       if (functionCalls.length === 0) {
+        if (
+          shouldNudgeForObservableProgress({
+            settings,
+            hooks,
+            toolEvents,
+            content,
+            nudgeCount: observableProgressNudges,
+          })
+        ) {
+          const assistantContent = maybeSpillAssistantContent({
+            content,
+            settings,
+            hooks,
+            toolEvents,
+            providerKind: 'google',
+            reason: 'observable_progress_nudge',
+            order: reasoningOrder,
+            stage: `step-${step + 1}`,
+          }).content
+          if (assistantContent.trim()) {
+            lastDraftMessage = assistantContent
+            transcript.push({
+              role: 'model',
+              parts: [{ text: assistantContent }],
+            })
+            conversationMessages.push({
+              role: 'assistant',
+              content: assistantContent,
+            })
+          }
+          const progressPrompt = buildObservableProgressPrompt()
+          transcript.push({
+            role: 'user',
+            parts: [{ text: progressPrompt }],
+          })
+          conversationMessages.push({
+            role: 'user',
+            content: progressPrompt,
+          })
+          observableProgressNudges += 1
+          step += 1
+          continue
+        }
         const queuedInputs = drainAppendedInputs(hooks)
         if (queuedInputs.length > 0) {
           const assistantContent = maybeSpillAssistantContent({

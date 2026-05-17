@@ -2336,7 +2336,7 @@ export function createBuiltinTools(context) {
       name: 'aura_read_skill',
       aliases: ['readskill', 'skillfile', 'openskill'],
       description:
-        'Read the full content of an installed Aura skill by id. Use this only when a selected skill is relevant and you need its detailed instructions.',
+        'Read the full content of an installed Aura skill by id. When an enabled skill matches the current file type or domain, call this before using generic shell/Python/Node commands so the skill instructions drive the implementation.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2792,6 +2792,33 @@ function emitToolEvent(event, toolEvents, hooks) {
   hooks?.onToolEvent?.(event)
 }
 
+function normalizeActivePlanStep(hooks = {}) {
+  const source =
+    hooks.activePlanStep ||
+    hooks.currentPlanStep ||
+    hooks.graphStep ||
+    hooks.runtimePlanStep ||
+    null
+  if (!source || typeof source !== 'object') {
+    return {}
+  }
+  return {
+    planId: typeof source.planId === 'string' ? source.planId : undefined,
+    subtaskId:
+      typeof source.subtaskId === 'string'
+        ? source.subtaskId
+        : typeof source.stepId === 'string'
+          ? source.stepId
+          : undefined,
+    subtaskTitle:
+      typeof source.subtaskTitle === 'string'
+        ? source.subtaskTitle
+        : typeof source.title === 'string'
+          ? source.title
+          : undefined,
+  }
+}
+
 function emitToolAuditEvent(hooks, event) {
   try {
     hooks?.onToolAuditEvent?.(event)
@@ -2821,6 +2848,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     typeof hooks.createExecutionStepId === 'function'
       ? hooks.createExecutionStepId('tool', effectiveTool.name)
       : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const activePlanStep = normalizeActivePlanStep(hooks)
   const shouldEmitEvent = effectiveTool.internalOnly !== true
   const eventSummary =
     shellPatchInterception?.summary ||
@@ -2842,6 +2870,8 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   }
   const baseEvent = {
     id: eventId,
+    toolCallId: hooks.toolCallId,
+    ...activePlanStep,
     source: effectiveTool.source,
     name: effectiveTool.name,
     riskLevel: catalogEntry.riskLevel,
@@ -2925,6 +2955,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       output: null,
       error: blockedError,
       toolName: effectiveTool.name,
+      toolCallId: hooks.toolCallId,
+      eventId,
+      ...activePlanStep,
     })
   }
 
@@ -3139,6 +3172,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         output: null,
         error: deniedError,
         toolName: effectiveTool.name,
+        toolCallId: hooks.toolCallId,
+        eventId,
+        ...activePlanStep,
       })
     }
   } else if (approvalCategory && !hasTaskScopedApproval) {
@@ -3190,6 +3226,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         output: stringifyOutput(repeatedFullReadGuardOutput),
         error: null,
         toolName: effectiveTool.name,
+        toolCallId: hooks.toolCallId,
+        eventId,
+        ...activePlanStep,
       })
     }
     const output = await runAbortable(
@@ -3290,6 +3329,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       output: stringifyOutput(output),
       error: commandExitError,
       toolName: effectiveTool.name,
+      toolCallId: hooks.toolCallId,
+      eventId,
+      ...activePlanStep,
     })
   } catch (error) {
     const detail = formatToolError(error)
@@ -3331,6 +3373,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       output: null,
       error: toolError,
       toolName: effectiveTool.name,
+      toolCallId: hooks.toolCallId,
+      eventId,
+      ...activePlanStep,
     })
   } finally {
     hooks.releaseCurrentStepAbortController?.(abortController)
@@ -3370,7 +3415,9 @@ export async function invokeToolWithRetry(tool, args, toolEvents, hooks = {}) {
           output: null,
           error: toolError,
           toolName: tool.name,
+          toolCallId: hooks.toolCallId,
           attempt,
+          ...normalizeActivePlanStep(hooks),
         })
       }
       lastError = error
@@ -3385,7 +3432,9 @@ export async function invokeToolWithRetry(tool, args, toolEvents, hooks = {}) {
           output: null,
           error: toolError,
           toolName: tool.name,
+          toolCallId: hooks.toolCallId,
           attempt,
+          ...normalizeActivePlanStep(hooks),
         })
       }
       const delay = getRetryDelay(attempt, toolError.retryConfig)
@@ -3399,5 +3448,7 @@ export async function invokeToolWithRetry(tool, args, toolEvents, hooks = {}) {
     output: null,
     error: lastError,
     toolName: tool.name,
+    toolCallId: hooks.toolCallId,
+    ...normalizeActivePlanStep(hooks),
   })
 }

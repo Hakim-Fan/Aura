@@ -198,13 +198,28 @@ export class ToolExecutionError extends Error {
 }
 
 export class ToolResult {
-  constructor({ success, output, error, toolName, toolCallId, attempt }) {
+  constructor({
+    success,
+    output,
+    error,
+    toolName,
+    toolCallId,
+    attempt,
+    eventId,
+    planId,
+    subtaskId,
+    subtaskTitle,
+  }) {
     this.success = success
     this.output = output
     this.error = error
     this.toolName = toolName
     this.toolCallId = toolCallId
     this.attempt = attempt || 1
+    this.eventId = eventId
+    this.planId = planId
+    this.subtaskId = subtaskId
+    this.subtaskTitle = subtaskTitle
     this.timestamp = Date.now()
   }
 
@@ -212,23 +227,32 @@ export class ToolResult {
     return !this.success && this.error instanceof ToolExecutionError && this.error.retryable
   }
 
+  baseToolEventFields() {
+    return {
+      id: this.eventId,
+      toolCallId: this.toolCallId,
+      attempt: this.attempt,
+      planId: this.planId,
+      subtaskId: this.subtaskId,
+      subtaskTitle: this.subtaskTitle,
+    }
+  }
+
   toToolEventEntry() {
     if (this.success) {
       return {
+        ...this.baseToolEventFields(),
         name: this.toolName,
         status: 'success',
         output: typeof this.output === 'string' ? this.output : JSON.stringify(this.output),
-        toolCallId: this.toolCallId,
-        attempt: this.attempt,
       }
     }
     return {
+      ...this.baseToolEventFields(),
       name: this.toolName,
       status: 'error',
       error: this.error instanceof ToolExecutionError ? this.error.message : String(this.error),
       errorInfo: this.error instanceof ToolExecutionError ? this.error.toStructuredReport() : undefined,
-      toolCallId: this.toolCallId,
-      attempt: this.attempt,
     }
   }
 }

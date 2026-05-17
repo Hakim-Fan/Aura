@@ -75,15 +75,24 @@ function buildContinuationPrompt({
   if (evidence.length > 0) {
     lines.push(`最近证据：${evidence.join(', ')}`)
   }
+  if (subtask?.acceptance) {
+    lines.push(`当前步骤验收标准：${subtask.acceptance}`)
+  }
+  if (safeArray(subtask?.requiredEvidence).length > 0) {
+    lines.push(`需要补足的证据类型：${safeArray(subtask.requiredEvidence).join(', ')}`)
+  }
+  if (safeArray(subtask?.missingEvidence).length > 0) {
+    lines.push(`当前仍缺少：${safeArray(subtask.missingEvidence).join(', ')}`)
+  }
   if (errors.length > 0) {
     lines.push(`最近错误：${errors.join(' | ')}`)
   }
 
   if (decision?.nextAction === 'run_verification') {
     lines.push(
-      '请使用当前最安全的读取、测试或构建检查来验证上一步工作。',
-      '除非验证明确暴露问题，否则不要重复应用同一批修改。',
-      '只有在拿到验证证据后才返回最终答案，否则要明确说明具体阻塞点。',
+      '请围绕当前步骤的验收标准补足证据。',
+      '如果缺少的是实际执行证据，请继续执行当前步骤，而不是只解释方案。',
+      '如果缺少的是验证证据，请使用最安全的读取、测试或检查方式确认结果。',
     )
   } else if (decision?.nextAction === 'attempt_recovery') {
     lines.push(
@@ -137,25 +146,7 @@ function buildContinuationRequest(request, context = {}) {
 function createContinuationSubtask(plan, decision, previousSubtask) {
   const labels = getRuntimeTaskLabels(plan?.locale || 'zh-CN')
   if (decision?.nextAction === 'run_verification') {
-    return appendPlanSubtask(plan, {
-      title: labels.verifyPrevious,
-      kind: 'verification_step',
-      requiredCapability: 'auto',
-      afterSubtaskId: previousSubtask?.id,
-      dependencies: previousSubtask?.id ? [previousSubtask.id] : undefined,
-      successCriteria: [
-        'Run or inspect enough evidence to confirm the previous execution',
-        'Do not repeat completed mutations without a concrete failed verification',
-      ],
-      metadata: {
-        reason: decision.reason,
-        nextAction: decision.nextAction,
-        previousSubtaskId: previousSubtask?.id,
-        hiddenFromTaskTree: true,
-        internal: true,
-      },
-      locale: plan?.locale || 'zh-CN',
-    })
+    return previousSubtask || null
   }
 
   if (decision?.nextAction === 'attempt_recovery') {
@@ -183,6 +174,9 @@ function createContinuationSubtask(plan, decision, previousSubtask) {
 
 const EXECUTABLE_SUBTASK_KINDS = new Set([
   'execute',
+  'context',
+  'verify',
+  'respond',
   'inspect_step',
   'research_step',
   'verification_step',
@@ -232,7 +226,8 @@ function findRestoredActiveSubtask(plan, restoredContext = {}) {
 }
 
 function shouldFocusPlannedSubtask(subtask = {}) {
-  return ['inspect_step', 'research_step'].includes(subtask.kind)
+  return Boolean(subtask?.metadata?.modelPlanStepId) ||
+    ['context', 'verify', 'respond', 'inspect_step', 'research_step'].includes(subtask.kind)
 }
 
 function isInternalVerificationSubtask(subtask = {}) {
@@ -246,6 +241,67 @@ function shouldAcceptVerificationAttempt({ decision, subtask, executionResult } 
     executionResult?.status === 'completed' &&
     safeArray(executionResult?.evidence).length > 0
   )
+}
+
+function uniqueStrings(values = []) {
+  return Array.from(new Set(
+    safeArray(values)
+      .map(value => String(value || '').trim())
+      .filter(Boolean),
+  ))
+}
+
+const EVIDENCE_ALIASES = {
+  context_collected: [
+    'context_collected',
+    'skill_read',
+    'file_read',
+    'search_result',
+    'web_search_result',
+    'web_research_result',
+    'web_fetch_content',
+    'web_fetch_summary',
+  ],
+  execution_performed: [
+    'execution_performed',
+    'command_output',
+    'file_mutation',
+    'file_parsed',
+    'structured_output',
+    'artifact_present',
+    'browser_action',
+  ],
+  command_output: ['command_output', 'command_exit_0'],
+  file_mutation: ['file_mutation'],
+  file_parsed: ['file_parsed', 'command_output'],
+  structured_output: ['structured_output', 'command_output', 'artifact_present'],
+  artifact_present: ['artifact_present', 'artifact_read_back', 'artifact_hash_recorded'],
+  verification_passed: ['verification_passed', 'file_verified', 'test_pass'],
+  final_answer: ['final_answer'],
+}
+
+function evidenceSatisfies(required, actualSet) {
+  const aliases = EVIDENCE_ALIASES[required] || [required]
+  return aliases.some(alias => actualSet.has(alias))
+}
+
+function evaluateStepAcceptance(subtask = {}, executionResult = {}, result = {}) {
+  const requiredEvidence = uniqueStrings(subtask.requiredEvidence)
+  const actualEvidence = uniqueStrings(executionResult.actualEvidence)
+  const actualSet = new Set(actualEvidence)
+  if (result?.completionState === 'executed_verified') {
+    actualSet.add('verification_passed')
+  }
+  if (typeof result?.message === 'string' && result.message.trim()) {
+    actualSet.add('final_answer')
+  }
+  const missingEvidence = requiredEvidence.filter(required => !evidenceSatisfies(required, actualSet))
+  return {
+    requiredEvidence,
+    actualEvidence: Array.from(actualSet),
+    missingEvidence,
+    passed: missingEvidence.length === 0,
+  }
 }
 
 function markGraphResultVerified(result = {}, reason = 'verification_attempt_completed') {
@@ -272,6 +328,12 @@ function buildPlannedSubtaskRequest(request, {
     `当前子任务：${subtask?.title || labels.continueExecution}`,
     '只聚焦当前子任务，并保留后续图步骤需要的证据。',
   ]
+  if (subtask?.acceptance) {
+    lines.push(`本步骤验收标准：${subtask.acceptance}`)
+  }
+  if (safeArray(subtask?.requiredEvidence).length > 0) {
+    lines.push(`本步骤需要的证据类型：${safeArray(subtask.requiredEvidence).join(', ')}`)
+  }
   if (subtask.kind === 'inspect_step') {
     lines.push('请检查相关文件与行为，但这一子任务不要修改文件。')
   }
@@ -390,10 +452,11 @@ export async function runHybridStateGraph({
     })
   }
 
-  function updateSubtask(subtaskId, newStatus, evidenceCount = 0) {
+  function updateSubtask(subtaskId, newStatus, evidenceCount = 0, patch = {}) {
     const updated = updatePlanSubtask(plan, subtaskId, {
       status: newStatus,
       evidenceCount,
+      ...patch,
     })
     if (!updated) return
     logger?.emit?.('agent.plan.updated', {
@@ -402,6 +465,8 @@ export async function runHybridStateGraph({
       oldStatus: updated.oldStatus,
       newStatus: updated.newStatus,
       evidenceCount,
+      verificationStatus: updated.subtask?.verificationStatus,
+      missingEvidence: updated.subtask?.missingEvidence,
     })
     emitPlanTaskTree()
   }
@@ -435,7 +500,9 @@ export async function runHybridStateGraph({
     for (let pass = 0; pass < effectiveMaxGraphPasses; pass += 1) {
       passIndex = pass
       if (!activeSubtask) {
-        updateSubtask(verifySubtask.id, 'blocked', 0)
+        if (verifySubtask?.id) {
+          updateSubtask(verifySubtask.id, 'blocked', 0)
+        }
         emitTransition(AgentGraphState.BLOCKED, 'no runnable graph subtask remains')
         return mergeGraphResult({
           result: latestResult || { message: 'No runnable graph subtask remains.' },
@@ -487,7 +554,6 @@ export async function runHybridStateGraph({
       executionHistory.push(executionResult)
       latestResult = result
       latestExecutionResult = executionResult
-      updateSubtask(activeSubtask.id, executionResult.status, evidenceCount)
 
       emitTransition(AgentGraphState.OBSERVE, 'route-first execution returned a result', {
         stepId: activeSubtask?.id,
@@ -506,7 +572,7 @@ export async function runHybridStateGraph({
       })
 
       emitTransition(AgentGraphState.VERIFY, 'capture completion state and evidence summary')
-      const decision = decideGraphCompletion({
+      let decision = decideGraphCompletion({
         result,
         executionResult,
         classification,
@@ -514,12 +580,52 @@ export async function runHybridStateGraph({
         passIndex: pass,
         maxPasses: effectiveMaxGraphPasses,
       })
+      const stepAcceptance = evaluateStepAcceptance(activeSubtask, executionResult, result)
+      if (
+        executionResult.status === 'completed' &&
+        !stepAcceptance.passed &&
+        ![
+          'blocked_by_approval',
+          'blocked_by_capability',
+          'failed_after_execution',
+        ].includes(result?.completionState)
+      ) {
+        const canContinue = pass + 1 < effectiveMaxGraphPasses
+        decision = {
+          isComplete: false,
+          graphState: AgentGraphState.BLOCKED,
+          status: canContinue ? 'running' : 'blocked',
+          reason: 'step_acceptance_missing_evidence',
+          nextAction: canContinue ? 'run_verification' : 'report_missing_step_evidence',
+          canContinue,
+          missingEvidence: stepAcceptance.missingEvidence,
+        }
+      }
       latestDecision = decision
+      const stepStatus =
+        executionResult.status !== 'completed'
+          ? executionResult.status
+          : decision.isComplete
+            ? 'completed'
+            : decision.canContinue
+              ? 'running'
+              : 'blocked'
+      updateSubtask(activeSubtask.id, stepStatus, evidenceCount, {
+        actualEvidence: stepAcceptance.actualEvidence,
+        requiredEvidence: stepAcceptance.requiredEvidence,
+        missingEvidence: stepAcceptance.missingEvidence,
+        verificationStatus: stepAcceptance.passed && decision.isComplete
+          ? 'passed'
+          : stepAcceptance.passed
+            ? 'pending'
+            : 'missing_evidence',
+      })
       emitTransition(AgentGraphState.DECIDE_NEXT, decision.reason, {
         completionState: result?.completionState,
         executionStatus: executionResult.status,
         isComplete: decision.isComplete,
         nextAction: decision.nextAction,
+        missingEvidence: stepAcceptance.missingEvidence,
       })
 
       const acceptedVerificationAttempt = shouldAcceptVerificationAttempt({
@@ -568,7 +674,12 @@ export async function runHybridStateGraph({
           activeSubtask = nextPlannedSubtask
           continue
         }
-        updateSubtask(verifySubtask.id, 'completed', evidenceCount)
+        if (verifySubtask?.id) {
+          updateSubtask(verifySubtask.id, 'completed', evidenceCount, {
+            actualEvidence: ['final_answer'],
+            verificationStatus: 'passed',
+          })
+        }
         emitTransition(AgentGraphState.FINALIZE, 'return merged result to caller')
         emitTransition(AgentGraphState.COMPLETED, 'structured completion gate accepted result')
 
@@ -593,7 +704,9 @@ export async function runHybridStateGraph({
       }
 
       if (!decision.canContinue) {
-        updateSubtask(verifySubtask.id, 'blocked', evidenceCount)
+        if (verifySubtask?.id) {
+          updateSubtask(verifySubtask.id, 'blocked', evidenceCount)
+        }
         emitTransition(AgentGraphState.BLOCKED, decision.reason, {
           completionState: result?.completionState,
           nextAction: decision.nextAction,
@@ -613,7 +726,9 @@ export async function runHybridStateGraph({
 
       const continuationSubtask = createContinuationSubtask(plan, decision, activeSubtask)
       if (!continuationSubtask) {
-        updateSubtask(verifySubtask.id, 'blocked', evidenceCount)
+        if (verifySubtask?.id) {
+          updateSubtask(verifySubtask.id, 'blocked', evidenceCount)
+        }
         emitTransition(AgentGraphState.BLOCKED, decision.reason, {
           completionState: result?.completionState,
           nextAction: decision.nextAction,
@@ -630,15 +745,28 @@ export async function runHybridStateGraph({
           checkpoints: checkpointRuntime.records,
         })
       }
-      logger?.emit?.('agent.plan.updated', {
-        planId: plan.id,
-        subtaskId: continuationSubtask.id,
-        oldStatus: 'absent',
-        newStatus: continuationSubtask.status,
-        evidenceCount: 0,
-      })
+      if (continuationSubtask !== activeSubtask) {
+        logger?.emit?.('agent.plan.updated', {
+          planId: plan.id,
+          subtaskId: continuationSubtask.id,
+          oldStatus: 'absent',
+          newStatus: continuationSubtask.status,
+          evidenceCount: 0,
+        })
+      }
       if (!(typeof maxGraphPasses === 'number' && Number.isFinite(maxGraphPasses))) {
-        effectiveMaxGraphPasses += 1
+        if (continuationSubtask !== activeSubtask) {
+          effectiveMaxGraphPasses += 1
+        } else if (decision.nextAction === 'run_verification') {
+          const attempts = Number(activeSubtask?.metadata?.internalVerificationAttempts || 0)
+          if (attempts < 1) {
+            activeSubtask.metadata = {
+              ...(activeSubtask.metadata || {}),
+              internalVerificationAttempts: attempts + 1,
+            }
+            effectiveMaxGraphPasses += 1
+          }
+        }
       }
       activeRequest = buildContinuationRequest(stepRequest, {
         plan,

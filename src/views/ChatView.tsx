@@ -3563,6 +3563,7 @@ function ShellTerminalPanel({
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
+  const terminalReadyRef = useRef(false)
 
   useEffect(() => {
     const container = containerRef.current
@@ -3606,7 +3607,12 @@ function ShellTerminalPanel({
     const fitAddon = new FitAddon()
     terminal.loadAddon(fitAddon)
     terminal.open(container)
-    fitAddon.fit()
+    terminalReadyRef.current = true
+    try {
+      fitAddon.fit()
+    } catch {
+      // xterm can briefly report zero-size geometry during collapsed layout transitions.
+    }
 
     terminalRef.current = terminal
     fitAddonRef.current = fitAddon
@@ -3622,6 +3628,7 @@ function ShellTerminalPanel({
 
     return () => {
       resizeObserver.disconnect()
+      terminalReadyRef.current = false
       terminal.dispose()
       terminalRef.current = null
       fitAddonRef.current = null
@@ -3638,19 +3645,30 @@ function ShellTerminalPanel({
 
   useEffect(() => {
     const terminal = terminalRef.current
-    if (!terminal) {
+    if (!terminal || !terminalReadyRef.current) {
       return
     }
-    terminal.reset()
-    terminal.write(buildTerminalTranscript({
-      command,
-      output,
-      error,
-      status,
-      truncated,
-    }), () => {
-      terminal.scrollToBottom()
-    })
+    try {
+      terminal.reset()
+      terminal.write(buildTerminalTranscript({
+        command,
+        output,
+        error,
+        status,
+        truncated,
+      }), () => {
+        if (!terminalReadyRef.current || terminalRef.current !== terminal) {
+          return
+        }
+        try {
+          terminal.scrollToBottom()
+        } catch {
+          // xterm may dispose its renderer while React is unmounting/collapsing the panel.
+        }
+      })
+    } catch {
+      // Ignore transient renderer disposal during rapid task/plan UI updates.
+    }
   }, [command, output, error, status, truncated, exitCode])
 
   return (

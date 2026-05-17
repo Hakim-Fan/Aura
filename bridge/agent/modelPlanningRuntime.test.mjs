@@ -18,13 +18,16 @@ test('model planning parser accepts direct answers', () => {
 
 test('model planning parser accepts executable plans', () => {
   const result = parseModelPlanningResult(`\`\`\`json
-{"type":"plan","goal":"解析 docx","risk":"medium","steps":[{"id":"1","description":"读取附件标题"},{"id":"2","description":"生成实体表"}],"successCriteria":["每个子标题都有表"]}
+{"type":"plan","goal":"解析 docx","risk":"medium","steps":[{"id":"1","description":"读取附件标题","kind":"context","acceptance":"已经理解 docx 解析方法","requiredEvidence":["skill_read"]},{"id":"2","description":"生成实体表","kind":"execute","acceptance":"输出实体表定义","requiredEvidence":["file_parsed","structured_output"]}],"successCriteria":["每个子标题都有表"]}
 \`\`\``)
 
   assert.equal(result.type, 'plan')
   assert.equal(result.goal, '解析 docx')
   assert.equal(result.risk, 'medium')
   assert.equal(result.steps.length, 2)
+  assert.equal(result.steps[0].kind, 'context')
+  assert.equal(result.steps[0].acceptance, '已经理解 docx 解析方法')
+  assert.deepEqual(result.steps[1].requiredEvidence, ['file_parsed', 'structured_output'])
   assert.equal(result.successCriteria[0], '每个子标题都有表')
 })
 

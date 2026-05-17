@@ -1250,6 +1250,16 @@ function looksLikeExecutionCompletionClaim(value) {
   )
 }
 
+function looksLikeProceduralDraft(value) {
+  const normalized = normalizeFinalAnswer(value)
+  if (!normalized) {
+    return false
+  }
+  return /(?:我(?:需要|会|将|先|再|正在|准备)|让我|接下来|下一步|先(?:读取|检查|提取|解析|确认|执行)|需要先|将使用|准备使用|I\s+(?:need|will|am going)|Let me|Next,?\s+I)/iu.test(
+    normalized,
+  )
+}
+
 function shouldRunFinalization(
   result,
   recentToolEvents,
@@ -1306,6 +1316,14 @@ function shouldRunFinalization(
        name === 'computer_open_app')
     )
   })
+
+  if (
+    routeState?.answerMode === 'execute' &&
+    finalMessage.length < 140 &&
+    looksLikeProceduralDraft(finalMessage)
+  ) {
+    return true
+  }
 
   if (
     routeState?.answerMode === 'execute' &&

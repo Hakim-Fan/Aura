@@ -309,6 +309,10 @@ export type EvidenceRecord = {
     | 'command_session'
     | 'command_timeout'
     | 'command_output'
+    | 'skill_read'
+    | 'file_read'
+    | 'file_parsed'
+    | 'structured_output'
     | 'test_pass'
     | 'test_fail'
     | 'page_state'
@@ -325,6 +329,7 @@ export type EvidenceRecord = {
 
 export type ExecutionEvidenceSummary = {
   records: EvidenceRecord[]
+  hasContextEvidence?: boolean
   hasAnyExecution: boolean
   hasWriteEffect: boolean
   hasBrowserEffect: boolean
@@ -477,6 +482,11 @@ export type SessionContextCompression = {
 
 export type ToolEvent = {
   id: string
+  toolCallId?: string
+  planId?: string
+  subtaskId?: string
+  subtaskTitle?: string
+  attempt?: number
   source: 'builtin' | 'mcp' | 'plugin' | 'subagent'
   name: string
   summary: string
@@ -524,6 +534,7 @@ export type TaskStatus =
   | 'awaiting_user_input'
   | 'completed'
   | 'failed'
+  | 'blocked'
 
 export type TaskNode = {
   id: string
@@ -535,7 +546,9 @@ export type TaskNode = {
     | 'plan'
     | 'plan_step'
     | 'classify'
+    | 'context'
     | 'execute'
+    | 'respond'
     | 'inspect_step'
     | 'research_step'
     | 'verification_step'

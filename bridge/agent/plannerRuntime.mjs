@@ -21,6 +21,63 @@ function truncateText(value, maxLength = 180) {
     : normalized
 }
 
+const PLAN_STEP_KINDS = new Set([
+  'context',
+  'execute',
+  'verify',
+  'respond',
+  'inspect_step',
+  'research_step',
+  'recovery_step',
+])
+
+const KNOWN_EVIDENCE_TYPES = new Set([
+  'context_collected',
+  'skill_read',
+  'file_read',
+  'file_parsed',
+  'structured_output',
+  'command_output',
+  'file_mutation',
+  'file_verified',
+  'artifact_present',
+  'artifact_read_back',
+  'artifact_hash_recorded',
+  'test_pass',
+  'verification_passed',
+  'final_answer',
+  'execution_performed',
+])
+
+function normalizePlanStepKind(value, fallback = 'execute') {
+  const normalized = String(value || '').trim()
+  return PLAN_STEP_KINDS.has(normalized) ? normalized : fallback
+}
+
+function normalizeEvidenceTypes(value = []) {
+  return (Array.isArray(value) ? value : [value])
+    .map(entry => String(entry || '').trim())
+    .filter(Boolean)
+    .map(entry => entry.replace(/\s+/g, '_'))
+    .filter(entry => KNOWN_EVIDENCE_TYPES.has(entry))
+}
+
+function defaultRequiredEvidenceForKind(kind) {
+  switch (kind) {
+    case 'context':
+    case 'inspect_step':
+    case 'research_step':
+      return ['context_collected']
+    case 'verify':
+      return ['verification_passed']
+    case 'respond':
+      return ['final_answer']
+    case 'execute':
+    default:
+      return ['execution_performed']
+  }
+}
+
 function deriveGoal(messages = []) {
   const text = latestUserText(messages)
   if (!text) return 'Complete the user request'
@@ -41,16 +98,30 @@ function createExecutionSubtasks(planId, classification = {}, labels = getRuntim
     kind = 'execute',
     requiredCapability = 'auto',
     successCriteria = [],
+    acceptance = '',
+    requiredEvidence,
     dependencies,
     metadata = {},
   }) => {
+    const normalizedKind = normalizePlanStepKind(kind)
+    const normalizedRequiredEvidence = normalizeEvidenceTypes(requiredEvidence)
+    const effectiveRequiredEvidence = normalizedRequiredEvidence.length > 0
+      ? normalizedRequiredEvidence
+      : defaultRequiredEvidenceForKind(normalizedKind)
+    const effectiveAcceptance = acceptance || successCriteria[0] || ''
     const id = `${planId}-subtask-${subtasks.length + 2}`
     subtasks.push({
       id,
       title,
-      kind,
+      kind: normalizedKind,
       requiredCapability,
-      successCriteria,
+      successCriteria: successCriteria.length > 0
+        ? successCriteria
+        : [effectiveAcceptance || labels.observableProgressSummary],
+      acceptance: effectiveAcceptance || labels.observableProgressSummary,
+      requiredEvidence: effectiveRequiredEvidence,
+      actualEvidence: [],
+      verificationStatus: 'pending',
       dependencies: Array.isArray(dependencies) ? dependencies : [`${planId}-subtask-1`],
       status: 'pending',
       evidence: [],
@@ -65,9 +136,10 @@ function createExecutionSubtasks(planId, classification = {}, labels = getRuntim
       kind: 'research_step',
       requiredCapability: 'web-lookup',
       successCriteria: [
-        'Collect current information required by the user request',
-        'Keep retrieved evidence available for the execution step',
+        labels.observableProgressSummary,
       ],
+      acceptance: labels.observableProgressSummary,
+      requiredEvidence: ['context_collected'],
       metadata: {
         plannerReason: 'current_or_web_info_needed',
       },
@@ -80,9 +152,10 @@ function createExecutionSubtasks(planId, classification = {}, labels = getRuntim
       kind: 'inspect_step',
       requiredCapability: 'read-only',
       successCriteria: [
-        'Identify the relevant files, existing behavior, and constraints',
-        'Avoid mutating files during inspection',
+        labels.observableProgressSummary,
       ],
+      acceptance: labels.observableProgressSummary,
+      requiredEvidence: ['context_collected'],
       metadata: {
         plannerReason: 'workspace_write_requires_inspection',
       },
@@ -97,9 +170,10 @@ function createExecutionSubtasks(planId, classification = {}, labels = getRuntim
     kind: 'execute',
     requiredCapability: requiredExecutionCapability(classification),
     successCriteria: [
-      'Existing route-first capability selection is preserved',
-      'Tool routing, provider recovery, and evidence policy remain active',
+      labels.observableProgressSummary,
     ],
+    acceptance: labels.observableProgressSummary,
+    requiredEvidence: ['execution_performed'],
     dependencies: [previousId],
     metadata: {
       plannerReason: 'route_first_execution_core',
@@ -121,7 +195,6 @@ export function createHybridPlan({
   const goal = deriveGoal(request.messages)
   const createdAt = now()
   const executionSubtasks = createExecutionSubtasks(planId, classification, labels)
-  const verifySubtaskId = `${planId}-subtask-${executionSubtasks.length + 2}`
   const subtasks = [
     {
       id: `${planId}-subtask-1`,
@@ -132,24 +205,15 @@ export function createHybridPlan({
         'Goal is available to the runtime',
         'Risk and path classification are recorded',
       ],
+      acceptance: 'Goal, risk, and execution path are available to the runtime',
+      requiredEvidence: ['context_collected'],
+      actualEvidence: ['context_collected'],
+      verificationStatus: 'passed',
       dependencies: [],
       status: 'completed',
       evidence: ['classification'],
     },
     ...executionSubtasks,
-    {
-      id: verifySubtaskId,
-      title: labels.verifyCompletion,
-      kind: 'verify',
-      requiredCapability: 'auto',
-      successCriteria: [
-        'Completion state and route decision are captured',
-        'Final answer is returned with graph metadata',
-      ],
-      dependencies: executionSubtasks.map(subtask => subtask.id),
-      status: 'pending',
-      evidence: [],
-    },
   ]
 
   return {
@@ -187,8 +251,15 @@ function normalizePlanStep(step, index) {
     description:
       truncateText(step.description || step.title || step.summary || `Step ${index + 1}`, 180) ||
       `Step ${index + 1}`,
-    kind: truncateText(step.kind || step.type || '', 80),
+    kind: normalizePlanStepKind(step.kind || step.type || '', 'execute'),
     requiredCapability: truncateText(step.requiredCapability || step.capability || '', 80),
+    acceptance: truncateText(
+      step.acceptance || step.acceptanceCriteria || step.validation || '',
+      260,
+    ),
+    requiredEvidence: normalizeEvidenceTypes(
+      step.requiredEvidence || step.required_evidence || step.evidence,
+    ),
   }
 }
 
@@ -216,6 +287,14 @@ export function createHybridPlanFromModelPlan({
     const previousId = index === 0
       ? classifySubtask.id
       : `${planId}-subtask-${index + 1}`
+    const requiredEvidence = step.requiredEvidence.length > 0
+      ? step.requiredEvidence
+      : defaultRequiredEvidenceForKind(step.kind)
+    const acceptance = step.acceptance || (
+      step.kind === 'respond'
+        ? labels.finalResponseSummary
+        : labels.observableProgressSummary
+    )
     return {
       id: `${planId}-subtask-${index + 2}`,
       title: step.description,
@@ -224,8 +303,12 @@ export function createHybridPlanFromModelPlan({
         step.requiredCapability ||
         (classification?.requiresWrite ? 'local-write' : 'auto'),
       successCriteria: [
-        'Step produces observable progress or a clear blocker',
+        acceptance,
       ],
+      acceptance,
+      requiredEvidence,
+      actualEvidence: [],
+      verificationStatus: 'pending',
       dependencies: [previousId],
       status: 'pending',
       evidence: [],
@@ -234,17 +317,11 @@ export function createHybridPlanFromModelPlan({
       },
     }
   })
-  const verifySubtask = {
-    ...base.subtasks.at(-1),
-    id: `${planId}-subtask-${executionSubtasks.length + 2}`,
-    dependencies: executionSubtasks.map(subtask => subtask.id),
-  }
-
   return {
     ...base,
     goal: truncateText(modelPlan.goal || base.goal, 240),
     risk: modelPlan.risk || classification?.risk || base.risk,
-    estimatedSteps: executionSubtasks.length + 2,
+    estimatedSteps: executionSubtasks.length + 1,
     successCriteria: Array.isArray(modelPlan.successCriteria) && modelPlan.successCriteria.length > 0
       ? modelPlan.successCriteria.map(entry => truncateText(entry, 180)).filter(Boolean)
       : base.successCriteria,
@@ -254,7 +331,6 @@ export function createHybridPlanFromModelPlan({
     subtasks: [
       classifySubtask,
       ...executionSubtasks,
-      verifySubtask,
     ],
   }
 }
@@ -280,6 +356,7 @@ export function planToTaskTree(plan = {}) {
         id: subtask.id,
         title: subtask.title || subtask.id,
         summary: subtask.summary ||
+          subtask.acceptance ||
           (Array.isArray(subtask.successCriteria) && subtask.successCriteria.length > 0
             ? subtask.successCriteria.join('\n')
             : ''),
@@ -383,6 +460,10 @@ export function appendPlanSubtask(plan, {
   kind = 'execute',
   requiredCapability = 'auto',
   successCriteria = [],
+  acceptance = '',
+  requiredEvidence,
+  actualEvidence = [],
+  verificationStatus = 'pending',
   dependencies,
   afterSubtaskId,
   metadata = {},
@@ -399,9 +480,15 @@ export function appendPlanSubtask(plan, {
   const subtask = {
     id: `${plan.id}-subtask-${plan.subtasks.length + 1}`,
     title: title || labels.continueExecution,
-    kind,
+    kind: normalizePlanStepKind(kind),
     requiredCapability,
     successCriteria: Array.isArray(successCriteria) ? successCriteria : [],
+    acceptance: acceptance || (Array.isArray(successCriteria) ? successCriteria[0] : ''),
+    requiredEvidence: normalizeEvidenceTypes(requiredEvidence).length > 0
+      ? normalizeEvidenceTypes(requiredEvidence)
+      : defaultRequiredEvidenceForKind(kind),
+    actualEvidence: Array.isArray(actualEvidence) ? actualEvidence : [],
+    verificationStatus,
     dependencies: Array.isArray(dependencies)
       ? dependencies
       : previous?.id

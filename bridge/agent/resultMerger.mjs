@@ -20,6 +20,38 @@ function normalizeCompletedResultStatus(value) {
   return 'completed'
 }
 
+function toolEventKey(event, fallbackIndex = 0) {
+  const id = typeof event?.id === 'string' ? event.id.trim() : ''
+  if (id) return `id:${id}`
+  const callId = typeof event?.toolCallId === 'string' ? event.toolCallId.trim() : ''
+  if (callId) return `call:${callId}`
+  return `fallback:${event?.name || event?.toolName || 'tool'}:${fallbackIndex}`
+}
+
+function mergeToolEvents(events = []) {
+  const byKey = new Map()
+  for (const [index, event] of events.entries()) {
+    if (!event || typeof event !== 'object') {
+      continue
+    }
+    byKey.set(toolEventKey(event, index), event)
+  }
+  return Array.from(byKey.values())
+}
+
+function aggregateGraphToolEvents(executionHistory = [], executionResult = {}) {
+  const historyEvents = executionHistory.flatMap(entry =>
+    Array.isArray(entry?.toolEvents) ? entry.toolEvents : [],
+  )
+  return mergeToolEvents(
+    historyEvents.length > 0
+      ? historyEvents
+      : Array.isArray(executionResult?.toolEvents)
+        ? executionResult.toolEvents
+        : [],
+  )
+}
+
 export function decideGraphCompletion({
   result = {},
   executionResult = {},
@@ -129,8 +161,10 @@ export function mergeGraphResult({
       nextRecommendation: entry?.nextRecommendation,
     }))
   const latestGraphExecution = graphExecutions.at(-1) || {}
+  const toolEvents = aggregateGraphToolEvents(executionHistory, executionResult)
   return {
     ...result,
+    toolEvents: toolEvents.length > 0 ? toolEvents : result?.toolEvents,
     status: mergedDecision.status,
     pathMode: 'long',
     graphPlan: plan,
