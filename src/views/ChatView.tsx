@@ -802,6 +802,8 @@ function activityPhaseLabel(phase?: AgentExecutionPhase, stalled = false) {
   switch (phase) {
     case 'preparing':
       return `准备上下文${suffix}`
+    case 'planning':
+      return `判断任务规划${suffix}`
     case 'compressing_context':
       return `压缩上下文${suffix}`
     case 'model_connecting':
@@ -1125,7 +1127,7 @@ function isGenericToolSummary(event: MessageEvent) {
 }
 
 function appendedInputStatusLabel(status: AppendedInput['status']) {
-  return status === 'consumed' ? '已并入当前任务' : '将在当前步骤后处理'
+  return status === 'consumed' ? '已完成中途判断' : '将在当前步骤后判断处理'
 }
 
 function isSearchControllerDecisionEvent(event: MessageEvent) {
@@ -2333,6 +2335,9 @@ type ReasoningDisplayModel = {
 
 function inferReasoningTitle(content: string, kind: MessageReasoning['kind']) {
   if (kind === 'summary') {
+    if (/任务规划判断|规划判断|执行计划/.test(content)) {
+      return '任务规划判断'
+    }
     return '执行摘要'
   }
 
@@ -2811,6 +2816,35 @@ function buildExecutionTraceGroups(timeline: ExecutionTimelineItem[]) {
   return groups.filter(group => group.narratives.length > 0 || group.items.length > 0)
 }
 
+function findCurrentExecutionTraceGroupIndex(
+  groups: ExecutionTraceGroup[],
+  latestReasoningId: string,
+) {
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    if (
+      groups[index].items.some(
+        item =>
+          item.kind === 'event' &&
+          (item.event.status === 'running' ||
+            item.event.status === 'awaiting_approval' ||
+            item.event.status === 'awaiting_user_input'),
+      )
+    ) {
+      return index
+    }
+  }
+
+  if (latestReasoningId) {
+    for (let index = groups.length - 1; index >= 0; index -= 1) {
+      if (groups[index].narratives.some(narrative => narrative.sourceId === latestReasoningId)) {
+        return index
+      }
+    }
+  }
+
+  return groups.length > 0 ? groups.length - 1 : -1
+}
+
 function ExecutionDigestLog({ entries }: { entries: ExecutionDigestPreview[] }) {
   const [expanded, setExpanded] = useState(false)
   const [hasOverflow, setHasOverflow] = useState(false)
@@ -2936,9 +2970,17 @@ function ExecutionDigest({
 function ExecutionTraceHeader({
   activity,
   itemCount,
+  visibleCount,
+  expanded,
+  canToggle,
+  onToggle,
 }: {
   activity?: ChatMessage['activity']
   itemCount: number
+  visibleCount: number
+  expanded: boolean
+  canToggle: boolean
+  onToggle: () => void
 }) {
   const duration =
     activity
@@ -2957,6 +2999,7 @@ function ExecutionTraceHeader({
     duration ? formatDuration(duration) : null,
     activity?.toolCount ? `${activity.toolCount} 个工具` : null,
     itemCount ? `${itemCount} 个阶段` : null,
+    canToggle && !expanded ? `显示 ${visibleCount}/${itemCount}` : null,
   ].filter(Boolean)
 
   return (
@@ -2964,8 +3007,9 @@ function ExecutionTraceHeader({
       <div className="min-w-0">
         <div className="text-13px font-700 text-[var(--text-primary)]">执行轨迹</div>
       </div>
-      {meta.length > 0 ? (
-        <div className="flex flex-wrap items-center justify-end gap-1.5">
+      <div className="flex flex-wrap items-center justify-end gap-1.5">
+        {meta.length > 0 ? (
+          <>
           {meta.map(item => (
             <span
               key={item}
@@ -2974,8 +3018,19 @@ function ExecutionTraceHeader({
               {item}
             </span>
           ))}
-        </div>
-      ) : null}
+          </>
+        ) : null}
+        {canToggle ? (
+          <button
+            className="inline-flex items-center gap-1 rounded-full border border-[rgba(15,23,42,0.07)] bg-white px-2 py-0.5 text-10px font-700 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[rgba(15,23,42,0.12)]"
+            onClick={onToggle}
+            type="button"
+          >
+            <span>{expanded ? '收起' : '全部'}</span>
+            {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -5172,6 +5227,7 @@ function AssistantMessageCard({
   onToggleActivity: (messageId: string) => void
 }) {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
+  const [executionTraceExpanded, setExecutionTraceExpanded] = useState(false)
   const answerBodyRef = useRef<HTMLDivElement>(null)
   const messageTimeLabel = formatConversationTimestamp(message.createdAt)
   const activity = message.activity
@@ -5201,6 +5257,9 @@ function AssistantMessageCard({
   const appendedInputs = message.appendedInputs || []
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
   const activeVariantId = getActiveMessageVariant(message).id || message.id
+  useEffect(() => {
+    setExecutionTraceExpanded(false)
+  }, [activeVariantId])
   const isRetryInProgress = isStreaming && message.retryInfo?.inProgress === true
   const isContextCompressionInProgress =
     isStreaming && activity?.phase === 'compressing_context'
@@ -5280,6 +5339,15 @@ function AssistantMessageCard({
     displayReasoning.filter(entry => !isSyntheticRunSummary(entry.content)).at(-1)?.id ||
     displayReasoning.at(-1)?.id ||
     ''
+  const currentTraceGroupIndex = findCurrentExecutionTraceGroupIndex(
+    executionTraceGroups,
+    latestReasoningId,
+  )
+  const visibleExecutionTraceGroups = executionTraceExpanded
+    ? executionTraceGroups
+    : currentTraceGroupIndex >= 0
+      ? [executionTraceGroups[currentTraceGroupIndex]]
+      : []
   const executionDigestEntries = buildExecutionDigestEntries({
     executionTimeline: nonApprovalTimeline,
     taskNodes: [],
@@ -5478,9 +5546,16 @@ function AssistantMessageCard({
 
           {shouldShowDetailedTimeline ? (
             <section className="rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.018)] px-3.5 py-3">
-              <ExecutionTraceHeader activity={activity} itemCount={executionTraceGroups.length} />
+              <ExecutionTraceHeader
+                activity={activity}
+                itemCount={executionTraceGroups.length}
+                visibleCount={visibleExecutionTraceGroups.length}
+                expanded={executionTraceExpanded}
+                canToggle={executionTraceGroups.length > 1}
+                onToggle={() => setExecutionTraceExpanded(current => !current)}
+              />
               <div className="flex flex-col gap-4 border-l border-[rgba(15,23,42,0.08)] pl-3">
-                {executionTraceGroups.map(group => {
+                {visibleExecutionTraceGroups.map(group => {
                   const primaryNarrative = group.narratives[0]
                   const extraNarratives = group.narratives.slice(1)
                   const isGroupActive =

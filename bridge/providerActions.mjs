@@ -2,6 +2,7 @@ import { normalizeBaseUrl } from './utils.mjs'
 import { guardedFetch } from './web/net/guardedFetch.mjs'
 
 const PROXY_CONNECTIVITY_TEST_URL = 'https://api.ipify.org?format=json'
+const TITLE_GENERATION_MAX_TOKENS = 256
 
 async function parseJsonResponse(response) {
   const text = await response.text()
@@ -98,25 +99,85 @@ function openAiCompatibleHeaders(settings = {}) {
   return headers
 }
 
+function flattenTextValue(value) {
+  if (typeof value === 'string') {
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map(entry => flattenTextValue(entry))
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (!value || typeof value !== 'object') {
+    return ''
+  }
+
+  const fields = ['text', 'content', 'value', 'output_text']
+  for (const field of fields) {
+    if (typeof value[field] === 'string') {
+      return value[field]
+    }
+    if (Array.isArray(value[field])) {
+      const nested = flattenTextValue(value[field])
+      if (nested) {
+        return nested
+      }
+    }
+  }
+
+  if (Array.isArray(value.parts)) {
+    return flattenTextValue(value.parts)
+  }
+
+  return ''
+}
+
 function flattenOpenAiMessageContent(content) {
   if (typeof content === 'string') {
     return content
   }
   if (!Array.isArray(content)) {
-    return ''
+    return flattenTextValue(content)
   }
   return content
-    .map(block => {
-      if (!block || typeof block !== 'object') {
-        return ''
-      }
-      if (typeof block.text === 'string') {
-        return block.text
-      }
-      return ''
-    })
+    .map(block => flattenTextValue(block))
     .filter(Boolean)
     .join('\n')
+}
+
+function flattenOpenAiCompatibleTextResponse(data) {
+  const choice = data?.choices?.[0] || {}
+  const message = choice?.message || {}
+  return [
+    flattenOpenAiMessageContent(message.content),
+    flattenTextValue(choice.text),
+    flattenTextValue(data?.output_text),
+    flattenTextValue(data?.output),
+  ]
+    .map(value => String(value || '').trim())
+    .find(Boolean) || ''
+}
+
+function describeOpenAiCompatibleEmptyResponse(data) {
+  const choice = data?.choices?.[0] || {}
+  const message = choice?.message || {}
+  const content = message.content
+  const contentType = Array.isArray(content)
+    ? `array(${content.length})`
+    : content === null
+      ? 'null'
+      : typeof content
+  const finishReason = choice.finish_reason || choice.finishReason || ''
+  const hasReasoning =
+    Boolean(message.reasoning) ||
+    Boolean(message.reasoning_content) ||
+    Boolean(message.reasoningContent)
+  return [
+    finishReason ? `finish_reason=${finishReason}` : '',
+    `contentType=${contentType}`,
+    hasReasoning ? 'reasoningOnly=true' : '',
+  ].filter(Boolean).join(', ')
 }
 
 function flattenGeminiTextResponse(data) {
@@ -170,6 +231,42 @@ function buildTitleGenerationPrompts(titleContext = {}) {
   return { systemPrompt, userPrompt }
 }
 
+function resolveTitleGenerationSettings(settings = {}) {
+  const requestedProfileId =
+    typeof settings.titleProviderProfileId === 'string'
+      ? settings.titleProviderProfileId.trim()
+      : ''
+  const requestedModel =
+    typeof settings.titleModel === 'string' ? settings.titleModel.trim() : ''
+
+  if (!requestedProfileId || !requestedModel) {
+    return settings
+  }
+
+  const profiles = Array.isArray(settings.providerProfiles)
+    ? settings.providerProfiles
+    : []
+  const profile = profiles.find(
+    entry => entry?.enabled !== false && entry?.id === requestedProfileId,
+  )
+  const modelEnabled = Array.isArray(profile?.models)
+    ? profile.models.some(model => model?.enabled !== false && model?.id === requestedModel)
+    : false
+
+  if (!profile || !modelEnabled) {
+    return settings
+  }
+
+  return {
+    ...settings,
+    activeProviderProfileId: profile.id,
+    provider: profile.provider || settings.provider,
+    apiKey: profile.apiKey || settings.apiKey,
+    baseUrl: profile.baseUrl || settings.baseUrl,
+    model: requestedModel,
+  }
+}
+
 async function generateOpenAiTitle(settings, titleContext) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
   const { systemPrompt, userPrompt } = buildTitleGenerationPrompts(titleContext)
@@ -187,7 +284,7 @@ async function generateOpenAiTitle(settings, titleContext) {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        max_tokens: 80,
+        max_tokens: TITLE_GENERATION_MAX_TOKENS,
         temperature: 0.2,
         stream: false,
       }),
@@ -204,9 +301,16 @@ async function generateOpenAiTitle(settings, titleContext) {
   if (!response.ok) {
     throw new Error(data.error?.message || 'OpenAI-compatible title generation failed')
   }
-  return normalizeGeneratedTitle(
-    flattenOpenAiMessageContent(data.choices?.[0]?.message?.content),
-  )
+  const title = normalizeGeneratedTitle(flattenOpenAiCompatibleTextResponse(data))
+  if (!title) {
+    const responseShape = describeOpenAiCompatibleEmptyResponse(data)
+    throw new Error(
+      responseShape
+        ? `模型没有返回可用标题。${responseShape}`
+        : '模型没有返回可用标题。',
+    )
+  }
+  return title
 }
 
 async function generateGoogleTitle(settings, titleContext) {
@@ -234,7 +338,7 @@ async function generateGoogleTitle(settings, titleContext) {
           },
         ],
         generationConfig: {
-          maxOutputTokens: 80,
+          maxOutputTokens: TITLE_GENERATION_MAX_TOKENS,
           temperature: 0.2,
         },
       }),
@@ -251,7 +355,11 @@ async function generateGoogleTitle(settings, titleContext) {
   if (!response.ok) {
     throw new Error(data.error?.message || 'Google title generation failed')
   }
-  return normalizeGeneratedTitle(flattenGeminiTextResponse(data))
+  const title = normalizeGeneratedTitle(flattenGeminiTextResponse(data))
+  if (!title) {
+    throw new Error('模型没有返回可用标题。')
+  }
+  return title
 }
 
 async function generateSessionTitle(settings, titleContext) {
@@ -380,20 +488,22 @@ async function testProxyConnectivity(settings = {}) {
 
 async function runAction(payload) {
   const { action, settings } = payload
+  const actionSettings =
+    action === 'generate-title' ? resolveTitleGenerationSettings(settings) : settings
 
   if (action === 'test-proxy') {
-    return testProxyConnectivity(settings)
+    return testProxyConnectivity(actionSettings)
   }
 
-  if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
+  if (actionSettings?.provider !== 'custom' && !actionSettings?.apiKey?.trim()) {
     throw new Error('Missing API key.')
   }
 
   if (action === 'test') {
     const result =
-      settings.provider === 'google'
-        ? await fetchGoogleModels(settings)
-        : await fetchOpenAiModels(settings)
+      actionSettings.provider === 'google'
+        ? await fetchGoogleModels(actionSettings)
+        : await fetchOpenAiModels(actionSettings)
     return {
       ok: true,
       message: `连通性测试成功，可访问服务并读取到 ${result.models.length} 个模型。`,
@@ -402,13 +512,13 @@ async function runAction(payload) {
   }
 
   if (action === 'fetch-models') {
-    return settings.provider === 'google'
-      ? fetchGoogleModels(settings)
-      : fetchOpenAiModels(settings)
+    return actionSettings.provider === 'google'
+      ? fetchGoogleModels(actionSettings)
+      : fetchOpenAiModels(actionSettings)
   }
 
   if (action === 'generate-title') {
-    return generateSessionTitle(settings, payload.titleContext || {})
+    return generateSessionTitle(actionSettings, payload.titleContext || {})
   }
 
   throw new Error(`Unsupported provider action: ${action}`)

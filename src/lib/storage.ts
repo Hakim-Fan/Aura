@@ -189,6 +189,8 @@ export const defaultSettings: AgentSettings = {
   model: '',
   analysisProviderProfileId: '',
   analysisModel: '',
+  titleProviderProfileId: '',
+  titleModel: '',
   activeProviderProfileId: 'profile-openai',
   providerProfiles: defaultProfiles(),
   agentArchitectureMode: 'route-first',
@@ -1164,6 +1166,12 @@ function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
         : '',
     analysisModel:
       typeof settings.analysisModel === 'string' ? settings.analysisModel : '',
+    titleProviderProfileId:
+      typeof settings.titleProviderProfileId === 'string'
+        ? settings.titleProviderProfileId
+        : '',
+    titleModel:
+      typeof settings.titleModel === 'string' ? settings.titleModel : '',
     browser: normalizeBrowserSettings(settings.browser),
     web: normalizeWebToolsSettings(settings.web),
     mcpServers: normalizeMcpServers(settings.mcpServers),
@@ -1706,6 +1714,10 @@ function syncLegacyFields(settings: AgentSettings): AgentSettings {
     normalizedSettings.providerProfiles,
     normalizedSettings.analysisProviderProfileId,
   )
+  const titleProfile = resolveActiveProfile(
+    normalizedSettings.providerProfiles,
+    normalizedSettings.titleProviderProfileId,
+  )
 
   if (!activeProfile) {
     return normalizedSettings
@@ -1724,6 +1736,19 @@ function syncLegacyFields(settings: AgentSettings): AgentSettings {
     !!analysisProfile &&
     analysisProfile.id === normalizedSettings.analysisProviderProfileId
 
+  const resolvedTitleModel =
+    normalizedSettings.titleProviderProfileId &&
+    normalizedSettings.titleModel &&
+    titleProfile &&
+    titleProfile.id === normalizedSettings.titleProviderProfileId
+      ? resolvePreferredModelId(titleProfile, normalizedSettings.titleModel)
+      : ''
+
+  const shouldKeepTitleSelection =
+    !!resolvedTitleModel &&
+    !!titleProfile &&
+    titleProfile.id === normalizedSettings.titleProviderProfileId
+
   return {
     ...normalizedSettings,
     activeProviderProfileId: activeProfile.id,
@@ -1733,6 +1758,8 @@ function syncLegacyFields(settings: AgentSettings): AgentSettings {
     model: resolvePreferredModelId(activeProfile, normalizedSettings.model),
     analysisProviderProfileId: shouldKeepAnalysisSelection ? analysisProfile.id : '',
     analysisModel: shouldKeepAnalysisSelection ? resolvedAnalysisModel : '',
+    titleProviderProfileId: shouldKeepTitleSelection ? titleProfile.id : '',
+    titleModel: shouldKeepTitleSelection ? resolvedTitleModel : '',
   }
 }
 

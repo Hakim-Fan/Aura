@@ -561,36 +561,342 @@ function drainAppendedInputs(hooks) {
   return Array.isArray(consumed) ? consumed : []
 }
 
-function appendQueuedInputsToOpenAiTranscript(transcript, messages, hooks) {
-  const queuedInputs = drainAppendedInputs(hooks)
+function extractJsonObject(text) {
+  const value = String(text || '').trim()
+  if (!value) {
+    return null
+  }
+  try {
+    return JSON.parse(value)
+  } catch {
+    const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/iu)
+    if (fenced) {
+      try {
+        return JSON.parse(fenced[1])
+      } catch {
+        // Fall through to brace extraction.
+      }
+    }
+    const start = value.indexOf('{')
+    const end = value.lastIndexOf('}')
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(value.slice(start, end + 1))
+      } catch {
+        return null
+      }
+    }
+  }
+  return null
+}
+
+function compactInterventionString(value, maxLength = 1200) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return ''
+  }
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength).trimEnd()}...`
+    : normalized
+}
+
+function summarizeInterventionMessage(message = {}, maxLength = 1200) {
+  const partText = Array.isArray(message.parts)
+    ? message.parts
+        .filter((part) => part?.type === 'text')
+        .map((part) => part.text || '')
+        .join('\n')
+    : ''
+  return compactInterventionString(message.content || partText, maxLength)
+}
+
+function summarizeInterventionToolEvents(toolEvents = []) {
+  return toolEvents
+    .slice(-8)
+    .map((event, index) => ({
+      index: index + 1,
+      name: compactInterventionString(event?.name || event?.title || '', 80),
+      status: compactInterventionString(event?.status || '', 40),
+      summary: compactInterventionString(
+        event?.summary || event?.error || event?.output || '',
+        240,
+      ),
+    }))
+    .filter((event) => event.name || event.summary)
+}
+
+function buildMidTaskInterventionSystemPrompt() {
+  return [
+    'You are Aura Mid-task Intervention Router.',
+    'The user inserted one or more messages while an agent task is already running.',
+    'Return ONLY valid JSON. Do not use markdown fences. Do not call tools.',
+    'Classify the inserted input and include the next handling decision in the same JSON response.',
+    '',
+    'Allowed type values:',
+    '- add_constraint: the user adds constraints, preferences, attachments, formatting requirements, or verification requirements for the current task.',
+    '- revise_current_task: the user changes the current goal, priority, scope, or plan.',
+    '- cancel_current_task: the user asks to stop, cancel, pause, or avoid continuing the current task.',
+    '- start_new_task: the inserted input is unrelated and should be handled as a separate new task.',
+    '- needs_user_clarification: the intent is too ambiguous to continue safely.',
+    '',
+    'Preferred output shape:',
+    '{"type":"add_constraint|revise_current_task|cancel_current_task|start_new_task|needs_user_clarification","relation":"supplement_current_task|changes_current_task|cancels_current_task|new_task|unclear","shouldAbortCurrentRun":false,"shouldReplan":false,"instruction":"short instruction to apply now","revisedGoal":"","steps":[{"id":"1","description":"short step","kind":"context|execute|verify|respond","acceptance":"what proves this step is done"}],"reason":"short reason"}',
+    '',
+    'If type is revise_current_task, include revisedGoal and concise steps so the caller does not need a second planning call.',
+    'If type is add_constraint, keep shouldAbortCurrentRun false and explain how to merge the input into the current task.',
+    'If type is cancel_current_task, set shouldAbortCurrentRun true and instruction to stop with a brief user-facing acknowledgement.',
+    'If type is start_new_task, do not invent execution results; explain that it should be separated from the current run.',
+  ].join('\n')
+}
+
+function buildMidTaskInterventionUserPrompt({
+  inputs,
+  messages,
+  toolEvents,
+  draftAssistantContent = '',
+}) {
+  const recentMessages = messages
+    .slice(-8)
+    .map((message, index) => ({
+      index: index + 1,
+      role: message?.role || '',
+      content: summarizeInterventionMessage(message, 900),
+    }))
+    .filter((message) => message.content)
+  const insertedInputs = inputs.map((input, index) => ({
+    index: index + 1,
+    id: input.id || '',
+    content: summarizeInterventionMessage(input, index === inputs.length - 1 ? 3000 : 1200),
+    attachmentCount: Array.isArray(input.attachments) ? input.attachments.length : 0,
+    researchMode: input.researchMode || 'auto',
+  }))
+
+  return JSON.stringify({
+    currentRun: {
+      recentMessages,
+      recentToolEvents: summarizeInterventionToolEvents(toolEvents),
+      draftAssistantContent: compactInterventionString(draftAssistantContent, 1200),
+    },
+    insertedInputs,
+  }, null, 2)
+}
+
+function normalizeMidTaskInterventionDecision(raw, inputs = []) {
+  const parsed = raw && typeof raw === 'object' ? raw : {}
+  const allowedTypes = new Set([
+    'add_constraint',
+    'revise_current_task',
+    'cancel_current_task',
+    'start_new_task',
+    'needs_user_clarification',
+  ])
+  const type = allowedTypes.has(parsed.type) ? parsed.type : 'add_constraint'
+  const steps = Array.isArray(parsed.steps)
+    ? parsed.steps
+        .map((step, index) => ({
+          id: compactInterventionString(step?.id || String(index + 1), 40) || String(index + 1),
+          description: compactInterventionString(
+            step?.description || step?.title || step?.summary,
+            220,
+          ),
+          kind: compactInterventionString(step?.kind || step?.type, 80),
+          acceptance: compactInterventionString(
+            step?.acceptance || step?.acceptanceCriteria || step?.validation,
+            260,
+          ),
+        }))
+        .filter((step) => step.description)
+    : []
+  const fallbackInstruction = inputs
+    .map((input) => summarizeInterventionMessage(input, 1200))
+    .filter(Boolean)
+    .join('\n')
+
+  return {
+    type,
+    relation: compactInterventionString(parsed.relation || '', 80),
+    shouldAbortCurrentRun:
+      parsed.shouldAbortCurrentRun === true ||
+      parsed.should_abort_current_run === true ||
+      type === 'cancel_current_task',
+    shouldReplan:
+      parsed.shouldReplan === true ||
+      parsed.should_replan === true ||
+      type === 'revise_current_task',
+    instruction: compactInterventionString(parsed.instruction, 1200) || fallbackInstruction,
+    revisedGoal: compactInterventionString(parsed.revisedGoal || parsed.revised_goal, 500),
+    steps,
+    reason: compactInterventionString(parsed.reason, 800),
+  }
+}
+
+function formatMidTaskInterventionDecision(decision) {
+  const labels = {
+    add_constraint: '补充当前任务',
+    revise_current_task: '修改当前任务',
+    cancel_current_task: '取消当前任务',
+    start_new_task: '新任务',
+    needs_user_clarification: '需要澄清',
+  }
+  return [
+    `中途干预判断：${labels[decision.type] || decision.type}`,
+    decision.shouldReplan ? '需要调整计划' : '',
+    decision.shouldAbortCurrentRun ? '需要停止当前执行' : '',
+    decision.reason ? `原因：${decision.reason}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+function buildMidTaskInterventionDirective(decision, inputs = []) {
+  return [
+    '[Mid-task intervention decision]',
+    'Use this structured decision to continue the current run. Do not run the ordinary new-message planning router again for these inserted inputs.',
+    JSON.stringify({
+      decision,
+      insertedInputs: inputs.map((input, index) => ({
+        index: index + 1,
+        id: input.id || '',
+        content: summarizeInterventionMessage(input, 3000),
+        attachmentCount: Array.isArray(input.attachments) ? input.attachments.length : 0,
+      })),
+    }, null, 2),
+    '',
+    'Handling rules:',
+    '- add_constraint: merge the instruction into the current task and continue.',
+    '- revise_current_task: treat revisedGoal and steps as the updated plan and continue from the safest next step.',
+    '- cancel_current_task: stop further execution and provide a brief acknowledgement.',
+    '- start_new_task: do not mix unrelated work into the current task; explain the separation clearly.',
+    '- needs_user_clarification: ask a concise clarification question before doing more work.',
+  ].join('\n')
+}
+
+async function resolveMidTaskInterventionDecision({
+  settings,
+  inputs,
+  messages,
+  toolEvents,
+  draftAssistantContent,
+  hooks,
+}) {
+  if (!Array.isArray(inputs) || inputs.length === 0) {
+    return null
+  }
+  const blockId = `mid-task-intervention:${inputs.map((input) => input.id).filter(Boolean).join(',') || Date.now()}`
+  hooks?.onPhaseChange?.('planning')
+  hooks?.onReasoningDelta?.('中途干预判断：正在判断补充输入应合并、重规划、取消还是转为新任务。', {
+    blockId,
+    kind: 'summary',
+    order: -70,
+    createdAt: Date.now(),
+  })
+
+  try {
+    const raw = await callProviderForCompaction(settings, {
+      systemPrompt: buildMidTaskInterventionSystemPrompt(),
+      userPrompt: buildMidTaskInterventionUserPrompt({
+        inputs,
+        messages,
+        toolEvents,
+        draftAssistantContent,
+      }),
+      maxOutputTokens: 700,
+      messages,
+      hooks,
+    })
+    const decision = normalizeMidTaskInterventionDecision(
+      extractJsonObject(raw),
+      inputs,
+    )
+    hooks?.onReasoningDelta?.(`\n${formatMidTaskInterventionDecision(decision)}`, {
+      blockId,
+      kind: 'summary',
+      order: -70,
+      createdAt: Date.now(),
+    })
+    return decision
+  } catch (error) {
+    const decision = normalizeMidTaskInterventionDecision({
+      type: 'add_constraint',
+      relation: 'supplement_current_task',
+      shouldAbortCurrentRun: false,
+      shouldReplan: false,
+      instruction: inputs
+        .map((input) => summarizeInterventionMessage(input, 1200))
+        .filter(Boolean)
+        .join('\n'),
+      reason: `中途干预判断失败，已按补充约束保守合并：${error instanceof Error ? error.message : String(error)}`,
+    }, inputs)
+    hooks?.onReasoningDelta?.(`\n${formatMidTaskInterventionDecision(decision)}`, {
+      blockId,
+      kind: 'summary',
+      order: -70,
+      createdAt: Date.now(),
+    })
+    return decision
+  }
+}
+
+async function appendQueuedInputsToOpenAiTranscript(
+  transcript,
+  messages,
+  hooks,
+  options = {},
+) {
+  const queuedInputs = Array.isArray(options.inputs)
+    ? options.inputs
+    : drainAppendedInputs(hooks)
   if (queuedInputs.length === 0) {
     return 0
   }
 
+  const decision = await resolveMidTaskInterventionDecision({
+    settings: options.settings || {},
+    inputs: queuedInputs,
+    messages,
+    toolEvents: options.toolEvents || [],
+    draftAssistantContent: options.draftAssistantContent || '',
+    hooks,
+  })
   for (const input of queuedInputs) {
     messages.push(input)
-    transcript.push({
-      role: 'user',
-      content: toOpenAiContent(input),
-    })
   }
+  transcript.push({
+    role: 'user',
+    content: buildMidTaskInterventionDirective(decision, queuedInputs),
+  })
 
   return queuedInputs.length
 }
 
-function appendQueuedInputsToGeminiTranscript(transcript, messages, hooks) {
-  const queuedInputs = drainAppendedInputs(hooks)
+async function appendQueuedInputsToGeminiTranscript(
+  transcript,
+  messages,
+  hooks,
+  options = {},
+) {
+  const queuedInputs = Array.isArray(options.inputs)
+    ? options.inputs
+    : drainAppendedInputs(hooks)
   if (queuedInputs.length === 0) {
     return 0
   }
 
+  const decision = await resolveMidTaskInterventionDecision({
+    settings: options.settings || {},
+    inputs: queuedInputs,
+    messages,
+    toolEvents: options.toolEvents || [],
+    draftAssistantContent: options.draftAssistantContent || '',
+    hooks,
+  })
   for (const input of queuedInputs) {
     messages.push(input)
-    transcript.push({
-      role: 'user',
-      parts: toGeminiParts(input),
-    })
   }
+  transcript.push({
+    role: 'user',
+    parts: [{ text: buildMidTaskInterventionDirective(decision, queuedInputs) }],
+  })
 
   return queuedInputs.length
 }
@@ -3158,10 +3464,14 @@ export async function runOpenAiCompatibleAgent({
       if (isRepairIteration) {
         repairTurns += 1
       }
-      appendQueuedInputsToOpenAiTranscript(
+      await appendQueuedInputsToOpenAiTranscript(
         transcript,
         conversationMessages,
         hooks,
+        {
+          settings,
+          toolEvents,
+        },
       )
       const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
         systemPrompt,
@@ -3449,13 +3759,17 @@ export async function runOpenAiCompatibleAgent({
               content: assistantContent,
             })
           }
-          for (const input of queuedInputs) {
-            conversationMessages.push(input)
-            transcript.push({
-              role: 'user',
-              content: toOpenAiContent(input),
-            })
-          }
+          await appendQueuedInputsToOpenAiTranscript(
+            transcript,
+            conversationMessages,
+            hooks,
+            {
+              settings,
+              toolEvents,
+              draftAssistantContent: assistantContent,
+              inputs: queuedInputs,
+            },
+          )
           step += 1
           continue
         }
@@ -3677,10 +3991,14 @@ export async function runGoogleAgent({
       if (isRepairIteration) {
         repairTurns += 1
       }
-      appendQueuedInputsToGeminiTranscript(
+      await appendQueuedInputsToGeminiTranscript(
         transcript,
         conversationMessages,
         hooks,
+        {
+          settings,
+          toolEvents,
+        },
       )
       const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
         systemPrompt,
@@ -3919,13 +4237,17 @@ export async function runGoogleAgent({
               content: assistantContent,
             })
           }
-          for (const input of queuedInputs) {
-            conversationMessages.push(input)
-            transcript.push({
-              role: 'user',
-              parts: toGeminiParts(input),
-            })
-          }
+          await appendQueuedInputsToGeminiTranscript(
+            transcript,
+            conversationMessages,
+            hooks,
+            {
+              settings,
+              toolEvents,
+              draftAssistantContent: assistantContent,
+              inputs: queuedInputs,
+            },
+          )
           step += 1
           continue
         }

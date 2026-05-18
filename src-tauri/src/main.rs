@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::{Local, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, Runtime, State};
@@ -978,37 +979,22 @@ fn create_task_id() -> String {
     )
 }
 
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if m <= 2 { 1 } else { 0 };
-    (year as i32, m as u32, d as u32)
+fn local_log_datetime(timestamp_ms: u64) -> chrono::DateTime<Local> {
+    let timestamp_ms = i64::try_from(timestamp_ms).unwrap_or(i64::MAX);
+    Local
+        .timestamp_millis_opt(timestamp_ms)
+        .single()
+        .unwrap_or_else(Local::now)
 }
 
-fn utc_log_date(timestamp_ms: u64) -> String {
-    let days = (timestamp_ms / 86_400_000) as i64;
-    let (year, month, day) = civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02}")
+fn local_log_date(timestamp_ms: u64) -> String {
+    local_log_datetime(timestamp_ms).format("%Y-%m-%d").to_string()
 }
 
-fn utc_log_timestamp(timestamp_ms: u64) -> String {
-    let total_seconds = timestamp_ms / 1000;
-    let millis = timestamp_ms % 1000;
-    let seconds_of_day = total_seconds % 86_400;
-    let hour = seconds_of_day / 3600;
-    let minute = (seconds_of_day % 3600) / 60;
-    let second = seconds_of_day % 60;
-    format!(
-        "{}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z",
-        utc_log_date(timestamp_ms)
-    )
+fn local_log_timestamp(timestamp_ms: u64) -> String {
+    local_log_datetime(timestamp_ms)
+        .format("%Y-%m-%dT%H:%M:%S%.3f%:z")
+        .to_string()
 }
 
 fn prune_old_app_logs(logs_dir: &Path, now_ms: u64) {
@@ -1143,8 +1129,8 @@ fn append_app_log<R: Runtime>(
     let _ = ensure_directory(&logs_dir);
     let now_ms = current_timestamp_ms();
     prune_old_app_logs(&logs_dir, now_ms);
-    let timestamp = utc_log_timestamp(now_ms);
-    let date = utc_log_date(now_ms);
+    let timestamp = local_log_timestamp(now_ms);
+    let date = local_log_date(now_ms);
     let human_line = format_app_log_line(&timestamp, level, event, &details);
     let entry = AppLogEntry {
         timestamp,

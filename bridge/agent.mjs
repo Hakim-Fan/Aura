@@ -2572,6 +2572,68 @@ function buildDirectPlanningAnswerResult(planning, classification, taskFrame) {
   }
 }
 
+function createPlanningReasoningEntry(request = {}) {
+  const baseId =
+    request?.logContext?.assistantMessageId ||
+    request?.logContext?.taskId ||
+    `planning-${Date.now().toString(36)}`
+  return {
+    id: `${baseId}-planning-gate`,
+    kind: 'summary',
+    content: '',
+    order: -80,
+    createdAt: Date.now(),
+  }
+}
+
+function appendPlanningReasoning(entry, hooks, line) {
+  if (!entry || !line) {
+    return
+  }
+  const delta = entry.content ? `\n${line}` : line
+  entry.content = entry.content ? `${entry.content}\n${line}` : line
+  hooks?.onReasoningDelta?.(delta, {
+    blockId: entry.id,
+    kind: entry.kind,
+    order: entry.order,
+    createdAt: entry.createdAt,
+  })
+}
+
+function formatPlanningDecisionSummary(planning = {}) {
+  const relation = planning.taskRelation?.type
+  const relationText = relation ? `任务关系 ${relation}` : ''
+  if (planning.type === 'direct_answer') {
+    return ['判断结果：直接回答', relationText]
+      .filter(Boolean)
+      .join(' · ')
+  }
+
+  const stepCount = Array.isArray(planning.steps) ? planning.steps.length : 0
+  return [
+    '判断结果：需要执行计划',
+    planning.risk ? `风险 ${planning.risk}` : '',
+    stepCount > 0 ? `${stepCount} 个步骤` : '',
+    relationText,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+function prependReasoningEntry(result, entry) {
+  if (!result || !entry?.content?.trim()) {
+    return result
+  }
+  const reasoning = Array.isArray(result.reasoning) ? result.reasoning : []
+  if (reasoning.some(item => item?.id === entry.id)) {
+    return result
+  }
+  return {
+    ...result,
+    reasoning: [entry, ...reasoning],
+  }
+}
+
 async function runModelPlanningGate({
   request,
   classification,
@@ -2580,6 +2642,12 @@ async function runModelPlanningGate({
 }) {
   const settings = request?.settings || {}
   const hooks = request?.hooks || {}
+  const planningReasoning = createPlanningReasoningEntry(request)
+  appendPlanningReasoning(
+    planningReasoning,
+    hooks,
+    '任务规划判断：正在判断这次请求是否需要长任务、执行计划或直接回答。',
+  )
   if (request?.runtime?.modelPlanningResult) {
     const planning = parseModelPlanningResult(
       typeof request.runtime.modelPlanningResult === 'string'
@@ -2596,16 +2664,19 @@ async function runModelPlanningGate({
       taskRelationConfidence: planning.taskRelation?.confidence,
       contextRequest: planning.contextRequest,
     })
+    appendPlanningReasoning(planningReasoning, hooks, formatPlanningDecisionSummary(planning))
     if (planning.type === 'direct_answer') {
       return {
         type: 'direct_answer',
         result: buildDirectPlanningAnswerResult(planning, classification, taskFrame),
         planning,
+        planningReasoning,
       }
     }
     return {
       type: 'plan',
       planning,
+      planningReasoning,
       plan: createHybridPlanFromModelPlan({
         modelPlan: planning,
         request,
@@ -2679,18 +2750,24 @@ async function runModelPlanningGate({
     taskRelationConfidence: planning.taskRelation?.confidence,
     contextRequest: planning.contextRequest,
   })
+  appendPlanningReasoning(planningReasoning, hooks, formatPlanningDecisionSummary(planning))
+  if (planning.goal) {
+    appendPlanningReasoning(planningReasoning, hooks, `目标：${planning.goal}`)
+  }
 
   if (planning.type === 'direct_answer') {
     return {
       type: 'direct_answer',
       result: buildDirectPlanningAnswerResult(planning, classification, taskFrame),
       planning,
+      planningReasoning,
     }
   }
 
   return {
     type: 'plan',
     planning,
+    planningReasoning,
     plan: createHybridPlanFromModelPlan({
       modelPlan: planning,
       request,
@@ -2831,6 +2908,7 @@ export async function runAgent(request) {
   try {
     let result
     let plannedInitialPlan = null
+    let planningReasoning = null
     if (!graphCheckpoint && mode.effectiveAgentMode === 'route-first') {
       const planningGate = await runModelPlanningGate({
         request: effectiveRequest,
@@ -2838,6 +2916,7 @@ export async function runAgent(request) {
         taskFrame,
         logger: runtimeLogger,
       })
+      planningReasoning = planningGate.planningReasoning || null
       if (planningGate.type === 'direct_answer') {
         executionPathMode = 'fast'
         runtimeLogger.setPathMode(executionPathMode)
@@ -2925,6 +3004,7 @@ export async function runAgent(request) {
     } else if (!result) {
       result = await runRouteFirstAgent(effectiveRequest)
     }
+    result = prependReasoningEntry(result, planningReasoning)
     if (result?.recovered === true || result?.retryInfo?.recovered === true) {
       runtimeLogger.emit('agent.recovery.event', {
         stage: 'completed',

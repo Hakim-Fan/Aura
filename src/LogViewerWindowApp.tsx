@@ -42,10 +42,12 @@ function normalizeLevel(level: string): AppLogLevel {
   return 'info'
 }
 
-function formatTime(timestamp: string) {
-  const date = new Date(timestamp)
+function formatTime(entry: Pick<AppLogEntry, 'timestamp' | 'timestampMs'>) {
+  const date = Number.isFinite(entry.timestampMs)
+    ? new Date(entry.timestampMs)
+    : new Date(entry.timestamp)
   if (Number.isNaN(date.getTime())) {
-    return timestamp
+    return entry.timestamp
   }
   const time = date.toLocaleTimeString([], {
     hour12: false,
@@ -288,7 +290,7 @@ function LogEntryRow({
         <span className={`log-entry__level log-entry__level--${level}`}>
           {level.toUpperCase()}
         </span>
-        <span className="log-entry__time">{formatTime(entry.timestamp)}</span>
+        <span className="log-entry__time">{formatTime(entry)}</span>
         <span className="log-entry__event">{entry.event}</span>
         <span className="log-entry__ids">
           {runId ? <span title={runId}>run {truncateMiddle(runId, 28)}</span> : null}
@@ -343,7 +345,7 @@ function LogEntryRow({
                         key={`${contextEntry.timestampMs}-${contextEntry.event}-${contextIndex}`}
                       >
                         <span className="log-entry__context-time">
-                          {formatTime(contextEntry.timestamp)}
+                          {formatTime(contextEntry)}
                         </span>
                         <span className={`log-entry__level log-entry__level--${contextLevel}`}>
                           {contextLevel.toUpperCase()}

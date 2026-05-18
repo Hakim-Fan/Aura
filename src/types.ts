@@ -82,6 +82,7 @@ export type ProviderRetryInfo = {
 
 export type AgentExecutionPhase =
   | 'preparing'
+  | 'planning'
   | 'compressing_context'
   | 'model_connecting'
   | 'model_streaming'
@@ -675,6 +676,8 @@ export type AgentSettings = {
   model: string
   analysisProviderProfileId: string
   analysisModel: string
+  titleProviderProfileId: string
+  titleModel: string
   activeProviderProfileId: string
   providerProfiles: ProviderProfile[]
   agentArchitectureMode: AgentArchitectureMode

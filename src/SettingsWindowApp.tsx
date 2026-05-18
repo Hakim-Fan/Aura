@@ -96,6 +96,39 @@ function normalizeManualModelId(profile: ProviderProfile, value: string) {
   return profile.provider === 'google' ? modelId.replace(/^models\//, '').trim() : modelId
 }
 
+function encodeModelRouteValue(profileId: string, modelId: string) {
+  return JSON.stringify([profileId, modelId])
+}
+
+function decodeModelRouteValue(value: string) {
+  if (!value) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (
+      Array.isArray(parsed) &&
+      typeof parsed[0] === 'string' &&
+      typeof parsed[1] === 'string'
+    ) {
+      return {
+        profileId: parsed[0],
+        modelId: parsed[1],
+      }
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
+function formatModelRouteLabel(profile: ProviderProfile, modelId: string) {
+  const providerLabel = profile.name.trim() || profile.provider
+  return `${providerLabel}/${modelId}`
+}
+
 function formatCaughtMessage(caught: unknown, fallback: string) {
   if (caught instanceof Error && caught.message.trim()) {
     return caught.message
@@ -244,6 +277,31 @@ export function SettingsWindowApp({ initialTab }: Props) {
   const analysisModelOptions = selectedAnalysisProfile
     ? selectedAnalysisProfile.models.filter(model => model.enabled)
     : []
+
+  const modelRouteOptions = useMemo(
+    () =>
+      draftSettings.providerProfiles
+        .filter(profile => profile.enabled)
+        .flatMap(profile =>
+          profile.models
+            .filter(model => model.enabled)
+            .map(model => ({
+              value: encodeModelRouteValue(profile.id, model.id),
+              label: formatModelRouteLabel(profile, model.id),
+            })),
+        ),
+    [draftSettings.providerProfiles],
+  )
+
+  const titleModelRouteStoredValue =
+    draftSettings.titleProviderProfileId && draftSettings.titleModel
+      ? encodeModelRouteValue(draftSettings.titleProviderProfileId, draftSettings.titleModel)
+      : ''
+  const titleModelRouteValue = modelRouteOptions.some(
+    option => option.value === titleModelRouteStoredValue,
+  )
+    ? titleModelRouteStoredValue
+    : ''
 
   const browserValidationError = useMemo(() => {
     if (draftSettings.browser.lightpanda.enabled && !lightpandaStatus?.valid) {
@@ -826,6 +884,27 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setDraftSettings(current => ({
       ...current,
       analysisModel: modelId,
+    }))
+    setSaveState('idle')
+  }
+
+  function updateTitleModelRoute(value: string) {
+    const selection = decodeModelRouteValue(value)
+
+    if (!selection) {
+      setDraftSettings(current => ({
+        ...current,
+        titleProviderProfileId: '',
+        titleModel: '',
+      }))
+      setSaveState('idle')
+      return
+    }
+
+    setDraftSettings(current => ({
+      ...current,
+      titleProviderProfileId: selection.profileId,
+      titleModel: selection.modelId,
     }))
     setSaveState('idle')
   }
@@ -1690,6 +1769,54 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section> */}
 
           <section className="dashboard-card">
+            <div className="section-title">模型设置</div>
+            <p className="muted">
+              不单独指定时，所有功能都会使用当前会话模型。需要更快或更省成本时，可以只针对某个功能覆盖模型。
+            </p>
+            <div className="model-routing-panel">
+              <div className="model-routing-default">
+                <span className="model-routing-default__badge">默认</span>
+                <div>
+                  <strong>当前会话模型</strong>
+                  <span>所有未覆盖的功能都会跟随聊天窗口正在使用的模型。</span>
+                </div>
+              </div>
+
+              <div className="model-route-list">
+                <label className="model-route-row">
+                  <div className="model-route-copy">
+                    <span>标题</span>
+                    <strong>聊天标题 AI 总结</strong>
+                    <small>用于侧边栏“AI 总结标题”的后台调用。</small>
+                  </div>
+                  <div className="model-route-control">
+                    <select
+                      aria-label="聊天标题 AI 总结模型"
+                      className="model-route-select"
+                      value={titleModelRouteValue}
+                      onChange={event => updateTitleModelRoute(event.target.value)}
+                    >
+                      <option value="">当前会话模型</option>
+                      {modelRouteOptions.map(option => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown size={15} />
+                  </div>
+                </label>
+              </div>
+
+              {modelRouteOptions.length === 0 ? (
+                <p className="model-route-empty">
+                  还没有可选的已启用模型。先到“提供商”页启用至少一个模型。
+                </p>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="dashboard-card">
             <div className="section-title">交互设置</div>
             <div className="toggle-stack">
               <label className="toggle-inline">
@@ -1719,7 +1846,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             </div>
           </section>
 
-          <section className="dashboard-card">
+          {/* <section className="dashboard-card">
             <div className="section-title">Agent 架构</div>
             <div className="settings-mode-stack">
               <label className="toggle-inline">
@@ -1753,9 +1880,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 </div>
               </label>
             </div>
-          </section>
+          </section> */}
 
-          <section className="dashboard-card">
+          {/* <section className="dashboard-card">
             <div className="section-title">任务轮数</div>
             <p className="muted">
               普通模式下，Agent 每完成一轮“模型判断 + 工具调用 + 继续推理”都会消耗一次轮数。
@@ -1828,7 +1955,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 <p>当前已启用长任务模式，轮数预设和最大轮数输入不会生效。</p>
               ) : null}
             </div>
-          </section>
+          </section> */}
 
           <section className="dashboard-card">
             <div className="section-title">上下文与压缩</div>
