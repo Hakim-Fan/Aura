@@ -825,6 +825,44 @@ function activityPhaseLabel(phase?: AgentExecutionPhase, stalled = false) {
   }
 }
 
+function isCancelledActivity(message: ChatMessage, activity?: ChatMessage['activity']) {
+  const code = message.errorInfo?.code || ''
+  const category = message.errorInfo?.category || ''
+  return (
+    activity?.status === 'failed' &&
+    (category === 'cancelled' ||
+      code === 'USER_ABORTED' ||
+      code === 'APPENDED_INPUT_FORCE_REPLAN')
+  )
+}
+
+function userFacingActivityStatusLabel(
+  activity?: ChatMessage['activity'],
+  message?: ChatMessage,
+) {
+  switch (activity?.status) {
+    case 'queued':
+      return '准备中'
+    case 'running':
+      if (activity.phase === 'tool_running') {
+        return '执行中'
+      }
+      return '处理中'
+    case 'awaiting_approval':
+      return '等待确认'
+    case 'awaiting_user_input':
+      return '等待回复'
+    case 'completed':
+      return '已完成'
+    case 'failed':
+      return message && isCancelledActivity(message, activity) ? '已停止' : '执行失败'
+    case 'blocked':
+      return '已暂停'
+    default:
+      return ''
+  }
+}
+
 function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], status?: MessageStatus) {
   const terminal = status === 'completed' || status === 'failed'
   if (terminal || !retryInfo || retryInfo.attemptedRetries <= 0 || retryInfo.inProgress !== true) {
@@ -2968,61 +3006,38 @@ function ExecutionDigest({
 }
 
 function ExecutionTraceHeader({
-  activity,
   itemCount,
   visibleCount,
   expanded,
   canToggle,
   onToggle,
 }: {
-  activity?: ChatMessage['activity']
   itemCount: number
   visibleCount: number
   expanded: boolean
   canToggle: boolean
   onToggle: () => void
 }) {
-  const duration =
-    activity
-      ? (
-        activity.finishedAt ||
-        (activity.status === 'running' ||
-          activity.status === 'queued' ||
-          activity.status === 'awaiting_approval' ||
-          activity.status === 'awaiting_user_input'
-          ? Date.now()
-          : activity.startedAt)
-      ) - activity.startedAt
-      : undefined
-  const meta = [
-    activity ? activityStatusLabel(activity.status) : null,
-    duration ? formatDuration(duration) : null,
-    activity?.toolCount ? `${activity.toolCount} 个工具` : null,
-    itemCount ? `${itemCount} 个阶段` : null,
-    canToggle && !expanded ? `显示 ${visibleCount}/${itemCount}` : null,
-  ].filter(Boolean)
+  const progressLabel = canToggle
+    ? expanded
+      ? `${itemCount} 段`
+      : `${visibleCount}/${itemCount}`
+    : ''
 
   return (
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-      <div className="min-w-0">
+      <div className="flex min-w-0 items-center gap-2">
         <div className="text-13px font-700 text-[var(--text-primary)]">执行轨迹</div>
-      </div>
-      <div className="flex flex-wrap items-center justify-end gap-1.5">
-        {meta.length > 0 ? (
-          <>
-          {meta.map(item => (
-            <span
-              key={item}
-              className="rounded-full border border-[rgba(15,23,42,0.07)] bg-white px-2 py-0.5 text-10px font-600 text-[var(--text-secondary)]"
-            >
-              {item}
-            </span>
-          ))}
-          </>
+        {progressLabel ? (
+          <span className="text-11px font-600 text-[var(--text-secondary)] opacity-70">
+            {progressLabel}
+          </span>
         ) : null}
+      </div>
+      <div className="flex items-center justify-end">
         {canToggle ? (
           <button
-            className="inline-flex items-center gap-1 rounded-full border border-[rgba(15,23,42,0.07)] bg-white px-2 py-0.5 text-10px font-700 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[rgba(15,23,42,0.12)]"
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-11px font-700 text-[var(--text-secondary)] hover:bg-white hover:text-[var(--text-primary)]"
             onClick={onToggle}
             type="button"
           >
@@ -5271,42 +5286,15 @@ function AssistantMessageCard({
     ? formatFailureDetail(message.errorInfo, message.error)
     : ''
   const messageRetryDetail = formatRetryLabel(message.retryInfo, message.status)
-  const statusNoticeDetail = [messageFailureDetail, messageRetryDetail]
-    .filter(Boolean)
-    .join('\n')
-  const phaseSummary = activityPhaseLabel(activity?.phase, activity?.stalled === true)
+  const userFacingActivityStatus = userFacingActivityStatusLabel(activity, message)
   const activitySummary = activity
     ? [
-      activityStatusLabel(activity.status),
-      phaseSummary || null,
+      userFacingActivityStatus || activityStatusLabel(activity.status),
       duration ? formatDuration(duration) : null,
-      activity.toolCount > 0 ? `${activity.toolCount} 个工具` : null,
-      activity.skillCount > 0 ? `${activity.skillCount} 个技能` : null,
     ]
-      .filter(Boolean)
-      .join(' · ')
+        .filter(Boolean)
+        .join(' · ')
     : null
-  const routeSummary = buildRouteSummary(message.routeDecision)
-  const routeTooltip = buildRouteTooltip(message.routeDecision)
-  const shouldShowCompletionState =
-    Boolean(message.completionState) &&
-    (message.routeDecision?.answerMode === 'execute' ||
-      message.completionState !== 'not_executed')
-  const completionSummary = shouldShowCompletionState
-    ? completionStateLabel(message.completionState)
-    : ''
-  const completionTooltip = message.evidenceSummary
-    ? [
-      `完成态：${completionSummary || message.completionState}`,
-      `执行：${message.evidenceSummary.hasAnyExecution ? '是' : '否'}`,
-      `验证证据：${message.evidenceSummary.hasVerifiedEvidence ? '有' : '无'}`,
-      `审批阻塞：${message.evidenceSummary.hasApprovalBlock ? '是' : '否'}`,
-      `能力阻塞：${message.evidenceSummary.hasCapabilityBlock ? '是' : '否'}`,
-      `执行失败：${message.evidenceSummary.hasExecutionFailure ? '是' : '否'}`,
-    ]
-      .filter(Boolean)
-      .join('\n')
-    : completionSummary
   const messageModelLabel =
     message.modelInfo?.label ||
     (activeModelId.split('/').filter(Boolean).at(-1) || activeModelId || '未记录模型')
@@ -5441,17 +5429,30 @@ function AssistantMessageCard({
       ? summarizeFailureReason(message.retryInfo.lastErrorSummary)
       : ''
   const statusNoticeTitle =
-    messageFailureSummary || fallbackStatusTitle || (isRetryInProgress ? retryFailureSummary : '')
+    messageFailureSummary
+      ? (userFacingActivityStatus || '执行失败')
+      : fallbackStatusTitle
+        ? '未生成回答'
+        : isRetryInProgress
+          ? '正在重试'
+          : ''
   const statusNoticeTone: MessageStatusNoticeTone =
     messageFailureSummary
       ? 'error'
       : isRetryInProgress
         ? 'progress'
         : 'neutral'
+  const statusNoticeDetail = [
+    messageFailureDetail,
+    fallbackStatusTitle && !messageFailureSummary ? fallbackStatusTitle : '',
+    messageRetryDetail,
+  ]
+    .filter(Boolean)
+    .join('\n')
   const shouldShowStatusNotice = Boolean(statusNoticeTitle || messageRetryDetail)
   const compressionStatusDetail = activity?.stalled === true
-    ? 'Aura 正在压缩已累积的运行上下文，连接较慢，完成后会继续回答。'
-    : 'Aura 正在压缩已累积的运行上下文，完成后会继续回答。'
+    ? '正在整理上下文，连接较慢，完成后会继续回答。'
+    : '正在整理上下文，完成后会继续回答。'
 
   return (
     <article className="group relative flex flex-col gap-3">
@@ -5482,22 +5483,6 @@ function AssistantMessageCard({
                     {messageModelLabel}
                   </span>
                   <span>{activitySummary}</span>
-                  {routeSummary ? (
-                    <span
-                      className="rounded-full border border-[rgba(69,119,108,0.16)] bg-[rgba(69,119,108,0.06)] px-2 py-0.5 text-[11px] font-600 text-[var(--accent-soft-strong)]"
-                      title={routeTooltip}
-                    >
-                      {routeSummary}
-                    </span>
-                  ) : null}
-                  {completionSummary ? (
-                    <span
-                      className={`rounded-full border px-2 py-0.5 text-[11px] font-600 ${completionStateTone(message.completionState)}`}
-                      title={completionTooltip}
-                    >
-                      {completionSummary}
-                    </span>
-                  ) : null}
                   {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </button>
                 {hasUsedCapabilities ? (
@@ -5547,7 +5532,6 @@ function AssistantMessageCard({
           {shouldShowDetailedTimeline ? (
             <section className="rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.018)] px-3.5 py-3">
               <ExecutionTraceHeader
-                activity={activity}
                 itemCount={executionTraceGroups.length}
                 visibleCount={visibleExecutionTraceGroups.length}
                 expanded={executionTraceExpanded}
@@ -5615,7 +5599,7 @@ function AssistantMessageCard({
           {isContextCompressionInProgress ? (
             <MessageStatusNotice
               tone="progress"
-              title="正在压缩上下文"
+              title="处理中"
               detail={compressionStatusDetail}
               animateDetail
             />
@@ -5632,8 +5616,8 @@ function AssistantMessageCard({
               <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
                 <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
                 {isContextCompressionInProgress
-                  ? '正在压缩上下文，随后继续回答...'
-                  : phaseSummary || '正在整理信息并生成最终回答...'}
+                  ? '正在整理上下文，随后继续回答...'
+                  : userFacingActivityStatus || '正在处理...'}
               </div>
             )
           ) : null}

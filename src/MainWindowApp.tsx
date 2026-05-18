@@ -982,6 +982,25 @@ function buildSnapshotErrorMessage(
   return candidates.find(value => typeof value === 'string' && value.trim())?.trim() || fallback
 }
 
+function shouldKeepActivityExpanded(status: AgentTaskSnapshot['status']) {
+  return (
+    status === 'queued' ||
+    status === 'running' ||
+    status === 'awaiting_approval' ||
+    status === 'awaiting_user_input'
+  )
+}
+
+function resolveActivityExpanded(
+  status: AgentTaskSnapshot['status'],
+  currentExpanded?: boolean,
+) {
+  if (!shouldKeepActivityExpanded(status)) {
+    return false
+  }
+  return currentExpanded ?? true
+}
+
 function buildMessageActivity(
   status: AgentTaskSnapshot['status'],
   startedAt: number,
@@ -991,7 +1010,7 @@ function buildMessageActivity(
     AgentTaskSnapshot,
     'phase' | 'phaseStartedAt' | 'lastHeartbeatAt' | 'lastProgressAt' | 'stalled'
   > = {},
-  expanded = status !== 'completed',
+  expanded = resolveActivityExpanded(status),
 ): MessageActivity {
   return {
     status,
@@ -2304,7 +2323,7 @@ export function MainWindowApp() {
                     snapshot.toolEvents,
                     snapshot.taskTree,
                     snapshot,
-                    currentVariant.activity?.expanded ?? true,
+                    resolveActivityExpanded(snapshot.status, currentVariant.activity?.expanded),
                   ),
                   appendedInputs: snapshot.appendedInputs || currentVariant.appendedInputs,
                   error:
@@ -2369,8 +2388,7 @@ export function MainWindowApp() {
                               snapshot.toolEvents,
                               snapshot.taskTree,
                               snapshot,
-                              currentVariant.activity?.expanded ??
-                                (snapshot.status !== 'completed'),
+                              resolveActivityExpanded(snapshot.status, currentVariant.activity?.expanded),
                             ),
                             appendedInputs:
                               snapshot.appendedInputs || currentVariant.appendedInputs,
@@ -3833,6 +3851,7 @@ export function MainWindowApp() {
                   ...currentVariant.activity,
                   status: 'failed',
                   finishedAt: stoppedAt,
+                  expanded: false,
                 }
                 : currentVariant.activity,
               retryInfo: clearRetryProgressInfo(
