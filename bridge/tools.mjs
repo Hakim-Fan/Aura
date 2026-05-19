@@ -442,8 +442,73 @@ function resolveAuraHomePath() {
   return path.join(os.homedir(), '.aura')
 }
 
-function createTodoId() {
-  return `todo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+function createTodoId(content = '', index = 0) {
+  const slug = String(content || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/giu, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+  return `todo-${index + 1}${slug ? `-${slug}` : ''}`
+}
+
+function normalizeTodoStatus(value) {
+  return ['completed', 'in_progress', 'failed', 'blocked'].includes(value)
+    ? value
+    : 'pending'
+}
+
+function normalizeTodoKind(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return [
+    'inspect',
+    'research',
+    'execute',
+    'verify',
+    'respond',
+    'recovery',
+  ].includes(normalized)
+    ? normalized
+    : 'execute'
+}
+
+function normalizeTodoVerification(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+  const content =
+    typeof value.content === 'string'
+      ? value.content.trim()
+      : typeof value.description === 'string'
+        ? value.description.trim()
+        : ''
+  const methodHint =
+    typeof value.methodHint === 'string'
+      ? value.methodHint.trim()
+      : typeof value.method === 'string'
+        ? value.method.trim()
+        : typeof value.verificationHint === 'string'
+          ? value.verificationHint.trim()
+          : ''
+  const evidence =
+    typeof value.evidence === 'string'
+      ? value.evidence.trim()
+      : typeof value.result === 'string'
+        ? value.result.trim()
+        : ''
+  const successCriteria =
+    typeof value.successCriteria === 'string' ? value.successCriteria.trim() : ''
+  return {
+    id:
+      typeof value.id === 'string' && value.id.trim()
+        ? value.id.trim()
+        : '',
+    content,
+    status: normalizeTodoStatus(value.status),
+    methodHint,
+    evidence,
+    successCriteria,
+  }
 }
 
 function normalizeTodoItems(input) {
@@ -482,18 +547,28 @@ function normalizeTodoItems(input) {
         return null
       }
 
-      const status =
-        item.status === 'completed' || item.status === 'in_progress'
-          ? item.status
-          : 'pending'
+      const status = normalizeTodoStatus(item.status)
+      const kind = normalizeTodoKind(item.kind || item.type)
+      const successCriteria =
+        typeof item.successCriteria === 'string'
+          ? item.successCriteria.trim()
+          : typeof item.acceptance === 'string'
+            ? item.acceptance.trim()
+            : ''
+      const verification = normalizeTodoVerification(
+        item.verification || item.verify || item.validation,
+      )
 
       return {
         id:
           typeof item.id === 'string' && item.id.trim()
             ? item.id.trim()
-            : `${createTodoId()}-${index}`,
+            : createTodoId(content, index),
         content,
         status,
+        kind,
+        successCriteria,
+        verification,
       }
     })
     .filter(Boolean)
@@ -585,6 +660,14 @@ function buildTodoProgressMemory(context, items) {
       completed: completed.map(item => item.content),
       inProgress: inProgress.map(item => item.content),
       pending: pending.map(item => item.content),
+      items: items.map(item => ({
+        id: item.id,
+        content: item.content,
+        status: item.status,
+        kind: item.kind,
+        successCriteria: item.successCriteria || undefined,
+        verification: item.verification || undefined,
+      })),
     },
     sourceRefs: [
       {
@@ -1686,7 +1769,33 @@ export function createBuiltinTools(context) {
                 content: { type: 'string' },
                 status: {
                   type: 'string',
-                  description: 'One of: pending, in_progress, completed.',
+                  description: 'One of: pending, in_progress, completed, failed, blocked.',
+                },
+                kind: {
+                  type: 'string',
+                  description:
+                    'Optional step kind. Use execute for user-visible work. Put verification details in verification instead of creating top-level verify-only items.',
+                },
+                successCriteria: {
+                  type: 'string',
+                  description:
+                    'Optional natural-language acceptance criteria for this step.',
+                },
+                verification: {
+                  type: 'object',
+                  description:
+                    'Optional hidden verification metadata for this step. The UI marks the parent step verified when verification.status is completed.',
+                  properties: {
+                    id: { type: 'string' },
+                    content: { type: 'string' },
+                    status: {
+                      type: 'string',
+                      description: 'One of: pending, in_progress, completed, failed, blocked.',
+                    },
+                    methodHint: { type: 'string' },
+                    evidence: { type: 'string' },
+                    successCriteria: { type: 'string' },
+                  },
                 },
               },
               required: ['content'],
@@ -1702,6 +1811,7 @@ export function createBuiltinTools(context) {
         runtime.throwIfAborted?.()
         const nextItems = normalizeTodoItems(args.items ?? args.todos)
         context.todoState.items = nextItems
+        runtime.onTodoWrite?.(nextItems)
         const todoMemory = buildTodoProgressMemory(context, nextItems)
         if (todoMemory) {
           await recordContextWorkMemory(context, todoMemory, runtime)
@@ -2794,6 +2904,9 @@ function emitToolEvent(event, toolEvents, hooks) {
 
 function normalizeActivePlanStep(hooks = {}) {
   const source =
+    (typeof hooks.getActivePlanStep === 'function'
+      ? hooks.getActivePlanStep()
+      : null) ||
     hooks.activePlanStep ||
     hooks.currentPlanStep ||
     hooks.graphStep ||
@@ -3008,12 +3121,21 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       guardian: executionPolicy.guardian,
       details: executionPolicy.details,
     })
+    const normalizedPolicyError = normalizeRuntimeError(policyError, {
+      source: 'tool',
+      operationLabel: effectiveTool.description || effectiveTool.name,
+    })
+    const toolError = ToolExecutionError.fromNormalizedError(
+      normalizedPolicyError,
+      effectiveTool.name,
+    )
+    const toolErrorInfo = toolError.toStructuredReport()
     updateEvent({
       summary: executionPolicy.summary,
       status: 'error',
       ...completeEventTiming(),
       error: policyError.rawMessage,
-      errorInfo: policyError.errorInfo,
+      errorInfo: toolErrorInfo,
     })
     emitToolPermissionEvent(hooks, {
       ...auditBase,
@@ -3028,7 +3150,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       {
         toolEventId: eventId,
         tool: catalogEntry,
-        errorInfo: policyError.errorInfo,
+        errorInfo: toolErrorInfo,
       },
     )
     await invokeAgentHook(
@@ -3037,22 +3159,24 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       {
         toolEventId: eventId,
         tool: catalogEntry,
-        errorInfo: policyError.errorInfo,
+        errorInfo: toolErrorInfo,
       },
     )
     emitToolAuditEvent(hooks, {
       ...auditBase,
       status: 'denied',
-      errorCode: policyError.errorInfo?.code,
-      errorCategory: policyError.errorInfo?.category,
+      errorCode: toolErrorInfo?.code,
+      errorCategory: toolErrorInfo?.category,
     })
-    return [
-      executionPolicy.summary,
-      executionPolicy.suggestedAction || null,
-      executionPolicy.reason ? `原因：${executionPolicy.reason}` : null,
-    ]
-      .filter(Boolean)
-      .join('\n\n')
+    return new ToolResult({
+      success: false,
+      output: null,
+      error: toolError,
+      toolName: effectiveTool.name,
+      toolCallId: hooks.toolCallId,
+      eventId,
+      ...activePlanStep,
+    })
   }
 
   const requiresPolicyApproval = executionPolicy.action === 'prompt'
@@ -3282,6 +3406,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
             : {}),
           onWorkMemory(memory) {
             hooks.onWorkMemory?.(memory)
+          },
+          onTodoWrite(items) {
+            hooks.onTodoWrite?.(items)
           },
         }),
       ),

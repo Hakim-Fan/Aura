@@ -1627,6 +1627,67 @@ function createTaskTracker(hooks, rootTitle) {
     checkpoint: null,
   }
 
+  function sanitizeTaskIdPart(value, fallback = 'step') {
+    const normalized = String(value || fallback)
+      .trim()
+      .replace(/[^a-zA-Z0-9_.:-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+    return (normalized || fallback).slice(0, 96)
+  }
+
+  function todoStatusToTaskStatus(status) {
+    switch (status) {
+      case 'in_progress':
+        return 'running'
+      case 'completed':
+        return 'completed'
+      case 'failed':
+        return 'failed'
+      case 'blocked':
+        return 'blocked'
+      default:
+        return 'queued'
+    }
+  }
+
+  function todoKindToTaskKind(kind) {
+    switch (kind) {
+      case 'inspect':
+        return 'inspect_step'
+      case 'research':
+        return 'research_step'
+      case 'respond':
+        return 'respond'
+      case 'recovery':
+        return 'recovery_step'
+      case 'execute':
+      default:
+        return 'execute'
+    }
+  }
+
+  function verificationStatusForTodo(todo) {
+    const status = todo?.verification?.status
+    switch (status) {
+      case 'completed':
+        return 'verified'
+      case 'in_progress':
+        return 'running'
+      case 'failed':
+        return 'failed'
+      case 'blocked':
+        return 'blocked'
+      case 'pending':
+        return 'pending'
+      default:
+        return undefined
+    }
+  }
+
+  function todoNodeId(todo, index) {
+    return `${root.id}-todo-${sanitizeTaskIdPart(todo?.id || index + 1)}`
+  }
+
   function emit() {
     hooks?.onTaskTree?.(clone([root]))
   }
@@ -1718,6 +1779,61 @@ function createTaskTracker(hooks, rootTitle) {
       parent.children.push(child)
       emit()
       return child
+    },
+    syncTodoItems(items = []) {
+      const previousById = new Map(root.children.map(child => [child.id, child]))
+      const visibleItems = Array.isArray(items)
+        ? items.filter(item => item?.kind !== 'verify')
+        : []
+      root.children = visibleItems.map((item, index) => {
+        const id = todoNodeId(item, index)
+        const previous = previousById.get(id)
+        const verificationStatus = verificationStatusForTodo(item)
+        const verification = item.verification
+          ? {
+            ...item.verification,
+            status: item.verification.status || 'pending',
+          }
+          : undefined
+        return {
+          ...(previous || {}),
+          id,
+          title: item.content || `步骤 ${index + 1}`,
+          summary:
+            item.successCriteria ||
+            item.verification?.evidence ||
+            previous?.summary ||
+            '',
+          kind: todoKindToTaskKind(item.kind),
+          status: todoStatusToTaskStatus(item.status),
+          children: [],
+          errors: previous?.errors || [],
+          retryAttempts: previous?.retryAttempts || 0,
+          checkpoint: previous?.checkpoint || null,
+          todoId: item.id,
+          successCriteria: item.successCriteria || undefined,
+          verification,
+          verificationStatus,
+        }
+      })
+      emit()
+    },
+    getActivePlanStep() {
+      const node =
+        root.children.find(child =>
+          ['running', 'awaiting_approval', 'awaiting_user_input'].includes(child.status),
+        ) ||
+        root.children.find(child => ['failed', 'blocked'].includes(child.status)) ||
+        root.children.find(child => child.status === 'queued') ||
+        root.children[root.children.length - 1]
+      if (!node) {
+        return null
+      }
+      return {
+        planId: root.id,
+        subtaskId: node.id,
+        subtaskTitle: node.title,
+      }
     },
     completeTask(id, summary, status = 'completed', nestedChildren = []) {
       const node = findNode(root, id)
@@ -2064,6 +2180,12 @@ export async function runDefaultAgent(request) {
           hooks: {
             ...hooks,
             workMemoryContext: context,
+            getActivePlanStep() {
+              return taskTracker.getActivePlanStep?.()
+            },
+            onTodoWrite(items) {
+              taskTracker.syncTodoItems?.(items)
+            },
             rethrowToolError(error) {
               return extractRouteEscalationRequest(error) !== null
             },

@@ -417,6 +417,44 @@ test('todo_write records a reusable task progress checkpoint', async () => {
   assert.match(context.workMemories[0].summary, /2\/2 steps completed/)
 })
 
+test('todo_write emits normalized execution todos with hidden verification metadata', async () => {
+  const context = { cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-todo-ui-')) }
+  const todoWrite = createBuiltinTools(context).find(tool => tool.name === 'todo_write')
+  let emittedItems
+
+  await invokeTool(
+    todoWrite,
+    {
+      items: [
+        {
+          content: '获取 docx skill 目录',
+          status: 'in_progress',
+          kind: 'execute',
+          successCriteria: '本地可以访问 docx skill 文件',
+          verification: {
+            content: '确认存在 skill.md 或 SKILL.md',
+            status: 'pending',
+            methodHint: '列出 skills/docx 目录',
+          },
+        },
+      ],
+    },
+    [],
+    {
+      onTodoWrite(items) {
+        emittedItems = items
+      },
+    },
+  )
+
+  assert.equal(emittedItems.length, 1)
+  assert.equal(emittedItems[0].kind, 'execute')
+  assert.equal(emittedItems[0].status, 'in_progress')
+  assert.equal(emittedItems[0].successCriteria, '本地可以访问 docx skill 文件')
+  assert.equal(emittedItems[0].verification.status, 'pending')
+  assert.match(emittedItems[0].id, /^todo-1-/)
+})
+
 test('record_work_memory stores a normalized phase artifact without a visible tool event', async () => {
   const context = {
     cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-work-memory-')),
@@ -802,6 +840,48 @@ test('invokeTool blocks shell scripts that write source files', async () => {
   assert.match(toolResultText(output), /已阻止使用 shell 脚本直接修改源码文件/)
   assert.equal(events.at(-1)?.status, 'error')
   assert.equal(events.at(-1)?.errorInfo?.code, 'SHELL_FILE_MUTATION_BLOCKED')
+})
+
+test('invokeTool returns structured result when shell capability mutation is denied', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-capability-policy-'))
+  const events = []
+  let shellRan = false
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'exec_command',
+      approvalCategory: 'shell',
+      description: 'Run a shell command.',
+      async run() {
+        shellRan = true
+        return { ok: true }
+      },
+    },
+    {
+      cmd: 'mkdir -p ~/.aura/skills/docx',
+    },
+    events,
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: false,
+      },
+      onToolEvent(event) {
+        events.push(event)
+      },
+    },
+  )
+
+  assert.equal(shellRan, false)
+  assert.equal(output.success, false)
+  assert.equal(typeof output.toToolEventEntry, 'function')
+  assert.equal(output.toToolEventEntry().errorInfo.code, 'SHELL_AURA_CAPABILITY_MUTATION_BLOCKED')
+  assert.equal(events.at(-1)?.status, 'error')
+  assert.equal(events.at(-1)?.errorInfo?.code, 'SHELL_AURA_CAPABILITY_MUTATION_BLOCKED')
+  assert.match(toolResultText(output), /aura_install_skill/)
 })
 
 test('invokeTool forces approval for shell commands that access external paths', async () => {

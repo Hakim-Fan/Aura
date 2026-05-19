@@ -49,6 +49,17 @@ function buildHostExecutionContext() {
   ].join('\n')
 }
 
+function buildWorkspaceScratchInstruction(settings = {}) {
+  const cwd = typeof settings?.cwd === 'string' && settings.cwd.trim()
+    ? settings.cwd.trim()
+    : 'the active workspace'
+  return [
+    `Workspace scratch directory: ${cwd}/.aura/tmp/`,
+    'Use this workspace-local scratch directory for temporary unzip/extraction output, cloned source copies, generated intermediate files, and conversion work. Create task-specific subdirectories there as needed.',
+    'Do not use /tmp, the user home directory, Downloads, or other paths outside the active workspace for scratch work unless the user explicitly asks for that external location.',
+  ].join('\n')
+}
+
 function buildApprovalPolicy(settings) {
   return [
     `Approval policy: shell is ${settings.autoApproveShell ? 'auto-approved' : 'approval-required'}.`,
@@ -209,6 +220,7 @@ export function buildRuntimeSystemPrompt(
   const sections = [
     'You are Aura, a runtime-governed tool-using agent for workspace work, web retrieval, and browser tasks within mounted capabilities.',
     `The active workspace is: ${settings.cwd}`,
+    buildWorkspaceScratchInstruction(settings),
     buildHostExecutionContext(),
     buildCurrentDateContext(),
     'Answer directly when your current knowledge or the mounted local context is sufficient.',
@@ -433,11 +445,13 @@ export function buildDefaultAgentSystemPrompt(
   const sections = [
     'You are Aura running in default-agent mode: the main model decides whether to answer directly, make a lightweight plan, use tools, ask the user, or stop with a clear blocker.',
     `The active workspace is: ${settings.cwd}`,
+    buildWorkspaceScratchInstruction(settings),
     buildHostExecutionContext(),
     buildCurrentDateContext(),
     'Understand the user request from context and act naturally in this single default-agent pass.',
     'For simple questions, answer directly and keep the response concise.',
-    'For multi-step, ambiguous, or stateful work, call todo_write with a short checklist and keep it current. Do not create a plan for trivial one-step work.',
+    'For multi-step, ambiguous, or stateful work, call todo_write with a short checklist and keep it current. Use top-level todo items for user-visible execution tasks only. Put each step acceptance details in successCriteria, and put hidden per-step verification details in verification. Do not create top-level verification-only todo items unless the user explicitly asks for a standalone verification task. Do not create a plan for trivial one-step work.',
+    'When a todo step needs verification, complete the execution and then verify it with an appropriate mounted tool before marking that todo completed. Mark verification.status as completed only when the current run produced direct evidence.',
     'Use tools when they materially reduce uncertainty or let you complete the user request. The mounted tool list is the source of truth for this turn.',
     'If a needed capability is not obvious and tool_search is mounted, inspect the current tool catalog before claiming the capability is unavailable.',
     'If the user request needs files, commands, web retrieval, browser interaction, or capability management and the matching tool is mounted, use the tool directly instead of asking the user to do the work.',

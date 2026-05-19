@@ -815,13 +815,46 @@ function activityPhaseLabel(phase?: AgentExecutionPhase, stalled = false) {
     case 'finalizing':
       return `整理最终回答${suffix}`
     case 'recovering':
-      return `恢复回答${suffix}`
+      return `连接中断，正在恢复${suffix}`
     case 'awaiting_approval':
       return '等待审批'
     case 'awaiting_user_input':
       return '等待你回复'
     default:
       return stalled ? '执行较慢' : ''
+  }
+}
+
+function hasToolFailure(message?: ChatMessage) {
+  return (message?.events || []).some(event => event.status === 'error')
+}
+
+function runningActivityStatusLabel(
+  activity?: ChatMessage['activity'],
+  isRetryInProgress = false,
+  hasCurrentToolFailure = false,
+) {
+  if (activity?.phase === 'recovering') {
+    return hasCurrentToolFailure ? '整理失败结果' : '连接中断，正在恢复'
+  }
+  if (isRetryInProgress) {
+    return '模型响应重试中'
+  }
+
+  switch (activity?.phase) {
+    case 'tool_running':
+      return '工具执行中'
+    case 'model_connecting':
+    case 'model_streaming':
+    case 'finalizing':
+      return '继续回答'
+    case 'compressing_context':
+      return '整理上下文'
+    case 'preparing':
+    case 'planning':
+      return '准备中'
+    default:
+      return '处理中'
   }
 }
 
@@ -839,15 +872,17 @@ function isCancelledActivity(message: ChatMessage, activity?: ChatMessage['activ
 function userFacingActivityStatusLabel(
   activity?: ChatMessage['activity'],
   message?: ChatMessage,
+  isRetryInProgress = false,
 ) {
   switch (activity?.status) {
     case 'queued':
       return '准备中'
     case 'running':
-      if (activity.phase === 'tool_running') {
-        return '执行中'
-      }
-      return '处理中'
+      return runningActivityStatusLabel(
+        activity,
+        isRetryInProgress,
+        hasToolFailure(message),
+      )
     case 'awaiting_approval':
       return '等待确认'
     case 'awaiting_user_input':
@@ -870,8 +905,17 @@ function messageDetailStatusTitle(options: {
   isRetryInProgress: boolean
   hasAnswer: boolean
   hasFallbackStatus: boolean
+  hasToolFailure: boolean
 }) {
-  const { activity, message, isStreaming, isRetryInProgress, hasAnswer, hasFallbackStatus } = options
+  const {
+    activity,
+    message,
+    isStreaming,
+    isRetryInProgress,
+    hasAnswer,
+    hasFallbackStatus,
+    hasToolFailure,
+  } = options
 
   if (activity?.status === 'failed' || message.error) {
     return isCancelledActivity(message, activity) ? '已停止' : '执行失败'
@@ -891,24 +935,27 @@ function messageDetailStatusTitle(options: {
   if (activity?.status === 'awaiting_user_input') {
     return '等待回复'
   }
-  if (isRetryInProgress || activity?.phase === 'recovering') {
-    return '正在恢复'
+  if (activity?.phase === 'recovering') {
+    return hasToolFailure ? '整理失败结果' : '连接中断，正在恢复'
+  }
+  if (isRetryInProgress) {
+    return '模型响应重试中'
   }
 
   switch (activity?.phase) {
     case 'compressing_context':
       return '整理上下文'
     case 'tool_running':
-      return '执行操作...'
+      return '工具执行中'
+    case 'model_connecting':
     case 'model_streaming':
-      return hasAnswer ? '' : '生成回答...'
+    case 'finalizing':
+      return hasAnswer ? '' : '继续回答'
     case 'preparing':
     case 'planning':
-    case 'model_connecting':
-    case 'finalizing':
-      return '准备中...'
+      return '准备中'
     default:
-      return activity ? '准备中...' : ''
+      return activity ? '准备中' : ''
   }
 }
 
@@ -929,7 +976,11 @@ function messageDetailStatusDescription(options: {
       return '需要你确认后才能继续。'
     case '等待回复':
       return '需要你补充信息后才能继续。'
-    case '正在恢复':
+    case '模型响应重试中':
+      return retryDetail || '模型响应暂时失败，正在重新请求。'
+    case '整理失败结果':
+      return '工具执行失败，正在整理失败原因和可行的下一步。'
+    case '连接中断，正在恢复':
       return retryDetail || '遇到中断，正在尝试恢复并继续回答。'
     case '已停止':
     case '执行失败':
@@ -1019,10 +1070,15 @@ function MessageStatusNotice({
 
   return (
     <div className={`rounded-xl border px-4 py-3 text-13px leading-relaxed ${palette.shell}`}>
-      {title ? <div className="font-600">{title}</div> : null}
+      {title ? (
+        <div className="flex items-center gap-2 font-600">
+          <span>{title}</span>
+          {animateDetail ? <RetryStatusDots /> : null}
+        </div>
+      ) : null}
       {detail ? (
         <div className={`${title ? 'mt-1 ' : ''}flex items-start gap-2 text-12px ${palette.detail}`}>
-          {animateDetail ? <RetryStatusDots /> : null}
+          {animateDetail && !title ? <RetryStatusDots /> : null}
           <span className="whitespace-pre-wrap">{detail}</span>
         </div>
       ) : null}
@@ -5356,6 +5412,7 @@ function AssistantMessageCard({
     setExecutionTraceExpanded(false)
   }, [activeVariantId])
   const isRetryInProgress = isStreaming && message.retryInfo?.inProgress === true
+  const messageHasToolFailure = hasToolFailure(message)
   const messageFailureSummary =
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.summary || summarizeFailureReason(message.error)
@@ -5364,7 +5421,11 @@ function AssistantMessageCard({
     ? formatFailureDetail(message.errorInfo, message.error)
     : ''
   const messageRetryDetail = formatRetryLabel(message.retryInfo, message.status)
-  const userFacingActivityStatus = userFacingActivityStatusLabel(activity, message)
+  const userFacingActivityStatus = userFacingActivityStatusLabel(
+    activity,
+    message,
+    isRetryInProgress,
+  )
   const activitySummary = activity
     ? [
       userFacingActivityStatus || activityStatusLabel(activity.status),
@@ -5513,6 +5574,7 @@ function AssistantMessageCard({
     isRetryInProgress,
     hasAnswer: shouldShowAnswer,
     hasFallbackStatus: Boolean(fallbackStatusTitle),
+    hasToolFailure: messageHasToolFailure,
   })
   const statusNoticeTone: MessageStatusNoticeTone =
     statusNoticeTitle === '执行失败' || statusNoticeTitle === '已停止'
@@ -5558,6 +5620,7 @@ function AssistantMessageCard({
                     {messageModelLabel}
                   </span>
                   <span>{activitySummary}</span>
+                  {isStreaming ? <RetryStatusDots /> : null}
                   {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </button>
                 {hasUsedCapabilities ? (

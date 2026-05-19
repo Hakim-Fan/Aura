@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { CheckCircle2, Circle, LoaderCircle, PauseCircle, XCircle } from 'lucide-react'
+import { BadgeCheck, CheckCircle2, Circle, LoaderCircle, PauseCircle, XCircle } from 'lucide-react'
 import type { TaskNode } from '../types'
 
 const STRUCTURAL_STEP_KINDS = new Set(['main', 'plan'])
@@ -92,6 +92,7 @@ function pickFocusedStep(steps: TaskNode[] = []) {
 }
 
 function TaskStep({ node, compact = false }: { node: TaskNode; compact?: boolean }) {
+  const verified = node.verificationStatus === 'verified'
   return (
     <li className={`flex min-w-0 ${compact ? 'items-center' : 'items-start'} gap-2.5`}>
       <span
@@ -107,7 +108,16 @@ function TaskStep({ node, compact = false }: { node: TaskNode; compact?: boolean
         }`}
         title={compact ? node.title : undefined}
       >
-        {node.title}
+        <span className="min-w-0">{node.title}</span>
+        {verified ? (
+          <span
+            className="ml-2 inline-flex shrink-0 items-center gap-1 rounded-full border border-green-200 bg-green-50 px-1.5 py-0.5 align-middle text-11px font-700 text-green-600"
+            title={node.verification?.evidence || '验证通过'}
+          >
+            <BadgeCheck size={11} />
+            {!compact ? '已验证' : null}
+          </span>
+        ) : null}
       </span>
     </li>
   )

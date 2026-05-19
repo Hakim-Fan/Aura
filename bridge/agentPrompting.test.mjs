@@ -33,7 +33,11 @@ test('default-agent prompt lets the main model choose answer, tools, or plan', (
   assert.match(prompt, /main model decides/i)
   assert.match(prompt, /For simple questions, answer directly/i)
   assert.match(prompt, /todo_write with a short checklist/i)
+  assert.match(prompt, /successCriteria/i)
+  assert.match(prompt, /verification\.status as completed/i)
   assert.match(prompt, /single default-agent pass/i)
+  assert.match(prompt, /Workspace scratch directory: \/tmp\/workspace\/\.aura\/tmp\//i)
+  assert.match(prompt, /temporary unzip\/extraction output/i)
 })
 
 test('default-agent prompt keeps mounted write tools available', () => {
