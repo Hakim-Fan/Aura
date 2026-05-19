@@ -863,6 +863,86 @@ function userFacingActivityStatusLabel(
   }
 }
 
+function messageDetailStatusTitle(options: {
+  activity?: ChatMessage['activity']
+  message: ChatMessage
+  isStreaming: boolean
+  isRetryInProgress: boolean
+  hasAnswer: boolean
+  hasFallbackStatus: boolean
+}) {
+  const { activity, message, isStreaming, isRetryInProgress, hasAnswer, hasFallbackStatus } = options
+
+  if (activity?.status === 'failed' || message.error) {
+    return isCancelledActivity(message, activity) ? '已停止' : '执行失败'
+  }
+  if (activity?.status === 'blocked') {
+    return '已暂停'
+  }
+  if (hasFallbackStatus) {
+    return '未生成回答'
+  }
+  if (!isStreaming) {
+    return ''
+  }
+  if (activity?.status === 'awaiting_approval') {
+    return '等待确认'
+  }
+  if (activity?.status === 'awaiting_user_input') {
+    return '等待回复'
+  }
+  if (isRetryInProgress || activity?.phase === 'recovering') {
+    return '正在恢复...'
+  }
+
+  switch (activity?.phase) {
+    case 'compressing_context':
+      return '整理上下文'
+    case 'tool_running':
+      return '执行操作...'
+    case 'model_streaming':
+      return hasAnswer ? '' : '生成回答...'
+    case 'preparing':
+    case 'planning':
+    case 'model_connecting':
+    case 'finalizing':
+      return '准备中...'
+    default:
+      return activity ? '准备中...' : ''
+  }
+}
+
+function messageDetailStatusDescription(options: {
+  title: string
+  detail?: string
+  fallbackDetail?: string
+  retryDetail?: string
+  stalled?: boolean
+}) {
+  const { title, detail, fallbackDetail, retryDetail, stalled } = options
+  switch (title) {
+    case '整理上下文':
+      return stalled
+        ? '正在整理较长上下文，连接较慢，完成后会继续回答。'
+        : '正在整理较长上下文，完成后会继续回答。'
+    case '等待确认':
+      return '需要你确认后才能继续。'
+    case '等待回复':
+      return '需要你补充信息后才能继续。'
+    case '正在恢复...':
+      return retryDetail || '遇到中断，正在尝试恢复并继续回答。'
+    case '已停止':
+    case '执行失败':
+      return detail || ''
+    case '未生成回答':
+      return fallbackDetail || ''
+    case '已暂停':
+      return '当前任务已暂停，需要处理阻塞项后继续。'
+    default:
+      return ''
+  }
+}
+
 function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], status?: MessageStatus) {
   const terminal = status === 'completed' || status === 'failed'
   if (terminal || !retryInfo || retryInfo.attemptedRetries <= 0 || retryInfo.inProgress !== true) {
@@ -5276,8 +5356,6 @@ function AssistantMessageCard({
     setExecutionTraceExpanded(false)
   }, [activeVariantId])
   const isRetryInProgress = isStreaming && message.retryInfo?.inProgress === true
-  const isContextCompressionInProgress =
-    isStreaming && activity?.phase === 'compressing_context'
   const messageFailureSummary =
     activity?.status === 'failed' || message.error
       ? message.errorInfo?.summary || summarizeFailureReason(message.error)
@@ -5428,31 +5506,28 @@ function AssistantMessageCard({
     typeof message.retryInfo?.lastErrorSummary === 'string' && message.retryInfo.lastErrorSummary.trim()
       ? summarizeFailureReason(message.retryInfo.lastErrorSummary)
       : ''
-  const statusNoticeTitle =
-    messageFailureSummary
-      ? (userFacingActivityStatus || '执行失败')
-      : fallbackStatusTitle
-        ? '未生成回答'
-        : isRetryInProgress
-          ? '正在重试'
-          : ''
+  const statusNoticeTitle = messageDetailStatusTitle({
+    activity,
+    message,
+    isStreaming,
+    isRetryInProgress,
+    hasAnswer: shouldShowAnswer,
+    hasFallbackStatus: Boolean(fallbackStatusTitle),
+  })
   const statusNoticeTone: MessageStatusNoticeTone =
-    messageFailureSummary
+    statusNoticeTitle === '执行失败' || statusNoticeTitle === '已停止'
       ? 'error'
-      : isRetryInProgress
+      : isStreaming
         ? 'progress'
         : 'neutral'
-  const statusNoticeDetail = [
-    messageFailureDetail,
-    fallbackStatusTitle && !messageFailureSummary ? fallbackStatusTitle : '',
-    messageRetryDetail,
-  ]
-    .filter(Boolean)
-    .join('\n')
-  const shouldShowStatusNotice = Boolean(statusNoticeTitle || messageRetryDetail)
-  const compressionStatusDetail = activity?.stalled === true
-    ? '正在整理上下文，连接较慢，完成后会继续回答。'
-    : '正在整理上下文，完成后会继续回答。'
+  const statusNoticeDetail = messageDetailStatusDescription({
+    title: statusNoticeTitle,
+    detail: messageFailureDetail,
+    fallbackDetail: fallbackStatusTitle,
+    retryDetail: retryFailureSummary || messageRetryDetail,
+    stalled: activity?.stalled === true,
+  })
+  const shouldShowStatusNotice = Boolean(statusNoticeTitle)
 
   return (
     <article className="group relative flex flex-col gap-3">
@@ -5596,15 +5671,6 @@ function AssistantMessageCard({
             </div>
           ) : null}
 
-          {isContextCompressionInProgress ? (
-            <MessageStatusNotice
-              tone="progress"
-              title="处理中"
-              detail={compressionStatusDetail}
-              animateDetail
-            />
-          ) : null}
-
           {shouldShowAnswer && !shouldSuppressStreamingAnswerBody ? (
             isStreaming ? (
               <StreamingMarkdownAnswer content={message.content} onCopyText={onCopyText} bodyRef={answerBodyRef} />
@@ -5612,14 +5678,7 @@ function AssistantMessageCard({
               <MarkdownAnswer content={message.content} onCopyText={onCopyText} bodyRef={answerBodyRef} />
             )
           ) : isStreaming ? (
-            shouldSuppressStreamingAnswerBody || isRetryInProgress ? null : (
-              <div className="flex items-center gap-2 text-13px text-[var(--text-secondary)] opacity-50 italic">
-                <span className="w-2 h-2 rounded-full bg-[var(--accent-soft-strong)] animate-pulse" />
-                {isContextCompressionInProgress
-                  ? '正在整理上下文，随后继续回答...'
-                  : userFacingActivityStatus || '正在处理...'}
-              </div>
-            )
+            null
           ) : null}
 
           {!isStreaming && finalChangeSummary.files.length > 0 ? (
@@ -5631,7 +5690,7 @@ function AssistantMessageCard({
               tone={statusNoticeTone}
               title={statusNoticeTitle}
               detail={statusNoticeDetail}
-              animateDetail={isRetryInProgress}
+              animateDetail={isStreaming}
             />
           ) : null}
 
