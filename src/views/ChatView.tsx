@@ -3904,6 +3904,10 @@ function dockedApprovalCategoryLabel(category?: string) {
       return 'Shell 命令'
     case 'file_write':
       return '文件写入'
+    case 'external_file_read':
+      return '外部文件读取'
+    case 'external_file_write':
+      return '外部文件写入'
     case 'computer_use':
       return '桌面操作'
     case 'plan':
@@ -3919,6 +3923,10 @@ function dockedApprovalGrantLabel(category?: string) {
       return '本轮 Shell 都允许'
     case 'file_write':
       return '本轮文件写入都允许'
+    case 'external_file_read':
+      return '本轮外部文件读取都允许'
+    case 'external_file_write':
+      return '本轮外部文件写入都允许'
     case 'computer_use':
       return '本轮桌面操作都允许'
     case 'plan':
@@ -3977,11 +3985,20 @@ function buildDockedApprovalViewModel(
     }
   }
 
-  if (approval.category === 'file_write') {
+  if (approval.category === 'file_write' || approval.category === 'external_file_write') {
     return {
-      eyebrow: '文件写入',
+      eyebrow: approval.category === 'external_file_write' ? '外部文件写入' : '文件写入',
       primaryLabel: path ? '将写入' : '将执行文件写入',
       primaryText: path || fallbackInput || approval.toolName || '文件写入',
+      summary: approval.summary,
+    }
+  }
+
+  if (approval.category === 'external_file_read') {
+    return {
+      eyebrow: '外部文件读取',
+      primaryLabel: path ? '将读取' : '将读取外部文件',
+      primaryText: path || fallbackInput || approval.toolName || '外部文件读取',
       summary: approval.summary,
     }
   }
@@ -5431,8 +5448,8 @@ function AssistantMessageCard({
       userFacingActivityStatus || activityStatusLabel(activity.status),
       duration ? formatDuration(duration) : null,
     ]
-        .filter(Boolean)
-        .join(' · ')
+      .filter(Boolean)
+      .join(' · ')
     : null
   const messageModelLabel =
     message.modelInfo?.label ||
@@ -5621,7 +5638,7 @@ function AssistantMessageCard({
                   </span>
                   <span>{activitySummary}</span>
                   {isStreaming ? <RetryStatusDots /> : null}
-                  {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                  {/* {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />} */}
                 </button>
                 {hasUsedCapabilities ? (
                   <div className="absolute left-0 top-full pt-2 z-30 w-max min-w-[14rem] max-w-[20rem] opacity-0 invisible -translate-y-1.5 group-hover/activity:opacity-100 group-hover/activity:visible group-hover/activity:translate-y-0 transition-all duration-200 ease-out origin-top-left">

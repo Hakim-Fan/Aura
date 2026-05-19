@@ -1,5 +1,6 @@
 import os from 'node:os'
 import path from 'node:path'
+import { evaluateFileToolAccessPolicy } from './permissions/fileAccessPolicy.mjs'
 import { parseArgString } from './utils.mjs'
 
 const SOURCE_WRITE_EXTENSIONS =
@@ -220,7 +221,7 @@ function inferPathAccess(command, token) {
   return 'read'
 }
 
-function collectExternalPathReferences(command, cwd) {
+export function collectExternalPathReferences(command, cwd) {
   const homeDir = os.homedir()
   const auraHome = path.join(homeDir, '.aura')
   const workspaceRoot = path.resolve(cwd)
@@ -285,6 +286,11 @@ export function evaluateToolExecutionPolicy({
   settings = {},
   routeState = {},
 } = {}) {
+  const fileAccessDecision = evaluateFileToolAccessPolicy({ tool, args, settings })
+  if (fileAccessDecision) {
+    return fileAccessDecision
+  }
+
   const command = normalizeCommand(tool, args)
   if (!command) {
     return buildDecision('allow', {
@@ -295,21 +301,6 @@ export function evaluateToolExecutionPolicy({
   if (tool?.approvalCategory !== 'shell' && tool?.name !== 'write_stdin') {
     return buildDecision('allow', {
       summary: 'Tool does not require shell execution policy.',
-    })
-  }
-
-  if (looksLikeShellFileMutation(command)) {
-    return buildDecision('deny', {
-      code: 'SHELL_FILE_MUTATION_BLOCKED',
-      riskLevel: 'high',
-      summary: '已阻止使用 shell 直接修改源码文件。',
-      reason:
-        'The command appears to create or modify source files through shell redirection, in-place editing, or script file writes.',
-      suggestedAction:
-        '请使用 apply_patch、replace_line_range、edit_file 或 write_file；执行验证命令可以继续使用 shell。',
-      details: {
-        command,
-      },
     })
   }
 
@@ -410,6 +401,21 @@ export function evaluateToolExecutionPolicy({
         },
       })
     }
+  }
+
+  if (looksLikeShellFileMutation(command)) {
+    return buildDecision('deny', {
+      code: 'SHELL_FILE_MUTATION_BLOCKED',
+      riskLevel: 'high',
+      summary: '已阻止使用 shell 直接修改源码文件。',
+      reason:
+        'The command appears to create or modify source files through shell redirection, in-place editing, or script file writes.',
+      suggestedAction:
+        '请使用 apply_patch、replace_line_range、edit_file 或 write_file；执行验证命令可以继续使用 shell。',
+      details: {
+        command,
+      },
+    })
   }
 
   return buildDecision('allow', {

@@ -2414,7 +2414,17 @@ export async function runDefaultAgent(request) {
         buildRuntimeBlocks(lastRouteDecision?.stopReason),
       )
       try {
-        hooks?.onPhaseChange?.('recovering')
+        hooks?.onPhaseChange?.('recovering', {
+          reason: normalized.message,
+          code: normalized.code,
+          stage: retryInfo?.stage,
+          lastErrorSummary: retryInfo?.lastErrorSummary || normalized.message,
+          providerStatus: normalized.errorInfo?.details?.providerStatus,
+          providerErrorDetail: normalized.errorInfo?.detail,
+          providerRawError:
+            normalized.errorInfo?.details?.providerRawError ||
+            normalized.rawMessage,
+        })
         const recovered =
           settings.provider === 'google'
             ? await finalizeGoogleAnswer({

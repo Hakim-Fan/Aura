@@ -2,13 +2,15 @@ export const readFileToolSpec = {
   source: 'builtin',
   name: 'read_file',
   aliases: ['read', 'readfile', 'cat'],
-  description: 'Read a text file from inside the workspace.',
+  description:
+    'Read a text file. Workspace paths are allowed directly; absolute or escaping paths outside the workspace require approval.',
   inputSchema: {
     type: 'object',
     properties: {
       path: {
         type: 'string',
-        description: 'Relative file path inside the workspace.',
+        description:
+          'File path to read. Prefer a relative workspace path; external paths require approval.',
       },
       startLine: {
         type: 'number',
@@ -45,7 +47,8 @@ export const readBlockToolSpec = {
     properties: {
       path: {
         type: 'string',
-        description: 'Relative file path inside the workspace.',
+        description:
+          'File path to read. Prefer a relative workspace path; external paths require approval.',
       },
       anchorLine: {
         type: 'number',
@@ -77,7 +80,7 @@ export const applyPatchToolSpec = {
   aliases: ['patch'],
   approvalCategory: 'file_write',
   description:
-    'Apply a structured multi-file patch inside the workspace. Prefer this for modifying existing files. Pass a patch string that starts with "*** Begin Patch" and ends with "*** End Patch"; tolerant runtimes may also forward a raw/freeform patch body directly.',
+    'Apply a structured multi-file patch. Workspace edits are allowed through normal file-write approval; absolute or escaping paths outside the workspace require external-file approval. Prefer this for modifying existing files. Pass a patch string that starts with "*** Begin Patch" and ends with "*** End Patch"; tolerant runtimes may also forward a raw/freeform patch body directly.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -111,13 +114,14 @@ export const writeFileToolSpec = {
   aliases: ['write', 'writefile'],
   approvalCategory: 'file_write',
   description:
-    'Write a text file inside the workspace. Best for new files or full-document rewrites.',
+    'Write a text file. Workspace writes use normal file-write approval; absolute or escaping paths outside the workspace require external-file approval. Best for new files or full-document rewrites.',
   inputSchema: {
     type: 'object',
     properties: {
       path: {
         type: 'string',
-        description: 'Relative file path inside the workspace.',
+        description:
+          'File path to write. Prefer a relative workspace path; external paths require approval.',
       },
       content: {
         type: 'string',
@@ -140,7 +144,8 @@ export const editFileToolSpec = {
     properties: {
       path: {
         type: 'string',
-        description: 'Relative file path inside the workspace.',
+        description:
+          'File path to edit. Prefer a relative workspace path; external paths require approval.',
       },
       oldText: {
         type: 'string',
@@ -169,13 +174,14 @@ export const replaceLineRangeToolSpec = {
   aliases: ['edit_range', 'replace_lines'],
   approvalCategory: 'file_write',
   description:
-    'Replace an inclusive 1-based line range in a workspace text file. Use this after read_file with startLine/endLine when apply_patch or exact edit_file context does not match. Content must not include line-number prefixes.',
+    'Replace an inclusive 1-based line range in a text file. Workspace writes use normal file-write approval; external paths require external-file approval. Use this after read_file with startLine/endLine when apply_patch or exact edit_file context does not match. Content must not include line-number prefixes.',
   inputSchema: {
     type: 'object',
     properties: {
       path: {
         type: 'string',
-        description: 'Relative file path inside the workspace.',
+        description:
+          'File path to edit. Prefer a relative workspace path; external paths require approval.',
       },
       startLine: {
         type: 'number',
@@ -206,13 +212,14 @@ export const multiEditFileToolSpec = {
   aliases: ['multiedit', 'editmany'],
   approvalCategory: 'file_write',
   description:
-    'Apply multiple exact text replacements to one file in sequence. Use this only when apply_patch is unnecessary and several exact replacements are clearer.',
+    'Apply multiple exact text replacements to one file in sequence. Workspace writes use normal file-write approval; external paths require external-file approval. Use this only when apply_patch is unnecessary and several exact replacements are clearer.',
   inputSchema: {
     type: 'object',
     properties: {
       path: {
         type: 'string',
-        description: 'Relative file path inside the workspace.',
+        description:
+          'File path to edit. Prefer a relative workspace path; external paths require approval.',
       },
       edits: {
         type: 'array',

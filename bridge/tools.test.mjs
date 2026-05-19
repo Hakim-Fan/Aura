@@ -842,6 +842,113 @@ test('invokeTool blocks shell scripts that write source files', async () => {
   assert.equal(events.at(-1)?.errorInfo?.code, 'SHELL_FILE_MUTATION_BLOCKED')
 })
 
+test('invokeTool asks approval for write_file outside the workspace', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-external-write-workspace-'))
+  const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-external-write-target-'))
+  const externalFile = path.join(externalDir, 'starship.toml')
+  let approvalRequest
+
+  const writeFile = createBuiltinTools({ cwd: workspace }).find(tool => tool.name === 'write_file')
+  const output = await invokeTool(
+    writeFile,
+    {
+      path: externalFile,
+      content: 'add_newline = false\n',
+    },
+    [],
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: false,
+      },
+      async requestApproval(request) {
+        approvalRequest = request
+        return 'deny'
+      },
+    },
+  )
+
+  assert.equal(output.success, false)
+  assert.equal(approvalRequest.category, 'external_file_write')
+  assert.equal(approvalRequest.policy.code, 'FILE_EXTERNAL_WRITE_ACCESS')
+  await assert.rejects(fs.readFile(externalFile, 'utf8'), { code: 'ENOENT' })
+})
+
+test('invokeTool writes external files after approval', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-external-write-approve-workspace-'))
+  const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-external-write-approve-target-'))
+  const externalFile = path.join(externalDir, 'starship.toml')
+
+  const writeFile = createBuiltinTools({ cwd: workspace }).find(tool => tool.name === 'write_file')
+  const output = await invokeTool(
+    writeFile,
+    {
+      path: externalFile,
+      content: 'add_newline = false\n',
+    },
+    [],
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: false,
+      },
+      async requestApproval(request) {
+        assert.equal(request.category, 'external_file_write')
+        return 'approve'
+      },
+    },
+  )
+
+  assert.equal(output.success, true)
+  assert.equal(await fs.readFile(externalFile, 'utf8'), 'add_newline = false\n')
+})
+
+test('invokeTool asks approval instead of hard-blocking shell writes to external toml files', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-external-shell-workspace-'))
+  const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-external-shell-target-'))
+  const externalFile = path.join(externalDir, 'starship.toml')
+  let shellRan = false
+  let approvalRequest
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'run_shell',
+      approvalCategory: 'shell',
+      description: 'Run a shell command.',
+      async run() {
+        shellRan = true
+        return { ok: true }
+      },
+    },
+    {
+      command: `cat > ${externalFile} <<'EOF'\nadd_newline = false\nEOF`,
+    },
+    [],
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: false,
+      },
+      async requestApproval(request) {
+        approvalRequest = request
+        return 'deny'
+      },
+    },
+  )
+
+  assert.equal(shellRan, false)
+  assert.equal(output.success, false)
+  assert.equal(approvalRequest.category, 'shell')
+  assert.equal(approvalRequest.policy.code, 'SHELL_EXTERNAL_PATH_ACCESS')
+})
+
 test('invokeTool returns structured result when shell capability mutation is denied', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-capability-policy-'))
   const events = []

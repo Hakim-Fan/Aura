@@ -173,7 +173,13 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
     originalTokenEstimate: 1000,
     compressedTokenEstimate: 400,
   })
-  hooks.onPhaseChange('recovering')
+  hooks.onPhaseChange('recovering', {
+    reason: '模型服务请求失败。',
+    code: 'HTTP_400',
+    providerStatus: 400,
+    providerErrorDetail: 'Missing reasoning_content.',
+    providerRawError: '{"message":"Missing reasoning_content","type":"invalid_request_error"}',
+  })
 
   assert.deepEqual(forwarded, [
     ['route', 'local-write'],
@@ -200,6 +206,10 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
   assert.equal(toolRuntimeEvent.details.permissionScope, 'workspace_write')
   const catalogRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.tool.catalog.loaded')
   assert.equal(catalogRuntimeEvent.details.highRiskToolCount, 4)
+  const recoveryRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.recovery.event')
+  assert.equal(recoveryRuntimeEvent.details.code, 'HTTP_400')
+  assert.equal(recoveryRuntimeEvent.details.providerStatus, 400)
+  assert.match(recoveryRuntimeEvent.details.providerRawError, /Missing reasoning_content/)
 })
 
 test('run finished and error detail helpers expose validation-friendly summaries', () => {

@@ -1,10 +1,14 @@
 import fs from 'node:fs/promises'
 import { createStructuredError } from '../runtimeErrors.mjs'
-import { resolveWorkspacePath } from '../utils.mjs'
+import { resolveFileAccessPath } from '../permissions/fileAccessPolicy.mjs'
 import {
   buildTextDiffPreview,
   buildTextMutationEvidence,
 } from './fileVerification.mjs'
+
+function resolvePatchPath(rootPath, targetPath) {
+  return resolveFileAccessPath(rootPath, targetPath).resolved
+}
 
 function splitFileContent(content) {
   const normalized = String(content || '').replace(/\r\n/g, '\n')
@@ -218,7 +222,7 @@ function validatePatchOperationConflicts(rootPath, operations) {
   const destinationOwners = new Map()
 
   for (const operation of operations) {
-    const sourcePath = resolveWorkspacePath(rootPath, operation.path)
+    const sourcePath = resolvePatchPath(rootPath, operation.path)
     const previousSource = sourceOwners.get(sourcePath)
     if (previousSource) {
       throw new Error(
@@ -231,7 +235,7 @@ function validatePatchOperationConflicts(rootPath, operations) {
       operation.kind === 'add'
         ? sourcePath
         : operation.kind === 'update' && operation.moveTo
-          ? resolveWorkspacePath(rootPath, operation.moveTo)
+          ? resolvePatchPath(rootPath, operation.moveTo)
           : sourcePath
 
     const previousDestination = destinationOwners.get(destinationPath)
@@ -258,7 +262,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
   runtime.throwIfAborted?.()
 
   if (operation.kind === 'add') {
-    const absolutePath = resolveWorkspacePath(rootPath, operation.path)
+    const absolutePath = resolvePatchPath(rootPath, operation.path)
     await ensurePathAbsent(absolutePath, 'Add File target')
     return {
       kind: 'add',
@@ -271,7 +275,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
   }
 
   if (operation.kind === 'delete') {
-    const absolutePath = resolveWorkspacePath(rootPath, operation.path)
+    const absolutePath = resolvePatchPath(rootPath, operation.path)
     const oldContent = await fs.readFile(absolutePath, 'utf8')
     return {
       kind: 'delete',
@@ -283,7 +287,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
     }
   }
 
-  const absolutePath = resolveWorkspacePath(rootPath, operation.path)
+  const absolutePath = resolvePatchPath(rootPath, operation.path)
   const oldContent = await fs.readFile(absolutePath, 'utf8')
   const newContent =
     Array.isArray(operation.hunks) && operation.hunks.length > 0
@@ -291,7 +295,7 @@ async function buildVerifiedChange(rootPath, operation, runtime = {}) {
       : oldContent
 
   if (operation.moveTo) {
-    const destinationPath = resolveWorkspacePath(rootPath, operation.moveTo)
+    const destinationPath = resolvePatchPath(rootPath, operation.moveTo)
     if (destinationPath !== absolutePath) {
       await ensurePathAbsent(destinationPath, 'Move target')
     }

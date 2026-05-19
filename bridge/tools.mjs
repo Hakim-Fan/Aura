@@ -37,6 +37,7 @@ import { buildShellEnv } from './shellEnv.mjs'
 import { resolveCommandShell } from './shellRuntime.mjs'
 import { resolveAuraSkillInstallSource } from './skillInstaller.mjs'
 import {
+  collectExternalPathReferences,
   evaluateToolExecutionPolicy,
   formatExecutionPolicyPreview,
   looksLikeShellFileMutation,
@@ -223,12 +224,20 @@ function resolveShellPatchInterception(tool, args, hooks = {}) {
   }
 }
 
-function resolveShellFileMutationInterception(tool, args) {
+function resolveShellFileMutationInterception(tool, args, hooks = {}) {
   if (tool?.name !== 'run_shell' || typeof args?.command !== 'string') {
     return null
   }
 
   if (!looksLikeShellFileMutation(args.command)) {
+    return null
+  }
+
+  const cwd =
+    typeof hooks.settings?.cwd === 'string' && hooks.settings.cwd.trim()
+      ? hooks.settings.cwd.trim()
+      : ''
+  if (cwd && collectExternalPathReferences(args.command, cwd).length > 0) {
     return null
   }
 
@@ -2953,7 +2962,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   const shellPatchInterception = resolveShellPatchInterception(tool, args, hooks)
   const shellFileMutationInterception = shellPatchInterception
     ? null
-    : resolveShellFileMutationInterception(tool, args)
+    : resolveShellFileMutationInterception(tool, args, hooks)
   const effectiveTool =
     shellPatchInterception?.tool || shellFileMutationInterception?.tool || tool
   const effectiveArgs =
@@ -3180,7 +3189,9 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
   }
 
   const requiresPolicyApproval = executionPolicy.action === 'prompt'
-  const approvalCategory = effectiveTool.approvalCategory || executionPolicy.approvalCategory
+  const approvalCategory = requiresPolicyApproval
+    ? (executionPolicy.approvalCategory || effectiveTool.approvalCategory)
+    : (effectiveTool.approvalCategory || executionPolicy.approvalCategory)
   const hasTaskScopedApproval =
     approvalCategory &&
     typeof hooks.isApprovalGranted === 'function' &&

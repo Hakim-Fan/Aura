@@ -864,6 +864,10 @@ function approvalCategoryLabel(category?: string) {
       return 'Shell 命令'
     case 'file_write':
       return '文件写入'
+    case 'external_file_read':
+      return '外部文件读取'
+    case 'external_file_write':
+      return '外部文件写入'
     case 'computer_use':
       return 'Computer Use'
     case 'plan':

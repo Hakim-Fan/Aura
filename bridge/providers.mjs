@@ -481,6 +481,29 @@ function toOpenAiTranscript(systemPrompt, messages) {
   ]
 }
 
+function shouldRoundTripReasoningContent(settings = {}) {
+  return settings.provider !== 'openai' && settings.provider !== 'google'
+}
+
+function buildOpenAiAssistantToolCallTranscriptEntry({
+  content,
+  toolCalls,
+  reasoningContent,
+  settings,
+}) {
+  const entry = {
+    role: 'assistant',
+    content,
+    tool_calls: toolCalls,
+  }
+
+  if (shouldRoundTripReasoningContent(settings)) {
+    entry.reasoning_content = String(reasoningContent || '')
+  }
+
+  return entry
+}
+
 function toGeminiParts(message) {
   const parts = normalizeMessageParts(message)
   const mapped = parts.flatMap((part) => {
@@ -1443,6 +1466,7 @@ async function callOpenAiCompatibleCompaction(
       response,
       data.error?.message || 'OpenAI-compatible compaction request failed',
       messages,
+      data,
     )
   }
 
@@ -1510,6 +1534,7 @@ async function callGoogleCompaction(
       response,
       data.error?.message || 'Google compaction request failed',
       messages,
+      data,
     )
   }
 
@@ -2201,6 +2226,7 @@ export function stripInlineToolCallText(text) {
 }
 
 export const __testInternals = {
+  buildOpenAiAssistantToolCallTranscriptEntry,
   buildFinalizerPrompt,
   buildProviderRetryInfo,
   compactMessagesWithProvider,
@@ -2351,10 +2377,22 @@ function classifyProviderHttpCategory(status) {
   return 'execution_failed'
 }
 
-function buildProviderHttpError(response, message, messages) {
+function compactProviderErrorPayload(data) {
+  if (data === undefined || data === null) {
+    return ''
+  }
+  try {
+    return truncate(JSON.stringify(data), 4_000)
+  } catch {
+    return truncate(String(data), 4_000)
+  }
+}
+
+function buildProviderHttpError(response, message, messages, data) {
   const presented = presentProviderError(message, messages)
   const status = response.status
   const category = classifyProviderHttpCategory(status)
+  const rawProviderError = compactProviderErrorPayload(data?.error || data)
 
   return createStructuredError('模型服务请求失败。', {
     source: 'provider',
@@ -2362,6 +2400,7 @@ function buildProviderHttpError(response, message, messages) {
     code: `HTTP_${status}`,
     status,
     detail: presented,
+    rawMessage: rawProviderError || presented,
     suggestedAction:
       category === 'authentication'
         ? '请检查当前 Provider 的 API Key、账号权限或模型访问权限。'
@@ -2371,6 +2410,11 @@ function buildProviderHttpError(response, message, messages) {
             ? '请稍后重试，或确认当前 Provider 服务状态正常。'
             : '请展开详细信息查看原始报错，并确认当前 Provider / 模型配置是否正确。',
     retryable: category === 'rate_limit' || category === 'unavailable',
+    details: {
+      providerStatus: status,
+      providerError: data?.error || data,
+      providerRawError: rawProviderError || undefined,
+    },
   })
 }
 
@@ -2955,6 +2999,7 @@ async function finalizeOpenAiTranscriptAfterStepLimit({
           data.error?.message ||
             'OpenAI-compatible finalization request failed',
           conversationMessages,
+          data,
         )
       }
 
@@ -3064,6 +3109,7 @@ async function finalizeGoogleTranscriptAfterStepLimit({
           response,
           data.error?.message || 'Google finalization request failed',
           conversationMessages,
+          data,
         )
       }
 
@@ -3282,6 +3328,7 @@ export async function finalizeOpenAiCompatibleAnswer({
           data.error?.message ||
             'OpenAI-compatible finalization request failed',
           messages,
+          data,
         )
       }
 
@@ -3392,6 +3439,7 @@ export async function finalizeGoogleAnswer({
           response,
           data.error?.message || 'Google finalization request failed',
           messages,
+          data,
         )
       }
 
@@ -3537,6 +3585,7 @@ export async function runOpenAiCompatibleAgent({
               response,
               data.error?.message || 'OpenAI-compatible request failed',
               messages,
+              data,
             )
           }
           hooks?.onPhaseChange?.('model_streaming')
@@ -3689,7 +3738,7 @@ export async function runOpenAiCompatibleAgent({
         })
       }
 
-      const { content, finalizedToolCalls } = stepResult
+      const { content, finalizedToolCalls, phaseReasoning } = stepResult
       if (finalizedToolCalls.length === 0) {
         if (
           shouldNudgeForObservableProgress({
@@ -3811,14 +3860,15 @@ export async function runOpenAiCompatibleAgent({
         lastDraftMessage = assistantContent
       }
 
-      transcript.push({
-        role: 'assistant',
+      transcript.push(buildOpenAiAssistantToolCallTranscriptEntry({
         content: truncateAssistantContentForTranscript(
           assistantContent,
           settings,
         ),
-        tool_calls: finalizedToolCalls,
-      })
+        toolCalls: finalizedToolCalls,
+        reasoningContent: phaseReasoning,
+        settings,
+      }))
       conversationMessages.push({
         role: 'assistant',
         content: assistantContent,
@@ -4055,6 +4105,7 @@ export async function runGoogleAgent({
               response,
               data.error?.message || 'Google request failed',
               messages,
+              data,
             )
           }
           hooks?.onPhaseChange?.('model_streaming')

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { __testInternals } from './providers.mjs'
 
 const {
+  buildOpenAiAssistantToolCallTranscriptEntry,
   buildFinalizerPrompt,
   buildProviderRetryInfo,
   compactMessagesWithProvider,
@@ -19,6 +20,46 @@ const {
   shouldNudgeForObservableProgress,
   updateUnresolvedToolErrorForRepair,
 } = __testInternals
+
+test('custom OpenAI-compatible tool-call turns round-trip reasoning_content', () => {
+  const entry = buildOpenAiAssistantToolCallTranscriptEntry({
+    content: '',
+    toolCalls: [
+      {
+        id: 'call-1',
+        type: 'function',
+        function: {
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+      },
+    ],
+    reasoningContent: 'Need to inspect the file first.',
+    settings: { provider: 'custom' },
+  })
+
+  assert.equal(entry.reasoning_content, 'Need to inspect the file first.')
+})
+
+test('OpenAI tool-call turns keep the standard assistant message shape', () => {
+  const entry = buildOpenAiAssistantToolCallTranscriptEntry({
+    content: '',
+    toolCalls: [
+      {
+        id: 'call-1',
+        type: 'function',
+        function: {
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+      },
+    ],
+    reasoningContent: 'OpenAI should not receive this non-standard field.',
+    settings: { provider: 'openai' },
+  })
+
+  assert.equal('reasoning_content' in entry, false)
+})
 
 test('mergeOpenAiToolCalls keeps append-only tool argument chunks parseable', () => {
   const toolCalls = []

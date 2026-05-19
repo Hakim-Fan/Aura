@@ -29,6 +29,68 @@ test('execution policy prompts for shell access outside workspace', () => {
   assert.equal(result.details.externalPaths[0].scope, 'external')
 })
 
+test('execution policy prompts for file-tool reads outside workspace', () => {
+  const workspace = path.join(os.tmpdir(), 'aura-policy-workspace')
+  const result = evaluateToolExecutionPolicy({
+    tool: {
+      name: 'read_file',
+    },
+    args: {
+      path: path.join(os.tmpdir(), 'external-notes.txt'),
+    },
+    settings: {
+      cwd: workspace,
+    },
+  })
+
+  assert.equal(result.action, 'prompt')
+  assert.equal(result.approvalCategory, 'external_file_read')
+  assert.equal(result.code, 'FILE_EXTERNAL_READ_ACCESS')
+})
+
+test('execution policy expands home-relative file-tool paths before sandbox checks', () => {
+  const workspace = path.join(os.tmpdir(), 'aura-policy-workspace')
+  const result = evaluateToolExecutionPolicy({
+    tool: {
+      name: 'read_file',
+    },
+    args: {
+      path: '~/.config/starship.toml',
+    },
+    settings: {
+      cwd: workspace,
+    },
+  })
+
+  assert.equal(result.action, 'prompt')
+  assert.equal(result.approvalCategory, 'external_file_read')
+  assert.equal(
+    result.details.externalPaths[0].resolved,
+    path.join(os.homedir(), '.config', 'starship.toml'),
+  )
+})
+
+test('execution policy blocks file-tool writes into Aura capability directories', () => {
+  const workspace = path.join(os.tmpdir(), 'aura-policy-workspace')
+  const result = evaluateToolExecutionPolicy({
+    tool: {
+      name: 'write_file',
+      approvalCategory: 'file_write',
+    },
+    args: {
+      path: path.join(os.homedir(), '.aura', 'skills', 'demo', 'SKILL.md'),
+      content: '# Demo\n',
+    },
+    settings: {
+      cwd: workspace,
+    },
+  })
+
+  assert.equal(result.action, 'deny')
+  assert.equal(result.approvalCategory, 'external_file_write')
+  assert.equal(result.code, 'FILE_AURA_CAPABILITY_MUTATION_BLOCKED')
+})
+
 test('execution policy blocks Aura capability directory mutations through shell', () => {
   const result = evaluateToolExecutionPolicy({
     tool: {

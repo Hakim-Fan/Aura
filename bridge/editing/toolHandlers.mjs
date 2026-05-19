@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import { createStructuredError } from '../runtimeErrors.mjs'
+import { resolveFileAccessPath } from '../permissions/fileAccessPolicy.mjs'
 import { resolveWorkspacePath, truncate } from '../utils.mjs'
 import { parsePatch } from './applyPatchParser.mjs'
 import { applyPatchInWorkspace } from './applyPatchTool.mjs'
@@ -61,6 +62,10 @@ export function normalizeApplyPatchToolInput(args = {}) {
   })
 }
 
+function resolveEditablePath(rootPath, targetPath) {
+  return resolveFileAccessPath(rootPath, targetPath).resolved
+}
+
 export async function buildEditingToolTransaction(rootPath, toolName, args = {}, runtime = {}) {
   if (toolName === 'apply_patch') {
     const patchText = normalizeApplyPatchToolInput(args)
@@ -78,7 +83,7 @@ export async function buildEditingToolTransaction(rootPath, toolName, args = {},
 
   if (toolName === 'write_file') {
     return prepareWriteFileTransaction(
-      resolveWorkspacePath(rootPath, args.path),
+      resolveEditablePath(rootPath, args.path),
       args.content,
       {
         toolPath: args.path,
@@ -88,7 +93,7 @@ export async function buildEditingToolTransaction(rootPath, toolName, args = {},
 
   if (toolName === 'edit_file') {
     return prepareEditFileTransaction(
-      resolveWorkspacePath(rootPath, args.path),
+      resolveEditablePath(rootPath, args.path),
       args.oldText,
       args.newText,
       {
@@ -101,7 +106,7 @@ export async function buildEditingToolTransaction(rootPath, toolName, args = {},
 
   if (toolName === 'replace_line_range') {
     return prepareReplaceLineRangeTransaction(
-      resolveWorkspacePath(rootPath, args.path),
+      resolveEditablePath(rootPath, args.path),
       args.startLine,
       args.endLine,
       args.content,
@@ -114,7 +119,7 @@ export async function buildEditingToolTransaction(rootPath, toolName, args = {},
 
   if (toolName === 'multi_edit_file') {
     return prepareMultiEditFileTransaction(
-      resolveWorkspacePath(rootPath, args.path),
+      resolveEditablePath(rootPath, args.path),
       args.edits,
       {
         toolPath: args.path,
@@ -142,7 +147,7 @@ export function createEditingTools(context) {
       ...readFileToolSpec,
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
+        const target = resolveEditablePath(context.cwd, args.path)
         const content = await fs.readFile(target)
         if (detectBinary(content)) {
           return summarizeBinaryFile(target, content)
@@ -154,7 +159,7 @@ export function createEditingTools(context) {
       ...readBlockToolSpec,
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
+        const target = resolveEditablePath(context.cwd, args.path)
         const content = await fs.readFile(target)
         if (detectBinary(content)) {
           return summarizeBinaryFile(target, content)
@@ -177,7 +182,7 @@ export function createEditingTools(context) {
       ...writeFileToolSpec,
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
+        const target = resolveEditablePath(context.cwd, args.path)
         return applyWriteFileMutation(target, args.content, {
           toolPath: args.path,
         }, runtime)
@@ -187,7 +192,7 @@ export function createEditingTools(context) {
       ...editFileToolSpec,
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
+        const target = resolveEditablePath(context.cwd, args.path)
         return applyEditFileMutation(
           target,
           args.oldText,
@@ -205,7 +210,7 @@ export function createEditingTools(context) {
       ...replaceLineRangeToolSpec,
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
+        const target = resolveEditablePath(context.cwd, args.path)
         return applyReplaceLineRangeMutation(
           target,
           args.startLine,
@@ -223,7 +228,7 @@ export function createEditingTools(context) {
       ...multiEditFileToolSpec,
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
-        const target = resolveWorkspacePath(context.cwd, args.path)
+        const target = resolveEditablePath(context.cwd, args.path)
         return applyMultiEditFileMutation(target, args.edits, {
           toolPath: args.path,
         }, runtime)

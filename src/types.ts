@@ -508,6 +508,8 @@ export type ToolEvent = {
 export type ApprovalCategory =
   | 'shell'
   | 'file_write'
+  | 'external_file_read'
+  | 'external_file_write'
   | 'computer_use'
   | 'plan'
 

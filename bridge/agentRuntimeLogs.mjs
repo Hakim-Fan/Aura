@@ -358,6 +358,13 @@ export function wrapAgentRuntimeHooks(hooks = {}, logger) {
             stage: 'recovering',
             recovered: false,
             fallbackUsed: false,
+            reason: compactString(meta?.reason, 500),
+            code: compactString(meta?.code, 120),
+            originalStage: compactString(meta?.stage, 120),
+            lastErrorSummary: compactString(meta?.lastErrorSummary, 500),
+            providerStatus: safeNumber(meta?.providerStatus),
+            providerErrorDetail: compactString(meta?.providerErrorDetail, 1_200),
+            providerRawError: compactString(meta?.providerRawError, 4_000),
           },
           { level: 'warn' },
         )
