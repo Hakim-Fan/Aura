@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   buildCapabilityExposureNote,
   buildDefaultAgentSystemPrompt,
+  buildRuntimeSystemPrompt,
 } from './agentPrompting.mjs'
 
 const baseSettings = {
@@ -96,4 +97,25 @@ test('default-agent prompt carries the configured locale policy', () => {
 
   assert.match(prompt, /简体中文/)
   assert.match(prompt, /all user-facing answers, visible reasoning notes, plan previews, step titles/i)
+})
+
+test('runtime prompt constrains the turn to the newest user request', () => {
+  const prompt = buildRuntimeSystemPrompt(
+    {
+      cwd: '/workspace',
+      locale: 'zh-CN',
+      reasoningEffort: 'medium',
+      autoApproveShell: false,
+      autoApproveFileWrite: false,
+      autoApproveComputerUse: false,
+      requireLongTaskPlanApproval: false,
+    },
+    '',
+    '',
+    null,
+  )
+
+  assert.match(prompt, /Latest user request boundary/)
+  assert.match(prompt, /newest user message as the scope for this turn/)
+  assert.match(prompt, /Do not expand a narrow latest request into an older larger task goal/)
 })

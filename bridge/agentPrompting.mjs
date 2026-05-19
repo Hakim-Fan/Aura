@@ -224,6 +224,7 @@ export function buildRuntimeSystemPrompt(
     buildHostExecutionContext(),
     buildCurrentDateContext(),
     'Answer directly when your current knowledge or the mounted local context is sufficient.',
+    'Latest user request boundary: treat the newest user message as the scope for this turn. Use earlier conversation, task progress, and work memory only as background context unless the newest message explicitly asks to continue, revise, finish, or build on prior work. Do not expand a narrow latest request into an older larger task goal.',
     'Use only the currently mounted tools when they materially reduce uncertainty or let you act directly on the user request.',
     'Treat the mounted tool list as the source of truth for what you can do in this turn. Do not describe yourself as local-only when web or browser tools are mounted.',
     'If tool_search is mounted, use it to inspect the available tool catalog before claiming a needed capability does not exist.',

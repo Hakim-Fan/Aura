@@ -348,6 +348,16 @@ rl.on('line', (line) => {
             : Date.now(),
       })
     },
+    onReasoningDiscard(event = {}) {
+      executionMonitor.markProgress()
+      emit({
+        type: 'reasoning_discard',
+        blockId: event.blockId,
+        reason: event.reason,
+        attemptNumber: event.attemptNumber,
+        nextAttemptNumber: event.nextAttemptNumber,
+      })
+    },
     onUsage(usage) {
       executionMonitor.markProgress()
       emit({ type: 'usage', usage })

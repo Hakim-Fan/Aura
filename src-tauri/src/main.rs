@@ -1408,6 +1408,14 @@ fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> 
             "deltaChars": delta_log_char_count(event),
             "delta": delta_log_preview(event),
         })),
+        "reasoning_discard" => agent_log_details(context, serde_json::json!({
+            "stepId": event_step_id(event),
+            "reasoningStepId": event_step_id(event),
+            "blockId": event.get("blockId").and_then(|value| value.as_str()),
+            "reason": event.get("reason").and_then(|value| value.as_str()),
+            "attemptNumber": event.get("attemptNumber").and_then(|value| value.as_u64()),
+            "nextAttemptNumber": event.get("nextAttemptNumber").and_then(|value| value.as_u64()),
+        })),
         "runtime_status" => agent_log_details(context, serde_json::json!({
             "phase": event.get("phase").and_then(|value| value.as_str()),
             "stalled": event.get("stalled").and_then(|value| value.as_bool()),
@@ -3357,6 +3365,27 @@ fn append_reasoning_delta(current: &mut AgentTaskSnapshot, event: &serde_json::V
     }));
 }
 
+fn discard_reasoning_block(
+    current: &mut AgentTaskSnapshot,
+    event: &serde_json::Value,
+) -> Option<String> {
+    let block_id = event.get("blockId").and_then(|value| value.as_str())?;
+    let before_len = current.reasoning.len();
+    current.reasoning.retain(|block| {
+        block
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(|value| value != block_id)
+            .unwrap_or(true)
+    });
+
+    if current.reasoning.len() == before_len {
+        None
+    } else {
+        Some(block_id.to_string())
+    }
+}
+
 fn reasoning_blocks_log_summary(reasoning: &[serde_json::Value]) -> serde_json::Value {
     serde_json::Value::Array(
         reasoning
@@ -3733,6 +3762,17 @@ fn spawn_agent_task<R: Runtime>(
                         );
                     }
                     append_reasoning_delta(current, &event);
+                }),
+                Some("reasoning_discard") => with_snapshot(&stdout_snapshot, |current| {
+                    append_app_log(
+                        &stdout_log_app,
+                        "warn",
+                        "agent_reasoning_discarded",
+                        event_log_details(&stdout_log_context, &event),
+                    );
+                    if let Some(reasoning_step_id) = discard_reasoning_block(current, &event) {
+                        logged_reasoning_blocks.remove(&reasoning_step_id);
+                    }
                 }),
                 Some("usage") => with_snapshot(&stdout_snapshot, |current| {
                     current.usage = extract_object(event.get("usage"));

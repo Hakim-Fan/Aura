@@ -1012,9 +1012,16 @@ function formatRetryLabel(retryInfo?: ChatMessage['retryInfo'], status?: Message
     configuredMaxRetries > 0 &&
     retryInfo.attemptedRetries <= configuredMaxRetries
 
+  const attemptLabel =
+    typeof retryInfo.nextAttemptNumber === 'number' &&
+      Number.isFinite(retryInfo.nextAttemptNumber) &&
+      retryInfo.nextAttemptNumber > 1
+      ? `，第 ${Math.round(retryInfo.nextAttemptNumber)} 次尝试`
+      : ''
+
   return showBoundedLimit
-    ? `重试中 ${retryInfo.attemptedRetries}/${configuredMaxRetries}`
-    : `重试中 ${retryInfo.attemptedRetries}`
+    ? `重试中 ${retryInfo.attemptedRetries}/${configuredMaxRetries}${attemptLabel}`
+    : `重试中 ${retryInfo.attemptedRetries}${attemptLabel}`
 }
 
 function RetryStatusDots() {
@@ -5638,7 +5645,7 @@ function AssistantMessageCard({
                   </span>
                   <span>{activitySummary}</span>
                   {isStreaming ? <RetryStatusDots /> : null}
-                  {/* {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />} */}
+                  {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </button>
                 {hasUsedCapabilities ? (
                   <div className="absolute left-0 top-full pt-2 z-30 w-max min-w-[14rem] max-w-[20rem] opacity-0 invisible -translate-y-1.5 group-hover/activity:opacity-100 group-hover/activity:visible group-hover/activity:translate-y-0 transition-all duration-200 ease-out origin-top-left">

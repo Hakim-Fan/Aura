@@ -2757,6 +2757,14 @@ async function runProviderOperationWithRetry(
 
       const nextRetryCount = retryCount + 1
       const nextRetryDelayMs = getProviderRetryDelayMs(nextRetryCount)
+      if (attemptState.reasoningBlockId && attemptState.partialReasoning) {
+        hooks?.onReasoningDiscard?.({
+          blockId: attemptState.reasoningBlockId,
+          reason: summarizeRetryError(normalized),
+          attemptNumber: attempt,
+          nextAttemptNumber: attempt + 1,
+        })
+      }
       hooks?.onRetryProgress?.(
         buildProviderRetryInfo(nextRetryCount, maxRetries, {
           stage,
@@ -3544,6 +3552,7 @@ export async function runOpenAiCompatibleAgent({
 
       const attemptResult = await runProviderOperationWithRetry(
         async (attemptState) => {
+          attemptState.reasoningBlockId = reasoningBlockId
           hooks?.onPhaseChange?.('model_connecting')
           const estimatedInputTokens = estimateOpenAiRequestInputTokens(
             transcript,
@@ -4067,6 +4076,7 @@ export async function runGoogleAgent({
 
       const attemptResult = await runProviderOperationWithRetry(
         async (attemptState) => {
+          attemptState.reasoningBlockId = reasoningBlockId
           hooks?.onPhaseChange?.('model_connecting')
           const estimatedInputTokens = estimateGoogleRequestInputTokens(
             activeSystemPrompt,

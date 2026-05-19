@@ -333,6 +333,37 @@ test('runProviderOperationWithRetry clears in-progress retry state after a succe
   assert.match(progressEvents[1]?.lastErrorSummary || '', /模型响应超时|模型连接在生成过程中被中断/)
 })
 
+test('runProviderOperationWithRetry discards failed attempt reasoning before retry', async () => {
+  const discardEvents = []
+  let attempts = 0
+
+  const result = await runProviderOperationWithRetry(
+    async (attemptState) => {
+      attempts += 1
+      attemptState.reasoningBlockId = 'reasoning-openai-step-1'
+      if (attempts === 1) {
+        attemptState.partialReasoning = 'first attempt reasoning'
+        throw new Error('network timeout')
+      }
+      return 'ok'
+    },
+    {
+      messages: [],
+      hooks: {
+        onReasoningDiscard(event) {
+          discardEvents.push(event)
+        },
+      },
+    },
+  )
+
+  assert.equal(result.value, 'ok')
+  assert.equal(discardEvents.length, 1)
+  assert.equal(discardEvents[0]?.blockId, 'reasoning-openai-step-1')
+  assert.equal(discardEvents[0]?.attemptNumber, 1)
+  assert.equal(discardEvents[0]?.nextAttemptNumber, 2)
+})
+
 test('buildFinalizerPrompt can omit duplicated tool and reasoning digests', () => {
   const prompt = buildFinalizerPrompt({
     toolEvents: [

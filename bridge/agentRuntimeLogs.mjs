@@ -341,6 +341,19 @@ export function wrapAgentRuntimeHooks(hooks = {}, logger) {
       )
       hooks?.onRetryProgress?.(retryInfo)
     },
+    onReasoningDiscard(event = {}) {
+      logger.emit(
+        'agent.reasoning.discarded',
+        {
+          blockId: event?.blockId,
+          reason: compactString(event?.reason, 500),
+          attemptNumber: safeNumber(event?.attemptNumber),
+          nextAttemptNumber: safeNumber(event?.nextAttemptNumber),
+        },
+        { level: 'warn' },
+      )
+      hooks?.onReasoningDiscard?.(event)
+    },
     onWorkMemory(memory) {
       logger.emit('agent.memory.updated', {
         memoryId: memory?.id,
