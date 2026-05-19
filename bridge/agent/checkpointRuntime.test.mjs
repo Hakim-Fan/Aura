@@ -39,7 +39,7 @@ test('graph checkpoint runtime creates restorable graph snapshots without sensit
         model: 'test-model',
         cwd: '/tmp/workspace',
         apiKey: 'secret-key',
-        agentArchitectureMode: 'route-first',
+        agentArchitectureMode: 'default-agent',
       },
       logContext: { taskId: 'task-1' },
     },

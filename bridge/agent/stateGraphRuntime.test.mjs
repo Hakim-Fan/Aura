@@ -79,7 +79,7 @@ test('createHybridPlan adds dynamic inspect and execute subtasks for workspace w
   assert.deepEqual(plan.subtasks[2].dependencies, [plan.subtasks[1].id])
 })
 
-test('runHybridStateGraph logs graph states, checkpoints, and merges route-first result', async () => {
+test('runHybridStateGraph logs graph states, checkpoints, and merges default-agent result', async () => {
   const logger = createLogger()
   const result = await runHybridStateGraph({
     request: {
@@ -93,7 +93,7 @@ test('runHybridStateGraph logs graph states, checkpoints, and merges route-first
     logger,
     now: () => 1_700_000_000_000,
     random: () => 0.123456,
-    executeRouteFirst: async () => ({
+    executeDefaultAgent: async () => ({
       status: 'completed',
       message: 'done',
       completionState: 'executed_verified',
@@ -130,7 +130,7 @@ test('runHybridStateGraph logs graph states, checkpoints, and merges route-first
   ])
 })
 
-test('runHybridStateGraph keeps delegated route-first task trees from replacing the plan tree', async () => {
+test('runHybridStateGraph keeps delegated default-agent task trees from replacing the plan tree', async () => {
   const logger = createLogger()
   const taskTrees = []
   const result = await runHybridStateGraph({
@@ -148,11 +148,11 @@ test('runHybridStateGraph keeps delegated route-first task trees from replacing 
       requiresWrite: false,
     },
     logger,
-    executeRouteFirst: async request => {
+    executeDefaultAgent: async request => {
       request.hooks.onTaskTree([
         {
-          id: 'inner-route-first-main',
-          title: '内部 route-first 执行树',
+          id: 'inner-default-agent-main',
+          title: '内部 default-agent 执行树',
           summary: '',
           kind: 'main',
           status: 'running',
@@ -171,7 +171,7 @@ test('runHybridStateGraph keeps delegated route-first task trees from replacing 
   assert.equal(result.status, 'completed')
   assert.ok(taskTrees.length > 0)
   assert.ok(taskTrees.every(tree => tree[0]?.kind === 'plan'))
-  assert.ok(!taskTrees.some(tree => tree[0]?.id === 'inner-route-first-main'))
+  assert.ok(!taskTrees.some(tree => tree[0]?.id === 'inner-default-agent-main'))
 })
 
 test('runHybridStateGraph continues into verification when first execution is unverified', async () => {
@@ -194,7 +194,7 @@ test('runHybridStateGraph continues into verification when first execution is un
       requiresWrite: true,
     },
     logger,
-    executeRouteFirst: async request => {
+    executeDefaultAgent: async request => {
       requests.push(request)
       executionStepIds.push(request.runtime.executionStepIds.next('reasoning', 'probe'))
       if (requests.length === 1) {
@@ -252,7 +252,7 @@ test('runHybridStateGraph does not chain internal verification subtasks', async 
       complexity: 'complex',
     },
     logger,
-    executeRouteFirst: async () => {
+    executeDefaultAgent: async () => {
       calls += 1
       return {
         status: 'completed',
@@ -357,7 +357,7 @@ test('runHybridStateGraph expands pass budget for hidden verification steps', as
     },
     initialPlan,
     logger,
-    executeRouteFirst: async () => {
+    executeDefaultAgent: async () => {
       calls += 1
       return {
         status: 'completed',
@@ -402,7 +402,7 @@ test('runHybridStateGraph executes dynamic planned subtasks before finalizing', 
       workspaceRelated: true,
     },
     logger,
-    executeRouteFirst: async request => {
+    executeDefaultAgent: async request => {
       requests.push(request)
       const toolName = requests.length === 1 ? 'read_file' : 'apply_patch'
       return {
@@ -473,7 +473,7 @@ test('runHybridStateGraph sizes the default graph pass budget to the plan', asyn
     },
     initialPlan,
     logger,
-    executeRouteFirst: async stepRequest => {
+    executeDefaultAgent: async stepRequest => {
       requests.push(stepRequest)
       return {
         status: 'completed',
@@ -539,7 +539,7 @@ test('runHybridStateGraph keeps execute steps open when only skill-read evidence
     initialPlan,
     logger,
     maxGraphPasses: 2,
-    executeRouteFirst: async () => {
+    executeDefaultAgent: async () => {
       calls += 1
       return {
         status: 'completed',
@@ -571,7 +571,7 @@ test('runHybridStateGraph blocks unverified execute results after graph pass lim
     },
     logger,
     maxGraphPasses: 1,
-    executeRouteFirst: async () => {
+    executeDefaultAgent: async () => {
       calls += 1
       return {
         status: 'completed',
@@ -609,7 +609,7 @@ test('runHybridStateGraph can run a recovery continuation after failed execution
       requiresWrite: true,
     },
     logger,
-    executeRouteFirst: async () => {
+    executeDefaultAgent: async () => {
       calls += 1
       if (calls === 1) {
         return {
@@ -655,7 +655,7 @@ test('runHybridStateGraph resumes remaining planned subtasks after recovering a 
       workspaceRelated: true,
     },
     logger,
-    executeRouteFirst: async request => {
+    executeDefaultAgent: async request => {
       calls.push(request)
       if (calls.length === 1) {
         return {
@@ -706,7 +706,7 @@ test('runHybridStateGraph emits ESCALATE before blocking capability blockers', a
       complexity: 'complex',
     },
     logger,
-    executeRouteFirst: async () => ({
+    executeDefaultAgent: async () => ({
       status: 'completed',
       message: 'blocked',
       completionState: 'blocked_by_capability',
@@ -738,7 +738,7 @@ test('runHybridStateGraph logs recovery transition when delegated execution fail
         complexity: 'complex',
       },
       logger,
-      executeRouteFirst: async () => {
+      executeDefaultAgent: async () => {
         throw error
       },
     }),
@@ -820,7 +820,7 @@ test('runHybridStateGraph restores a graph checkpoint and resumes its active sub
     },
     logger,
     restoreCheckpoint: checkpoint.toJSON(),
-    executeRouteFirst: async request => {
+    executeDefaultAgent: async request => {
       requests.push(request)
       return {
         status: 'completed',

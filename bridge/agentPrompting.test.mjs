@@ -2,143 +2,92 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   buildCapabilityExposureNote,
-  buildRouteFirstSystemPrompt,
+  buildDefaultAgentSystemPrompt,
 } from './agentPrompting.mjs'
 
-test('route-first prompt treats mounted web tools as optional instead of inactive', () => {
-  const prompt = buildRouteFirstSystemPrompt(
-    {
-      cwd: '/tmp/workspace',
-      autoApproveShell: false,
-      autoApproveFileWrite: false,
-      autoApproveComputerUse: false,
-      reasoningEffort: 'medium',
-    },
+const baseSettings = {
+  cwd: '/tmp/workspace',
+  autoApproveShell: false,
+  autoApproveFileWrite: false,
+  autoApproveComputerUse: false,
+  reasoningEffort: 'medium',
+}
+
+const modelDirectedState = {
+  modelDirected: true,
+  answerMode: 'advise',
+  needsExternalFacts: false,
+  researchMode: 'auto',
+  responseStyle: 'adaptive-default',
+}
+
+test('default-agent prompt lets the main model choose answer, tools, or plan', () => {
+  const prompt = buildDefaultAgentSystemPrompt(
+    baseSettings,
     '',
     '',
-    {
-      answerMode: 'advise',
-      needsExternalFacts: false,
-      researchMode: 'auto',
-      responseStyle: 'adaptive-default',
-    },
+    modelDirectedState,
   )
 
-  assert.match(prompt, /do not wait for classifier hints/i)
-  assert.doesNotMatch(prompt, /inactive unless external facts are clearly needed/i)
+  assert.match(prompt, /default-agent mode/i)
+  assert.match(prompt, /main model decides/i)
+  assert.match(prompt, /For simple questions, answer directly/i)
+  assert.match(prompt, /todo_write with a short checklist/i)
+  assert.match(prompt, /single default-agent pass/i)
 })
 
-test('route-first prompt keeps mounted write tools available beyond execute-only routing', () => {
-  const prompt = buildRouteFirstSystemPrompt(
-    {
-      cwd: '/tmp/workspace',
-      autoApproveShell: false,
-      autoApproveFileWrite: false,
-      autoApproveComputerUse: false,
-      reasoningEffort: 'medium',
-    },
+test('default-agent prompt keeps mounted write tools available', () => {
+  const prompt = buildDefaultAgentSystemPrompt(
+    baseSettings,
     '',
     '',
-    {
-      answerMode: 'advise',
-      needsExternalFacts: false,
-      researchMode: 'auto',
-      responseStyle: 'adaptive-default',
-    },
+    modelDirectedState,
     {
       hasWorkspaceWriteTools: true,
     },
   )
 
-  assert.match(prompt, /route mode as planning guidance rather than a hard prohibition/i)
-  assert.match(prompt, /request_user_input/i)
-  assert.doesNotMatch(prompt, /Workspace write tools: inactive for this turn/i)
+  assert.match(prompt, /prefer apply_patch/i)
+  assert.match(prompt, /targeted verification/i)
+  assert.match(prompt, /exec_command/i)
 })
 
-test('capability exposure note explains optional web retrieval without classifier gating', () => {
+test('capability exposure note describes default-agent capabilities', () => {
   const note = buildCapabilityExposureNote(
     {
       skills: [],
       plugins: [],
       mcpServers: [],
     },
-    {
-      answerMode: 'advise',
-      needsExternalFacts: false,
-    },
+    modelDirectedState,
   )
 
+  assert.match(note, /default-agent capability profile/i)
   assert.match(note, /optional tools/i)
-  assert.match(note, /assuming they are blocked by prior classification/i)
 })
 
-test('route-first prompt frames skills as enabled options rather than preselected instructions', () => {
-  const prompt = buildRouteFirstSystemPrompt(
-    {
-      cwd: '/tmp/workspace',
-      autoApproveShell: false,
-      autoApproveFileWrite: false,
-      autoApproveComputerUse: false,
-      reasoningEffort: 'medium',
-    },
-    '- Web Research (id: web-research): Find and compare public sources.; if this matches the user request, call aura_read_skill with skillId "web-research" before applying it.',
+test('default-agent prompt frames skills as enabled options', () => {
+  const prompt = buildDefaultAgentSystemPrompt(
+    baseSettings,
+    '- Web Research (id: web-research): Find and compare public sources.',
     '',
-    {
-      answerMode: 'advise',
-      needsExternalFacts: false,
-      researchMode: 'auto',
-      responseStyle: 'adaptive-default',
-    },
+    modelDirectedState,
   )
 
   assert.match(prompt, /Enabled skill summaries:/)
-  assert.match(prompt, /live routing hints/i)
-  assert.match(prompt, /even if the user does not mention a skill/i)
+  assert.match(prompt, /scan the skill names, ids, and descriptions/i)
   assert.match(prompt, /aura_read_skill with the exact skill id/i)
 })
 
-test('route-first prompt separates scratchpad reasoning from reusable work memory', () => {
-  const prompt = buildRouteFirstSystemPrompt(
+test('default-agent prompt carries the configured locale policy', () => {
+  const prompt = buildDefaultAgentSystemPrompt(
     {
-      cwd: '/tmp/workspace',
-      autoApproveShell: false,
-      autoApproveFileWrite: false,
-      autoApproveComputerUse: false,
-      reasoningEffort: 'medium',
-    },
-    '',
-    '',
-    {
-      answerMode: 'advise',
-      needsExternalFacts: false,
-      researchMode: 'auto',
-      responseStyle: 'adaptive-default',
-    },
-  )
-
-  assert.match(prompt, /reasoning and scratchpad text are temporary process/i)
-  assert.match(prompt, /record_work_memory/i)
-  assert.match(prompt, /draft, and mark unverified assumptions as assumption/i)
-})
-
-test('route-first prompt carries the configured locale policy', () => {
-  const prompt = buildRouteFirstSystemPrompt(
-    {
-      cwd: '/tmp/workspace',
+      ...baseSettings,
       locale: 'zh-CN',
-      autoApproveShell: false,
-      autoApproveFileWrite: false,
-      autoApproveComputerUse: false,
-      reasoningEffort: 'medium',
     },
     '',
     '',
-    {
-      answerMode: 'advise',
-      needsExternalFacts: false,
-      researchMode: 'auto',
-      responseStyle: 'adaptive-default',
-    },
+    modelDirectedState,
   )
 
   assert.match(prompt, /简体中文/)

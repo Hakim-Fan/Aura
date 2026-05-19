@@ -8,7 +8,7 @@ export async function runOrchestratedAgent(request = {}) {
     category: 'unsupported',
     code: 'ORCHESTRATED_MODE_UNAVAILABLE',
     detail: 'The orchestrated agent mode has not been implemented in this build yet.',
-    suggestedAction: '请先切回标准模式（route-first）继续使用当前稳定执行流。',
+    suggestedAction: '请先切回 default-agent 继续使用当前稳定执行流。',
   })
 
   error.agentMode = 'orchestrated'

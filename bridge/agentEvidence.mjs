@@ -507,7 +507,7 @@ export function deriveCompletionState(routeState, evidenceSummary, runtimeBlocks
     return 'failed_after_execution'
   }
 
-  if (routeState?.answerMode !== 'execute') {
+  if (routeState?.answerMode !== 'execute' && routeState?.modelDirected !== true) {
     return 'not_executed'
   }
 

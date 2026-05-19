@@ -225,7 +225,7 @@ export function createHybridPlan({
     estimatedSteps: subtasks.length,
     createdAt,
     successCriteria: [
-      'The delegated route-first runtime completes or reports a recoverable blocker',
+      'The delegated default-agent runtime completes or reports a recoverable blocker',
       'The structured completion decision explains why the graph can finish or must block',
       'A checkpoint exists before delegated execution and after observation',
     ],

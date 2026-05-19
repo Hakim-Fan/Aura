@@ -1852,11 +1852,10 @@ export function SettingsWindowApp({ initialTab }: Props) {
               <label className="toggle-inline">
                 <input
                   checked={
-                    draftSettings.agentArchitectureMode === 'route-first' ||
-                    draftSettings.agentArchitectureMode === 'legacy'
+                    draftSettings.agentArchitectureMode === 'default-agent'
                   }
                   type="radio"
-                  onChange={() => handleSettingsChange('agentArchitectureMode', 'route-first')}
+                  onChange={() => handleSettingsChange('agentArchitectureMode', 'default-agent')}
                 />
                 <div className="flex flex-col">
                   <strong>标准模式</strong>

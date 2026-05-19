@@ -10,35 +10,25 @@ import {
   wrapAgentRuntimeHooks,
 } from './agentRuntimeLogs.mjs'
 
-test('normalizeAgentArchitectureMode keeps route-first as the legacy stable path', () => {
-  assert.equal(normalizeAgentArchitectureMode(undefined), 'legacy')
-  assert.equal(normalizeAgentArchitectureMode('route-first'), 'legacy')
-  assert.equal(normalizeAgentArchitectureMode('legacy'), 'legacy')
-  assert.equal(normalizeAgentArchitectureMode('hybrid'), 'hybrid')
-  assert.equal(normalizeAgentArchitectureMode('graph'), 'graph')
-  assert.equal(normalizeAgentArchitectureMode('state-machine'), 'graph')
-  assert.equal(normalizeAgentArchitectureMode('unexpected'), 'legacy')
+test('normalizeAgentArchitectureMode only exposes default-agent and orchestrated', () => {
+  assert.equal(normalizeAgentArchitectureMode(undefined), 'default-agent')
+  assert.equal(normalizeAgentArchitectureMode('default-agent'), 'default-agent')
+  assert.equal(normalizeAgentArchitectureMode('orchestrated'), 'orchestrated')
+  assert.equal(normalizeAgentArchitectureMode('unexpected'), 'default-agent')
 })
 
-test('resolveAgentExecutionMode keeps staged graph modes on route-first execution core', () => {
-  assert.deepEqual(resolveAgentExecutionMode({ agentArchitectureMode: 'route-first' }), {
-    requestedArchitectureMode: 'route-first',
-    architectureMode: 'legacy',
-    effectiveAgentMode: 'route-first',
-    pathMode: 'standard',
+test('resolveAgentExecutionMode uses default-agent as the main execution core', () => {
+  assert.deepEqual(resolveAgentExecutionMode({ agentArchitectureMode: 'default-agent' }), {
+    requestedArchitectureMode: 'default-agent',
+    architectureMode: 'default-agent',
+    effectiveAgentMode: 'default-agent',
+    pathMode: 'default',
     fallbackToLegacy: false,
   })
-  assert.deepEqual(resolveAgentExecutionMode({ agentArchitectureMode: 'hybrid' }), {
-    requestedArchitectureMode: 'hybrid',
-    architectureMode: 'hybrid',
-    effectiveAgentMode: 'route-first',
-    pathMode: 'standard',
-    fallbackToLegacy: false,
-  })
-  assert.deepEqual(resolveAgentExecutionMode({ agentArchitectureMode: 'graph' }), {
-    requestedArchitectureMode: 'graph',
-    architectureMode: 'graph',
-    effectiveAgentMode: 'route-first',
+  assert.deepEqual(resolveAgentExecutionMode({ agentArchitectureMode: 'orchestrated' }), {
+    requestedArchitectureMode: 'orchestrated',
+    architectureMode: 'orchestrated',
+    effectiveAgentMode: 'orchestrated',
     pathMode: 'long',
     fallbackToLegacy: false,
   })
@@ -53,7 +43,7 @@ test('createAgentRuntimeLogger emits stable base fields and never throws through
       },
     },
     settings: {
-      agentArchitectureMode: 'route-first',
+      agentArchitectureMode: 'default-agent',
     },
     logContext: {
       sessionId: 'session-1',
@@ -73,9 +63,9 @@ test('createAgentRuntimeLogger emits stable base fields and never throws through
   assert.equal(events[0].details.sessionId, 'session-1')
   assert.equal(events[0].details.taskId, 'task-1')
   assert.equal(events[0].details.assistantMessageId, 'assistant-1')
-  assert.equal(events[0].details.architectureMode, 'legacy')
-  assert.equal(events[0].details.requestedArchitectureMode, 'route-first')
-  assert.equal(events[0].details.pathMode, 'standard')
+  assert.equal(events[0].details.architectureMode, 'default-agent')
+  assert.equal(events[0].details.requestedArchitectureMode, 'default-agent')
+  assert.equal(events[0].details.pathMode, 'default')
   assert.equal(events[0].details.eventVersion, 1)
   assert.equal(events[0].details.provider, 'openai')
 

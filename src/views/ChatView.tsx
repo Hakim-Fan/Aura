@@ -892,7 +892,7 @@ function messageDetailStatusTitle(options: {
     return '等待回复'
   }
   if (isRetryInProgress || activity?.phase === 'recovering') {
-    return '正在恢复...'
+    return '正在恢复'
   }
 
   switch (activity?.phase) {
@@ -929,7 +929,7 @@ function messageDetailStatusDescription(options: {
       return '需要你确认后才能继续。'
     case '等待回复':
       return '需要你补充信息后才能继续。'
-    case '正在恢复...':
+    case '正在恢复':
       return retryDetail || '遇到中断，正在尝试恢复并继续回答。'
     case '已停止':
     case '执行失败':

@@ -124,7 +124,7 @@ export function classifyAgentTask({ messages = [], settings = {} } = {}) {
     workspaceRelated,
     needsCurrentInfo,
     hasAttachments: attachmentPresent,
-    reason: reasons.join(', ') || 'standard route-first execution',
+    reason: reasons.join(', ') || 'standard default-agent execution',
     reasons,
     confidence: pathMode === 'fast' ? 0.86 : 0.72,
     latestUserTextLength: normalized.length,

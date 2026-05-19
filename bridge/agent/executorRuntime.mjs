@@ -111,7 +111,7 @@ function isolateGraphStepTaskTree(request = {}) {
     hooks: {
       ...request.hooks,
       onTaskTree() {
-        // The graph plan owns the user-visible task tree. Nested route-first
+        // The graph plan owns the user-visible task tree. Nested default-agent
         // task trackers still run, but must not replace the active plan steps.
       },
     },
@@ -151,12 +151,12 @@ export async function executeGraphStep({
   request,
   plan,
   subtask,
-  executeRouteFirst,
+  executeDefaultAgent,
   logger,
   now = Date.now,
 } = {}) {
-  if (typeof executeRouteFirst !== 'function') {
-    throw new Error('executeGraphStep requires executeRouteFirst')
+  if (typeof executeDefaultAgent !== 'function') {
+    throw new Error('executeGraphStep requires executeDefaultAgent')
   }
   if (!subtask?.id) {
     throw new Error('executeGraphStep requires a plan subtask')
@@ -168,11 +168,11 @@ export async function executeGraphStep({
     subtaskId: subtask.id,
     planId: plan?.id,
     capabilityTier: subtask.requiredCapability || 'auto',
-    toolsAvailable: 'route-first-runtime',
+    toolsAvailable: 'default-agent-runtime',
   })
 
   try {
-    const routeResult = await executeRouteFirst(
+    const routeResult = await executeDefaultAgent(
       isolateGraphStepTaskTree(withGraphStepRuntime(request, plan, subtask, logger)),
     )
     const toolEvents = safeToolEvents(routeResult)

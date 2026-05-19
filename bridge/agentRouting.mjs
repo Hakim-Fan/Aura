@@ -1231,7 +1231,7 @@ export function inferRouteState(messages, options = {}) {
 }
 
 export function selectAgentStrategy(classification, hardSignals = {}, options = {}) {
-  let chain = 'route-first'
+  let chain = 'default-agent'
   let reason = 'default-fast-path'
 
   if (hardSignals.forceOrchestrated === true) {
@@ -1257,7 +1257,7 @@ export function selectAgentStrategy(classification, hardSignals = {}, options = 
 
   if (chain === 'orchestrated' && options.orchestratedAvailable === false) {
     return {
-      chain: 'route-first',
+      chain: 'default-agent',
       requestedChain: 'orchestrated',
       reason: 'orchestrated-unavailable-fallback',
     }
@@ -1353,6 +1353,9 @@ export function escalateRouteState(routeState, targetTier) {
 
 export function applyRouteToolBudgets(tools, routeState) {
   if (!Array.isArray(tools) || tools.length === 0) {
+    return tools
+  }
+  if (routeState?.modelDirected === true) {
     return tools
   }
 

@@ -124,7 +124,9 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
       .filter(Boolean)
       .join(', ')
     lines.push(
-      `Current answer mode: ${routeState.answerMode}. Active capability profile: ${enabledModes || 'safe local reads only'}.`,
+      routeState.modelDirected === true
+        ? `Active default-agent capability profile: ${enabledModes || 'safe local reads only'}.`
+        : `Current answer mode: ${routeState.answerMode}. Active capability profile: ${enabledModes || 'safe local reads only'}.`,
     )
     if (routeState.needsExternalFacts === true) {
       lines.push(
@@ -135,14 +137,20 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
         'Web retrieval tools may still be mounted as optional tools on this turn. If they appear in the tool list, use them when local context or current knowledge is insufficient instead of assuming they are blocked by prior classification.',
       )
     }
-    if (Array.isArray(routeState.availableEscalations) && routeState.availableEscalations.length > 0) {
+    if (
+      routeState.modelDirected !== true &&
+      Array.isArray(routeState.availableEscalations) &&
+      routeState.availableEscalations.length > 0
+    ) {
       lines.push(
         `Additional runtime escalations remain possible if the current capability profile is genuinely insufficient: ${routeState.availableEscalations.join(', ')}.`,
       )
     }
-    lines.push(
-      'Internal route budgets and pass limits exist for planning only. Never mention budgets, route tiers, or pass limits to the user.',
-    )
+    if (routeState.modelDirected !== true) {
+      lines.push(
+        'Internal route budgets and pass limits exist for planning only. Never mention budgets, route tiers, or pass limits to the user.',
+      )
+    }
   }
 
   const items = [
@@ -189,7 +197,7 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
   return lines.join('\n')
 }
 
-export function buildRouteFirstSystemPrompt(
+export function buildRuntimeSystemPrompt(
   settings,
   skillPrompt,
   exposureNote,
@@ -401,6 +409,90 @@ export function buildRouteFirstSystemPrompt(
         'When a skill matches a file type or domain (for example a docx skill for Word documents), read that skill before choosing generic shell/Python/Node commands. After reading a skill, treat its named tools, runtimes, libraries, and validation steps as the source of truth for that domain. Do not substitute an unrelated dependency or language-specific package unless the skill explicitly allows it or the skill path is impossible and you clearly report the blocker.',
       )
     }
+  }
+
+  if (exposureNote?.trim()) {
+    sections.push(exposureNote)
+  }
+
+  sections.push(buildLanguagePolicyInstruction(settings))
+
+  return sections.join('\n\n')
+}
+
+export function buildDefaultAgentSystemPrompt(
+  settings,
+  skillPrompt,
+  exposureNote,
+  routeState,
+  toolAvailability = {},
+) {
+  const locale = normalizeRuntimeLocale(settings?.locale)
+  const localeLabel = getLocaleDisplayName(locale)
+  const capabilityProfile = deriveCapabilityProfile(routeState, toolAvailability)
+  const sections = [
+    'You are Aura running in default-agent mode: the main model decides whether to answer directly, make a lightweight plan, use tools, ask the user, or stop with a clear blocker.',
+    `The active workspace is: ${settings.cwd}`,
+    buildHostExecutionContext(),
+    buildCurrentDateContext(),
+    'Understand the user request from context and act naturally in this single default-agent pass.',
+    'For simple questions, answer directly and keep the response concise.',
+    'For multi-step, ambiguous, or stateful work, call todo_write with a short checklist and keep it current. Do not create a plan for trivial one-step work.',
+    'Use tools when they materially reduce uncertainty or let you complete the user request. The mounted tool list is the source of truth for this turn.',
+    'If a needed capability is not obvious and tool_search is mounted, inspect the current tool catalog before claiming the capability is unavailable.',
+    'If the user request needs files, commands, web retrieval, browser interaction, or capability management and the matching tool is mounted, use the tool directly instead of asking the user to do the work.',
+    'Ask the user only when an important product decision, risky action, missing credential, or unavailable input blocks progress.',
+    'Do not claim that something is fixed, installed, configured, created, or completed unless the current run produced direct evidence.',
+    'Verify concrete changes before finalizing when verification is practical. If verification is blocked, say exactly what was done and what remains unverified.',
+    'Do not access paths outside the configured workspace root.',
+    'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
+    'When it improves clarity, use enhanced Markdown fences that the UI can render: ```mermaid for diagrams, ```csv or ```tsv for tabular data, ```json for structured data, and LaTeX math with $...$ or $$...$$. Use these only when they make the answer easier to inspect.',
+    buildApprovalPolicy(settings),
+    buildReasoningInstruction(settings),
+    [
+      'Work memory discipline: reasoning and scratchpad text are temporary process, not reusable task memory.',
+      'When a stage produces reusable synthesized outcomes that are not already obvious from a tool result, such as implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
+      'For long tasks, treat context as a working window rather than durable storage. Process one bounded chunk at a time, call update_progress after durable chunks, and keep ordinary assistant text short until final delivery.',
+      'Do not write full intermediate tables, large drafts, long logs, or raw reasoning into assistant content. If a large result must persist, write or update a file/artifact and keep only its reference, counts, decisions, open questions, and next action in progress/work memory.',
+      'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
+    ].join('\n'),
+    `Primary response locale: ${localeLabel} (${locale}).`,
+  ]
+
+  const enabledModes = [
+    capabilityProfile.hasReadonlyWorkspaceTools ? 'safe local reads' : null,
+    capabilityProfile.hasWorkspaceWriteTools ? 'workspace writes' : null,
+    capabilityProfile.hasWebRetrievalTools ? 'web retrieval' : null,
+    capabilityProfile.hasInteractiveBrowserTools ? 'interactive browser handoff' : null,
+    capabilityProfile.hasCapabilityAdminTools ? 'capability management' : null,
+  ]
+    .filter(Boolean)
+    .join(', ')
+
+  sections.push(`Mounted capability profile: ${enabledModes || 'direct answers only'}.`)
+
+  if (capabilityProfile.hasWorkspaceWriteTools) {
+    sections.push('For code changes, prefer apply_patch as the main editing path. Use write_file mainly for new files or full-document rewrites, keep edit_file / multi_edit_file as exact-match fallbacks, and use replace_line_range after a fresh read_file range when exact patch context repeatedly fails.')
+    sections.push('A high-quality local editing loop is: locate with search_code or glob_files, inspect with read_file or read_block, patch with apply_patch, then do targeted verification before the final answer.')
+    sections.push('For longer-running or interactive commands, prefer exec_command and continue with write_stdin. Use write_stdin to send more input, poll more output, close stdin, or terminate the session. Keep run_shell for short one-shot commands.')
+  }
+
+  if (capabilityProfile.hasWebRetrievalTools) {
+    sections.push('Use web retrieval for current facts, live data, linked pages, or external evidence that may have changed. Prefer local context first when the task is purely about the workspace.')
+    sections.push('Use web_search for quick discovery, web_fetch for a known URL, and web_research when the evidence needs broader synthesis or corroboration.')
+  }
+
+  if (capabilityProfile.hasInteractiveBrowserTools) {
+    sections.push('Use browser/computer tools only for explicit browser workflows such as login, clicking, filling forms, or operating the system browser. Use web retrieval tools for ordinary information gathering.')
+  }
+
+  if (capabilityProfile.hasCapabilityAdminTools) {
+    sections.push('For Aura skill/plugin/MCP management, use the dedicated aura_* tools. Do not install third-party capability commands through shell when an Aura capability tool fits.')
+  }
+
+  if (skillPrompt.trim()) {
+    sections.push('Enabled skill summaries:\n' + skillPrompt)
+    sections.push('At the start of each user request, scan the skill names, ids, and descriptions. If a skill clearly or plausibly matches, call aura_read_skill with the exact skill id before applying the skill.')
   }
 
   if (exposureNote?.trim()) {

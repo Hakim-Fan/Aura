@@ -1,14 +1,5 @@
 const DEFAULT_EVENT_VERSION = 1
 
-const ARCHITECTURE_MODE_ALIASES = new Map([
-  ['route-first', 'legacy'],
-  ['legacy', 'legacy'],
-  ['hybrid', 'hybrid'],
-  ['graph', 'graph'],
-  ['state-machine', 'graph'],
-  ['orchestrated', 'orchestrated'],
-])
-
 function safeString(value) {
   return typeof value === 'string' ? value.trim() : ''
 }
@@ -42,23 +33,19 @@ function safeNumber(value) {
 
 export function normalizeAgentArchitectureMode(value) {
   const normalized = safeString(value).toLowerCase()
-  return ARCHITECTURE_MODE_ALIASES.get(normalized) || 'legacy'
+  return normalized === 'orchestrated' ? 'orchestrated' : 'default-agent'
 }
 
 export function resolveAgentExecutionMode(settings = {}) {
-  const requestedArchitectureMode = safeString(settings?.agentArchitectureMode) || 'route-first'
-  const architectureMode = normalizeAgentArchitectureMode(requestedArchitectureMode)
+  const architectureMode = normalizeAgentArchitectureMode(settings?.agentArchitectureMode)
+  const requestedArchitectureMode = architectureMode
   const effectiveAgentMode = architectureMode === 'orchestrated'
     ? 'orchestrated'
-    : 'route-first'
+    : 'default-agent'
   const pathMode =
-    architectureMode === 'legacy'
-      ? 'standard'
-      : architectureMode === 'hybrid'
-        ? 'standard'
-        : architectureMode === 'graph' || architectureMode === 'orchestrated'
-          ? 'long'
-          : 'standard'
+    architectureMode === 'orchestrated'
+      ? 'long'
+      : 'default'
   const fallbackToLegacy =
     false
 

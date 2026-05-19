@@ -193,7 +193,7 @@ export const defaultSettings: AgentSettings = {
   titleModel: '',
   activeProviderProfileId: 'profile-openai',
   providerProfiles: defaultProfiles(),
-  agentArchitectureMode: 'route-first',
+  agentArchitectureMode: 'default-agent',
   cwd: '',
   locale: 'zh-CN',
   providerProxyEnabled: false,
@@ -489,11 +489,7 @@ function normalizeSessionContextCompression(value: unknown): SessionContextCompr
 }
 
 function normalizeAgentMode(value: unknown): AgentArchitectureMode | undefined {
-  return value === 'route-first' ||
-    value === 'orchestrated' ||
-    value === 'legacy' ||
-    value === 'hybrid' ||
-    value === 'graph'
+  return value === 'default-agent' || value === 'orchestrated'
     ? value
     : undefined
 }
@@ -1440,12 +1436,7 @@ function parseSettings(raw: string | null): AgentSettings {
 }
 
 function normalizeAgentArchitectureMode(value: unknown): AgentArchitectureMode {
-  return value === 'orchestrated' ||
-    value === 'legacy' ||
-    value === 'hybrid' ||
-    value === 'graph'
-    ? value
-    : 'route-first'
+  return value === 'orchestrated' ? 'orchestrated' : 'default-agent'
 }
 
 function normalizeExecutionMode(value: unknown): ExecutionMode {

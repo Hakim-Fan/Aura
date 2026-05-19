@@ -72,6 +72,10 @@ export function evaluateRuntimeCapabilityContract({
   routeState = {},
   selectedTools = [],
 } = {}) {
+  if (routeState?.modelDirected === true) {
+    return null
+  }
+
   const tier = routeState.capabilityTier || ''
   if (!tier) {
     return null

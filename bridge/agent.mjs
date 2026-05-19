@@ -4,7 +4,7 @@ import { selectTurnCapabilities } from './capabilitySelector.mjs'
 import { createAdvancedTools } from './advancedTools.mjs'
 import {
   buildCapabilityExposureNote as buildAgentCapabilityExposureNote,
-  buildRouteFirstSystemPrompt,
+  buildDefaultAgentSystemPrompt,
 } from './agentPrompting.mjs'
 import {
   applyHardSignalIntentOverrides,
@@ -350,19 +350,12 @@ function buildPreflightSystemPromptEstimate({
   settings,
   carryoverContext = '',
 }) {
-  const hardSignals = deriveHardSignals(messages)
-  const routeState = inferRouteState(messages, {
-    classification: null,
-    hardSignals,
-    settings,
-  })
+  const routeState = createDefaultAgentRouteState(settings)
   const promptRouteState = {
     ...routeState,
-    availableEscalations: getRouteEscalationTargets(routeState, {
-      visitedTiers: new Set([routeState.capabilityTier]),
-    }),
+    availableEscalations: [],
   }
-  const estimatedSystemPrompt = buildRouteFirstSystemPrompt(
+  const estimatedSystemPrompt = buildDefaultAgentSystemPrompt(
     buildEffectiveRunSettings(settings, promptRouteState),
     '',
     '',
@@ -612,6 +605,31 @@ function buildEffectiveRunSettings(settings, routeState) {
 
 function shouldLoadRuntimeCapabilityLayers(routeState) {
   return true
+}
+
+function createDefaultAgentRouteState(settings = {}) {
+  return {
+    modelDirected: true,
+    answerMode: 'advise',
+    capabilityTier: 'default-agent',
+    researchMode: 'auto',
+    webRetrievalAvailable: true,
+    needsExternalFacts: false,
+    webInteractionRequired: false,
+    workspaceRelated: true,
+    responseStyle: 'adaptive-default',
+    taskComplexity: 'model_directed',
+    planDepth: 'model_directed',
+    executionMode: settings?.executionMode === 'long-task' ? 'long-task' : 'bounded',
+    allowEscalationTo: [],
+    budgets: {},
+    completionPolicy: {
+      canClaimDone: true,
+      requiresEvidenceForDone: false,
+    },
+    isCapabilityAdminTask: false,
+    explicitSystemBrowserRequest: false,
+  }
 }
 
 function buildCompletionContext(routeState, toolEvents, runtimeBlocks = {}) {
@@ -947,7 +965,7 @@ function createRouteEscalationTool(routeState, availableEscalations) {
     source: 'builtin',
     name: ROUTE_ESCALATION_TOOL_NAME,
     description:
-      'Request a route-first capability upgrade when the current tier is genuinely insufficient for the user goal.',
+      'Request a runtime capability upgrade when the current mounted tool set is genuinely insufficient for the user goal.',
     internalOnly: true,
     inputSchema: {
       type: 'object',
@@ -1730,7 +1748,7 @@ function createTaskTracker(hooks, rootTitle) {
   }
 }
 
-export async function runRouteFirstAgent(request) {
+export async function runDefaultAgent(request) {
   const {
     settings,
     messages: requestedMessages,
@@ -1818,13 +1836,7 @@ export async function runRouteFirstAgent(request) {
     runtime.taskTracker || createTaskTracker(hooks, summarizeMessages(messages))
   const currentTaskId = runtime.currentTaskId || taskTracker.rootId
   taskTracker.setStatus(currentTaskId, 'running')
-  const hardSignals = deriveHardSignals(messages)
-  const initialNormalizedClassification = null
-  const initialRouteState = inferRouteState(messages, {
-    classification: initialNormalizedClassification,
-    hardSignals,
-    settings,
-  })
+  const initialRouteState = createDefaultAgentRouteState(settings)
   const shouldLoadCapabilityLayers = shouldLoadRuntimeCapabilityLayers(initialRouteState)
 
   const builtinTools = createBuiltinTools(context)
@@ -1843,11 +1855,7 @@ export async function runRouteFirstAgent(request) {
     }),
     taskTracker,
   })
-  const [classificationResult, skillCatalog, pluginInventory, mcpInventory] = await Promise.all([
-    resolveIntentClassification(messages, settings, {
-      hardSignals,
-      settings,
-    }).catch(() => null),
+  const [skillCatalog, pluginInventory, mcpInventory] = await Promise.all([
     shouldLoadCapabilityLayers
       ? loadSkillCatalog(appRoot, capabilities?.skills || settings.enabledSkillIds || [])
       : Promise.resolve([]),
@@ -1889,26 +1897,13 @@ export async function runRouteFirstAgent(request) {
     discoverableToolCount: toolRegistry.discoverableEntries.length,
     highRiskToolCount: toolRegistry.catalog?.highRiskCount || 0,
   })
-  const classification = classificationResult?.classification || null
-  const normalizedClassification = classification
-    ? applyHardSignalIntentOverrides(classification, hardSignals)
-    : null
-  const strategy = selectAgentStrategy(normalizedClassification, hardSignals, {
-    orchestratedAvailable: ORCHESTRATED_AGENT_AVAILABLE,
-  })
-
-  if (strategy.chain === 'orchestrated' && ORCHESTRATED_AGENT_AVAILABLE) {
-    await mcpInventory.close().catch(() => {})
-    return runOrchestratedAgent(request)
+  const normalizedClassification = null
+  const strategy = {
+    chain: 'default-agent',
+    reason: 'model-directed',
   }
 
-  let routeState = normalizedClassification
-    ? inferRouteState(messages, {
-        classification: normalizedClassification,
-        hardSignals,
-        settings,
-      })
-    : initialRouteState
+  let routeState = initialRouteState
   const visitedTiers = new Set([routeState.capabilityTier])
   const routeNotes = []
   const routeHistory = []
@@ -1919,8 +1914,8 @@ export async function runRouteFirstAgent(request) {
   let lastRouteDecision = {
     strategyDecision: strategy,
     intentClassification: normalizedClassification || undefined,
-    classificationSource: classificationResult?.source || undefined,
-    classificationReason: classificationResult?.reason || undefined,
+    classificationSource: undefined,
+    classificationReason: undefined,
     answerMode: routeState.answerMode,
     capabilityTier: routeState.capabilityTier,
     budgets: {
@@ -1949,7 +1944,7 @@ export async function runRouteFirstAgent(request) {
   let checkpointId = null
 
   try {
-    for (let pass = 0; pass < MAX_ROUTE_RUNTIME_PASSES; pass += 1) {
+    for (let pass = 0; pass < 1; pass += 1) {
       const snapshot = checkpointManager.createSnapshot({
         messages,
         toolEvents,
@@ -2007,7 +2002,7 @@ export async function runRouteFirstAgent(request) {
       )
       lastSystemPrompt = appendCarryoverContextToPrompt(
         appendRouteNotesToPrompt(
-          buildRouteFirstSystemPrompt(
+          buildDefaultAgentSystemPrompt(
             effectiveRunSettings,
             skillPrompt,
             exposureNote,
@@ -2022,13 +2017,7 @@ export async function runRouteFirstAgent(request) {
         lastSystemPrompt,
         context,
       )
-      const escalationTool = createRouteEscalationTool(
-        promptRouteState,
-        availableEscalations,
-      )
-      const allTools = escalationTool
-        ? [...selectedCapabilities.selectedTools, escalationTool]
-        : selectedCapabilities.selectedTools
+      const allTools = selectedCapabilities.selectedTools
       const toolSchemaTokens = estimateMountedToolSchemaTokens(allTools, effectiveRunSettings)
       const runtimeCompression = await maybeCompressMessagesForContext({
         messages,
@@ -2056,8 +2045,8 @@ export async function runRouteFirstAgent(request) {
         availableEscalations,
         tierHistory: [...routeHistory.map(entry => entry.capabilityTier), routeState.capabilityTier],
         classification: normalizedClassification,
-        classificationSource: classificationResult?.source,
-        classificationReason: classificationResult?.reason,
+        classificationSource: undefined,
+        classificationReason: undefined,
         strategy,
       })
       hooks?.onRouteDecision?.(lastRouteDecision)
@@ -2206,8 +2195,8 @@ export async function runRouteFirstAgent(request) {
         availableEscalations,
         tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),
         classification: normalizedClassification,
-        classificationSource: classificationResult?.source,
-        classificationReason: classificationResult?.reason,
+        classificationSource: undefined,
+        classificationReason: undefined,
         strategy,
         stopReason:
           routeStopReason ||
@@ -2269,7 +2258,7 @@ export async function runRouteFirstAgent(request) {
         ...result,
         usage: getAccumulatedUsage() || result.usage,
         contextCompression: getLatestContextCompression(),
-        agentMode: 'route-first',
+        agentMode: 'default-agent',
         routeDecision: lastRouteDecision,
         capabilitySnapshot: selectedCapabilities.capabilitySnapshot,
         reasoning,
@@ -2280,11 +2269,11 @@ export async function runRouteFirstAgent(request) {
       }
     }
 
-    throw createStructuredError('Route-first 执行在多次能力升级后仍未收敛到最终回答。', {
+    throw createStructuredError('default-agent 执行结束前没有生成最终回答。', {
       source: 'system',
       category: 'execution_failed',
       code: 'ROUTE_RUNTIME_EXHAUSTED',
-      detail: `Route runtime exceeded ${MAX_ROUTE_RUNTIME_PASSES} passes without converging.`,
+      detail: 'Default-agent finished without a converged final response.',
       suggestedAction: '请缩小任务范围，或调整任务指令后再试。',
     })
   } catch (error) {
@@ -2367,7 +2356,7 @@ export async function runRouteFirstAgent(request) {
           return {
             ...recoveredResult,
             toolEvents,
-            agentMode: 'route-first',
+            agentMode: 'default-agent',
             routeDecision: lastRouteDecision,
             capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
             reasoning: summaryReasoning,
@@ -2418,7 +2407,7 @@ export async function runRouteFirstAgent(request) {
       return {
         ...fallbackResult,
         toolEvents,
-        agentMode: 'route-first',
+        agentMode: 'default-agent',
         routeDecision: lastRouteDecision,
         capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
         reasoning: summaryReasoning,
@@ -2438,7 +2427,7 @@ export async function runRouteFirstAgent(request) {
     enriched.rawMessage = normalized.rawMessage
     enriched.errorInfo = normalized.errorInfo
     enriched.retryInfo = retryInfo
-    enriched.agentMode = 'route-first'
+    enriched.agentMode = 'default-agent'
     enriched.routeDecision = {
       ...lastRouteDecision,
       stopReason:
@@ -2514,7 +2503,7 @@ async function runFastPathAgent(request, classification, taskFrame) {
     ...result,
     status: 'completed',
     completionState: 'not_executed',
-    agentMode: 'route-first',
+    agentMode: 'default-agent',
     pathMode: 'fast',
     routeDecision: {
       answerMode: 'advise',
@@ -2548,7 +2537,7 @@ function buildDirectPlanningAnswerResult(planning, classification, taskFrame) {
     taskTree: [],
     reasoning: [],
     completionState: 'not_executed',
-    agentMode: 'route-first',
+    agentMode: 'default-agent',
     pathMode: 'fast',
     routeDecision: {
       answerMode: 'advise',
@@ -2701,7 +2690,7 @@ async function runModelPlanningGate({
 
   logger?.emit?.('agent.planning.started', {
     planner: 'model_planning_prompt',
-    legacyPathMode: classification?.pathMode,
+    priorPathMode: classification?.pathMode,
     reason: classification?.reason,
   })
   hooks?.onPhaseChange?.('planning')
@@ -2790,14 +2779,13 @@ export async function runAgent(request) {
     mode,
   })
   const hooks = wrapAgentRuntimeHooks(request?.hooks || {}, runtimeLogger)
-  const effectiveSettings =
-    mode.effectiveAgentMode === 'route-first' &&
-    request?.settings?.agentArchitectureMode !== 'route-first'
-      ? {
-          ...(request?.settings || {}),
-          agentArchitectureMode: 'route-first',
-        }
-      : request?.settings
+  const effectiveSettings = {
+    ...(request?.settings || {}),
+    agentArchitectureMode:
+      mode.effectiveAgentMode === 'orchestrated'
+        ? 'orchestrated'
+        : 'default-agent',
+  }
   const effectiveRequest = {
     ...request,
     hooks,
@@ -2824,27 +2812,7 @@ export async function runAgent(request) {
       ],
     }
   }
-  const legacyClassification = classifyAgentTask({
-    messages: effectiveRequest.messages,
-    settings: effectiveSettings,
-  })
-  const taskFrame = resolveTaskFrame({
-    messages: effectiveRequest.messages,
-    runtime: effectiveRequest.runtime,
-    settings: effectiveSettings,
-  })
-  const classification = applyTaskFrameToClassification(
-    legacyClassification,
-    taskFrame,
-  )
-  const graphCheckpoint =
-    effectiveRequest?.runtime?.graphCheckpoint ||
-    effectiveRequest?.runtime?.restoreGraphCheckpoint ||
-    null
-  let executionPathMode =
-    graphCheckpoint || mode.architectureMode === 'graph' || mode.architectureMode === 'orchestrated'
-      ? 'long'
-      : classification.pathMode
+  let executionPathMode = mode.pathMode || 'default'
   runtimeLogger.setPathMode(executionPathMode)
 
   runtimeLogger.emit('agent.run.started', {
@@ -2853,158 +2821,20 @@ export async function runAgent(request) {
     cwd: request?.settings?.cwd,
     effectiveAgentMode: mode.effectiveAgentMode,
   })
-  runtimeLogger.emit('agent.classifier.result', {
-    pathMode: classification.pathMode,
-    complexity: classification.complexity,
-    risk: classification.risk,
-    requiresTools: classification.requiresTools,
-    requiresWrite: classification.requiresWrite,
-    reason: classification.reason,
-    confidence: classification.confidence,
-    latestUserTextLength: classification.latestUserTextLength,
-    legacyPathMode: legacyClassification.pathMode,
-    taskFrameBlockedFastPath: classification.taskFrameBlockedFastPath === true,
+  runtimeLogger.emit('agent.path.selected', {
+    pathMode: executionPathMode,
+    reason:
+      mode.effectiveAgentMode === 'orchestrated'
+        ? 'orchestrated execution requested'
+        : 'default-agent model-directed execution',
+    confidence: 'model-directed',
+    estimatedRisk: 'model-directed',
   })
-  runtimeLogger.emit('agent.task_frame.resolved', {
-    source: taskFrame.source,
-    blocksFastPath: taskFrame.blocksFastPath,
-    recommendedPathMode: taskFrame.recommendedPathMode,
-    pendingActionCount: taskFrame.pendingActions.length,
-    priorExecutionState: taskFrame.priorExecution?.completionState,
-    requiresEvidenceForDone: taskFrame.requiresEvidenceForDone,
-    reasons: taskFrame.reasons,
-  })
-  let pathSelectionEmitted = false
-  function emitPathSelected(reason, estimatedRisk = classification.risk) {
-    runtimeLogger.emit('agent.path.selected', {
-      pathMode: executionPathMode,
-      reason: reason ||
-        (executionPathMode === 'fast'
-          ? 'simple no-tool request selected for fast path'
-          : executionPathMode === 'long'
-            ? 'hybrid state graph selected for complex or graph-requested execution'
-          : mode.architectureMode === 'legacy'
-          ? 'route-first legacy execution remains the default stable path'
-          : mode.fallbackToLegacy
-            ? `${mode.architectureMode} is not implemented yet; falling back to route-first`
-            : `${mode.architectureMode} execution requested`),
-      confidence: classification.confidence,
-      estimatedRisk,
-    })
-    pathSelectionEmitted = true
-  }
-  if (mode.fallbackToLegacy) {
-    runtimeLogger.emit(
-      'agent.architecture.fallback',
-      {
-        fromMode: mode.architectureMode,
-        toMode: 'legacy',
-        reason: 'requested architecture mode is staged but not implemented in this build',
-      },
-      { level: 'warn' },
-    )
-  }
 
   try {
-    let result
-    let plannedInitialPlan = null
-    let planningReasoning = null
-    if (!graphCheckpoint && mode.effectiveAgentMode === 'route-first') {
-      const planningGate = await runModelPlanningGate({
-        request: effectiveRequest,
-        classification,
-        taskFrame,
-        logger: runtimeLogger,
-      })
-      planningReasoning = planningGate.planningReasoning || null
-      if (planningGate.type === 'direct_answer') {
-        executionPathMode = 'fast'
-        runtimeLogger.setPathMode(executionPathMode)
-        emitPathSelected('model planning prompt returned direct_answer', 'low')
-        result = planningGate.result
-      } else {
-        plannedInitialPlan = planningGate.plan
-        executionPathMode = 'long'
-        runtimeLogger.setPathMode(executionPathMode)
-        hooks?.onTaskTree?.(planToTaskTree(plannedInitialPlan))
-        emitPathSelected(
-          'model planning prompt returned executable plan',
-          plannedInitialPlan?.risk || classification.risk,
-        )
-      }
-    }
-    if (!pathSelectionEmitted) {
-      emitPathSelected()
-    }
-    if (!result && (
-      executionPathMode === 'fast' &&
-      mode.effectiveAgentMode === 'route-first' &&
-      !mode.fallbackToLegacy
-    )) {
-      runtimeLogger.emit('agent.fast_path.started', {
-        reason: classification.reason,
-      })
-      result = await runFastPathAgent(effectiveRequest, classification, taskFrame)
-      runtimeLogger.emit('agent.fast_path.finished', {
-        status: result?.status || 'completed',
-        toolCount: 0,
-        inputTokens: result?.usage?.inputTokens,
-        outputTokens: result?.usage?.outputTokens,
-        durationMs: runtimeLogger.elapsedMs(),
-      })
-    } else if (!result && (
-      executionPathMode === 'long' &&
-      mode.effectiveAgentMode === 'route-first'
-    )) {
-      if (graphCheckpoint) {
-        result = await runHybridStateGraph({
-          request: effectiveRequest,
-          classification,
-          logger: runtimeLogger,
-          executeRouteFirst: runRouteFirstAgent,
-          restoreCheckpoint: graphCheckpoint,
-        })
-      } else {
-        const initialPlan = plannedInitialPlan || createHybridPlan({
-          request: effectiveRequest,
-          classification,
-        })
-        if (effectiveRequest?.settings?.requireLongTaskPlanApproval === true) {
-          const planApproval = await requestPlanApproval({
-            hooks,
-            logger: runtimeLogger,
-            plan: initialPlan,
-            classification,
-          })
-          if (!planApproval.approved) {
-            result = buildRejectedPlanResult({
-              plan: initialPlan,
-              approval: planApproval,
-            })
-          }
-        } else {
-          runtimeLogger.emit('agent.plan.approval.skipped', {
-            planId: initialPlan?.id,
-            reason: 'long_task_plan_approval_disabled',
-          })
-        }
-
-        if (!result) {
-          result = await runHybridStateGraph({
-            request: effectiveRequest,
-            classification,
-            logger: runtimeLogger,
-            executeRouteFirst: runRouteFirstAgent,
-            initialPlan,
-          })
-        }
-      }
-    } else if (!result && mode.effectiveAgentMode === 'orchestrated') {
-      result = await runOrchestratedAgent(effectiveRequest)
-    } else if (!result) {
-      result = await runRouteFirstAgent(effectiveRequest)
-    }
-    result = prependReasoningEntry(result, planningReasoning)
+    const result = mode.effectiveAgentMode === 'orchestrated'
+      ? await runOrchestratedAgent(effectiveRequest)
+      : await runDefaultAgent(effectiveRequest)
     if (result?.recovered === true || result?.retryInfo?.recovered === true) {
       runtimeLogger.emit('agent.recovery.event', {
         stage: 'completed',
@@ -3033,7 +2863,7 @@ export async function runAgent(request) {
         completionState: result?.completionState,
         isComplete:
           result?.status === 'completed' &&
-          !isCompletionStateIncompleteForExecution(result, {}, taskFrame),
+          !isCompletionStateIncompleteForExecution(result, {}, {}),
         evidence: result?.evidenceSummary,
       },
     )

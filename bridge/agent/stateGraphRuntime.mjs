@@ -373,15 +373,15 @@ export async function runHybridStateGraph({
   request,
   classification,
   logger,
-  executeRouteFirst,
+  executeDefaultAgent,
   maxGraphPasses,
   restoreCheckpoint,
   initialPlan,
   now = Date.now,
   random = Math.random,
 } = {}) {
-  if (typeof executeRouteFirst !== 'function') {
-    throw new Error('runHybridStateGraph requires executeRouteFirst')
+  if (typeof executeDefaultAgent !== 'function') {
+    throw new Error('runHybridStateGraph requires executeDefaultAgent')
   }
 
   let currentState = AgentGraphState.INIT
@@ -490,12 +490,12 @@ export async function runHybridStateGraph({
   if (!restoredContext?.success) {
     emitTransition(AgentGraphState.CLASSIFY, 'task classification is available')
     emitTransition(AgentGraphState.PLAN, 'hybrid plan created')
-    emitTransition(AgentGraphState.SELECT_CAPABILITY, 'delegate capability selection to route-first runtime')
+    emitTransition(AgentGraphState.SELECT_CAPABILITY, 'delegate capability selection to default-agent runtime')
   } else {
     emitTransition(AgentGraphState.PLAN, 'hybrid plan restored from checkpoint', {
       checkpointId: restoredContext.checkpointId,
     })
-    emitTransition(AgentGraphState.SELECT_CAPABILITY, 'resume through route-first runtime')
+    emitTransition(AgentGraphState.SELECT_CAPABILITY, 'resume through default-agent runtime')
   }
 
   try {
@@ -538,7 +538,7 @@ export async function runHybridStateGraph({
         reason: 'before_execute_step',
       })
 
-      emitTransition(AgentGraphState.EXECUTE_STEP, 'execute the current plan through route-first runtime', {
+      emitTransition(AgentGraphState.EXECUTE_STEP, 'execute the current plan through default-agent runtime', {
         stepId: activeSubtask?.id,
       })
       const stepRequest = buildPlannedSubtaskRequest(activeRequest, {
@@ -551,7 +551,7 @@ export async function runHybridStateGraph({
         request: stepRequest,
         plan,
         subtask: activeSubtask,
-        executeRouteFirst,
+        executeDefaultAgent,
         logger,
         now,
       })
@@ -561,7 +561,7 @@ export async function runHybridStateGraph({
       latestResult = result
       latestExecutionResult = executionResult
 
-      emitTransition(AgentGraphState.OBSERVE, 'route-first execution returned a result', {
+      emitTransition(AgentGraphState.OBSERVE, 'default-agent execution returned a result', {
         stepId: activeSubtask?.id,
         toolEventCount: executionResult.toolEvents.length,
         executionStatus: executionResult.status,
@@ -803,7 +803,7 @@ export async function runHybridStateGraph({
     if (activeSubtask?.id) {
       updateSubtask(activeSubtask.id, 'failed', 0)
     }
-    emitTransition(AgentGraphState.RECOVER, 'route-first execution raised an error', {
+    emitTransition(AgentGraphState.RECOVER, 'default-agent execution raised an error', {
       stepId: activeSubtask?.id,
       errorCode: error?.code,
     })

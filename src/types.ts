@@ -227,11 +227,8 @@ export type CapabilityUsageSnapshot = {
 }
 
 export type AgentArchitectureMode =
-  | 'route-first'
+  | 'default-agent'
   | 'orchestrated'
-  | 'legacy'
-  | 'hybrid'
-  | 'graph'
 
 export type RouteAnswerMode = 'advise' | 'diagnose' | 'execute'
 
