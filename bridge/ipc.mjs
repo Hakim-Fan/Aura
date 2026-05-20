@@ -85,7 +85,27 @@ function createDeltaEmitter(type) {
 }
 
 function emit(event) {
-  process.stdout.write(`${JSON.stringify(sanitizePayload(event))}\n`)
+  return process.stdout.write(`${JSON.stringify(sanitizePayload(event))}\n`)
+}
+
+function waitForStdoutDrain() {
+  return new Promise((resolve) => {
+    process.stdout.once('drain', resolve)
+  })
+}
+
+function flushStdout() {
+  return new Promise((resolve) => {
+    process.stdout.write('', resolve)
+  })
+}
+
+async function emitAndFlush(event) {
+  const accepted = emit(event)
+  if (!accepted) {
+    await waitForStdoutDrain()
+  }
+  await flushStdout()
 }
 
 const PHASE_STALL_TIMEOUTS_MS = {
@@ -207,17 +227,14 @@ const rl = readline.createInterface({
   crlfDelay: Infinity,
 })
 
-function finishProcess(exitCode = 0) {
+async function finishProcess(exitCode = 0) {
   process.exitCode = exitCode
   rl.close()
-  const exit = () => {
-    process.exit(exitCode)
-  }
   if (process.stdout.writableNeedDrain) {
-    process.stdout.once('drain', () => setImmediate(exit))
-    return
+    await waitForStdoutDrain()
   }
-  setImmediate(exit)
+  await flushStdout()
+  process.exit(exitCode)
 }
 
 rl.on('line', (line) => {
@@ -467,6 +484,9 @@ rl.on('line', (line) => {
         researchMode: input.researchMode === 'deep' ? 'deep' : 'auto',
       }))
     },
+    hasQueuedAppendedInputs() {
+      return appendedInputs.some((input) => input.status === 'queued')
+    },
     createCurrentStepAbortController() {
       currentStepAbortController = new AbortController()
       return currentStepAbortController
@@ -482,21 +502,21 @@ rl.on('line', (line) => {
     ...message.payload,
     hooks,
   })
-    .then((result) => {
+    .then(async (result) => {
       executionMonitor.stop()
       activeExecutionMonitor = null
       clearTaskScopedApprovals()
-      emit({
+      await emitAndFlush({
         type: 'completed',
         result,
       })
-      finishProcess(0)
+      await finishProcess(0)
     })
-    .catch((error) => {
+    .catch(async (error) => {
       executionMonitor.stop()
       activeExecutionMonitor = null
       clearTaskScopedApprovals()
-      emit({
+      await emitAndFlush({
         type: 'failed',
         message: error instanceof Error ? error.message : String(error),
         code:
@@ -552,6 +572,6 @@ rl.on('line', (line) => {
             ? error.routeDecision
             : undefined,
       })
-      finishProcess(1)
+      await finishProcess(1)
     })
 })

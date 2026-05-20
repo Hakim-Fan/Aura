@@ -5133,6 +5133,52 @@ fn search_sessions_sqlite<R: Runtime>(
 }
 
 #[tauri::command]
+fn list_deleted_sessions_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let connection = open_app_db(&app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT s.id, s.title, s.provider_profile_id, s.provider, s.model, s.folder_id, s.workspace_path, s.workspace_root, s.workspace_mode, s.context_compression_json, s.updated_at, s.deleted_at,
+                    COUNT(m.id) AS message_count
+             FROM sessions s
+             LEFT JOIN messages m ON m.session_id = s.id AND m.deleted_at = 0
+             WHERE s.deleted_at > 0
+             GROUP BY s.id
+             ORDER BY s.deleted_at DESC",
+        )
+        .map_err(|error| format!("Failed to prepare deleted sessions query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "providerProfileId": row.get::<_, String>(2)?,
+                "provider": row.get::<_, String>(3)?,
+                "model": row.get::<_, String>(4)?,
+                "folderId": row.get::<_, Option<String>>(5)?,
+                "workspacePath": row.get::<_, String>(6)?,
+                "workspaceRoot": row.get::<_, String>(7)?,
+                "workspaceMode": row.get::<_, String>(8)?,
+                "contextCompression": parse_json_object_column(row.get::<_, Option<String>>(9)?),
+                "messages": Vec::<serde_json::Value>::new(),
+                "messagesLoaded": false,
+                "messageCount": row.get::<_, i64>(12)?,
+                "toolEvents": Vec::<serde_json::Value>::new(),
+                "taskTree": Vec::<serde_json::Value>::new(),
+                "updatedAt": row.get::<_, i64>(10)?,
+                "deletedAt": row.get::<_, i64>(11)?,
+            }))
+        })
+        .map_err(|error| format!("Failed to read deleted sessions: {error}"))?;
+    let mut sessions = Vec::new();
+    for row in rows {
+        sessions.push(row.map_err(|error| format!("Failed to decode deleted session row: {error}"))?);
+    }
+    Ok(sessions)
+}
+
+#[tauri::command]
 fn load_work_memories_sqlite<R: Runtime>(
     app: tauri::AppHandle<R>,
     session_id: String,
@@ -5452,6 +5498,22 @@ fn delete_session_sqlite<R: Runtime>(
             params![session_id, deleted_at],
         )
         .map_err(|error| format!("Failed to delete session from SQLite: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn restore_session_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    session_id: String,
+) -> Result<(), String> {
+    let connection = open_app_db(&app)?;
+    let restored_at = current_timestamp_ms() as i64;
+    connection
+        .execute(
+            "UPDATE sessions SET deleted_at = 0, updated_at = ?2 WHERE id = ?1 AND deleted_at > 0",
+            params![session_id, restored_at],
+        )
+        .map_err(|error| format!("Failed to restore session from SQLite: {error}"))?;
     Ok(())
 }
 
@@ -6276,6 +6338,7 @@ fn main() {
             load_persisted_app_state,
             load_session_messages_sqlite,
             search_sessions_sqlite,
+            list_deleted_sessions_sqlite,
             load_work_memories_sqlite,
             list_agent_runs_sqlite,
             load_agent_run_sqlite,
@@ -6284,6 +6347,7 @@ fn main() {
             save_session_folders_sqlite,
             upsert_session_sqlite,
             delete_session_sqlite,
+            restore_session_sqlite,
             purge_session_sqlite,
             upsert_message_sqlite,
             delete_message_sqlite,

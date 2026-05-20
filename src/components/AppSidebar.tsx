@@ -19,10 +19,12 @@ import {
   Loader2,
   Pencil,
   Plus,
+  RotateCcw,
   Search,
   Settings2,
   Trash2,
   Wand2,
+  X,
 } from 'lucide-react'
 import type { Session, SessionFolder } from '../types'
 import { formatConversationTimestamp } from '../lib/sessionMeta'
@@ -33,6 +35,7 @@ type Props = {
   sessionFilter: string
   onSessionFilterChange: (value: string) => void
   sessions: Session[]
+  deletedSessions: Session[]
   sessionFolders: SessionFolder[]
   runningSessionIds: string[]
   activeSessionId: string | null
@@ -44,6 +47,8 @@ type Props = {
   onShowToast?: (message: string, tone?: 'success' | 'error') => void
   onRenameSessionFolder: (folderId: string, title: string) => void
   onDeleteSession: (sessionId: string) => void
+  onRestoreSession: (sessionId: string) => void | Promise<void>
+  onPermanentlyDeleteSession: (sessionId: string) => void | Promise<void>
   onDeleteSessionFolder: (folderId: string) => void
   onToggleSessionFolder: (folderId: string) => void
   onMoveSessionToFolder: (sessionId: string, folderId?: string) => void
@@ -178,6 +183,7 @@ export function AppSidebar({
   sessionFilter,
   onSessionFilterChange,
   sessions,
+  deletedSessions,
   sessionFolders,
   runningSessionIds,
   activeSessionId,
@@ -189,6 +195,8 @@ export function AppSidebar({
   onShowToast,
   onRenameSessionFolder,
   onDeleteSession,
+  onRestoreSession,
+  onPermanentlyDeleteSession,
   onDeleteSessionFolder,
   onToggleSessionFolder,
   onMoveSessionToFolder,
@@ -206,6 +214,16 @@ export function AppSidebar({
   const [editingTitle, setEditingTitle] = useState('')
   const [titleGenerating, setTitleGenerating] = useState(false)
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
+  const [trashOpen, setTrashOpen] = useState(false)
+  const [trashBusySessionId, setTrashBusySessionId] = useState('')
+  const [restoreConfirmation, setRestoreConfirmation] = useState<{
+    id: string
+    title: string
+  } | null>(null)
+  const [permanentDeleteConfirmation, setPermanentDeleteConfirmation] = useState<{
+    id: string
+    title: string
+  } | null>(null)
   const [folderDraft, setFolderDraft] = useState('')
   const [renameFolder, setRenameFolder] = useState<{ id: string; title: string } | null>(null)
   const [deleteFolderId, setDeleteFolderId] = useState<string | null>(null)
@@ -237,7 +255,6 @@ export function AppSidebar({
   )
 
   const deletingFolder = sessionFolders.find(folder => folder.id === deleteFolderId) || null
-
   function startRename(session: Session) {
     setRenameSession({ id: session.id, title: session.title })
     setEditingTitle(session.title)
@@ -343,6 +360,24 @@ export function AppSidebar({
 
   function handleDragCancel() {
     document.body.style.cursor = ''
+  }
+
+  async function handleRestoreSession(sessionId: string) {
+    setTrashBusySessionId(sessionId)
+    try {
+      await onRestoreSession(sessionId)
+    } finally {
+      setTrashBusySessionId('')
+    }
+  }
+
+  async function handlePermanentlyDeleteSession(sessionId: string) {
+    setTrashBusySessionId(sessionId)
+    try {
+      await onPermanentlyDeleteSession(sessionId)
+    } finally {
+      setTrashBusySessionId('')
+    }
   }
 
   return (
@@ -499,26 +534,37 @@ export function AppSidebar({
       </DndContext>
 
       <div className="flex items-center justify-between border-t border-[var(--border-subtle)] p-4">
-        <button
-          className={`rounded-lg p-2 text-[var(--text-secondary)] transition-colors ${settingsOpen
-            ? 'bg-[var(--bg-sidebar-active)] text-[var(--text-primary)]'
-            : 'hover:bg-[rgba(0,0,0,0.05)]'
-            }`}
-          onClick={onOpenSettings}
-          title="设置"
-        >
-          <Settings2 size={16} />
-        </button>
-
-        {updateRelease ? (
+        <div className="flex items-center gap-1.5">
           <button
-            onClick={onShowUpdate}
-            className="group flex items-center gap-1.5 rounded-full bg-[#e2eeed] px-2.5 py-1.5 text-[#4f7b74] transition-all active:scale-95 hover:bg-[#d6e5e4]"
+            className={`rounded-lg p-2 text-[var(--text-secondary)] transition-colors ${settingsOpen
+              ? 'bg-[var(--bg-sidebar-active)] text-[var(--text-primary)]'
+              : 'hover:bg-[rgba(0,0,0,0.05)]'
+              }`}
+            onClick={onOpenSettings}
+            title="设置"
           >
-            <ArrowUpCircle size={15} className="text-[#6da099] transition-transform group-hover:scale-110" />
-            <span className="text-12px font-700 tracking-wide">更新</span>
+            <Settings2 size={16} />
           </button>
-        ) : null}
+
+          {updateRelease ? (
+            <button
+              onClick={onShowUpdate}
+              className="group flex items-center gap-1.5 rounded-full bg-[#e2eeed] px-2.5 py-1.5 text-[#4f7b74] transition-all active:scale-95 hover:bg-[#d6e5e4]"
+            >
+              <ArrowUpCircle size={15} className="text-[#6da099] transition-transform group-hover:scale-110" />
+              <span className="text-12px font-700 tracking-wide">更新</span>
+            </button>
+          ) : null}
+        </div>
+
+        <button
+          className="rounded-lg p-2 text-[var(--text-secondary)] transition-colors hover:bg-[rgba(0,0,0,0.05)] hover:text-[var(--text-primary)]"
+          onClick={() => setTrashOpen(true)}
+          title="回收站"
+          type="button"
+        >
+          <Trash2 size={16} />
+        </button>
       </div>
 
       <ConfirmModal
@@ -625,7 +671,7 @@ export function AppSidebar({
         title="移入回收站？"
         description={`“${deleteConfirmation?.title}”会从当前列表移除，并可在回收站中找回。`}
         confirmText="移入回收站"
-        cancelText="保留会话"
+        cancelText="取消"
         variant="warning"
         onConfirm={() => {
           if (deleteConfirmation) {
@@ -636,6 +682,131 @@ export function AppSidebar({
         onCancel={() => {
           setDeleteConfirmation(null)
         }}
+      />
+
+      {trashOpen ? (
+        <div
+          className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/40 p-4 backdrop-blur-[2px]"
+          onClick={() => setTrashOpen(false)}
+        >
+          <div
+            className="flex max-h-[76vh] w-full max-w-[520px] flex-col overflow-hidden rounded-2xl border border-[var(--border-subtle)] bg-white shadow-[0_20px_50px_rgba(0,0,0,0.2)]"
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
+              <div>
+                <h3 className="text-17px font-800 text-[var(--text-primary)]">回收站</h3>
+                <p className="mt-1 text-12px text-[var(--text-secondary)]">
+                  已移入回收站的会话可以恢复，删除后将无法找回。
+                </p>
+              </div>
+              <button
+                className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-[var(--text-primary)]"
+                onClick={() => setTrashOpen(false)}
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="custom-scrollbar min-h-[180px] max-h-[420px] overflow-y-auto p-3">
+              {deletedSessions.length > 0 ? (
+                <div className="flex flex-col gap-2">
+                  {deletedSessions.map(session => {
+                    const busy = trashBusySessionId === session.id
+                    return (
+                      <div
+                        key={session.id}
+                        className="flex items-center justify-between gap-3 rounded-xl border border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.02)] px-3 py-2.5"
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate text-13px font-700 text-[var(--text-primary)]">
+                            {session.title}
+                          </div>
+                          <div className="mt-0.5 text-11px text-[var(--text-secondary)] opacity-70">
+                            {session.deletedAt
+                              ? `删除于 ${formatConversationTimestamp(session.deletedAt)}`
+                              : `更新于 ${formatConversationTimestamp(session.updatedAt)}`}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[var(--accent-soft-strong)] transition-colors hover:bg-[rgba(79,123,116,0.08)] disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={busy}
+                            onClick={() =>
+                              setRestoreConfirmation({
+                                id: session.id,
+                                title: session.title,
+                              })
+                            }
+                            title="恢复会话"
+                            type="button"
+                          >
+                            {busy ? <Loader2 size={15} className="animate-spin" /> : <RotateCcw size={15} />}
+                          </button>
+                          <button
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-red-500 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={busy}
+                            onClick={() =>
+                              setPermanentDeleteConfirmation({
+                                id: session.id,
+                                title: session.title,
+                              })
+                            }
+                            title="永久删除"
+                            type="button"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="flex h-[180px] flex-col items-center justify-center text-center">
+                  <Trash2 size={26} className="mb-3 text-[var(--text-secondary)] opacity-35" />
+                  <div className="text-13px font-700 text-[var(--text-primary)]">回收站为空</div>
+                  <div className="mt-1 text-12px text-[var(--text-secondary)] opacity-70">
+                    删除的会话会出现在这里。
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <ConfirmModal
+        isOpen={!!restoreConfirmation}
+        title="恢复会话？"
+        description={`确定要恢复“${restoreConfirmation?.title || ''}”吗？恢复后它会重新出现在会话列表中。`}
+        confirmText="恢复"
+        cancelText="取消"
+        variant="info"
+        onConfirm={() => {
+          if (restoreConfirmation) {
+            void handleRestoreSession(restoreConfirmation.id)
+            setRestoreConfirmation(null)
+          }
+        }}
+        onCancel={() => setRestoreConfirmation(null)}
+      />
+
+      <ConfirmModal
+        isOpen={!!permanentDeleteConfirmation}
+        title="永久删除会话？"
+        description={`确定要永久删除“${permanentDeleteConfirmation?.title || ''}”吗？此操作无法撤销。`}
+        confirmText="永久删除"
+        cancelText="取消"
+        variant="danger"
+        onConfirm={() => {
+          if (permanentDeleteConfirmation) {
+            void handlePermanentlyDeleteSession(permanentDeleteConfirmation.id)
+            setPermanentDeleteConfirmation(null)
+          }
+        }}
+        onCancel={() => setPermanentDeleteConfirmation(null)}
       />
     </aside>
   )

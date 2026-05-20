@@ -730,6 +730,7 @@ export type Session = {
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]
   updatedAt: number
+  deletedAt?: number
 }
 
 export type SessionFolder = {

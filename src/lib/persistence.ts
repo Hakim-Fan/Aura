@@ -21,6 +21,10 @@ export function loadPersistedAppState() {
   return invoke<PersistedAppState>('load_persisted_app_state')
 }
 
+export function listDeletedPersistedSessions() {
+  return invoke<unknown[]>('list_deleted_sessions_sqlite')
+}
+
 export function loadPersistedSessionMessages(sessionId: string) {
   return invoke<unknown[]>('load_session_messages_sqlite', { sessionId })
 }
@@ -64,6 +68,10 @@ export function upsertPersistedSession(session: Session) {
 
 export function deletePersistedSession(sessionId: string) {
   return invoke('delete_session_sqlite', { sessionId })
+}
+
+export function restorePersistedSession(sessionId: string) {
+  return invoke('restore_session_sqlite', { sessionId })
 }
 
 export function purgePersistedSession(sessionId: string) {

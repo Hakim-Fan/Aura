@@ -37,8 +37,11 @@ import {
   deletePersistedMessage,
   deletePersistedMessageVersion,
   deletePersistedSession,
+  listDeletedPersistedSessions,
   loadPersistedAppState,
   loadPersistedSessionMessages,
+  purgePersistedSession,
+  restorePersistedSession,
   searchPersistedSessionIds,
   savePersistedProjectCapabilityOverrides,
   savePersistedSessionFolders,
@@ -1906,6 +1909,10 @@ function parseSessions(raw: string | null): ParsedSessionRecord[] {
             toolEvents: session.toolEvents || [],
             taskTree: session.taskTree || [],
             updatedAt,
+            deletedAt:
+              typeof session.deletedAt === 'number' && Number.isFinite(session.deletedAt)
+                ? session.deletedAt
+                : undefined,
           },
           messageCount,
           messagesLoaded:
@@ -2407,6 +2414,25 @@ export function loadSettings(): AgentSettings {
 
 export function loadSessions(): Session[] {
   return cloneValue(cachedSessions)
+}
+
+export async function loadDeletedSessions(): Promise<Session[]> {
+  const parsedSessionRecords = parseSessions(
+    parsePersistedJson(await listDeletedPersistedSessions()),
+  )
+  return cloneValue(
+    parsedSessionRecords
+      .map(record => record.session)
+      .sort((left, right) => (right.deletedAt || 0) - (left.deletedAt || 0)),
+  )
+}
+
+export async function restoreSessionFromTrash(sessionId: string) {
+  await restorePersistedSession(sessionId)
+}
+
+export async function purgeSessionFromTrash(sessionId: string) {
+  await purgePersistedSession(sessionId)
 }
 
 export function isSessionMessagesLoaded(sessionId: string) {

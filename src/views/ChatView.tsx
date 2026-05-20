@@ -834,11 +834,11 @@ function runningActivityStatusLabel(
   isRetryInProgress = false,
   hasCurrentToolFailure = false,
 ) {
+  if (isRetryInProgress) {
+    return '模型响应中断，正在重试'
+  }
   if (activity?.phase === 'recovering') {
     return hasCurrentToolFailure ? '整理失败结果' : '连接中断，正在恢复'
-  }
-  if (isRetryInProgress) {
-    return '模型响应重试中'
   }
 
   switch (activity?.phase) {
@@ -935,11 +935,11 @@ function messageDetailStatusTitle(options: {
   if (activity?.status === 'awaiting_user_input') {
     return '等待回复'
   }
+  if (isRetryInProgress) {
+    return '模型响应中断，正在重试'
+  }
   if (activity?.phase === 'recovering') {
     return hasToolFailure ? '整理失败结果' : '连接中断，正在恢复'
-  }
-  if (isRetryInProgress) {
-    return '模型响应重试中'
   }
 
   switch (activity?.phase) {
@@ -976,8 +976,8 @@ function messageDetailStatusDescription(options: {
       return '需要你确认后才能继续。'
     case '等待回复':
       return '需要你补充信息后才能继续。'
-    case '模型响应重试中':
-      return retryDetail || '模型响应暂时失败，正在重新请求。'
+    case '模型响应中断，正在重试':
+      return retryDetail || '正在重新请求模型。'
     case '整理失败结果':
       return '工具执行失败，正在整理失败原因和可行的下一步。'
     case '连接中断，正在恢复':
@@ -3150,21 +3150,27 @@ function ExecutionDigest({
 
 function ExecutionTraceHeader({
   itemCount,
-  visibleCount,
+  thoughtRoundCount,
+  isRunning,
   expanded,
   canToggle,
   onToggle,
 }: {
   itemCount: number
-  visibleCount: number
+  thoughtRoundCount: number
+  isRunning: boolean
   expanded: boolean
   canToggle: boolean
   onToggle: () => void
 }) {
   const progressLabel = canToggle
-    ? expanded
-      ? `${itemCount} 段`
-      : `${visibleCount}/${itemCount}`
+    ? thoughtRoundCount > 0
+      ? isRunning
+        ? `第 ${thoughtRoundCount} 轮思考`
+        : `共 ${thoughtRoundCount} 轮思考`
+      : expanded
+        ? `${itemCount} 段`
+        : `最新 / 共 ${itemCount} 段`
     : ''
 
   return (
@@ -5575,6 +5581,9 @@ function AssistantMessageCard({
   )
   const providerReasoning = filteredReasoning.filter(entry => entry.kind === 'provider')
   const displayReasoning = filteredReasoning
+  const thoughtRoundCount = displayReasoning.filter(
+    entry => !isSyntheticRunSummary(entry.content),
+  ).length
   const executionTimeline = buildExecutionTimeline(
     displayReasoning,
     visiblePhaseOutputs,
@@ -5712,7 +5721,7 @@ function AssistantMessageCard({
     title: statusNoticeTitle,
     detail: messageFailureDetail,
     fallbackDetail: fallbackStatusTitle,
-    retryDetail: retryFailureSummary || messageRetryDetail,
+    retryDetail: messageRetryDetail || retryFailureSummary,
     stalled: activity?.stalled === true,
   })
   const shouldShowStatusNotice = Boolean(statusNoticeTitle)
@@ -5797,7 +5806,8 @@ function AssistantMessageCard({
             <section className="rounded-xl border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.018)] px-3.5 py-3">
               <ExecutionTraceHeader
                 itemCount={executionTraceGroups.length}
-                visibleCount={visibleExecutionTraceGroups.length}
+                thoughtRoundCount={thoughtRoundCount}
+                isRunning={isStreaming}
                 expanded={executionTraceExpanded}
                 canToggle={executionTraceGroups.length > 1}
                 onToggle={() => setExecutionTraceExpanded(current => !current)}

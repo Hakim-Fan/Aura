@@ -24,12 +24,15 @@ import {
   hydrateStorageFromAuraHome,
   hydrateProjectCapabilityOverridesFromAuraHome,
   isSessionMessagesLoaded,
+  loadDeletedSessions,
   loadSessionMessages,
   loadSessions,
   loadSessionFolders,
   loadSettings,
   loadProjectCapabilityOverrides,
+  purgeSessionFromTrash,
   resolveCapabilitiesForWorkspace,
+  restoreSessionFromTrash,
   searchSessionIds,
   saveSessionFolders,
   saveSessions,
@@ -1767,6 +1770,7 @@ function buildCapabilityPanelItems(
 export function MainWindowApp() {
   const [settings, setSettings] = useState<AgentSettings>(() => loadSettings())
   const [sessions, setSessions] = useState<Session[]>(() => loadSessions())
+  const [deletedSessions, setDeletedSessions] = useState<Session[]>([])
   const [sessionFolders, setSessionFolders] = useState<SessionFolder[]>(() => loadSessionFolders())
   const [auraHome, setAuraHome] = useState<AuraHomeState | null>(null)
   const [projectCapabilityOverrides, setProjectCapabilityOverrides] =
@@ -1869,9 +1873,10 @@ export function MainWindowApp() {
 
     void (async () => {
       try {
-        const [hydrated, hydratedProjectOverrides] = await Promise.all([
+        const [hydrated, hydratedProjectOverrides, hydratedDeletedSessions] = await Promise.all([
           hydrateStorageFromAuraHome(),
           hydrateProjectCapabilityOverridesFromAuraHome(),
+          loadDeletedSessions(),
         ])
         if (cancelled) {
           return
@@ -1879,6 +1884,7 @@ export function MainWindowApp() {
         setAuraHome(hydrated.aura)
         setSettings(hydrated.settings)
         setSessions(hydrated.sessions)
+        setDeletedSessions(hydratedDeletedSessions)
         setSessionFolders(hydrated.sessionFolders)
         setProjectCapabilityOverrides(hydratedProjectOverrides)
       } catch (caught) {
@@ -2928,7 +2934,20 @@ export function MainWindowApp() {
     }
 
     const remaining = sessions.filter(session => session.id !== sessionId)
+    const deletedAt = Date.now()
     setSessions(remaining)
+    setDeletedSessions(current => [
+      {
+        ...target,
+        folderId: undefined,
+        messages: [],
+        toolEvents: [],
+        taskTree: [],
+        deletedAt,
+        updatedAt: deletedAt,
+      },
+      ...current.filter(session => session.id !== sessionId),
+    ])
     setComposerStates(current => {
       const next = { ...current }
       delete next[sessionId]
@@ -2955,6 +2974,34 @@ export function MainWindowApp() {
       setWorkspaceTree(null)
       setWorkspaceError('')
     }
+  }
+
+  async function refreshSessionListsFromPersistence() {
+    const [hydrated, trashed] = await Promise.all([
+      hydrateStorageFromAuraHome(),
+      loadDeletedSessions(),
+    ])
+    setAuraHome(hydrated.aura)
+    setSettings(hydrated.settings)
+    setSessions(hydrated.sessions)
+    setSessionFolders(hydrated.sessionFolders)
+    setDeletedSessions(trashed)
+    return hydrated.sessions
+  }
+
+  async function restoreDeletedSession(sessionId: string) {
+    await restoreSessionFromTrash(sessionId)
+    const nextSessions = await refreshSessionListsFromPersistence()
+    if (!activeSessionId && nextSessions.length > 0) {
+      setActiveSessionId(nextSessions[0].id)
+    }
+    showToast('会话已恢复')
+  }
+
+  async function permanentlyDeleteSession(sessionId: string) {
+    await purgeSessionFromTrash(sessionId)
+    setDeletedSessions(current => current.filter(session => session.id !== sessionId))
+    showToast('会话已永久删除')
   }
 
   function insertFileReference(path: string) {
@@ -4014,6 +4061,7 @@ export function MainWindowApp() {
           sessionFilter={sessionFilter}
           onSessionFilterChange={setSessionFilter}
           sessions={filteredSessions}
+          deletedSessions={deletedSessions}
           sessionFolders={sessionFolders}
           runningSessionIds={Object.keys(runningTasksBySession)}
           activeSessionId={activeSession?.id || null}
@@ -4028,6 +4076,8 @@ export function MainWindowApp() {
           onGenerateSessionTitle={generateTitleForSession}
           onShowToast={showToast}
           onDeleteSession={sessionId => void deleteSession(sessionId)}
+          onRestoreSession={sessionId => void restoreDeletedSession(sessionId)}
+          onPermanentlyDeleteSession={sessionId => void permanentlyDeleteSession(sessionId)}
           onOpenSettings={() =>
             void openSettingsWindow('general').catch(caught => {
               setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')

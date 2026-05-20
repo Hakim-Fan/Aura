@@ -1729,13 +1729,14 @@ async function parseJsonResponse(response) {
 async function fetchWithTimeout(
   url,
   init,
-  { timeoutMs, timeoutMessage, messages, settings },
+  { timeoutMs, timeoutMessage, messages, settings, signal },
 ) {
   try {
     return await guardedFetch(url, init, {
       timeoutMs,
       timeoutMessage,
       settings,
+      signal,
       proxyMode: 'provider-explicit',
       allowLocal: true,
     })
@@ -1771,14 +1772,32 @@ function openAiCompatibleHeaders(settings = {}) {
   return headers
 }
 
+function isAbortSignalError(error, signal) {
+  if (signal?.aborted) {
+    return true
+  }
+  const message = error instanceof Error ? error.message : String(error || '')
+  const normalized = message.toLowerCase()
+  return normalized.includes('abort') || normalized.includes('cancelled')
+}
+
+function shouldReturnForQueuedInputAbort(hooks, signal) {
+  return signal?.aborted && hooks?.hasQueuedAppendedInputs?.() === true
+}
+
 async function readChunkWithTimeout(
   reader,
   timeoutMs,
   timeoutMessage,
   messages,
+  signal,
 ) {
   let timerId
+  let abortHandler
   try {
+    if (signal?.aborted) {
+      throw signal.reason || new Error('Request aborted')
+    }
     return await Promise.race([
       reader.read(),
       new Promise((_, reject) => {
@@ -1796,9 +1815,19 @@ async function readChunkWithTimeout(
           )
         }, timeoutMs)
       }),
+      new Promise((_, reject) => {
+        if (!signal) {
+          return
+        }
+        abortHandler = () => reject(signal.reason || new Error('Request aborted'))
+        signal.addEventListener('abort', abortHandler, { once: true })
+      }),
     ])
   } finally {
     clearTimeout(timerId)
+    if (signal && abortHandler) {
+      signal.removeEventListener('abort', abortHandler)
+    }
   }
 }
 
@@ -1821,47 +1850,60 @@ async function readSseStream(response, onData, options = {}) {
   const firstChunkTimeoutMs = options.firstChunkTimeoutMs || 45_000
   const idleTimeoutMs = options.idleTimeoutMs || 90_000
 
-  while (true) {
-    const { value, done } = await readChunkWithTimeout(
-      reader,
-      isFirstChunk ? firstChunkTimeoutMs : idleTimeoutMs,
-      isFirstChunk
-        ? 'Timed out while waiting for the first streaming chunk.'
-        : 'Streaming response stalled while waiting for the next chunk.',
-      options.messages,
-    )
-    if (done) {
-      break
-    }
-
-    isFirstChunk = false
-    options.onChunk?.()
-    buffer += decoder.decode(value, { stream: true })
-
+  try {
     while (true) {
-      const delimiterMatch = /\r?\n\r?\n/u.exec(buffer)
-      if (!delimiterMatch || delimiterMatch.index === undefined) {
+      const { value, done } = await readChunkWithTimeout(
+        reader,
+        isFirstChunk ? firstChunkTimeoutMs : idleTimeoutMs,
+        isFirstChunk
+          ? 'Timed out while waiting for the first streaming chunk.'
+          : 'Streaming response stalled while waiting for the next chunk.',
+        options.messages,
+        options.signal,
+      )
+      if (done) {
         break
       }
 
-      const rawEvent = buffer.slice(0, delimiterMatch.index)
-      buffer = buffer.slice(delimiterMatch.index + delimiterMatch[0].length)
-      const dataLines = rawEvent
-        .split(/\r?\n/u)
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trimStart())
+      isFirstChunk = false
+      options.onChunk?.()
+      buffer += decoder.decode(value, { stream: true })
 
-      if (dataLines.length === 0) {
-        continue
+      while (true) {
+        const delimiterMatch = /\r?\n\r?\n/u.exec(buffer)
+        if (!delimiterMatch || delimiterMatch.index === undefined) {
+          break
+        }
+
+        const rawEvent = buffer.slice(0, delimiterMatch.index)
+        buffer = buffer.slice(delimiterMatch.index + delimiterMatch[0].length)
+        const dataLines = rawEvent
+          .split(/\r?\n/u)
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart())
+
+        if (dataLines.length === 0) {
+          continue
+        }
+
+        const payload = dataLines.join('\n')
+        if (payload === '[DONE]') {
+          return
+        }
+
+        await onData(payload)
       }
-
-      const payload = dataLines.join('\n')
-      if (payload === '[DONE]') {
-        return
-      }
-
-      await onData(payload)
     }
+  } catch (error) {
+    const shouldReturnOnAbort =
+      typeof options.returnOnAbort === 'function'
+        ? options.returnOnAbort()
+        : options.returnOnAbort === true
+    if (shouldReturnOnAbort && isAbortSignalError(error, options.signal)) {
+      await reader.cancel(options.signal?.reason).catch(() => {})
+      return
+    }
+    throw error
   }
 
   const trailing = buffer.trim()
@@ -2790,7 +2832,8 @@ function maybeNormalizeProviderTermination(error, messages) {
 
   if (
     normalized === 'aborted' ||
-    normalized.includes('aborted')
+    normalized.includes('aborted') ||
+    normalized.includes('cancelled')
   ) {
     return createClassifiedError(
       '模型请求已被取消。',
@@ -3552,52 +3595,69 @@ export async function runOpenAiCompatibleAgent({
 
       const attemptResult = await runProviderOperationWithRetry(
         async (attemptState) => {
+          const abortController = hooks?.createCurrentStepAbortController?.()
           attemptState.reasoningBlockId = reasoningBlockId
-          hooks?.onPhaseChange?.('model_connecting')
-          const estimatedInputTokens = estimateOpenAiRequestInputTokens(
-            transcript,
-            activeTools,
-            settings,
-          )
-          const response = await fetchWithTimeout(
-            `${apiBase}/chat/completions`,
-            {
-              method: 'POST',
-              headers: openAiCompatibleHeaders(settings),
-              body: JSON.stringify({
-                model: settings.model,
-                messages: transcript,
-                tools: openAiToolDefs(activeTools),
-                tool_choice: 'auto',
-                stream: true,
-                ...(settings.provider === 'openai'
-                  ? {
-                      stream_options: {
-                        include_usage: true,
-                      },
-                    }
-                  : {}),
-              }),
-            },
-            {
-              timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
-              timeoutMessage:
-                'Timed out while waiting for the streaming response to start.',
-              messages: conversationMessages,
+          try {
+            hooks?.onPhaseChange?.('model_connecting')
+            const estimatedInputTokens = estimateOpenAiRequestInputTokens(
+              transcript,
+              activeTools,
               settings,
-            },
-          )
-
-          if (!response.ok) {
-            const data = await parseJsonResponse(response)
-            throw buildProviderHttpError(
-              response,
-              data.error?.message || 'OpenAI-compatible request failed',
-              messages,
-              data,
             )
-          }
-          hooks?.onPhaseChange?.('model_streaming')
+            let response
+            try {
+              response = await fetchWithTimeout(
+                `${apiBase}/chat/completions`,
+                {
+                  method: 'POST',
+                  headers: openAiCompatibleHeaders(settings),
+                  body: JSON.stringify({
+                    model: settings.model,
+                    messages: transcript,
+                    tools: openAiToolDefs(activeTools),
+                    tool_choice: 'auto',
+                    stream: true,
+                    ...(settings.provider === 'openai'
+                      ? {
+                          stream_options: {
+                            include_usage: true,
+                          },
+                        }
+                      : {}),
+                  }),
+                },
+                {
+                  timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+                  timeoutMessage:
+                    'Timed out while waiting for the streaming response to start.',
+                  messages: conversationMessages,
+                  settings,
+                  signal: abortController?.signal,
+                },
+              )
+            } catch (error) {
+              if (shouldReturnForQueuedInputAbort(hooks, abortController?.signal)) {
+                return {
+                  content: '',
+                  phaseReasoning: '',
+                  finalizedToolCalls: [],
+                  usage: undefined,
+                  interruptedForQueuedInput: true,
+                }
+              }
+              throw error
+            }
+
+            if (!response.ok) {
+              const data = await parseJsonResponse(response)
+              throw buildProviderHttpError(
+                response,
+                data.error?.message || 'OpenAI-compatible request failed',
+                messages,
+                data,
+              )
+            }
+            hooks?.onPhaseChange?.('model_streaming')
 
           let content = ''
           let phaseReasoning = ''
@@ -3682,8 +3742,21 @@ export async function runOpenAiCompatibleAgent({
                 attemptState.receivedOutput = true
                 hooks?.onProgress?.()
               },
+              signal: abortController?.signal,
+              returnOnAbort: () =>
+                shouldReturnForQueuedInputAbort(hooks, abortController?.signal),
             },
           )
+          if (shouldReturnForQueuedInputAbort(hooks, abortController?.signal)) {
+            streamParser.flush()
+            return {
+              content,
+              phaseReasoning,
+              finalizedToolCalls: [],
+              usage: usageForAttempt,
+              interruptedForQueuedInput: true,
+            }
+          }
 
           streamParser.flush()
           const inlineReasoningToolCalls = extractInlineToolCalls(
@@ -3721,6 +3794,9 @@ export async function runOpenAiCompatibleAgent({
               usageForAttempt ||
               buildEstimatedUsage(estimatedInputTokens, content, settings),
           }
+          } finally {
+            hooks?.releaseCurrentStepAbortController?.(abortController)
+          }
         },
         {
           messages: conversationMessages,
@@ -3750,6 +3826,7 @@ export async function runOpenAiCompatibleAgent({
       const { content, finalizedToolCalls, phaseReasoning } = stepResult
       if (finalizedToolCalls.length === 0) {
         if (
+          !stepResult.interruptedForQueuedInput &&
           shouldNudgeForObservableProgress({
             settings,
             hooks,
@@ -4076,49 +4153,66 @@ export async function runGoogleAgent({
 
       const attemptResult = await runProviderOperationWithRetry(
         async (attemptState) => {
+          const abortController = hooks?.createCurrentStepAbortController?.()
           attemptState.reasoningBlockId = reasoningBlockId
-          hooks?.onPhaseChange?.('model_connecting')
-          const estimatedInputTokens = estimateGoogleRequestInputTokens(
-            activeSystemPrompt,
-            transcript,
-            activeTools,
-            settings,
-          )
-          const response = await fetchWithTimeout(
-            `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
-            {
-              method: 'POST',
-              headers: {
-                'content-type': 'application/json',
-                'x-goog-api-key': settings.apiKey,
-              },
-              body: JSON.stringify({
-                system_instruction: {
-                  parts: [{ text: activeSystemPrompt }],
-                },
-                contents: transcript,
-                tools: geminiToolDefs(activeTools),
-              }),
-            },
-            {
-              timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
-              timeoutMessage:
-                'Timed out while waiting for the streaming response to start.',
-              messages: conversationMessages,
+          try {
+            hooks?.onPhaseChange?.('model_connecting')
+            const estimatedInputTokens = estimateGoogleRequestInputTokens(
+              activeSystemPrompt,
+              transcript,
+              activeTools,
               settings,
-            },
-          )
-
-          if (!response.ok) {
-            const data = await parseJsonResponse(response)
-            throw buildProviderHttpError(
-              response,
-              data.error?.message || 'Google request failed',
-              messages,
-              data,
             )
-          }
-          hooks?.onPhaseChange?.('model_streaming')
+            let response
+            try {
+              response = await fetchWithTimeout(
+                `${apiBase}/models/${settings.model}:streamGenerateContent?alt=sse`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'content-type': 'application/json',
+                    'x-goog-api-key': settings.apiKey,
+                  },
+                  body: JSON.stringify({
+                    system_instruction: {
+                      parts: [{ text: activeSystemPrompt }],
+                    },
+                    contents: transcript,
+                    tools: geminiToolDefs(activeTools),
+                  }),
+                },
+                {
+                  timeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+                  timeoutMessage:
+                    'Timed out while waiting for the streaming response to start.',
+                  messages: conversationMessages,
+                  settings,
+                  signal: abortController?.signal,
+                },
+              )
+            } catch (error) {
+              if (shouldReturnForQueuedInputAbort(hooks, abortController?.signal)) {
+                return {
+                  content: '',
+                  phaseReasoning: '',
+                  functionCalls: [],
+                  usage: undefined,
+                  interruptedForQueuedInput: true,
+                }
+              }
+              throw error
+            }
+
+            if (!response.ok) {
+              const data = await parseJsonResponse(response)
+              throw buildProviderHttpError(
+                response,
+                data.error?.message || 'Google request failed',
+                messages,
+                data,
+              )
+            }
+            hooks?.onPhaseChange?.('model_streaming')
 
           let content = ''
           let phaseReasoning = ''
@@ -4190,8 +4284,21 @@ export async function runGoogleAgent({
                 attemptState.receivedOutput = true
                 hooks?.onProgress?.()
               },
+              signal: abortController?.signal,
+              returnOnAbort: () =>
+                shouldReturnForQueuedInputAbort(hooks, abortController?.signal),
             },
           )
+          if (shouldReturnForQueuedInputAbort(hooks, abortController?.signal)) {
+            streamParser.flush()
+            return {
+              content,
+              phaseReasoning,
+              functionCalls: [],
+              usage: usageForAttempt,
+              interruptedForQueuedInput: true,
+            }
+          }
 
           streamParser.flush()
           return {
@@ -4201,6 +4308,9 @@ export async function runGoogleAgent({
             usage:
               usageForAttempt ||
               buildEstimatedUsage(estimatedInputTokens, content, settings),
+          }
+          } finally {
+            hooks?.releaseCurrentStepAbortController?.(abortController)
           }
         },
         {
@@ -4231,6 +4341,7 @@ export async function runGoogleAgent({
       const { content, functionCalls } = stepResult
       if (functionCalls.length === 0) {
         if (
+          !stepResult.interruptedForQueuedInput &&
           shouldNudgeForObservableProgress({
             settings,
             hooks,
