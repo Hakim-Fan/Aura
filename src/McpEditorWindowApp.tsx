@@ -408,7 +408,7 @@ export function McpEditorWindowApp() {
               </div>
 
               <div>
-                <label className={labelClass}>安装命令</label>
+                <label className={labelClass}>启动命令</label>
                 <input
                   className={`${premiumInputClass} font-mono !text-12px`}
                   value={server.command}
@@ -434,7 +434,7 @@ export function McpEditorWindowApp() {
                   onChange={event =>
                     updateServer(markServerUnvalidated({ ...server, args: event.target.value }))
                   }
-                  placeholder="可选；如果安装命令里已经写完整，这里可以留空"
+                  placeholder="可选；如果启动命令里已经写完整，这里可以留空"
                 />
               </div>
 

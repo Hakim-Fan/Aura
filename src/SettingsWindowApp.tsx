@@ -2800,7 +2800,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                       </div>
                       <div className="asset-card-meta">
                         <span className="micro-pill">
-                          {server.command ? `命令: ${server.command}` : '未配置安装命令'}
+                          {server.command ? `命令: ${server.command}` : '未配置启动命令'}
                         </span>
                         <span className="micro-pill">{server.args || '无参数'}</span>
                         {server.env.trim() !== '{}' ? (

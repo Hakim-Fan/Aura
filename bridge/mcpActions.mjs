@@ -22,7 +22,7 @@ function parseEnv(input) {
 
 function normalizeServer(server) {
   if (!server?.command?.trim()) {
-    throw new Error('缺少 MCP 安装命令。')
+    throw new Error('缺少 MCP 启动命令。')
   }
 
   const commandSpec = parseCommandSpec(server.command, server.args || '')

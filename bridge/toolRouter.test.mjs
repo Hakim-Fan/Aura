@@ -110,3 +110,49 @@ test('tool_search can find already-mounted direct tools', async () => {
   assert.ok(result.directToolNames.includes('web_search'))
   assert.equal(result.loadedToolNames.length, 0)
 })
+
+test('tool_search can find and load deferred MCP tools', async () => {
+  const registry = createToolRegistry({
+    mcpTools: [
+      {
+        source: 'mcp',
+        capabilityId: 'context7',
+        capabilityName: 'context7',
+        name: 'mcp__context7__get-library-docs',
+        description: '[MCP:context7] Get library documentation',
+        deferLoading: true,
+        discoverable: true,
+        async run() {
+          return 'ok'
+        },
+      },
+    ],
+  })
+
+  const router = createToolRouter(registry, {
+    answerMode: 'advise',
+    workspaceRelated: true,
+  })
+
+  const visibleToolNames = router.modelVisibleTools.map(tool => tool.name)
+  assert.ok(visibleToolNames.includes('tool_search'))
+  assert.equal(visibleToolNames.includes('mcp__context7__get-library-docs'), false)
+
+  const toolSearch = router.modelVisibleTools.find(tool => tool.name === 'tool_search')
+  const registeredTools = []
+  const result = await toolSearch.run(
+    {
+      query: 'context7 library docs',
+    },
+    {
+      registerTools(nextTools) {
+        registeredTools.push(...nextTools)
+      },
+    },
+  )
+
+  assert.equal(result.noResults, false)
+  assert.ok(result.loadedToolNames.includes('mcp__context7__get-library-docs'))
+  assert.equal(registeredTools.length, 1)
+  assert.equal(registeredTools[0].name, 'mcp__context7__get-library-docs')
+})
