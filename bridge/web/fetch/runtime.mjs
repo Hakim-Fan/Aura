@@ -614,6 +614,7 @@ function readFetchCacheEntry(cacheKey) {
     cacheKey,
     persisted.value,
     Math.max(1, persisted.expiresAt - Date.now()),
+    { maxEntries: FETCH_CACHE_MAX_ENTRIES },
   )
   return {
     value: persisted.value,
@@ -622,7 +623,9 @@ function readFetchCacheEntry(cacheKey) {
 }
 
 function writeFetchCacheEntry(cacheKey, value, ttlMs) {
-  writeCache(FETCH_CACHE, cacheKey, value, ttlMs)
+  writeCache(FETCH_CACHE, cacheKey, value, ttlMs, {
+    maxEntries: FETCH_CACHE_MAX_ENTRIES,
+  })
   writePersistentCache(FETCH_CACHE_NAMESPACE, cacheKey, value, ttlMs, {
     maxEntries: FETCH_CACHE_MAX_ENTRIES,
   })

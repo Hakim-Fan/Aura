@@ -207,6 +207,19 @@ const rl = readline.createInterface({
   crlfDelay: Infinity,
 })
 
+function finishProcess(exitCode = 0) {
+  process.exitCode = exitCode
+  rl.close()
+  const exit = () => {
+    process.exit(exitCode)
+  }
+  if (process.stdout.writableNeedDrain) {
+    process.stdout.once('drain', () => setImmediate(exit))
+    return
+  }
+  setImmediate(exit)
+}
+
 rl.on('line', (line) => {
   let message
   try {
@@ -477,6 +490,7 @@ rl.on('line', (line) => {
         type: 'completed',
         result,
       })
+      finishProcess(0)
     })
     .catch((error) => {
       executionMonitor.stop()
@@ -538,6 +552,6 @@ rl.on('line', (line) => {
             ? error.routeDecision
             : undefined,
       })
-      process.exitCode = 1
+      finishProcess(1)
     })
 })

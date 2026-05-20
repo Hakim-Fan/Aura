@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type ClipboardEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { Check, RefreshCw } from 'lucide-react'
 import {
@@ -56,6 +56,7 @@ export function McpEditorWindowApp() {
     const serverId = getEditingMcpServerId()
     return settings.mcpServers.find(entry => entry.id === serverId) || createEmptyServer()
   })
+  const serverRef = useRef(server)
   const [saveState, setSaveState] = useState('')
   const [isTesting, setIsTesting] = useState(false)
   const [testResult, setTestResult] = useState<{
@@ -81,7 +82,7 @@ export function McpEditorWindowApp() {
         setFieldErrors({})
         setImportState(null)
         setImportJson('')
-        setServer(
+        replaceServer(
           hydrated.settings.mcpServers.find(entry => entry.id === serverId) || createEmptyServer(),
         )
       } catch {
@@ -99,7 +100,7 @@ export function McpEditorWindowApp() {
         setFieldErrors({})
         setImportState(null)
         setImportJson('')
-        setServer(
+        replaceServer(
           settings.mcpServers.find(entry => entry.id === nextServerId) || createEmptyServer(),
         )
       })
@@ -110,8 +111,13 @@ export function McpEditorWindowApp() {
     }
   }, [])
 
-  function updateServer(nextServer: McpServerConfig) {
+  function replaceServer(nextServer: McpServerConfig) {
+    serverRef.current = nextServer
     setServer(nextServer)
+  }
+
+  function updateServer(nextServer: McpServerConfig) {
+    replaceServer(nextServer)
     setSaveState('')
     setTestResult(null)
     setFieldErrors({})
@@ -152,7 +158,7 @@ export function McpEditorWindowApp() {
         message: result.message,
         tools: result.tools,
       })
-      setServer(nextServer)
+      replaceServer(nextServer)
       return nextServer
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'MCP 连接测试失败。'
@@ -170,26 +176,27 @@ export function McpEditorWindowApp() {
         message,
         tools: [],
       })
-      setServer(nextServer)
+      replaceServer(nextServer)
       return nextServer
     }
   }
 
   async function saveServer() {
-    const validation = getValidationResult(server)
+    const currentServer = serverRef.current
+    const validation = getValidationResult(currentServer)
     if (!validation.isValid) {
       return
     }
 
     const settings = loadSettings()
     let nextServer: McpServerConfig = {
-      ...server,
+      ...currentServer,
       healthStatus:
-        server.healthStatus === 'ok' || server.healthStatus === 'error'
-          ? server.healthStatus
+        currentServer.healthStatus === 'ok' || currentServer.healthStatus === 'error'
+          ? currentServer.healthStatus
           : 'unknown',
-      healthMessage: server.healthMessage || '',
-      toolCount: server.toolCount || 0,
+      healthMessage: currentServer.healthMessage || '',
+      toolCount: currentServer.toolCount || 0,
     }
 
     if (nextServer.enabled) {
@@ -236,44 +243,70 @@ export function McpEditorWindowApp() {
   }
 
   async function testServer() {
-    const validation = getValidationResult(server)
+    const currentServer = serverRef.current
+    const validation = getValidationResult(currentServer)
     if (!validation.isValid) {
       return
     }
 
     setIsTesting(true)
     setTestResult(null)
-    await validateServer(server)
+    await validateServer(currentServer, {
+      enableOnSuccess: true,
+    })
     setIsTesting(false)
   }
 
-  function importServerFromJson() {
+  function applyImportedServers(servers: ReturnType<typeof parseMcpImportJson>['servers']) {
+    const [firstServer] = servers
+    updateServer(
+      markServerUnvalidated({
+        ...serverRef.current,
+        name: firstServer.name,
+        description: firstServer.description,
+        command: firstServer.command,
+        args: firstServer.args,
+        env: firstServer.env,
+        cwd: firstServer.cwd,
+      }),
+    )
+    setImportState({
+      tone: 'success',
+      message:
+        servers.length > 1
+          ? `已解析 ${servers.length} 个 MCP 配置，当前编辑器先载入第一个：${firstServer.name}。`
+          : `已从 JSON 填充 MCP：${firstServer.name}。`,
+    })
+  }
+
+  function importServerFromJson(source = importJson) {
     try {
-      const { servers } = parseMcpImportJson(importJson)
-      const [firstServer] = servers
-      updateServer(
-        markServerUnvalidated({
-          ...server,
-          name: firstServer.name,
-          description: firstServer.description,
-          command: firstServer.command,
-          args: firstServer.args,
-          env: firstServer.env,
-          cwd: firstServer.cwd,
-        }),
-      )
-      setImportState({
-        tone: 'success',
-        message:
-          servers.length > 1
-            ? `已解析 ${servers.length} 个 MCP 配置，当前编辑器先载入第一个：${firstServer.name}。`
-            : `已从 JSON 填充 MCP：${firstServer.name}。`,
-      })
+      const { servers } = parseMcpImportJson(source)
+      applyImportedServers(servers)
+      return true
     } catch (error) {
       setImportState({
         tone: 'error',
         message: error instanceof Error ? error.message : 'MCP JSON 导入失败。',
       })
+      return false
+    }
+  }
+
+  function importServerFromClipboard(event: ClipboardEvent<HTMLElement>) {
+    const pastedText = event.clipboardData.getData('text')
+    if (!pastedText.trim()) {
+      return false
+    }
+
+    try {
+      const { servers } = parseMcpImportJson(pastedText)
+      event.preventDefault()
+      setImportJson(pastedText)
+      applyImportedServers(servers)
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -323,13 +356,18 @@ export function McpEditorWindowApp() {
                     setImportJson(event.target.value)
                     setImportState(null)
                   }}
+                  onPaste={event => {
+                    importServerFromClipboard(event)
+                  }}
                   placeholder={`支持直接粘贴 MCP JSON，例如:\n{\n  "mcpServers": {\n    "ddg-search": {\n      "command": "uvx",\n      "args": ["duckduckgo-mcp-server"]\n    }\n  }\n}`}
                 />
                 <div className="mt-3 flex items-center gap-3">
                   <button
                     className="h-9 px-4 text-12px font-700 rounded-xl border border-black/8 text-black/60 hover:bg-black/4 transition-all"
                     type="button"
-                    onClick={importServerFromJson}
+                    onClick={() => {
+                      importServerFromJson()
+                    }}
                   >
                     从 JSON 填充
                   </button>
@@ -374,6 +412,9 @@ export function McpEditorWindowApp() {
                 <input
                   className={`${premiumInputClass} font-mono !text-12px`}
                   value={server.command}
+                  onPaste={event => {
+                    importServerFromClipboard(event)
+                  }}
                   onChange={event =>
                     updateServer(markServerUnvalidated({ ...server, command: event.target.value }))
                   }

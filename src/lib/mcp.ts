@@ -81,6 +81,33 @@ function parseNamedServers(source: Record<string, unknown>) {
     })
 }
 
+function parseServerList(source: unknown) {
+  if (Array.isArray(source)) {
+    return source
+      .filter((value): value is Record<string, unknown> =>
+        Boolean(value) && typeof value === 'object' && !Array.isArray(value),
+      )
+      .map((entry, index) => ({
+        name:
+          typeof entry.name === 'string' && entry.name.trim()
+            ? entry.name.trim()
+            : `mcp-${index + 1}`,
+        description:
+          typeof entry.description === 'string' ? entry.description : '',
+        command: typeof entry.command === 'string' ? entry.command.trim() : '',
+        args: stringifyArgs(entry.args),
+        env: stringifyEnv(entry.env),
+        cwd: typeof entry.cwd === 'string' ? entry.cwd.trim() : '',
+      }))
+  }
+
+  if (source && typeof source === 'object' && !Array.isArray(source)) {
+    return parseNamedServers(source as Record<string, unknown>)
+  }
+
+  return []
+}
+
 export function validateMcpServerInput(server: Pick<McpServerConfig, 'name' | 'command' | 'env'>) {
   const errors: McpFieldErrors = {}
 
@@ -130,11 +157,14 @@ export function parseMcpImportJson(raw: string): ParsedMcpImportResult {
   const root = parsed as Record<string, unknown>
   let servers: ParsedMcpImportResult['servers'] = []
 
-  if (root.mcpServers !== undefined) {
-    if (!root.mcpServers || typeof root.mcpServers !== 'object' || Array.isArray(root.mcpServers)) {
-      throw new Error('mcpServers 必须是一个对象。')
+  const serverCollection =
+    root.mcpServers ?? root.mcp_servers ?? root.servers ?? root.MCPServers
+
+  if (serverCollection !== undefined) {
+    servers = parseServerList(serverCollection)
+    if (!servers.length) {
+      throw new Error('mcpServers 必须是一个包含 server 配置的对象或数组。')
     }
-    servers = parseNamedServers(root.mcpServers as Record<string, unknown>)
   }
 
   if (!servers.length && typeof root.command === 'string') {

@@ -31,6 +31,7 @@ const MAX_WORK_MEMORY_SOURCE_REFS_JSON_CHARS: usize = 2_400;
 const MAX_LOG_DELTA_CHARS: usize = 2_000;
 const SNAPSHOT_TRUNCATION_MARKER: &str = "\n...(truncated to keep memory bounded)...\n";
 const MAX_INLINE_IMAGE_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RUNTIME_IMAGE_DATA_URL_BYTES: usize = 12 * 1024 * 1024;
 const MAX_TERMINAL_TASK_SNAPSHOTS: usize = 64;
 
 #[derive(Clone, Serialize, Default)]
@@ -3271,6 +3272,36 @@ fn prune_terminal_task_snapshots(tasks: &mut HashMap<String, AgentTaskHandle>) {
     }
 }
 
+fn spawn_child_reaper(child: Arc<Mutex<Option<std::process::Child>>>) {
+    std::thread::spawn(move || loop {
+        let should_stop = {
+            let Ok(mut guard) = child.lock() else {
+                return;
+            };
+            let Some(child) = guard.as_mut() else {
+                return;
+            };
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    *guard = None;
+                    true
+                }
+                Ok(None) => false,
+                Err(_) => {
+                    *guard = None;
+                    true
+                }
+            }
+        };
+
+        if should_stop {
+            return;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(1_000));
+    });
+}
+
 fn truncate_snapshot_text(value: &str, max_chars: usize) -> String {
     let total_chars = value.chars().count();
     if total_chars <= max_chars {
@@ -3654,8 +3685,11 @@ fn spawn_agent_task<R: Runtime>(
         raw_error: None,
     }));
 
+    let child_handle = Arc::new(Mutex::new(Some(child)));
+    spawn_child_reaper(child_handle.clone());
+
     let handle = AgentTaskHandle {
-        child: Arc::new(Mutex::new(Some(child))),
+        child: child_handle,
         stdin: Arc::new(Mutex::new(stdin)),
         snapshot: snapshot.clone(),
         log_context: log_context.clone(),
@@ -5949,14 +5983,20 @@ fn read_image_data_url_internal(
         _ => return Ok(None),
     };
 
-    let bytes = fs::read(&path)
-        .map_err(|error| format!("Failed to read image {}: {error}", path.display()))?;
-
     if let Some(limit) = max_bytes {
-        if bytes.len() > limit {
-            return Err("Image is too large to preview inline.".into());
+        let file_size = fs::metadata(&path)
+            .map_err(|error| format!("Failed to inspect image {}: {error}", path.display()))?
+            .len();
+        if file_size > limit as u64 {
+            return Err(format!(
+                "Image is too large to inline: {} bytes exceeds {} bytes.",
+                file_size, limit
+            ));
         }
     }
+
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("Failed to read image {}: {error}", path.display()))?;
 
     Ok(Some(format!(
         "data:{mime};base64,{}",
@@ -5971,7 +6011,7 @@ fn read_image_preview(file_path: String) -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn read_image_data_url(file_path: String) -> Result<Option<String>, String> {
-    read_image_data_url_internal(&file_path, None)
+    read_image_data_url_internal(&file_path, Some(MAX_RUNTIME_IMAGE_DATA_URL_BYTES))
 }
 
 #[tauri::command]

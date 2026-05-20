@@ -7,6 +7,7 @@ import { normalizeCacheKey, readCache, writeCache } from './web/shared/cache.mjs
 const DOMAIN_FAILURE_MEMORY = new Map()
 const RETRIEVAL_RESULT_CACHE = new Map()
 const MAX_FAILURE_MEMORY_ENTRIES = 256
+const MAX_RETRIEVAL_RESULT_CACHE_ENTRIES = 128
 const RETRIEVAL_RESULT_TTL_MS = {
   web_search: 90_000,
   web_fetch: 120_000,
@@ -87,6 +88,7 @@ function writeRetrievalResultCache(operation, args, result) {
     buildRetrievalResultCacheKey(operation, args),
     cloneJsonValue(result),
     ttlMs,
+    { maxEntries: MAX_RETRIEVAL_RESULT_CACHE_ENTRIES },
   )
 }
 

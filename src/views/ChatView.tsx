@@ -3396,6 +3396,42 @@ function readPatchNumber(value: unknown) {
 
 const FINAL_CHANGE_FILE_LIMIT = 12
 
+function isAbsoluteFilePath(pathLabel: string) {
+  return (
+    pathLabel.startsWith('/') ||
+    /^[a-zA-Z]:[\\/]/u.test(pathLabel) ||
+    pathLabel.startsWith('\\\\')
+  )
+}
+
+function resolveOpenFilePath(pathLabel: string, workspaceRootPath?: string) {
+  const normalizedPath = pathLabel.trim()
+  if (!normalizedPath || isAbsoluteFilePath(normalizedPath)) {
+    return normalizedPath
+  }
+
+  const normalizedRoot = (workspaceRootPath || '').trim()
+  if (!normalizedRoot) {
+    return normalizedPath
+  }
+
+  const separator = normalizedRoot.includes('\\') && !normalizedRoot.includes('/') ? '\\' : '/'
+  return `${normalizedRoot.replace(/[\\/]+$/u, '')}${separator}${normalizedPath.replace(/^[\\/]+/u, '')}`
+}
+
+function handleOpenPreviewFile(
+  event: ReactMouseEvent<HTMLElement>,
+  pathLabel: string,
+  workspaceRootPath: string | undefined,
+  onOpenFile: (path: string) => void,
+) {
+  event.stopPropagation()
+  const targetPath = resolveOpenFilePath(pathLabel, workspaceRootPath)
+  if (targetPath) {
+    onOpenFile(targetPath)
+  }
+}
+
 function PatchDiffLine({ line }: { line: Record<string, unknown> }) {
   const type = typeof line.type === 'string' ? line.type : 'context'
   const text = typeof line.text === 'string' ? line.text : ''
@@ -3563,7 +3599,15 @@ function collectFinalChangeSummary(events: MessageEvent[] = []): FinalChangeSumm
   }
 }
 
-function FinalChangedFilesCard({ summary }: { summary: FinalChangeSummary }) {
+function FinalChangedFilesCard({
+  summary,
+  workspaceRootPath,
+  onOpenFile,
+}: {
+  summary: FinalChangeSummary
+  workspaceRootPath?: string
+  onOpenFile: (path: string) => void
+}) {
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({})
   const [changeState, setChangeState] = useState<'applied' | 'reverted'>('applied')
   const [toggleError, setToggleError] = useState('')
@@ -3638,8 +3682,10 @@ function FinalChangedFilesCard({ summary }: { summary: FinalChangeSummary }) {
 
           return (
             <div key={fileKey} className="bg-white">
-              <button
+              <div
                 aria-expanded={isFileExpanded}
+                role="button"
+                tabIndex={0}
                 className="flex w-full flex-wrap items-center justify-between gap-2 bg-[rgba(15,23,42,0.035)] px-3 py-2 text-left transition-colors hover:bg-[rgba(15,23,42,0.055)]"
                 onClick={() =>
                   setExpandedFiles(current => ({
@@ -3647,7 +3693,15 @@ function FinalChangedFilesCard({ summary }: { summary: FinalChangeSummary }) {
                     [fileKey]: !isFileExpanded,
                   }))
                 }
-                type="button"
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    setExpandedFiles(current => ({
+                      ...current,
+                      [fileKey]: !isFileExpanded,
+                    }))
+                  }
+                }}
               >
                 <div className="flex min-w-0 items-center gap-2">
                   {isFileExpanded ? (
@@ -3655,9 +3709,16 @@ function FinalChangedFilesCard({ summary }: { summary: FinalChangeSummary }) {
                   ) : (
                     <ChevronRight size={14} className="shrink-0 text-[var(--text-secondary)]" />
                   )}
-                  <span className="min-w-0 truncate text-13px font-600 text-[var(--text-primary)]">
+                  <button
+                    className="min-w-0 truncate rounded px-1 text-left text-13px font-600 text-[var(--text-primary)] hover:bg-white/80 hover:text-[var(--accent-soft-strong)]"
+                    onClick={event =>
+                      handleOpenPreviewFile(event, file.path, workspaceRootPath, onOpenFile)
+                    }
+                    title={resolveOpenFilePath(file.path, workspaceRootPath)}
+                    type="button"
+                  >
                     {file.path}
-                  </span>
+                  </button>
                   {file.eventCount > 1 ? (
                     <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-10px font-700 text-[var(--text-secondary)]">
                       {file.eventCount} edits
@@ -3668,7 +3729,7 @@ function FinalChangedFilesCard({ summary }: { summary: FinalChangeSummary }) {
                   <span className="text-emerald-600">+{file.addedLines}</span>
                   <span className="text-red-600">-{file.removedLines}</span>
                 </div>
-              </button>
+              </div>
 
               {isFileExpanded && file.diffLines.length > 0 ? (
                 <div className="border-t border-[rgba(15,23,42,0.04)]">
@@ -3690,9 +3751,13 @@ function FinalChangedFilesCard({ summary }: { summary: FinalChangeSummary }) {
 function PatchPreviewCard({
   output,
   status,
+  workspaceRootPath,
+  onOpenFile,
 }: {
   output: Record<string, unknown>
   status: MessageEvent['status']
+  workspaceRootPath?: string
+  onOpenFile: (path: string) => void
 }) {
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({})
   const files = readPatchPreviewFiles(output)
@@ -3746,9 +3811,16 @@ function PatchPreviewCard({
                 key={`${pathLabel}-${index}`}
                 className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-white/80 bg-white/85 px-3 py-2"
               >
-                <span className="min-w-0 truncate text-[12px] font-600 text-[var(--text-primary)]">
+                <button
+                  className="min-w-0 truncate rounded px-1 text-left text-[12px] font-600 text-[var(--text-primary)] hover:bg-[rgba(79,123,116,0.08)] hover:text-[var(--accent-soft-strong)]"
+                  onClick={event =>
+                    handleOpenPreviewFile(event, pathLabel, workspaceRootPath, onOpenFile)
+                  }
+                  title={resolveOpenFilePath(pathLabel, workspaceRootPath)}
+                  type="button"
+                >
                   {pathLabel}
-                </span>
+                </button>
                 <span className="shrink-0 rounded-full bg-[rgba(79,123,116,0.08)] px-2 py-1 text-[10px] font-700 uppercase tracking-[0.12em] text-[var(--accent-soft-strong)]">
                   {kind}
                 </span>
@@ -3784,8 +3856,10 @@ function PatchPreviewCard({
                 key={`${pathLabel}-${index}`}
                 className="rounded-lg border border-white/80 bg-white/85"
               >
-                <button
+                <div
                   aria-expanded={isFileExpanded}
+                  role="button"
+                  tabIndex={0}
                   className="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-2 text-left"
                   onClick={() =>
                     setExpandedFiles(current => ({
@@ -3793,7 +3867,15 @@ function PatchPreviewCard({
                       [fileKey]: !isFileExpanded,
                     }))
                   }
-                  type="button"
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      setExpandedFiles(current => ({
+                        ...current,
+                        [fileKey]: !isFileExpanded,
+                      }))
+                    }
+                  }}
                 >
                   <div className="flex min-w-0 items-center gap-2">
                     {isFileExpanded ? (
@@ -3802,9 +3884,16 @@ function PatchPreviewCard({
                       <ChevronRight size={14} className="shrink-0 text-[var(--text-secondary)]" />
                     )}
                     <div className="min-w-0">
-                      <div className="truncate text-[12px] font-600 text-[var(--text-primary)]">
+                      <button
+                        className="max-w-full truncate rounded px-1 text-left text-[12px] font-600 text-[var(--text-primary)] hover:bg-[rgba(79,123,116,0.08)] hover:text-[var(--accent-soft-strong)]"
+                        onClick={event =>
+                          handleOpenPreviewFile(event, pathLabel, workspaceRootPath, onOpenFile)
+                        }
+                        title={resolveOpenFilePath(pathLabel, workspaceRootPath)}
+                        type="button"
+                      >
                         {pathLabel}
-                      </div>
+                      </button>
                       <div className="mt-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--text-secondary)] opacity-70">
                         {kind}
                       </div>
@@ -3823,7 +3912,7 @@ function PatchPreviewCard({
                       -{removedLines}
                     </span>
                   </div>
-                </button>
+                </div>
                 {isFileExpanded && diffLines.length > 0 ? (
                   <div className="border-t border-[rgba(15,23,42,0.05)]">
                     <div className="max-h-72 overflow-auto font-[SFMono-Regular,Menlo,monospace] text-[11px] leading-5 custom-scrollbar">
@@ -4389,11 +4478,15 @@ function MessageEventCard({
   onHandleApproval,
   onCancelCurrentStep,
   onCopyText,
+  workspaceRootPath,
+  onOpenFile,
 }: {
   event: MessageEvent
   onHandleApproval?: (decision: ApprovalDecision) => void
   onCancelCurrentStep?: () => void
   onCopyText?: CopyTextHandler
+  workspaceRootPath?: string
+  onOpenFile: (path: string) => void
 }) {
   const isShellLog = event.kind === 'shell'
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
@@ -4549,7 +4642,12 @@ function MessageEventCard({
         <WebFetchEventCard event={event} output={parsedOutput} />
       ) : null}
       {isStructuredPatchPreviewEvent && parsedOutput ? (
-        <PatchPreviewCard output={parsedOutput} status={event.status} />
+        <PatchPreviewCard
+          output={parsedOutput}
+          status={event.status}
+          workspaceRootPath={workspaceRootPath}
+          onOpenFile={onOpenFile}
+        />
       ) : null}
       {isApproval ? (
         <div className="mt-2 rounded-xl border border-amber-200 bg-white p-3">
@@ -5370,6 +5468,7 @@ function AppendedInputsPanel({
 
 function AssistantMessageCard({
   message,
+  workspaceRootPath,
   modelGroups,
   activeModelProfileId,
   activeModelId,
@@ -5380,12 +5479,14 @@ function AssistantMessageCard({
   onRegenerateMessage,
   onRegenerateMessageWithModel,
   onForceExecuteAppendedInput,
+  onOpenFile,
   showDetailedExecutionDetails,
   onCancelCurrentStep,
   onHandleApproval,
   onToggleActivity,
 }: {
   message: ChatMessage
+  workspaceRootPath?: string
   modelGroups: ModelGroup[]
   activeModelProfileId: string
   activeModelId: string
@@ -5396,6 +5497,7 @@ function AssistantMessageCard({
   onRegenerateMessage: (messageId: string) => void
   onRegenerateMessageWithModel: (messageId: string, profileId: string, modelId: string) => void
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
+  onOpenFile: (path: string) => void
   showDetailedExecutionDetails: boolean
   onCancelCurrentStep: () => void
   onHandleApproval: (decision: ApprovalDecision) => void
@@ -5729,11 +5831,13 @@ function AssistantMessageCard({
                             ) : item.kind === 'event' ? (
                               <MessageEventCard
                                 key={item.key}
-                                event={item.event}
-                                onHandleApproval={onHandleApproval}
-                                onCancelCurrentStep={onCancelCurrentStep}
-                                onCopyText={onCopyText}
-                              />
+                              event={item.event}
+                              onHandleApproval={onHandleApproval}
+                              onCancelCurrentStep={onCancelCurrentStep}
+                              onCopyText={onCopyText}
+                              workspaceRootPath={workspaceRootPath}
+                              onOpenFile={onOpenFile}
+                            />
                             ) : null,
                           )}
                         </div>
@@ -5769,7 +5873,11 @@ function AssistantMessageCard({
           ) : null}
 
           {!isStreaming && finalChangeSummary.files.length > 0 ? (
-            <FinalChangedFilesCard summary={finalChangeSummary} />
+            <FinalChangedFilesCard
+              summary={finalChangeSummary}
+              workspaceRootPath={workspaceRootPath}
+              onOpenFile={onOpenFile}
+            />
           ) : null}
 
           {shouldShowStatusNotice ? (
@@ -6380,6 +6488,7 @@ export function ChatView({
                     <AssistantMessageCard
                       key={message.id}
                       message={message}
+                      workspaceRootPath={workspaceRootPath}
                       modelGroups={modelGroups}
                       activeModelProfileId={activeModelProfileId}
                       activeModelId={settings.model}
@@ -6390,6 +6499,7 @@ export function ChatView({
                       onRegenerateMessage={onRegenerateMessage}
                       onRegenerateMessageWithModel={onRegenerateMessageWithModel}
                       onForceExecuteAppendedInput={onForceExecuteAppendedInput}
+                      onOpenFile={onOpenAttachment}
                       showDetailedExecutionDetails={settings.showDetailedExecutionDetails}
                       onCancelCurrentStep={onCancelCurrentStep}
                       onHandleApproval={onHandleApproval}

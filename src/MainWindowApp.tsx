@@ -643,6 +643,10 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
 }
 
 async function createDraftAttachmentFromFile(file: File): Promise<DraftAttachment> {
+  if (file.size > MAX_DRAFT_ATTACHMENT_BYTES) {
+    throw new Error(`附件“${file.name || '未命名文件'}”过大，请通过文件路径添加。`)
+  }
+
   const name = guessAttachmentName(file, `pasted-${Date.now()}`)
   const bytesBase64 = arrayBufferToBase64(await file.arrayBuffer())
   const preview = file.type.startsWith('image/')
@@ -655,7 +659,6 @@ async function createDraftAttachmentFromFile(file: File): Promise<DraftAttachmen
     preview,
     mimeType: file.type || undefined,
     bytesBase64,
-    file,
   }
 }
 
@@ -1072,6 +1075,7 @@ const MAX_ARCHIVED_EVENT_INPUT_CHARS = 280
 const MAX_ARCHIVED_EVENT_OUTPUT_CHARS = 360
 const MAX_ARCHIVED_TASK_NODES = 12
 const MAX_ARCHIVED_TASK_DEPTH = 2
+const MAX_DRAFT_ATTACHMENT_BYTES = 12 * 1024 * 1024
 
 function archiveExecutionId(kind: string, value: string) {
   return `${REPLAN_ARCHIVE_PREFIX}:${kind}:${value}`
@@ -2096,8 +2100,11 @@ export function MainWindowApp() {
     if (!storageReady) {
       return
     }
+    if (Object.keys(runningTasksBySession).length > 0) {
+      return
+    }
     saveSessions(sessions)
-  }, [sessions, storageReady])
+  }, [runningTasksBySession, sessions, storageReady])
 
   useEffect(() => {
     const previousBindings = previousRunningTasksBySessionRef.current
