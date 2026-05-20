@@ -1116,6 +1116,53 @@ button {
   flex-wrap: wrap;
 }
 
+.asset-section-header {
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.asset-section-copy {
+  min-width: 260px;
+  max-width: 460px;
+}
+
+.asset-section-toolbar {
+  max-width: min(760px, 100%);
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.asset-section-toolbar .secondary-button {
+  min-height: 44px;
+  padding: 10px 16px;
+  border-radius: 14px;
+  font-size: 14px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.asset-section-toolbar .micro-pill {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+@media (max-width: 1120px) {
+  .asset-section-header {
+    flex-direction: column;
+  }
+
+  .asset-section-copy {
+    max-width: 100%;
+  }
+
+  .asset-section-toolbar {
+    justify-content: flex-start;
+  }
+}
+
 .provider-card-head strong,
 .asset-card-head strong {
   display: block;

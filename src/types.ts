@@ -708,6 +708,7 @@ export type AgentSettings = {
   autoApproveFileWrite: boolean
   autoApproveComputerUse: boolean
   enabledSkillIds: string[]
+  externalSkillDirs: string[]
   enabledPluginIds: string[]
   browser: BrowserSettings
   web: WebToolsSettings

@@ -9,6 +9,7 @@ export type AuraAsset = {
   supported: boolean
   supportMessage?: string | null
   readonly: boolean
+  external?: boolean
 }
 
 export async function deleteAuraAsset(relativePath: string): Promise<void> {
@@ -19,6 +20,7 @@ export type AuraHomeState = {
   homeDir: string
   configDir: string
   skillsDir: string
+  externalSkillDirs: string[]
   pluginsDir: string
   mcpDir: string
   workspaceDir: string

@@ -74,6 +74,20 @@ function createReadonlyBuiltinAssets(
   }))
 }
 
+function normalizePathList(paths: string[] = []) {
+  const seen = new Set<string>()
+  return paths
+    .map(path => path.trim())
+    .filter(Boolean)
+    .filter(path => {
+      if (seen.has(path)) {
+        return false
+      }
+      seen.add(path)
+      return true
+    })
+}
+
 function createProviderProfile(provider: ProviderMode = 'custom'): ProviderProfile {
   return {
     id: `profile-${provider}-${Math.random().toString(36).slice(2, 8)}`,
@@ -986,6 +1000,36 @@ export function SettingsWindowApp({ initialTab }: Props) {
     } finally {
       setRefreshingAssets('')
     }
+  }
+
+  async function persistSettingsAndRefreshAssets(nextSettings: AgentSettings, kind?: 'skills' | 'plugins') {
+    await saveSettingsAndAwaitPersistence(nextSettings)
+    setSavedSettings(cloneSettings(nextSettings))
+    setDraftSettings(cloneSettings(nextSettings))
+    setSaveState('saved')
+    await broadcastSettingsUpdated()
+    await refreshAuraAssets(kind)
+  }
+
+  async function bindExternalSkillDirectory() {
+    const selected = await open({
+      directory: true,
+      multiple: true,
+      title: '选择外部 Skill 目录',
+    })
+    if (!selected) {
+      return
+    }
+
+    const selectedPaths = Array.isArray(selected) ? selected : [selected]
+    const nextDirs = normalizePathList([
+      ...(draftSettings.externalSkillDirs || []),
+      ...selectedPaths,
+    ])
+    await persistSettingsAndRefreshAssets({
+      ...draftSettings,
+      externalSkillDirs: nextDirs,
+    }, 'skills')
   }
 
   async function handleDeleteAsset() {
@@ -2912,15 +2956,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
     return (
       <section className="section-shell settings-panel">
-        <header className="section-header">
-          <div>
+        <header className="section-header asset-section-header">
+          <div className="asset-section-copy">
             <div className="eyebrow">{title}</div>
             <h2>{title}</h2>
             {kind === 'skills' ? (
-              <p className="muted mt-2">内置核心 skills 始终开启，这里只展示可管理的用户 skills。</p>
+              <p className="muted mt-2">您可以自己安装 skills，或通过”绑定外部目录“将其他目录挂载到 skills 目录</p>
             ) : null}
           </div>
-          <div className="header-actions">
+          <div className="header-actions asset-section-toolbar mb-12px">
             <span className="micro-pill">{visibleItems.length} 个可用</span>
             <button
               className="secondary-button"
@@ -2951,6 +2995,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
               <FolderOpen size={14} />
               打开文件夹
             </button>
+            {kind === 'skills' ? (
+              <button
+                className="secondary-button"
+                onClick={() => void bindExternalSkillDirectory()}
+              >
+                <FolderOpen size={14} />
+                绑定外部目录
+              </button>
+            ) : null}
           </div>
         </header>
 
@@ -3006,6 +3059,12 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   <span className={`micro-pill ${item.supported ? 'pill-success' : 'pill-warning'}`}>
                     {item.supported ? '可用' : '仅发现'}
                   </span>
+                  {kind === 'skills' && item.external ? (
+                    <span className="micro-pill">外部目录</span>
+                  ) : null}
+                  {kind === 'skills' && item.external ? (
+                    <span className="micro-pill">只读</span>
+                  ) : null}
                   {item.path ? (
                     <span className="micro-pill mono-pill">{item.path}</span>
                   ) : null}

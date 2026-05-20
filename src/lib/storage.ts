@@ -214,6 +214,7 @@ export const defaultSettings: AgentSettings = {
   autoApproveFileWrite: false,
   autoApproveComputerUse: false,
   enabledSkillIds: [],
+  externalSkillDirs: [],
   enabledPluginIds: [],
   browser: defaultBrowserSettings(),
   web: defaultWebToolsSettings(),
@@ -222,6 +223,20 @@ export const defaultSettings: AgentSettings = {
 }
 
 const builtinSkillIds = new Set(builtinSkills.map(skill => skill.id))
+
+function normalizeStringList(values: unknown) {
+  if (!Array.isArray(values)) {
+    return []
+  }
+  return Array.from(
+    new Set(
+      values
+        .filter((value): value is string => typeof value === 'string')
+        .map(value => value.trim())
+        .filter(Boolean),
+    ),
+  )
+}
 
 function createEmptyWorkspaceCapabilityOverrides(): WorkspaceCapabilityOverrides {
   return {
@@ -1158,6 +1173,7 @@ function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
   return {
     ...settings,
     providerProfiles: normalizeProviderProfiles(settings.providerProfiles),
+    externalSkillDirs: normalizeStringList(settings.externalSkillDirs),
     locale: normalizeLocale(settings.locale),
     analysisProviderProfileId:
       typeof settings.analysisProviderProfileId === 'string'
@@ -1429,6 +1445,7 @@ function parseSettings(raw: string | null): AgentSettings {
         typeof parsed.requireLongTaskPlanApproval === 'boolean'
           ? parsed.requireLongTaskPlanApproval
           : defaultSettings.requireLongTaskPlanApproval,
+      externalSkillDirs: normalizeStringList(parsed.externalSkillDirs),
       browser: normalizeBrowserSettings(parsed.browser),
       web: normalizeWebToolsSettings(parsed.web),
       mcpServers: normalizeMcpServers(parsed.mcpServers),

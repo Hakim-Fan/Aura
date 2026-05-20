@@ -142,6 +142,7 @@ struct AuraAssetMetadata {
     #[serde(rename = "supportMessage")]
     support_message: Option<String>,
     readonly: bool,
+    external: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -152,6 +153,8 @@ struct AuraHomeState {
     config_dir: String,
     #[serde(rename = "skillsDir")]
     skills_dir: String,
+    #[serde(rename = "externalSkillDirs")]
+    external_skill_dirs: Vec<String>,
     #[serde(rename = "pluginsDir")]
     plugins_dir: String,
     #[serde(rename = "mcpDir")]
@@ -773,11 +776,102 @@ fn scan_aura_assets<R: Runtime>(
             supported,
             support_message,
             readonly,
+            external: false,
         });
     }
 
     assets.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
     Ok(assets)
+}
+
+fn load_external_skill_dirs<R: Runtime>(_app: &tauri::AppHandle<R>) -> Vec<PathBuf> {
+    let Ok(home_dir) = resolve_aura_home() else {
+        return Vec::new();
+    };
+    let db_path = home_dir.join("config").join("app.db");
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let Ok(connection) = Connection::open(&db_path) else {
+        return Vec::new();
+    };
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM app_kv WHERE key = 'settings'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(entries) = settings
+        .get("externalSkillDirs")
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    entries
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let path = PathBuf::from(entry);
+            let key = path.to_string_lossy().to_string();
+            if seen.insert(key) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn scan_skill_roots<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    skills_dir: &Path,
+    external_skill_dirs: &[PathBuf],
+) -> Result<Vec<AuraAssetMetadata>, String> {
+    let mut skills = scan_aura_assets(app, skills_dir, "skills")?;
+    let mut seen_ids: HashSet<String> = skills.iter().map(|skill| skill.id.clone()).collect();
+    let canonical_builtin = skills_dir.canonicalize().ok();
+
+    for external_dir in external_skill_dirs {
+        let is_builtin_dir = canonical_builtin
+            .as_ref()
+            .and_then(|builtin| {
+                external_dir
+                    .canonicalize()
+                    .ok()
+                    .map(|external| external == *builtin)
+            })
+            .unwrap_or(false);
+        if is_builtin_dir {
+            continue;
+        }
+
+        let Ok(mut external_skills) = scan_aura_assets(app, external_dir, "skills") else {
+            continue;
+        };
+        for skill in external_skills.iter_mut() {
+            if seen_ids.insert(skill.id.clone()) {
+                skill.readonly = true;
+                skill.external = true;
+                skills.push(skill.clone());
+            }
+        }
+    }
+
+    skills.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    Ok(skills)
 }
 
 fn resolve_default_asset_dir<R: Runtime>(
@@ -908,6 +1002,11 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
 
     seed_directory_from_defaults(app, "skills", &skills_dir)?;
     seed_directory_from_defaults(app, "plugins", &plugins_dir)?;
+    let external_skill_dirs = load_external_skill_dirs(app);
+    let external_skill_dir_labels = external_skill_dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>();
 
     let settings_path = config_dir.join("settings.json");
     let sessions_path = config_dir.join("sessions.json");
@@ -917,6 +1016,7 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
         home_dir: home_dir.display().to_string(),
         config_dir: config_dir.display().to_string(),
         skills_dir: skills_dir.display().to_string(),
+        external_skill_dirs: external_skill_dir_labels,
         plugins_dir: plugins_dir.display().to_string(),
         mcp_dir: mcp_dir.display().to_string(),
         workspace_dir: workspace_dir.display().to_string(),
@@ -925,7 +1025,7 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
         settings_path: settings_path.display().to_string(),
         sessions_path: sessions_path.display().to_string(),
         mcp_servers_path: mcp_servers_path.display().to_string(),
-        skills: scan_aura_assets(app, &skills_dir, "skills")?,
+        skills: scan_skill_roots(app, &skills_dir, &external_skill_dirs)?,
         plugins: scan_aura_assets(app, &plugins_dir, "plugins")?,
     })
 }
