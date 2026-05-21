@@ -1149,6 +1149,33 @@ button {
   font-size: 11px;
 }
 
+.external-skill-path-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -4px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.025);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.external-skill-path-row span {
+  flex: 0 0 auto;
+  font-weight: 800;
+}
+
+.external-skill-path-row code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
 @media (max-width: 1120px) {
   .asset-section-header {
     flex-direction: column;
@@ -1160,6 +1187,15 @@ button {
 
   .asset-section-toolbar {
     justify-content: flex-start;
+  }
+
+  .external-skill-path-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .external-skill-path-row code {
+    max-width: 100%;
   }
 }
 

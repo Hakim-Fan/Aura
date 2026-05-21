@@ -1012,22 +1012,50 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   async function bindExternalSkillDirectory() {
+    const existingDirs = normalizePathList(draftSettings.externalSkillDirs || [])
     const selected = await open({
       directory: true,
-      multiple: true,
+      multiple: false,
       title: '选择外部 Skill 目录',
     })
-    if (!selected) {
+    if (typeof selected !== 'string') {
       return
     }
 
-    const selectedPaths = Array.isArray(selected) ? selected : [selected]
-    const nextDirs = normalizePathList([
-      ...(draftSettings.externalSkillDirs || []),
-      ...selectedPaths,
-    ])
+    const nextDirs = normalizePathList([selected])
+    const selectedPath = nextDirs[0]
+    if (!selectedPath) {
+      return
+    }
+
+    const isChangingDirectory =
+      existingDirs.length > 0 &&
+      (existingDirs.length !== 1 || existingDirs[0] !== selectedPath)
+    if (isChangingDirectory) {
+      const confirmed = await ask(
+        '换绑外部 Skill 目录会从 Aura 列表中移除之前绑定目录的 skills，并清除这些 skills 的启用状态；不会删除原目录文件。确认继续？',
+        {
+          title: '换绑外部目录',
+          kind: 'warning',
+          okLabel: '确认换绑',
+          cancelLabel: '取消',
+        },
+      )
+      if (!confirmed) {
+        return
+      }
+    }
+
+    const previousExternalSkillIds = new Set(
+      availableSkills
+        .filter(item => item.external)
+        .map(item => item.id),
+    )
     await persistSettingsAndRefreshAssets({
       ...draftSettings,
+      enabledSkillIds: isChangingDirectory
+        ? draftSettings.enabledSkillIds.filter(id => !previousExternalSkillIds.has(id))
+        : draftSettings.enabledSkillIds,
       externalSkillDirs: nextDirs,
     }, 'skills')
   }
@@ -2953,6 +2981,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
     )
     const folderPath =
       kind === 'skills' ? auraHome?.skillsDir || '' : auraHome?.pluginsDir || ''
+    const externalSkillDirs = normalizePathList(draftSettings.externalSkillDirs || [])
+    const externalSkillPath = kind === 'skills' ? externalSkillDirs.join('、') : ''
 
     return (
       <section className="section-shell settings-panel">
@@ -3001,11 +3031,18 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 onClick={() => void bindExternalSkillDirectory()}
               >
                 <FolderOpen size={14} />
-                绑定外部目录
+                {externalSkillPath ? '换绑外部目录' : '绑定外部目录'}
               </button>
             ) : null}
           </div>
         </header>
+
+        {kind === 'skills' && externalSkillPath ? (
+          <div className="external-skill-path-row">
+            <span>当前外部目录</span>
+            <code title={externalSkillPath}>{externalSkillPath}</code>
+          </div>
+        ) : null}
 
         <div className="settings-search-bar">
           <Search size={16} />

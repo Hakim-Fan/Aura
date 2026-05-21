@@ -5383,10 +5383,10 @@ function CapabilityPanel({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <Sparkles size={14} className="text-[var(--accent-soft-strong)]" />
-              <strong className="text-14px font-700 text-[var(--text-primary)]">项目工具</strong>
+              <strong className="text-14px font-700 text-[var(--text-primary)]">会话工具</strong>
             </div>
             <p className="mt-1 text-12px leading-relaxed text-[var(--text-secondary)]">
-              这里的开关只影响当前项目，不会修改全局默认设置。
+              这里的开关只影响当前会话，不会修改全局默认设置。
             </p>
           </div>
           {snapshot ? (

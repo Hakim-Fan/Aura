@@ -415,7 +415,7 @@ export type CapabilityPanelItem = {
   entryPath?: string
   readonly: boolean
   globalEnabled: boolean
-  projectOverride: CapabilityOverrideMode
+  sessionOverride: CapabilityOverrideMode
   effectiveEnabled: boolean
 }
 
@@ -758,6 +758,7 @@ export type Session = {
   workspaceRoot: string
   workspaceMode: 'explicit' | 'default'
   contextCompression?: SessionContextCompression
+  capabilityOverrides?: WorkspaceCapabilityOverrides
   messages: ChatMessage[]
   toolEvents: ToolEvent[]
   taskTree: TaskNode[]

@@ -20,16 +20,13 @@ import {
 import { type AuraHomeState } from './lib/aura'
 import { builtinPlugins, builtinSkills } from './catalog'
 import {
-  getWorkspaceCapabilityOverrides,
   hydrateStorageFromAuraHome,
-  hydrateProjectCapabilityOverridesFromAuraHome,
   isSessionMessagesLoaded,
   loadDeletedSessions,
   loadSessionMessages,
   loadSessions,
   loadSessionFolders,
   loadSettings,
-  loadProjectCapabilityOverrides,
   purgeSessionFromTrash,
   resolveCapabilitiesForWorkspace,
   restoreSessionFromTrash,
@@ -37,8 +34,6 @@ import {
   saveSessionFolders,
   saveSessions,
   saveSettings,
-  saveProjectCapabilityOverrides,
-  updateWorkspaceCapabilityOverride,
 } from './lib/storage'
 import {
   compactMessageEvent,
@@ -79,7 +74,6 @@ import type {
   MessagePhaseOutput,
   MessageModelInfo,
   MessageReasoning,
-  ProjectCapabilityOverrides,
   ProviderProfile,
   ProviderRetryInfo,
   ReasoningEffort,
@@ -89,6 +83,7 @@ import type {
   SessionFolder,
   TaskNode,
   ToolEvent,
+  WorkspaceCapabilityOverrides,
   WorkspaceNode,
 } from './types'
 import { ChatView } from './views/ChatView'
@@ -1723,13 +1718,49 @@ function loadPaneWidth(storageKey: string, fallback: number, min: number, max: n
 const builtinSkillIds = new Set(builtinSkills.map(skill => skill.id))
 const builtinPluginIds = new Set(builtinPlugins.map(plugin => plugin.id))
 
+function createEmptyCapabilityOverrides(): WorkspaceCapabilityOverrides {
+  return {
+    skills: {},
+    plugins: {},
+    mcp: {},
+  }
+}
+
+function updateCapabilityOverride(
+  overrides: WorkspaceCapabilityOverrides | undefined,
+  kind: 'skills' | 'plugins' | 'mcp',
+  id: string,
+  mode: CapabilityOverrideMode,
+): WorkspaceCapabilityOverrides | undefined {
+  const current = overrides || createEmptyCapabilityOverrides()
+  const nextKindEntries = {
+    ...current[kind],
+  }
+
+  if (mode === 'inherit') {
+    delete nextKindEntries[id]
+  } else {
+    nextKindEntries[id] = mode
+  }
+
+  const nextOverrides: WorkspaceCapabilityOverrides = {
+    ...current,
+    [kind]: nextKindEntries,
+  }
+  const hasAnyOverrides =
+    Object.keys(nextOverrides.skills).length > 0 ||
+    Object.keys(nextOverrides.plugins).length > 0 ||
+    Object.keys(nextOverrides.mcp).length > 0
+
+  return hasAnyOverrides ? nextOverrides : undefined
+}
+
 function buildCapabilityPanelItems(
   aura: AuraHomeState | null,
   settings: AgentSettings,
-  workspaceRoot: string,
-  overrides: ProjectCapabilityOverrides,
+  sessionOverrides: WorkspaceCapabilityOverrides | undefined,
 ): CapabilityPanelItem[] {
-  const workspaceOverrides = getWorkspaceCapabilityOverrides(overrides, workspaceRoot)
+  const capabilityOverrides = sessionOverrides || createEmptyCapabilityOverrides()
 
   const skillItems = (aura?.skills || []).map(skill => ({
     id: skill.id,
@@ -1744,14 +1775,16 @@ function buildCapabilityPanelItems(
     entryPath: skill.entryPath || undefined,
     readonly: skill.readonly,
     globalEnabled: settings.enabledSkillIds.includes(skill.id),
-    projectOverride: workspaceOverrides.skills[skill.id] || 'inherit',
+    sessionOverride: capabilityOverrides.skills[skill.id] || 'inherit',
     effectiveEnabled:
-      workspaceOverrides.skills[skill.id] === 'on'
+      capabilityOverrides.skills[skill.id] === 'on'
         ? true
-        : workspaceOverrides.skills[skill.id] === 'off'
+        : capabilityOverrides.skills[skill.id] === 'off'
           ? false
           : settings.enabledSkillIds.includes(skill.id),
-  })).filter(skill => !builtinSkillIds.has(skill.id))
+  }))
+    .filter(skill => !builtinSkillIds.has(skill.id))
+    .filter(skill => skill.globalEnabled)
 
   const pluginItems = (aura?.plugins || []).map(plugin => ({
     id: plugin.id,
@@ -1766,14 +1799,14 @@ function buildCapabilityPanelItems(
     entryPath: plugin.entryPath || undefined,
     readonly: plugin.readonly,
     globalEnabled: settings.enabledPluginIds.includes(plugin.id),
-    projectOverride: workspaceOverrides.plugins[plugin.id] || 'inherit',
+    sessionOverride: capabilityOverrides.plugins[plugin.id] || 'inherit',
     effectiveEnabled:
-      workspaceOverrides.plugins[plugin.id] === 'on'
+      capabilityOverrides.plugins[plugin.id] === 'on'
         ? true
-        : workspaceOverrides.plugins[plugin.id] === 'off'
+        : capabilityOverrides.plugins[plugin.id] === 'off'
           ? false
           : settings.enabledPluginIds.includes(plugin.id),
-  }))
+  })).filter(plugin => plugin.globalEnabled)
 
   const mcpItems = settings.mcpServers.map(server => ({
     id: server.id,
@@ -1795,15 +1828,15 @@ function buildCapabilityPanelItems(
     entryPath: undefined,
     readonly: Boolean(server.isDefault),
     globalEnabled: server.enabled,
-    projectOverride: workspaceOverrides.mcp[server.id] || 'inherit',
+    sessionOverride: capabilityOverrides.mcp[server.id] || 'inherit',
     effectiveEnabled:
       server.healthStatus === 'ok' &&
-        workspaceOverrides.mcp[server.id] === 'on'
+        capabilityOverrides.mcp[server.id] === 'on'
         ? true
-        : workspaceOverrides.mcp[server.id] === 'off' || server.healthStatus !== 'ok'
+        : capabilityOverrides.mcp[server.id] === 'off' || server.healthStatus !== 'ok'
           ? false
           : server.enabled,
-  }))
+  })).filter(server => server.globalEnabled)
 
   return [...skillItems, ...pluginItems, ...mcpItems]
 }
@@ -1814,8 +1847,6 @@ export function MainWindowApp() {
   const [deletedSessions, setDeletedSessions] = useState<Session[]>([])
   const [sessionFolders, setSessionFolders] = useState<SessionFolder[]>(() => loadSessionFolders())
   const [auraHome, setAuraHome] = useState<AuraHomeState | null>(null)
-  const [projectCapabilityOverrides, setProjectCapabilityOverrides] =
-    useState<ProjectCapabilityOverrides>(() => loadProjectCapabilityOverrides())
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sessionFilter, setSessionFilter] = useState('')
   const [sessionFilterMatches, setSessionFilterMatches] = useState<Set<string> | null>(null)
@@ -1914,9 +1945,8 @@ export function MainWindowApp() {
 
     void (async () => {
       try {
-        const [hydrated, hydratedProjectOverrides, hydratedDeletedSessions] = await Promise.all([
+        const [hydrated, hydratedDeletedSessions] = await Promise.all([
           hydrateStorageFromAuraHome(),
-          hydrateProjectCapabilityOverridesFromAuraHome(),
           loadDeletedSessions(),
         ])
         if (cancelled) {
@@ -1927,7 +1957,6 @@ export function MainWindowApp() {
         setSessions(hydrated.sessions)
         setDeletedSessions(hydratedDeletedSessions)
         setSessionFolders(hydrated.sessionFolders)
-        setProjectCapabilityOverrides(hydratedProjectOverrides)
       } catch (caught) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : '初始化 Aura 目录失败。')
@@ -2126,10 +2155,9 @@ export function MainWindowApp() {
       buildCapabilityPanelItems(
         auraHome,
         settings,
-        activeProjectWorkspaceRoot,
-        projectCapabilityOverrides,
+        activeSession?.capabilityOverrides,
       ),
-    [activeProjectWorkspaceRoot, auraHome, projectCapabilityOverrides, settings],
+    [activeSession?.capabilityOverrides, auraHome, settings],
   )
   const currentResolvedCapabilityUsage = useMemo(() => {
     if (!auraHome || !activeProjectWorkspaceRoot.trim()) {
@@ -2139,9 +2167,10 @@ export function MainWindowApp() {
       workspaceRoot: activeProjectWorkspaceRoot,
       settings,
       aura: auraHome,
-      overrides: projectCapabilityOverrides,
+      overrides: {},
+      sessionOverrides: activeSession?.capabilityOverrides,
     }).usage
-  }, [activeProjectWorkspaceRoot, auraHome, projectCapabilityOverrides, settings])
+  }, [activeProjectWorkspaceRoot, activeSession?.capabilityOverrides, auraHome, settings])
 
   useEffect(() => {
     if (!storageReady) {
@@ -2294,16 +2323,11 @@ export function MainWindowApp() {
       unlisten = await listen('settings:updated', () => {
         void (async () => {
           try {
-            const [hydrated, hydratedProjectOverrides] = await Promise.all([
-              hydrateStorageFromAuraHome(),
-              hydrateProjectCapabilityOverridesFromAuraHome(),
-            ])
+            const hydrated = await hydrateStorageFromAuraHome()
             setAuraHome(hydrated.aura)
             setSettings(hydrated.settings)
-            setProjectCapabilityOverrides(hydratedProjectOverrides)
           } catch {
             setSettings(loadSettings())
-            setProjectCapabilityOverrides(loadProjectCapabilityOverrides())
           }
         })()
       })
@@ -3391,19 +3415,13 @@ export function MainWindowApp() {
 
     let latestSettings = loadSettings()
     let latestAuraHome = auraHome
-    let latestProjectOverrides = loadProjectCapabilityOverrides()
 
     try {
-      const [hydrated, hydratedProjectOverrides] = await Promise.all([
-        hydrateStorageFromAuraHome(),
-        hydrateProjectCapabilityOverridesFromAuraHome(),
-      ])
+      const hydrated = await hydrateStorageFromAuraHome()
       latestSettings = hydrated.settings
       latestAuraHome = hydrated.aura
-      latestProjectOverrides = hydratedProjectOverrides
       setSettings(hydrated.settings)
       setAuraHome(hydrated.aura)
-      setProjectCapabilityOverrides(hydratedProjectOverrides)
     } catch {
       // Fall back to the latest cached state if hydration is temporarily unavailable.
     }
@@ -3501,7 +3519,8 @@ export function MainWindowApp() {
         workspaceRoot: projectWorkspaceRoot,
         settings: latestSettings,
         aura: latestAuraHome,
-        overrides: latestProjectOverrides,
+        overrides: {},
+        sessionOverrides: activeSession.capabilityOverrides,
       })
       : {
         runtime: {
@@ -4113,20 +4132,27 @@ export function MainWindowApp() {
     id: string,
     mode: CapabilityOverrideMode,
   ) {
-    if (!activeProjectWorkspaceRoot.trim()) {
-      setError('当前项目尚未配置工作区，暂时无法保存项目级能力设置。')
+    if (!activeSession) {
+      setError('当前会话尚未准备好，暂时无法保存会话工具设置。')
       return
     }
 
-    const nextOverrides = updateWorkspaceCapabilityOverride(
-      projectCapabilityOverrides,
-      activeProjectWorkspaceRoot,
-      kind,
-      id,
-      mode,
+    const nextSessions = sessions.map(session =>
+      session.id === activeSession.id
+        ? {
+          ...session,
+          capabilityOverrides: updateCapabilityOverride(
+            session.capabilityOverrides,
+            kind,
+            id,
+            mode,
+          ),
+          updatedAt: Date.now(),
+        }
+        : session,
     )
-    setProjectCapabilityOverrides(nextOverrides)
-    saveProjectCapabilityOverrides(nextOverrides)
+    setSessions(nextSessions)
+    saveSessions(nextSessions)
   }
 
   const effectiveSettings: AgentSettings = {

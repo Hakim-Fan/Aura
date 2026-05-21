@@ -1144,6 +1144,16 @@ function resolveCapabilityEnabled(
   return globalEnabled
 }
 
+function resolveSessionCapabilityEnabled(
+  globalEnabled: boolean,
+  override: CapabilityOverrideMode | undefined,
+) {
+  if (!globalEnabled) {
+    return false
+  }
+  return override === 'off' ? false : true
+}
+
 function normalizeMcpServers(value: unknown) {
   if (!Array.isArray(value)) {
     return []
@@ -1993,6 +2003,7 @@ function parseSessions(raw: string | null): ParsedSessionRecord[] {
             workspaceRoot: session.workspaceRoot || '',
             workspaceMode: session.workspaceMode || 'explicit',
             contextCompression: normalizeSessionContextCompression(session.contextCompression),
+            capabilityOverrides: normalizeWorkspaceCapabilityOverrides(session.capabilityOverrides),
             messages,
             toolEvents: session.toolEvents || [],
             taskTree: session.taskTree || [],
@@ -2715,12 +2726,17 @@ export function resolveCapabilitiesForWorkspace(args: {
   settings: AgentSettings
   aura: AuraHomeState
   overrides: ProjectCapabilityOverrides
+  sessionOverrides?: WorkspaceCapabilityOverrides
 }): {
   runtime: ResolvedAgentCapabilities
   usage: CapabilityUsageSnapshot
 } {
-  const { workspaceRoot, settings, aura, overrides } = args
-  const projectOverrides = getWorkspaceCapabilityOverrides(overrides, workspaceRoot)
+  const { workspaceRoot, settings, aura, overrides, sessionOverrides } = args
+  const capabilityOverrides =
+    sessionOverrides || getWorkspaceCapabilityOverrides(overrides, workspaceRoot)
+  const resolveEnabled = sessionOverrides
+    ? resolveSessionCapabilityEnabled
+    : resolveCapabilityEnabled
   const resolvedAt = Date.now()
 
   const skillMap = new Map(aura.skills.map(skill => [skill.id, skill]))
@@ -2731,14 +2747,14 @@ export function resolveCapabilitiesForWorkspace(args: {
       ...builtinSkills.map(skill => skill.id),
       ...aura.skills.map(skill => skill.id),
       ...(settings.enabledSkillIds || []),
-      ...Object.keys(projectOverrides.skills),
+      ...Object.keys(capabilityOverrides.skills),
     ]),
   )
     .filter(skillId =>
       (builtinSkillIds.has(skillId) ||
-        resolveCapabilityEnabled(
+        resolveEnabled(
           settings.enabledSkillIds.includes(skillId),
-          projectOverrides.skills[skillId],
+          capabilityOverrides.skills[skillId],
         )) &&
       skillMap.get(skillId)?.supported !== false,
     )
@@ -2755,13 +2771,13 @@ export function resolveCapabilitiesForWorkspace(args: {
     new Set([
       ...aura.plugins.map(plugin => plugin.id),
       ...(settings.enabledPluginIds || []),
-      ...Object.keys(projectOverrides.plugins),
+      ...Object.keys(capabilityOverrides.plugins),
     ]),
   )
     .filter(pluginId =>
-      resolveCapabilityEnabled(
+      resolveEnabled(
         settings.enabledPluginIds.includes(pluginId),
-        projectOverrides.plugins[pluginId],
+        capabilityOverrides.plugins[pluginId],
       ) && pluginMap.get(pluginId)?.supported !== false,
     )
     .map(pluginId => {
@@ -2775,7 +2791,7 @@ export function resolveCapabilitiesForWorkspace(args: {
 
   const resolvedMcpServers = settings.mcpServers
     .filter(server =>
-      resolveCapabilityEnabled(server.enabled, projectOverrides.mcp[server.id]) &&
+      resolveEnabled(server.enabled, capabilityOverrides.mcp[server.id]) &&
       server.healthStatus === 'ok' &&
       Boolean(server.command.trim()),
     )
