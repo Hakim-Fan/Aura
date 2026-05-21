@@ -1945,6 +1945,15 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS message_event_details (
+              message_id TEXT NOT NULL,
+              version_index INTEGER NOT NULL,
+              event_id TEXT NOT NULL,
+              detail_json TEXT NOT NULL,
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY(message_id, version_index, event_id)
+            );
+
             CREATE TABLE IF NOT EXISTS session_summaries (
               id TEXT PRIMARY KEY,
               session_id TEXT NOT NULL,
@@ -2032,6 +2041,8 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               ON messages(session_id, sort_index);
             CREATE INDEX IF NOT EXISTS idx_message_versions_message_version
               ON message_versions(message_id, version_index);
+            CREATE INDEX IF NOT EXISTS idx_message_event_details_message_version
+              ON message_event_details(message_id, version_index);
             CREATE INDEX IF NOT EXISTS idx_work_memories_session_created
               ON work_memories(session_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_work_memories_session_assistant
@@ -2173,6 +2184,8 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               ON messages(session_id, deleted_at, sort_index);
             CREATE INDEX IF NOT EXISTS idx_message_versions_message_deleted_version
               ON message_versions(message_id, deleted_at, version_index);
+            CREATE INDEX IF NOT EXISTS idx_message_event_details_event
+              ON message_event_details(event_id);
             "#,
         )
         .map_err(|error| format!("Failed to initialize SQLite deleted_at indexes: {error}"))?;
@@ -5636,9 +5649,16 @@ fn purge_session_sqlite<R: Runtime>(
     connection
         .execute(
             "DELETE FROM work_memories WHERE session_id = ?1",
-            params![session_id],
+            params![&session_id],
         )
         .map_err(|error| format!("Failed to purge session work memories from SQLite: {error}"))?;
+    connection
+        .execute(
+            "DELETE FROM message_event_details
+             WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?1)",
+            params![&session_id],
+        )
+        .map_err(|error| format!("Failed to purge session message event details from SQLite: {error}"))?;
     connection
         .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
         .map_err(|error| format!("Failed to purge session from SQLite: {error}"))?;
@@ -5704,6 +5724,12 @@ fn purge_message_sqlite<R: Runtime>(
     message_id: String,
 ) -> Result<(), String> {
     let connection = open_app_db(&app)?;
+    connection
+        .execute(
+            "DELETE FROM message_event_details WHERE message_id = ?1",
+            params![&message_id],
+        )
+        .map_err(|error| format!("Failed to purge message event details from SQLite: {error}"))?;
     connection
         .execute("DELETE FROM messages WHERE id = ?1", params![message_id])
         .map_err(|error| format!("Failed to purge message from SQLite: {error}"))?;
@@ -5835,11 +5861,83 @@ fn purge_message_version_sqlite<R: Runtime>(
     let connection = open_app_db(&app)?;
     connection
         .execute(
+            "DELETE FROM message_event_details WHERE message_id = ?1 AND version_index = ?2",
+            params![&message_id, version_index],
+        )
+        .map_err(|error| format!("Failed to purge message event details from SQLite: {error}"))?;
+    connection
+        .execute(
             "DELETE FROM message_versions WHERE message_id = ?1 AND version_index = ?2",
             params![message_id, version_index],
         )
         .map_err(|error| format!("Failed to purge message version from SQLite: {error}"))?;
     Ok(())
+}
+
+#[tauri::command]
+fn upsert_message_event_details_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    message_id: String,
+    version_index: i64,
+    details: serde_json::Value,
+) -> Result<(), String> {
+    let connection = open_app_db(&app)?;
+    let updated_at = current_timestamp_ms() as i64;
+    let records = details
+        .as_array()
+        .ok_or_else(|| "Message event details payload must be an array.".to_string())?;
+
+    for record in records {
+        let event_id = get_json_string_field(record, "eventId", "");
+        if event_id.trim().is_empty() {
+            continue;
+        }
+        let detail = get_json_object_field(record, "detail");
+        if detail.is_null() {
+            continue;
+        }
+        connection
+            .execute(
+                "INSERT INTO message_event_details (
+                    message_id, version_index, event_id, detail_json, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(message_id, version_index, event_id) DO UPDATE SET
+                    detail_json = excluded.detail_json,
+                    updated_at = excluded.updated_at",
+                params![
+                    &message_id,
+                    version_index,
+                    event_id,
+                    value_to_json_string(&detail)?,
+                    updated_at,
+                ],
+            )
+            .map_err(|error| format!("Failed to upsert message event detail into SQLite: {error}"))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn load_message_event_detail_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    message_id: String,
+    version_index: i64,
+    event_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let connection = open_app_db(&app)?;
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT detail_json
+             FROM message_event_details
+             WHERE message_id = ?1 AND version_index = ?2 AND event_id = ?3",
+            params![message_id, version_index, event_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load message event detail from SQLite: {error}"))?;
+
+    Ok(raw.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok()))
 }
 
 #[tauri::command]
@@ -6455,6 +6553,8 @@ fn main() {
             upsert_message_version_sqlite,
             delete_message_version_sqlite,
             purge_message_version_sqlite,
+            upsert_message_event_details_sqlite,
+            load_message_event_detail_sqlite,
             start_agent_task,
             get_agent_task,
             release_agent_task,

@@ -4,8 +4,14 @@ import { selectTurnCapabilities } from './capabilitySelector.mjs'
 import { createAdvancedTools } from './advancedTools.mjs'
 import {
   buildCapabilityExposureNote as buildAgentCapabilityExposureNote,
+  buildDefaultAgentPromptBlocks,
   buildDefaultAgentSystemPrompt,
 } from './agentPrompting.mjs'
+import {
+  diffPromptBlockSnapshots,
+  promptBlockSnapshot as snapshotPromptBlocks,
+  renderPromptBlocks,
+} from './promptBlocks.mjs'
 import {
   applyHardSignalIntentOverrides,
   applyRouteToolBudgets,
@@ -96,6 +102,7 @@ import {
   buildRejectedPlanResult,
   requestPlanApproval,
 } from './agent/planApprovalRuntime.mjs'
+import { compactVisibleTaskTitle } from './taskTitles.mjs'
 import {
   buildToolFailureContinuationNote,
   shouldContinueAfterToolFailure,
@@ -704,6 +711,8 @@ function buildRouteDecisionSnapshot({
   selectedCapabilities,
   selectedTools,
   contextEstimate,
+  promptBlocks,
+  promptBlockDiff,
   escalationCount,
   availableEscalations,
   tierHistory,
@@ -768,7 +777,40 @@ function buildRouteDecisionSnapshot({
         .filter(Boolean),
     },
     contextEstimate,
+    promptBlocks: Array.isArray(promptBlocks) ? promptBlocks : undefined,
+    promptBlockDiff: promptBlockDiff || undefined,
   }
+}
+
+function findLatestPromptBlockSnapshot(messages = []) {
+  const candidates = []
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (Array.isArray(message?.routeDecision?.promptBlocks)) {
+      candidates.push(message.routeDecision.promptBlocks)
+    }
+    for (const variant of Array.isArray(message?.versions) ? message.versions : []) {
+      if (Array.isArray(variant?.routeDecision?.promptBlocks)) {
+        candidates.push(variant.routeDecision.promptBlocks)
+      }
+    }
+  }
+  const latest = candidates.at(-1)
+  if (!Array.isArray(latest)) {
+    return []
+  }
+  return latest
+    .filter(block =>
+      block &&
+      typeof block.id === 'string' &&
+      typeof block.hash === 'string',
+    )
+    .map(block => ({
+      id: block.id,
+      role: typeof block.role === 'string' ? block.role : undefined,
+      kind: typeof block.kind === 'string' ? block.kind : undefined,
+      hash: block.hash,
+      stable: block.stable === true,
+    }))
 }
 
 function estimateMountedToolSchemaTokens(tools = [], settings = {}) {
@@ -825,12 +867,17 @@ function buildPromptContextSnapshot(
 function normalizeUsage(usage) {
   const inputTokens = Math.max(0, Math.round(Number(usage?.inputTokens) || 0))
   const outputTokens = Math.max(0, Math.round(Number(usage?.outputTokens) || 0))
+  const cachedInputTokens = Math.max(
+    0,
+    Math.round(Number(usage?.cachedInputTokens) || 0),
+  )
   if (inputTokens <= 0 && outputTokens <= 0) {
     return undefined
   }
   return {
     inputTokens,
     outputTokens,
+    cachedInputTokens,
     estimatedInputTokens: Math.max(
       0,
       Math.round(Number(usage?.estimatedInputTokens) || 0),
@@ -843,10 +890,12 @@ function createUsageTrackingHooks(baseHooks = {}) {
   let totals = {
     inputTokens: 0,
     outputTokens: 0,
+    cachedInputTokens: 0,
   }
   let latest = {
     inputTokens: 0,
     outputTokens: 0,
+    cachedInputTokens: 0,
   }
   let latestContext = {
     inputTokens: 0,
@@ -860,8 +909,10 @@ function createUsageTrackingHooks(baseHooks = {}) {
     baseHooks?.onUsage?.({
       inputTokens: totals.inputTokens,
       outputTokens: totals.outputTokens,
+      cachedInputTokens: totals.cachedInputTokens,
       latestInputTokens: activeInputTokens,
       latestOutputTokens: latest.outputTokens,
+      latestCachedInputTokens: latest.cachedInputTokens,
       contextWindow: latestContextWindow || undefined,
     })
   }
@@ -883,6 +934,7 @@ function createUsageTrackingHooks(baseHooks = {}) {
         latest = {
           inputTokens: normalized.inputTokens,
           outputTokens: normalized.outputTokens,
+          cachedInputTokens: normalized.cachedInputTokens,
         }
         if (normalized.estimatedInputTokens > 0 || latestContext.inputTokens <= 0) {
           latestContext = {
@@ -896,6 +948,7 @@ function createUsageTrackingHooks(baseHooks = {}) {
         totals = {
           inputTokens: totals.inputTokens + normalized.inputTokens,
           outputTokens: totals.outputTokens + normalized.outputTokens,
+          cachedInputTokens: totals.cachedInputTokens + normalized.cachedInputTokens,
         }
         publishUsage()
       },
@@ -935,8 +988,13 @@ function createUsageTrackingHooks(baseHooks = {}) {
       )
       return {
         ...normalizedTotals,
+        cachedInputTokens: totals.cachedInputTokens,
         latestInputTokens,
         latestOutputTokens: Math.max(0, Math.round(Number(latest.outputTokens) || 0)),
+        latestCachedInputTokens: Math.max(
+          0,
+          Math.round(Number(latest.cachedInputTokens) || 0),
+        ),
         contextWindow: latestContextWindow || undefined,
       }
     },
@@ -1798,7 +1856,7 @@ function createTaskTracker(hooks, rootTitle) {
         return {
           ...(previous || {}),
           id,
-          title: item.content || `步骤 ${index + 1}`,
+          title: compactVisibleTaskTitle(item.content, `步骤 ${index + 1}`),
           summary:
             item.successCriteria ||
             item.verification?.evidence ||
@@ -2027,6 +2085,7 @@ export async function runDefaultAgent(request) {
   let toolFailureContinuationCount = 0
   let lastSelectedCapabilities = null
   let lastSystemPrompt = ''
+  let previousPromptBlocks = findLatestPromptBlockSnapshot(messages)
   let lastRouteDecision = {
     strategyDecision: strategy,
     intentClassification: normalizedClassification || undefined,
@@ -2116,15 +2175,22 @@ export async function runDefaultAgent(request) {
           ...mountedToolAvailability,
         },
       )
+      const promptBlockList = buildDefaultAgentPromptBlocks(
+        effectiveRunSettings,
+        skillPrompt,
+        exposureNote,
+        promptRouteState,
+        mountedToolAvailability,
+      )
+      const promptBlocks = snapshotPromptBlocks(promptBlockList)
+      const promptBlockDiff = diffPromptBlockSnapshots(
+        previousPromptBlocks,
+        promptBlocks,
+      )
+      previousPromptBlocks = promptBlocks
       lastSystemPrompt = appendCarryoverContextToPrompt(
         appendRouteNotesToPrompt(
-          buildDefaultAgentSystemPrompt(
-            effectiveRunSettings,
-            skillPrompt,
-            exposureNote,
-            promptRouteState,
-            mountedToolAvailability,
-          ),
+          renderPromptBlocks(promptBlockList),
           routeNotes,
         ),
         carryoverContext,
@@ -2157,6 +2223,8 @@ export async function runDefaultAgent(request) {
         selectedCapabilities,
         selectedTools: selectedCapabilities.selectedTools,
         contextEstimate: promptContextSnapshot,
+        promptBlocks,
+        promptBlockDiff,
         escalationCount: routeEscalationCount,
         availableEscalations,
         tierHistory: [...routeHistory.map(entry => entry.capabilityTier), routeState.capabilityTier],
@@ -2313,6 +2381,8 @@ export async function runDefaultAgent(request) {
         selectedCapabilities,
         selectedTools: selectedCapabilities.selectedTools,
         contextEstimate: latestPromptContextSnapshot,
+        promptBlocks,
+        promptBlockDiff,
         escalationCount: routeEscalationCount,
         availableEscalations,
         tierHistory: routeHistory.map(entry => entry.capabilityTier).filter(Boolean),

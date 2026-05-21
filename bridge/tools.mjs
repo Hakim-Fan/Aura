@@ -1765,7 +1765,7 @@ export function createBuiltinTools(context) {
       name: 'todo_write',
       aliases: ['todo', 'plan', 'tasklist'],
       description:
-        'Track the current plan as a structured todo list. Use it for multi-step or stateful work.',
+        'Track the current plan as a structured todo list. Use it for multi-step or stateful work. Each item content is a short UI title: 20 Chinese characters or 8 English words max; put details in successCriteria or verification.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1775,7 +1775,11 @@ export function createBuiltinTools(context) {
               type: 'object',
               properties: {
                 id: { type: 'string' },
-                content: { type: 'string' },
+                content: {
+                  type: 'string',
+                  description:
+                    'Short user-visible step title, max 20 Chinese characters or 8 English words. Do not include long explanations, risks, or acceptance details here.',
+                },
                 status: {
                   type: 'string',
                   description: 'One of: pending, in_progress, completed, failed, blocked.',

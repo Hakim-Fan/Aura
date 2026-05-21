@@ -3,6 +3,7 @@ import type {
   AgentSettings,
   AgentRunRecord,
   ChatMessage,
+  MessageEventDetailPayload,
   ChatMessageVariant,
   ProjectCapabilityOverrides,
   Session,
@@ -100,6 +101,26 @@ export function upsertPersistedMessageVersion(
   versionIndex: number,
 ) {
   return invoke('upsert_message_version_sqlite', { messageId, version, versionIndex })
+}
+
+export function upsertPersistedMessageEventDetails(
+  messageId: string,
+  versionIndex: number,
+  details: Array<{ eventId: string; detail: MessageEventDetailPayload }>,
+) {
+  return invoke('upsert_message_event_details_sqlite', { messageId, versionIndex, details })
+}
+
+export function loadPersistedMessageEventDetail(
+  messageId: string,
+  versionIndex: number,
+  eventId: string,
+) {
+  return invoke<MessageEventDetailPayload | null>('load_message_event_detail_sqlite', {
+    messageId,
+    versionIndex,
+    eventId,
+  })
 }
 
 export function deletePersistedMessageVersion(messageId: string, versionIndex: number) {

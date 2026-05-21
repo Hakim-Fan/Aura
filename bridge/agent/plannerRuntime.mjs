@@ -1,6 +1,7 @@
 import {
   getRuntimeTaskLabels,
 } from '../runtimeLanguage.mjs'
+import { compactVisibleTaskTitle } from '../taskTitles.mjs'
 
 function createId(prefix, now = Date.now, random = Math.random) {
   return `${prefix}-${now().toString(36)}-${random().toString(36).slice(2, 8)}`
@@ -354,7 +355,7 @@ export function planToTaskTree(plan = {}) {
           : 'running',
       children: subtasks.map(subtask => ({
         id: subtask.id,
-        title: subtask.title || subtask.id,
+        title: compactVisibleTaskTitle(subtask.title, subtask.id),
         summary: subtask.summary ||
           subtask.acceptance ||
           (Array.isArray(subtask.successCriteria) && subtask.successCriteria.length > 0

@@ -553,7 +553,6 @@ function readSearchCacheEntry(cacheKey) {
     cacheKey,
     persisted.value,
     Math.max(1, persisted.expiresAt - Date.now()),
-    { maxEntries: SEARCH_CACHE_MAX_ENTRIES },
   )
   return {
     value: persisted.value,
@@ -562,9 +561,7 @@ function readSearchCacheEntry(cacheKey) {
 }
 
 function writeSearchCacheEntry(cacheKey, value, ttlMs) {
-  writeCache(SEARCH_CACHE, cacheKey, value, ttlMs, {
-    maxEntries: SEARCH_CACHE_MAX_ENTRIES,
-  })
+  writeCache(SEARCH_CACHE, cacheKey, value, ttlMs)
   writePersistentCache(SEARCH_CACHE_NAMESPACE, cacheKey, value, ttlMs, {
     maxEntries: SEARCH_CACHE_MAX_ENTRIES,
   })

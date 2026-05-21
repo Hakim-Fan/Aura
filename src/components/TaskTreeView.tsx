@@ -3,6 +3,15 @@ import { BadgeCheck, CheckCircle2, Circle, LoaderCircle, PauseCircle, XCircle } 
 import type { TaskNode } from '../types'
 
 const STRUCTURAL_STEP_KINDS = new Set(['main', 'plan'])
+const MAX_VISIBLE_TASK_TITLE_CHARS = 20
+
+function compactVisibleTaskTitle(value = '') {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= MAX_VISIBLE_TASK_TITLE_CHARS) {
+    return normalized
+  }
+  return `${normalized.slice(0, Math.max(0, MAX_VISIBLE_TASK_TITLE_CHARS - 3))}...`
+}
 
 function collectStepNodes(nodes: TaskNode[] = []) {
   const steps: TaskNode[] = []
@@ -93,6 +102,8 @@ function pickFocusedStep(steps: TaskNode[] = []) {
 
 function TaskStep({ node, compact = false }: { node: TaskNode; compact?: boolean }) {
   const verified = node.verificationStatus === 'verified'
+  const displayTitle = compactVisibleTaskTitle(node.title)
+  const titleTooltip = displayTitle === node.title ? undefined : node.title
   return (
     <li className={`flex min-w-0 ${compact ? 'items-center' : 'items-start'} gap-2.5`}>
       <span
@@ -103,12 +114,12 @@ function TaskStep({ node, compact = false }: { node: TaskNode; compact?: boolean
         <StatusIcon status={node.status} />
       </span>
       <span
-        className={`min-w-0 flex-1 text-13px font-600 text-[var(--text-primary)] ${
+        className={`min-w-0 flex-1 break-words text-13px font-600 text-[var(--text-primary)] ${
           compact ? 'truncate leading-5' : 'leading-relaxed'
         }`}
-        title={compact ? node.title : undefined}
+        title={titleTooltip}
       >
-        <span className="min-w-0">{node.title}</span>
+        <span className="min-w-0">{displayTitle}</span>
         {verified ? (
           <span
             className="ml-2 inline-flex shrink-0 items-center gap-1 rounded-full border border-green-200 bg-green-50 px-1.5 py-0.5 align-middle text-11px font-700 text-green-600"

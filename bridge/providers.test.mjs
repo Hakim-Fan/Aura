@@ -13,6 +13,8 @@ const {
   hasWriteRepairAttemptSince,
   maybeSpillAssistantContent,
   mergeOpenAiToolCalls,
+  normalizeGoogleUsage,
+  normalizeOpenAiUsage,
   parseToolArguments,
   resolveCompactionOutputTokens,
   resolveCompactionSettings,
@@ -20,6 +22,36 @@ const {
   shouldNudgeForObservableProgress,
   updateUnresolvedToolErrorForRepair,
 } = __testInternals
+
+test('provider usage preserves cached input token counters', () => {
+  assert.deepEqual(
+    normalizeOpenAiUsage({
+      prompt_tokens: 2048,
+      completion_tokens: 128,
+      prompt_tokens_details: {
+        cached_tokens: 1536,
+      },
+    }),
+    {
+      inputTokens: 2048,
+      outputTokens: 128,
+      cachedInputTokens: 1536,
+    },
+  )
+
+  assert.deepEqual(
+    normalizeGoogleUsage({
+      promptTokenCount: 4096,
+      candidatesTokenCount: 256,
+      cachedContentTokenCount: 3072,
+    }),
+    {
+      inputTokens: 4096,
+      outputTokens: 256,
+      cachedInputTokens: 3072,
+    },
+  )
+})
 
 test('custom OpenAI-compatible tool-call turns round-trip reasoning_content', () => {
   const entry = buildOpenAiAssistantToolCallTranscriptEntry({

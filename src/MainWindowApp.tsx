@@ -40,9 +40,20 @@ import {
   saveProjectCapabilityOverrides,
   updateWorkspaceCapabilityOverride,
 } from './lib/storage'
+import {
+  compactMessageEvent,
+  compactToolEventPayload,
+  readMessageEventDetailPayload,
+  stripMessageEventDetail,
+} from './lib/eventCompaction'
+import {
+  loadPersistedMessageEventDetail,
+  upsertPersistedMessageEventDetails,
+} from './lib/persistence'
 import { openSettingsWindow } from './lib/windows'
 import {
   createSessionWorkspace,
+  deleteWorkspaceDirectory,
   importAttachmentFromPath,
   openPathInDefaultApp,
   readImagePreview,
@@ -61,6 +72,7 @@ import type {
   ChatContentPart,
   ChatMessage,
   ChatMessageVariant,
+  MessageEventDetailPayload,
   MessageAttachment,
   MessageActivity,
   MessageEvent,
@@ -831,7 +843,11 @@ function presentToolEventTitle(event: ToolEvent) {
   return prettifyIdentifier(rawName)
 }
 
-function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
+function mapToolEventToMessageEvent(
+  event: ToolEvent,
+  options: { lazyDetails?: boolean } = {},
+): MessageEvent {
+  const compactPayload = compactToolEventPayload(event)
   const kind =
     event.source === 'subagent'
       ? 'subagent'
@@ -839,7 +855,7 @@ function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
         ? 'shell'
         : 'tool'
 
-  return {
+  const messageEvent: MessageEvent = {
     id: event.id,
     kind,
     title: presentToolEventTitle(event),
@@ -856,12 +872,13 @@ function mapToolEventToMessageEvent(event: ToolEvent): MessageEvent {
     startedAt: event.startedAt,
     finishedAt: event.finishedAt,
     durationMs: event.durationMs,
-    input: event.input,
-    output: event.output,
-    structuredOutput: event.structuredOutput,
-    error: event.error,
+    input: compactPayload.input,
+    output: compactPayload.output,
+    structuredOutput: compactPayload.structuredOutput,
+    error: compactPayload.error,
     errorInfo: event.errorInfo,
   }
+  return options.lazyDetails ? stripMessageEventDetail(messageEvent) : messageEvent
 }
 
 function approvalCategoryLabel(category?: string) {
@@ -937,10 +954,13 @@ function contextCompressionEvent(snapshot: AgentTaskSnapshot): MessageEvent | nu
   }
 }
 
-function buildSnapshotMessageEvents(snapshot: AgentTaskSnapshot): MessageEvent[] {
+function buildSnapshotMessageEvents(
+  snapshot: AgentTaskSnapshot,
+  options: { lazyDetails?: boolean } = {},
+): MessageEvent[] {
   return [
     contextCompressionEvent(snapshot),
-    ...snapshot.toolEvents.map(mapToolEventToMessageEvent),
+    ...snapshot.toolEvents.map(event => mapToolEventToMessageEvent(event, options)),
     ...(snapshot.pendingApproval
       ? [
         {
@@ -975,6 +995,13 @@ function buildSnapshotMessageEvents(snapshot: AgentTaskSnapshot): MessageEvent[]
       ]
       : []),
   ].filter((event): event is MessageEvent => Boolean(event))
+}
+
+function buildMessageEventDetailRecords(toolEvents: ToolEvent[]) {
+  return toolEvents.flatMap(event => {
+    const detail = readMessageEventDetailPayload(event)
+    return detail ? [{ eventId: event.id, detail }] : []
+  })
 }
 
 function buildSnapshotErrorMessage(
@@ -1317,7 +1344,7 @@ function mergeMessageEvents(existing: MessageEvent[] = [], incoming: MessageEven
   const preservedExisting = existing.filter(
     event => event.kind !== 'approval' || isArchivedExecutionId(event.id),
   )
-  return mergeEntriesById(preservedExisting, incoming)
+  return mergeEntriesById(preservedExisting, incoming).map(compactMessageEvent)
 }
 
 function isInternalPlanTaskNode(node?: TaskNode) {
@@ -1367,6 +1394,20 @@ function readTextField(record: Record<string, unknown> | null | undefined, key: 
   return typeof value === 'string' ? value.trim() : ''
 }
 
+const MAX_VISIBLE_TASK_TITLE_CHARS = 20
+
+function compactVisibleTaskTitle(value: string, fallback = '') {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+  const title = normalized || String(fallback || '').replace(/\s+/g, ' ').trim()
+  if (!title) {
+    return ''
+  }
+  if (title.length <= MAX_VISIBLE_TASK_TITLE_CHARS) {
+    return title
+  }
+  return `${title.slice(0, Math.max(0, MAX_VISIBLE_TASK_TITLE_CHARS - 3))}...`
+}
+
 function readPlanApprovalSteps(approval?: ApprovalRequest): Array<Record<string, unknown>> {
   if (approval?.category !== 'plan') {
     return []
@@ -1408,10 +1449,10 @@ function taskTreeFromPlanApproval(approval?: ApprovalRequest): TaskNode[] {
       status: 'running',
       children: steps.map((step, index) => ({
         id: readTextField(step, 'id') || `${planId}-approval-step-${index + 1}`,
-        title:
-          readTextField(step, 'title') ||
-          readTextField(step, 'description') ||
+        title: compactVisibleTaskTitle(
+          readTextField(step, 'title') || readTextField(step, 'description'),
           `步骤 ${index + 1}`,
+        ),
         summary: '',
         kind: (readTextField(step, 'kind') || 'plan_step') as TaskNode['kind'],
         status: index === 0 ? 'running' : 'queued',
@@ -2302,7 +2343,21 @@ export function MainWindowApp() {
           [sessionId]: snapshot,
         }))
 
-        const snapshotMessageEvents = buildSnapshotMessageEvents(snapshot)
+        const snapshotFinished = snapshot.status === 'completed' || snapshot.status === 'failed'
+        if (snapshotFinished) {
+          const details = buildMessageEventDetailRecords(snapshot.toolEvents)
+          if (details.length > 0) {
+            await upsertPersistedMessageEventDetails(
+              binding.messageId,
+              binding.variantIndex,
+              details,
+            )
+          }
+        }
+
+        const snapshotMessageEvents = buildSnapshotMessageEvents(snapshot, {
+          lazyDetails: snapshotFinished,
+        })
 
         updateSession(sessionId, session => ({
           ...session,
@@ -2363,7 +2418,7 @@ export function MainWindowApp() {
           ),
         }))
 
-        if (snapshot.status === 'completed' || snapshot.status === 'failed') {
+        if (snapshotFinished) {
           setSessions(current =>
             current
               .map(session =>
@@ -2998,10 +3053,48 @@ export function MainWindowApp() {
     showToast('会话已恢复')
   }
 
+  function resolveManagedTrashWorkspacePath(session: Session | undefined) {
+    if (!session || session.workspaceMode !== 'default') {
+      return ''
+    }
+    const workspacePath = session.workspacePath.trim()
+    const managedRoot = auraHome?.workspaceDir?.trim() || ''
+    if (!workspacePath || !managedRoot) {
+      return ''
+    }
+
+    const normalizedPath = workspacePath.replace(/\\/g, '/').replace(/\/+$/u, '')
+    const normalizedRoot = managedRoot.replace(/\\/g, '/').replace(/\/+$/u, '')
+    if (!normalizedPath || normalizedPath === normalizedRoot) {
+      return ''
+    }
+    return normalizedPath.startsWith(`${normalizedRoot}/`) ? workspacePath : ''
+  }
+
   async function permanentlyDeleteSession(sessionId: string) {
+    const target = deletedSessions.find(session => session.id === sessionId)
+    const workspacePath = resolveManagedTrashWorkspacePath(target)
     await purgeSessionFromTrash(sessionId)
+    if (workspacePath) {
+      try {
+        await deleteWorkspaceDirectory(workspacePath)
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : String(caught)
+        showToast(`会话已永久删除，但临时工作区清理失败：${message}`, 'error')
+        setDeletedSessions(current => current.filter(session => session.id !== sessionId))
+        return
+      }
+    }
     setDeletedSessions(current => current.filter(session => session.id !== sessionId))
-    showToast('会话已永久删除')
+    showToast(workspacePath ? '会话已永久删除，临时工作区已清理' : '会话已永久删除')
+  }
+
+  async function loadMessageEventDetail(
+    messageId: string,
+    versionIndex: number,
+    eventId: string,
+  ): Promise<MessageEventDetailPayload | null> {
+    return loadPersistedMessageEventDetail(messageId, versionIndex, eventId)
   }
 
   function insertFileReference(path: string) {
@@ -3881,6 +3974,16 @@ export function MainWindowApp() {
       await abortAgentTask(agentTask.id)
       const stoppedAt = Date.now()
       const currentSnapshot = agentTasksBySession[activeSession.id]
+      if (currentSnapshot) {
+        const details = buildMessageEventDetailRecords(currentSnapshot.toolEvents)
+        if (details.length > 0) {
+          await upsertPersistedMessageEventDetails(
+            activeRunningTask.messageId,
+            activeRunningTask.variantIndex,
+            details,
+          )
+        }
+      }
       updateSession(activeSession.id, session => ({
         ...session,
         messages: session.messages.map(message =>
@@ -3901,7 +4004,9 @@ export function MainWindowApp() {
               phaseOutputs:
                 currentSnapshot?.phaseOutputs || currentVariant.phaseOutputs,
               events:
-                currentSnapshot?.toolEvents.map(mapToolEventToMessageEvent) ||
+                currentSnapshot?.toolEvents.map(event =>
+                  mapToolEventToMessageEvent(event, { lazyDetails: true }),
+                ) ||
                 currentVariant.events,
               steps: currentSnapshot?.taskTree || currentVariant.steps,
               activity: currentVariant.activity
@@ -4192,6 +4297,7 @@ export function MainWindowApp() {
                 onCancelCurrentStep={() => void handleCancelCurrentStep()}
                 onCompressContext={() => void handleCompressActiveContext()}
                 onToggleMessageActivity={toggleMessageActivity}
+                onLoadMessageEventDetail={loadMessageEventDetail}
                 onStop={() => void handleStopAgentTask()}
                 contextCompressionRunning={contextCompressionSessionId === activeSession.id}
               />

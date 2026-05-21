@@ -123,7 +123,14 @@ export type MessageEvent = {
   structuredOutput?: Record<string, unknown>
   error?: string
   errorInfo?: RuntimeErrorInfo
+  detailRef?: string
+  detailAvailable?: boolean
 }
+
+export type MessageEventDetailPayload = Pick<
+  MessageEvent,
+  'input' | 'output' | 'structuredOutput' | 'error'
+>
 
 export type MessageActivity = {
   status: TaskStatus
@@ -204,8 +211,10 @@ export type MessagePhaseOutput = {
 export type MessageUsage = {
   inputTokens?: number
   outputTokens?: number
+  cachedInputTokens?: number
   latestInputTokens?: number
   latestOutputTokens?: number
+  latestCachedInputTokens?: number
   contextWindow?: number
 }
 
@@ -229,6 +238,11 @@ export type CapabilityUsageSnapshot = {
 export type AgentArchitectureMode =
   | 'default-agent'
   | 'orchestrated'
+
+export type UserCustomInstructions = {
+  workRules: string
+  answerPreferences: string
+}
 
 export type RouteAnswerMode = 'advise' | 'diagnose' | 'execute'
 
@@ -270,6 +284,20 @@ export type PromptContextSnapshot = {
   effectiveThresholdTokens?: number
 }
 
+export type PromptBlockSnapshotEntry = {
+  id: string
+  role?: string
+  kind?: string
+  hash: string
+  stable?: boolean
+}
+
+export type PromptBlockDiffSnapshot = {
+  added: string[]
+  changed: string[]
+  removed: string[]
+}
+
 export type RouteDecisionSnapshot = {
   answerMode: RouteAnswerMode
   capabilityTier: RouteCapabilityTier
@@ -286,6 +314,8 @@ export type RouteDecisionSnapshot = {
     | 'runtime_pass_limit'
   mountedCapabilities?: RouteMountedCapabilitiesSnapshot
   contextEstimate?: PromptContextSnapshot
+  promptBlocks?: PromptBlockSnapshotEntry[]
+  promptBlockDiff?: PromptBlockDiffSnapshot
 }
 
 export type CompletionState =
@@ -700,6 +730,7 @@ export type AgentSettings = {
   memoryMode: MemoryMode
   contextCompressionThresholdTokens: number
   reasoningEffort: ReasoningEffort
+  customInstructions: UserCustomInstructions
   showDetailedExecutionDetails: boolean
   requireLongTaskPlanApproval: boolean
   enableMultiAgent: boolean

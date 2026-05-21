@@ -299,6 +299,10 @@ function normalizeOpenAiUsage(usage) {
   return {
     inputTokens,
     outputTokens,
+    cachedInputTokens: Math.max(
+      0,
+      Math.round(Number(usage.prompt_tokens_details?.cached_tokens) || 0),
+    ),
   }
 }
 
@@ -320,6 +324,10 @@ function normalizeGoogleUsage(usage) {
   return {
     inputTokens,
     outputTokens,
+    cachedInputTokens: Math.max(
+      0,
+      Math.round(Number(usage.cachedContentTokenCount) || 0),
+    ),
   }
 }
 
@@ -2280,6 +2288,8 @@ export const __testInternals = {
   maybeSpillAssistantContent,
   mergeStreamedField,
   mergeOpenAiToolCalls,
+  normalizeGoogleUsage,
+  normalizeOpenAiUsage,
   parseToolArguments,
   resolveCompactionOutputTokens,
   resolveCompactionSettings,

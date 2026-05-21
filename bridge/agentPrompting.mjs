@@ -3,6 +3,10 @@ import {
   getLocaleDisplayName,
   normalizeRuntimeLocale,
 } from './runtimeLanguage.mjs'
+import {
+  createPromptBlock,
+  renderPromptBlocks,
+} from './promptBlocks.mjs'
 
 function buildCurrentDateContext() {
   const now = new Date()
@@ -79,6 +83,37 @@ function buildReasoningInstruction(settings) {
   }
 
   return reasoningInstructions[settings.reasoningEffort] || reasoningInstructions.medium
+}
+
+function normalizeCustomInstructionText(value, maxLength = 6000) {
+  const normalized = String(value || '').replace(/\r\n/g, '\n').trim()
+  if (!normalized) {
+    return ''
+  }
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength)}...`
+    : normalized
+}
+
+export function buildUserCustomInstructionsPrompt(settings = {}) {
+  const custom = settings?.customInstructions || {}
+  const workRules = normalizeCustomInstructionText(custom.workRules)
+  const answerPreferences = normalizeCustomInstructionText(custom.answerPreferences)
+
+  if (!workRules && !answerPreferences) {
+    return ''
+  }
+
+  return [
+    'User custom instructions:',
+    'These are developer-level user preferences configured in Aura. Follow them when applicable unless they conflict with system safety, workspace permissions, tool policies, or the latest user request.',
+    workRules
+      ? `<work_rules>\n${workRules}\n</work_rules>`
+      : '',
+    answerPreferences
+      ? `<answer_preferences>\n${answerPreferences}\n</answer_preferences>`
+      : '',
+  ].filter(Boolean).join('\n')
 }
 
 function deriveCapabilityProfile(routeState, toolAvailability = {}) {
@@ -234,6 +269,7 @@ export function buildRuntimeSystemPrompt(
     'When it improves clarity, use enhanced Markdown fences that the UI can render: ```mermaid for diagrams, ```csv or ```tsv for tabular data, ```json for structured data, and LaTeX math with $...$ or $$...$$. Use these only when they make the answer easier to inspect.',
     buildApprovalPolicy(settings),
     buildReasoningInstruction(settings),
+    buildUserCustomInstructionsPrompt(settings),
     [
       'Work memory discipline: reasoning and scratchpad text are temporary process, not reusable task memory.',
       'When a stage produces reusable synthesized outcomes that are not already obvious from a tool result, such as schema drafts, implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
@@ -440,18 +476,33 @@ export function buildDefaultAgentSystemPrompt(
   routeState,
   toolAvailability = {},
 ) {
+  return renderPromptBlocks(
+    buildDefaultAgentPromptBlocks(
+      settings,
+      skillPrompt,
+      exposureNote,
+      routeState,
+      toolAvailability,
+    ),
+  )
+}
+
+export function buildDefaultAgentPromptBlocks(
+  settings,
+  skillPrompt,
+  exposureNote,
+  routeState,
+  toolAvailability = {},
+) {
   const locale = normalizeRuntimeLocale(settings?.locale)
   const localeLabel = getLocaleDisplayName(locale)
   const capabilityProfile = deriveCapabilityProfile(routeState, toolAvailability)
-  const sections = [
+  const blocks = []
+  const coreSections = [
     'You are Aura running in default-agent mode: the main model decides whether to answer directly, make a lightweight plan, use tools, ask the user, or stop with a clear blocker.',
-    `The active workspace is: ${settings.cwd}`,
-    buildWorkspaceScratchInstruction(settings),
-    buildHostExecutionContext(),
-    buildCurrentDateContext(),
     'Understand the user request from context and act naturally in this single default-agent pass.',
     'For simple questions, answer directly and keep the response concise.',
-    'For multi-step, ambiguous, or stateful work, call todo_write with a short checklist and keep it current. Use top-level todo items for user-visible execution tasks only. Put each step acceptance details in successCriteria, and put hidden per-step verification details in verification. Do not create top-level verification-only todo items unless the user explicitly asks for a standalone verification task. Do not create a plan for trivial one-step work.',
+    'For multi-step, ambiguous, or stateful work, call todo_write with a short checklist and keep it current. Each todo content must be a concise user-visible step title within 20 Chinese characters or 8 English words; express only the core action, and put details, acceptance criteria, risks, and explanations in successCriteria or verification. Use top-level todo items for user-visible execution tasks only. Put each step acceptance details in successCriteria, and put hidden per-step verification details in verification. Do not create top-level verification-only todo items unless the user explicitly asks for a standalone verification task. Do not create a plan for trivial one-step work.',
     'When a todo step needs verification, complete the execution and then verify it with an appropriate mounted tool before marking that todo completed. Mark verification.status as completed only when the current run produced direct evidence.',
     'Use tools when they materially reduce uncertainty or let you complete the user request. The mounted tool list is the source of truth for this turn.',
     'If a needed capability is not obvious and tool_search is mounted, inspect the current tool catalog before claiming the capability is unavailable.',
@@ -459,20 +510,67 @@ export function buildDefaultAgentSystemPrompt(
     'Ask the user only when an important product decision, risky action, missing credential, or unavailable input blocks progress.',
     'Do not claim that something is fixed, installed, configured, created, or completed unless the current run produced direct evidence.',
     'Verify concrete changes before finalizing when verification is practical. If verification is blocked, say exactly what was done and what remains unverified.',
-    'Do not access paths outside the configured workspace root.',
-    'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
-    'When it improves clarity, use enhanced Markdown fences that the UI can render: ```mermaid for diagrams, ```csv or ```tsv for tabular data, ```json for structured data, and LaTeX math with $...$ or $$...$$. Use these only when they make the answer easier to inspect.',
-    buildApprovalPolicy(settings),
-    buildReasoningInstruction(settings),
-    [
-      'Work memory discipline: reasoning and scratchpad text are temporary process, not reusable task memory.',
-      'When a stage produces reusable synthesized outcomes that are not already obvious from a tool result, such as implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
-      'For long tasks, treat context as a working window rather than durable storage. Process one bounded chunk at a time, call update_progress after durable chunks, and keep ordinary assistant text short until final delivery.',
-      'Do not write full intermediate tables, large drafts, long logs, or raw reasoning into assistant content. If a large result must persist, write or update a file/artifact and keep only its reference, counts, decisions, open questions, and next action in progress/work memory.',
-      'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
-    ].join('\n'),
-    `Primary response locale: ${localeLabel} (${locale}).`,
   ]
+
+  blocks.push(createPromptBlock({
+    id: 'core-instructions',
+    kind: 'core_instructions',
+    priority: 10,
+    stable: true,
+    content: coreSections.join('\n\n'),
+  }))
+
+  blocks.push(createPromptBlock({
+    id: 'developer-instructions',
+    kind: 'developer_instructions',
+    priority: 20,
+    content: [
+      'When it improves clarity, use enhanced Markdown fences that the UI can render: ```mermaid for diagrams, ```csv or ```tsv for tabular data, ```json for structured data, and LaTeX math with $...$ or $$...$$. Use these only when they make the answer easier to inspect.',
+      buildReasoningInstruction(settings),
+      [
+        'Work memory discipline: reasoning and scratchpad text are temporary process, not reusable task memory.',
+        'When a stage produces reusable synthesized outcomes that are not already obvious from a tool result, such as implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
+        'For long tasks, treat context as a working window rather than durable storage. Process one bounded chunk at a time, call update_progress after durable chunks, and keep ordinary assistant text short until final delivery.',
+        'Do not write full intermediate tables, large drafts, long logs, or raw reasoning into assistant content. If a large result must persist, write or update a file/artifact and keep only its reference, counts, decisions, open questions, and next action in progress/work memory.',
+        'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
+      ].join('\n'),
+    ].join('\n\n'),
+  }))
+
+  blocks.push(createPromptBlock({
+    id: 'system-safety-and-permissions',
+    kind: 'system_safety_and_permissions',
+    priority: 30,
+    content: [
+      buildApprovalPolicy(settings),
+      'Do not access paths outside the configured workspace root.',
+      'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
+    ].join('\n\n'),
+  }))
+
+  const customInstructions = buildUserCustomInstructionsPrompt(settings)
+  if (customInstructions) {
+    blocks.push(createPromptBlock({
+      id: 'user-custom-instructions',
+      kind: 'user_custom_instructions',
+      priority: 40,
+      content: customInstructions,
+    }))
+  }
+
+  blocks.push(createPromptBlock({
+    id: 'environment-context',
+    kind: 'environment_context',
+    priority: 50,
+    content: [
+      buildHostExecutionContext(),
+      buildCurrentDateContext(),
+      `The active workspace is: ${settings.cwd}`,
+      buildWorkspaceScratchInstruction(settings),
+      `Primary response locale: ${localeLabel} (${locale}).`,
+      buildLanguagePolicyInstruction(settings),
+    ].join('\n\n'),
+  }))
 
   const enabledModes = [
     capabilityProfile.hasReadonlyWorkspaceTools ? 'safe local reads' : null,
@@ -484,37 +582,44 @@ export function buildDefaultAgentSystemPrompt(
     .filter(Boolean)
     .join(', ')
 
-  sections.push(`Mounted capability profile: ${enabledModes || 'direct answers only'}.`)
+  const capabilitySections = [
+    `Mounted capability profile: ${enabledModes || 'direct answers only'}.`,
+  ]
 
   if (capabilityProfile.hasWorkspaceWriteTools) {
-    sections.push('For code changes, prefer apply_patch as the main editing path. Use write_file mainly for new files or full-document rewrites, keep edit_file / multi_edit_file as exact-match fallbacks, and use replace_line_range after a fresh read_file range when exact patch context repeatedly fails.')
-    sections.push('A high-quality local editing loop is: locate with search_code or glob_files, inspect with read_file or read_block, patch with apply_patch, then do targeted verification before the final answer.')
-    sections.push('For longer-running or interactive commands, prefer exec_command and continue with write_stdin. Use write_stdin to send more input, poll more output, close stdin, or terminate the session. Keep run_shell for short one-shot commands.')
+    capabilitySections.push('For code changes, prefer apply_patch as the main editing path. Use write_file mainly for new files or full-document rewrites, keep edit_file / multi_edit_file as exact-match fallbacks, and use replace_line_range after a fresh read_file range when exact patch context repeatedly fails.')
+    capabilitySections.push('A high-quality local editing loop is: locate with search_code or glob_files, inspect with read_file or read_block, patch with apply_patch, then do targeted verification before the final answer.')
+    capabilitySections.push('For longer-running or interactive commands, prefer exec_command and continue with write_stdin. Use write_stdin to send more input, poll more output, close stdin, or terminate the session. Keep run_shell for short one-shot commands.')
   }
 
   if (capabilityProfile.hasWebRetrievalTools) {
-    sections.push('Use web retrieval for current facts, live data, linked pages, or external evidence that may have changed. Prefer local context first when the task is purely about the workspace.')
-    sections.push('Use web_search for quick discovery, web_fetch for a known URL, and web_research when the evidence needs broader synthesis or corroboration.')
+    capabilitySections.push('Use web retrieval for current facts, live data, linked pages, or external evidence that may have changed. Prefer local context first when the task is purely about the workspace.')
+    capabilitySections.push('Use web_search for quick discovery, web_fetch for a known URL, and web_research when the evidence needs broader synthesis or corroboration.')
   }
 
   if (capabilityProfile.hasInteractiveBrowserTools) {
-    sections.push('Use browser/computer tools only for explicit browser workflows such as login, clicking, filling forms, or operating the system browser. Use web retrieval tools for ordinary information gathering.')
+    capabilitySections.push('Use browser/computer tools only for explicit browser workflows such as login, clicking, filling forms, or operating the system browser. Use web retrieval tools for ordinary information gathering.')
   }
 
   if (capabilityProfile.hasCapabilityAdminTools) {
-    sections.push('For Aura skill/plugin/MCP management, use the dedicated aura_* tools. Do not install third-party capability commands through shell when an Aura capability tool fits.')
+    capabilitySections.push('For Aura skill/plugin/MCP management, use the dedicated aura_* tools. Do not install third-party capability commands through shell when an Aura capability tool fits.')
   }
 
   if (skillPrompt.trim()) {
-    sections.push('Enabled skill summaries:\n' + skillPrompt)
-    sections.push('At the start of each user request, scan the skill names, ids, and descriptions. If a skill clearly or plausibly matches, call aura_read_skill with the exact skill id before applying the skill.')
+    capabilitySections.push('Enabled skill summaries:\n' + skillPrompt)
+    capabilitySections.push('At the start of each user request, scan the skill names, ids, and descriptions. If a skill clearly or plausibly matches, call aura_read_skill with the exact skill id before applying the skill.')
   }
 
   if (exposureNote?.trim()) {
-    sections.push(exposureNote)
+    capabilitySections.push(exposureNote)
   }
 
-  sections.push(buildLanguagePolicyInstruction(settings))
+  blocks.push(createPromptBlock({
+    id: 'capability-context',
+    kind: 'capability_context',
+    priority: 60,
+    content: capabilitySections.join('\n\n'),
+  }))
 
-  return sections.join('\n\n')
+  return blocks
 }

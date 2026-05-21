@@ -2,9 +2,15 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   buildCapabilityExposureNote,
+  buildDefaultAgentPromptBlocks,
   buildDefaultAgentSystemPrompt,
   buildRuntimeSystemPrompt,
+  buildUserCustomInstructionsPrompt,
 } from './agentPrompting.mjs'
+import {
+  diffPromptBlockSnapshots,
+  promptBlockSnapshot,
+} from './promptBlocks.mjs'
 
 const baseSettings = {
   cwd: '/tmp/workspace',
@@ -97,6 +103,102 @@ test('default-agent prompt carries the configured locale policy', () => {
 
   assert.match(prompt, /简体中文/)
   assert.match(prompt, /all user-facing answers, visible reasoning notes, plan previews, step titles/i)
+})
+
+test('custom instructions prompt keeps work rules and answer preferences separate', () => {
+  const prompt = buildUserCustomInstructionsPrompt({
+    customInstructions: {
+      workRules: '改代码前先读相关文件，改完运行 typecheck。',
+      answerPreferences: '默认使用中文，先给结论。',
+    },
+  })
+
+  assert.match(prompt, /User custom instructions/)
+  assert.match(prompt, /<work_rules>/)
+  assert.match(prompt, /改代码前先读相关文件/)
+  assert.match(prompt, /<answer_preferences>/)
+  assert.match(prompt, /默认使用中文/)
+})
+
+test('default-agent prompt includes configured custom instructions', () => {
+  const prompt = buildDefaultAgentSystemPrompt(
+    {
+      ...baseSettings,
+      customInstructions: {
+        workRules: '改代码必须小范围修改。',
+        answerPreferences: '回答先给结论。',
+      },
+    },
+    '',
+    '',
+    modelDirectedState,
+  )
+
+  assert.match(prompt, /<work_rules>\n改代码必须小范围修改。/)
+  assert.match(prompt, /<answer_preferences>\n回答先给结论。/)
+})
+
+test('default-agent prompt is assembled from ordered prompt blocks', () => {
+  const blocks = buildDefaultAgentPromptBlocks(
+    {
+      ...baseSettings,
+      customInstructions: {
+        workRules: '改代码必须小范围修改。',
+        answerPreferences: '回答先给结论。',
+      },
+    },
+    '- Web Research (id: web-research): Find and compare public sources.',
+    'default-agent capability profile',
+    modelDirectedState,
+    {
+      hasWorkspaceWriteTools: true,
+    },
+  )
+
+  assert.deepEqual(blocks.map(block => block.id), [
+    'core-instructions',
+    'developer-instructions',
+    'system-safety-and-permissions',
+    'user-custom-instructions',
+    'environment-context',
+    'capability-context',
+  ])
+  assert.equal(blocks[0].kind, 'core_instructions')
+  assert.equal(blocks[3].kind, 'user_custom_instructions')
+  assert.equal(blocks[5].kind, 'capability_context')
+})
+
+test('prompt block snapshots isolate changed custom instructions', () => {
+  const previous = promptBlockSnapshot(buildDefaultAgentPromptBlocks(
+    {
+      ...baseSettings,
+      customInstructions: {
+        workRules: '旧规则',
+        answerPreferences: '回答先给结论。',
+      },
+    },
+    '',
+    '',
+    modelDirectedState,
+  ))
+  const next = promptBlockSnapshot(buildDefaultAgentPromptBlocks(
+    {
+      ...baseSettings,
+      customInstructions: {
+        workRules: '新规则',
+        answerPreferences: '回答先给结论。',
+      },
+    },
+    '',
+    '',
+    modelDirectedState,
+  ))
+
+  assert.deepEqual(diffPromptBlockSnapshots(previous, next), {
+    added: [],
+    changed: ['user-custom-instructions'],
+    removed: [],
+  })
 })
 
 test('runtime prompt constrains the turn to the newest user request', () => {

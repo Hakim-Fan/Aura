@@ -12,6 +12,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type RefObject,
   type ReactNode,
+  type SyntheticEvent,
 } from 'react'
 import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
@@ -75,6 +76,7 @@ import type {
   CompletionState,
   MessageAttachment,
   MessageEvent,
+  MessageEventDetailPayload,
   MessagePhaseOutput,
   MessageReasoning,
   MessageStatus,
@@ -168,6 +170,11 @@ type Props = {
   onCancelCurrentStep: () => void
   onCompressContext: () => void
   onToggleMessageActivity: (messageId: string) => void
+  onLoadMessageEventDetail?: (
+    messageId: string,
+    versionIndex: number,
+    eventId: string,
+  ) => Promise<MessageEventDetailPayload | null>
   onStop: () => void
   contextCompressionRunning?: boolean
 }
@@ -4480,7 +4487,10 @@ function findLatestLiveAssistantSteps(messages: ChatMessage[]) {
 }
 
 function MessageEventCard({
-  event,
+  event: baseEvent,
+  messageId,
+  versionIndex,
+  onLoadEventDetail,
   onHandleApproval,
   onCancelCurrentStep,
   onCopyText,
@@ -4488,12 +4498,24 @@ function MessageEventCard({
   onOpenFile,
 }: {
   event: MessageEvent
+  messageId: string
+  versionIndex: number
+  onLoadEventDetail?: (
+    messageId: string,
+    versionIndex: number,
+    eventId: string,
+  ) => Promise<MessageEventDetailPayload | null>
   onHandleApproval?: (decision: ApprovalDecision) => void
   onCancelCurrentStep?: () => void
   onCopyText?: CopyTextHandler
   workspaceRootPath?: string
   onOpenFile: (path: string) => void
 }) {
+  const [loadedDetail, setLoadedDetail] = useState<MessageEventDetailPayload | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
+  const hasLazyDetail = baseEvent.detailAvailable === true
+  const event = loadedDetail ? { ...baseEvent, ...loadedDetail } : baseEvent
   const isShellLog = event.kind === 'shell'
   const hasShellDetails = isShellLog && (event.input || event.output || event.error)
   const isApproval = event.kind === 'approval' && event.status === 'awaiting_approval'
@@ -4581,6 +4603,37 @@ function MessageEventCard({
       .join('\n\n')
     : ''
 
+  async function handleLazyDetailToggle(toggleEvent: SyntheticEvent<HTMLDetailsElement>) {
+    const opened = toggleEvent.currentTarget.open
+    if (!opened) {
+      setLoadedDetail(null)
+      setDetailError('')
+      setDetailLoading(false)
+      return
+    }
+    if (!hasLazyDetail || loadedDetail || detailLoading || !onLoadEventDetail) {
+      return
+    }
+    setDetailLoading(true)
+    setDetailError('')
+    try {
+      const detail = await onLoadEventDetail(
+        messageId,
+        versionIndex,
+        baseEvent.detailRef || baseEvent.id,
+      )
+      if (!detail) {
+        setDetailError('没有找到这条执行详情。')
+        return
+      }
+      setLoadedDetail(detail)
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : '执行详情加载失败。')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
   if (!isApproval && !isUserInputWait && isSearchControllerDecisionEvent && parsedOutput) {
     return <SearchControllerDecisionCard output={parsedOutput} />
   }
@@ -4638,16 +4691,68 @@ function MessageEventCard({
       {shouldShowGenericSummary ? (
         <p className="text-12px leading-relaxed text-[var(--text-secondary)]">{event.summary}</p>
       ) : null}
-      {!isApproval && isStructuredWebResearchEvent && parsedOutput ? (
+      {hasLazyDetail ? (
+        <details className="mt-2 rounded-lg border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.025)]" onToggle={handleLazyDetailToggle}>
+          <summary className="cursor-pointer px-3 py-2 text-11px font-700 text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+            查看执行详情
+          </summary>
+          <div className="border-t border-[rgba(15,23,42,0.05)] px-3 py-2">
+            {detailLoading ? (
+              <div className="text-12px text-[var(--text-secondary)]">正在加载执行详情...</div>
+            ) : null}
+            {detailError ? (
+              <div className="text-12px text-red-500">{detailError}</div>
+            ) : null}
+            {loadedDetail ? (
+              <>
+                {!isApproval && isStructuredWebResearchEvent && parsedOutput ? (
+                  <WebResearchEventCard event={event} output={parsedOutput} />
+                ) : null}
+                {!isApproval && isStructuredWebSearchEvent && parsedOutput ? (
+                  <WebSearchEventCard event={event} output={parsedOutput} />
+                ) : null}
+                {!isApproval && isStructuredWebFetchEvent && parsedOutput ? (
+                  <WebFetchEventCard event={event} output={parsedOutput} />
+                ) : null}
+                {isStructuredPatchPreviewEvent && parsedOutput ? (
+                  <PatchPreviewCard
+                    output={parsedOutput}
+                    status={event.status}
+                    workspaceRootPath={workspaceRootPath}
+                    onOpenFile={onOpenFile}
+                  />
+                ) : null}
+                {hasShellDetails ? (
+                  <ShellTerminalPanel
+                    command={shellCommand}
+                    output={shellRawOutputText}
+                    error={shellRawErrorText}
+                    status={event.status}
+                    isLive={event.status === 'running'}
+                    truncated={parsedShellSnapshot?.truncated === true}
+                    exitCode={parsedShellSnapshot?.exitCode}
+                  />
+                ) : null}
+                {!isShellLog && genericDetailText ? (
+                  <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3 text-11px text-gray-600 custom-scrollbar">
+                    {genericDetailText}
+                  </pre>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        </details>
+      ) : null}
+      {!hasLazyDetail && !isApproval && isStructuredWebResearchEvent && parsedOutput ? (
         <WebResearchEventCard event={event} output={parsedOutput} />
       ) : null}
-      {!isApproval && isStructuredWebSearchEvent && parsedOutput ? (
+      {!hasLazyDetail && !isApproval && isStructuredWebSearchEvent && parsedOutput ? (
         <WebSearchEventCard event={event} output={parsedOutput} />
       ) : null}
-      {!isApproval && isStructuredWebFetchEvent && parsedOutput ? (
+      {!hasLazyDetail && !isApproval && isStructuredWebFetchEvent && parsedOutput ? (
         <WebFetchEventCard event={event} output={parsedOutput} />
       ) : null}
-      {isStructuredPatchPreviewEvent && parsedOutput ? (
+      {!hasLazyDetail && isStructuredPatchPreviewEvent && parsedOutput ? (
         <PatchPreviewCard
           output={parsedOutput}
           status={event.status}
@@ -4700,7 +4805,7 @@ function MessageEventCard({
           </div>
         </div>
       ) : null}
-      {hasShellDetails ? (
+      {!hasLazyDetail && hasShellDetails ? (
         <details className="shell-event-details" open={event.status === 'running' || event.status === 'error'}>
           <summary className="shell-event-summary flex items-center justify-between w-full">
             <div className="flex items-center gap-2">
@@ -4760,7 +4865,7 @@ function MessageEventCard({
           </div>
         </details>
       ) : null}
-      {!isApproval && !isUserInputWait && !isShellLog && (event.input || event.output || event.error) && (
+      {!hasLazyDetail && !isApproval && !isUserInputWait && !isShellLog && (event.input || event.output || event.error) && (
         <details className="mt-1.5 group" open={!isShellLog && event.status === 'error'}>
           <summary className="text-11px text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] transition-colors opacity-65">查看审计详情</summary>
           <div className="mt-2 flex flex-col gap-3 rounded-lg border border-[rgba(15,23,42,0.05)] bg-white/85 p-3">
@@ -5486,6 +5591,7 @@ function AssistantMessageCard({
   onRegenerateMessageWithModel,
   onForceExecuteAppendedInput,
   onOpenFile,
+  onLoadMessageEventDetail,
   showDetailedExecutionDetails,
   onCancelCurrentStep,
   onHandleApproval,
@@ -5504,6 +5610,11 @@ function AssistantMessageCard({
   onRegenerateMessageWithModel: (messageId: string, profileId: string, modelId: string) => void
   onForceExecuteAppendedInput: (messageId: string, inputId: string) => void
   onOpenFile: (path: string) => void
+  onLoadMessageEventDetail?: (
+    messageId: string,
+    versionIndex: number,
+    eventId: string,
+  ) => Promise<MessageEventDetailPayload | null>
   showDetailedExecutionDetails: boolean
   onCancelCurrentStep: () => void
   onHandleApproval: (decision: ApprovalDecision) => void
@@ -5841,13 +5952,16 @@ function AssistantMessageCard({
                             ) : item.kind === 'event' ? (
                               <MessageEventCard
                                 key={item.key}
-                              event={item.event}
-                              onHandleApproval={onHandleApproval}
-                              onCancelCurrentStep={onCancelCurrentStep}
-                              onCopyText={onCopyText}
-                              workspaceRootPath={workspaceRootPath}
-                              onOpenFile={onOpenFile}
-                            />
+                                event={item.event}
+                                messageId={message.id}
+                                versionIndex={message.activeVersionIndex || 0}
+                                onLoadEventDetail={onLoadMessageEventDetail}
+                                onHandleApproval={onHandleApproval}
+                                onCancelCurrentStep={onCancelCurrentStep}
+                                onCopyText={onCopyText}
+                                workspaceRootPath={workspaceRootPath}
+                                onOpenFile={onOpenFile}
+                              />
                             ) : null,
                           )}
                         </div>
@@ -6138,6 +6252,7 @@ export function ChatView({
   onCancelCurrentStep,
   onCompressContext,
   onToggleMessageActivity,
+  onLoadMessageEventDetail,
   onStop,
   contextCompressionRunning = false,
 }: Props) {
@@ -6510,6 +6625,7 @@ export function ChatView({
                       onRegenerateMessageWithModel={onRegenerateMessageWithModel}
                       onForceExecuteAppendedInput={onForceExecuteAppendedInput}
                       onOpenFile={onOpenAttachment}
+                      onLoadMessageEventDetail={onLoadMessageEventDetail}
                       showDetailedExecutionDetails={settings.showDetailedExecutionDetails}
                       onCancelCurrentStep={onCancelCurrentStep}
                       onHandleApproval={onHandleApproval}

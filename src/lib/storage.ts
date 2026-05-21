@@ -16,6 +16,7 @@ import type {
   ExecutionEvidenceSummary,
   InteractiveBrowserSettings,
   LightpandaSettings,
+  MessageEvent,
   MemoryMode,
   ProjectCapabilityOverrides,
   ResolvedAgentCapabilities,
@@ -50,6 +51,7 @@ import {
   upsertPersistedMessageVersion,
   upsertPersistedSession,
 } from './persistence'
+import { compactMessageEvent } from './eventCompaction'
 
 function createProfileId(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`
@@ -206,6 +208,10 @@ export const defaultSettings: AgentSettings = {
   memoryMode: 'summary',
   contextCompressionThresholdTokens: 256_000,
   reasoningEffort: 'medium',
+  customInstructions: {
+    workRules: '',
+    answerPreferences: '',
+  },
   showDetailedExecutionDetails: false,
   requireLongTaskPlanApproval: false,
   enableMultiAgent: true,
@@ -687,6 +693,39 @@ function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefin
     )
   }
 
+  function normalizePromptBlocks(values: unknown) {
+    if (!Array.isArray(values)) {
+      return []
+    }
+    return values
+      .filter((entry): entry is Record<string, unknown> =>
+        !!entry &&
+        typeof entry === 'object' &&
+        typeof (entry as Record<string, unknown>).id === 'string' &&
+        typeof (entry as Record<string, unknown>).hash === 'string',
+      )
+      .map(entry => ({
+        id: String(entry.id).trim(),
+        role: typeof entry.role === 'string' ? entry.role.trim() || undefined : undefined,
+        kind: typeof entry.kind === 'string' ? entry.kind.trim() || undefined : undefined,
+        hash: String(entry.hash).trim(),
+        stable: entry.stable === true,
+      }))
+      .filter(entry => entry.id && entry.hash)
+  }
+
+  function normalizePromptBlockDiff(value: unknown) {
+    if (!value || typeof value !== 'object') {
+      return undefined
+    }
+    const diff = value as Record<string, unknown>
+    return {
+      added: normalizeStrings(diff.added),
+      changed: normalizeStrings(diff.changed),
+      removed: normalizeStrings(diff.removed),
+    }
+  }
+
   return {
     answerMode,
     capabilityTier,
@@ -793,6 +832,8 @@ function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefin
                 : undefined,
           }
         : undefined,
+    promptBlocks: normalizePromptBlocks(routeDecision.promptBlocks),
+    promptBlockDiff: normalizePromptBlockDiff(routeDecision.promptBlockDiff),
   }
 }
 
@@ -989,6 +1030,10 @@ function normalizeMessageVariant(
               typeof variant.usage.outputTokens === 'number'
                 ? variant.usage.outputTokens
                 : undefined,
+            cachedInputTokens:
+              typeof variant.usage.cachedInputTokens === 'number'
+                ? variant.usage.cachedInputTokens
+                : undefined,
             latestInputTokens:
               typeof variant.usage.latestInputTokens === 'number'
                 ? variant.usage.latestInputTokens
@@ -996,6 +1041,10 @@ function normalizeMessageVariant(
             latestOutputTokens:
               typeof variant.usage.latestOutputTokens === 'number'
                 ? variant.usage.latestOutputTokens
+                : undefined,
+            latestCachedInputTokens:
+              typeof variant.usage.latestCachedInputTokens === 'number'
+                ? variant.usage.latestCachedInputTokens
                 : undefined,
             contextWindow:
               typeof variant.usage.contextWindow === 'number'
@@ -1005,7 +1054,9 @@ function normalizeMessageVariant(
         : undefined,
     capabilitySnapshot: normalizeCapabilityUsageSnapshot(variant.capabilitySnapshot),
     activity: variant.activity,
-    events: Array.isArray(variant.events) ? variant.events : [],
+    events: Array.isArray(variant.events)
+      ? (variant.events as MessageEvent[]).map(compactMessageEvent)
+      : [],
     steps: Array.isArray(variant.steps) ? variant.steps : [],
     error: typeof variant.error === 'string' ? variant.error : undefined,
     errorInfo:
@@ -1169,12 +1220,29 @@ function normalizeProviderProfiles(value: AgentSettings['providerProfiles']) {
   }))
 }
 
+function normalizeCustomInstructions(value: unknown): AgentSettings['customInstructions'] {
+  const defaults = defaultSettings.customInstructions
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+
+  const entry = value as Partial<AgentSettings['customInstructions']>
+  return {
+    workRules: typeof entry.workRules === 'string' ? entry.workRules : defaults.workRules,
+    answerPreferences:
+      typeof entry.answerPreferences === 'string'
+        ? entry.answerPreferences
+        : defaults.answerPreferences,
+  }
+}
+
 function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
   return {
     ...settings,
     providerProfiles: normalizeProviderProfiles(settings.providerProfiles),
     externalSkillDirs: normalizeStringList(settings.externalSkillDirs),
     locale: normalizeLocale(settings.locale),
+    customInstructions: normalizeCustomInstructions(settings.customInstructions),
     analysisProviderProfileId:
       typeof settings.analysisProviderProfileId === 'string'
         ? settings.analysisProviderProfileId
@@ -1438,6 +1506,7 @@ function parseSettings(raw: string | null): AgentSettings {
         parsed.contextCompressionThresholdTokens,
       ),
       reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
+      customInstructions: normalizeCustomInstructions(parsed.customInstructions),
       showDetailedExecutionDetails: normalizeDetailedExecutionSetting(
         parsed.showDetailedExecutionDetails,
       ),
@@ -1808,7 +1877,9 @@ function parseSessionMessages(
       usage: undefined,
       capabilitySnapshot: normalizeCapabilityUsageSnapshot(message.capabilitySnapshot),
       activity: message.activity,
-      events: message.events || [],
+      events: Array.isArray(message.events)
+        ? (message.events as MessageEvent[]).map(compactMessageEvent)
+        : [],
       steps: message.steps || [],
       phaseOutputs: normalizeMessagePhaseOutputs(message.phaseOutputs),
       error: message.error,
@@ -2001,6 +2072,7 @@ function serializeSessions(sessions: Session[]) {
         ...attachment,
         preview: undefined,
       })),
+      events: (message.events || []).map(compactMessageEvent),
       appendedInputs: (message.appendedInputs || []).map(input => ({
         ...input,
         parts: (input.parts || []).map(part => {
@@ -2032,6 +2104,7 @@ function serializeSessions(sessions: Session[]) {
           ...attachment,
           preview: undefined,
         })),
+        events: (variant.events || []).map(compactMessageEvent),
         appendedInputs: (variant.appendedInputs || []).map(input => ({
           ...input,
           parts: (input.parts || []).map(part => {

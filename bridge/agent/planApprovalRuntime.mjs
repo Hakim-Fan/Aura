@@ -1,3 +1,5 @@
+import { compactVisibleTaskTitle } from '../taskTitles.mjs'
+
 function safeArray(value) {
   return Array.isArray(value) ? value : []
 }
@@ -60,7 +62,7 @@ export function buildPlanApprovalPreview({ plan = {}, classification = {} } = {}
     .filter(isUserVisiblePlanSubtask)
     .map(subtask => ({
       id: subtask.id,
-      title: subtask.title,
+      title: compactVisibleTaskTitle(subtask.title, subtask.id),
       kind: subtask.kind,
       requiredCapability: subtask.requiredCapability,
       successCriteria: safeArray(subtask.successCriteria).slice(0, 4),
