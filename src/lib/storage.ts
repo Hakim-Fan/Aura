@@ -2650,6 +2650,32 @@ export function saveSessions(sessions: Session[]) {
     })
 }
 
+export async function saveSessionsAndAwaitPersistence(sessions: Session[]) {
+  const sortedSessions = sortSessionsByRecentActivity(sessions)
+  for (const session of sortedSessions) {
+    const previousState = sessionLoadStates.get(session.id)
+    if (!previousState) {
+      sessionLoadStates.set(session.id, {
+        loaded: true,
+        messageCount: session.messages.length,
+      })
+      continue
+    }
+    const shouldRemainUnloaded = previousState.messageCount > 0 && session.messages.length === 0
+    sessionLoadStates.set(session.id, {
+      loaded: shouldRemainUnloaded ? false : true,
+      messageCount: shouldRemainUnloaded ? previousState.messageCount : session.messages.length,
+    })
+  }
+  cachedSessions = cloneValue(sortedSessions)
+  const nextSessions = cloneValue(sortedSessions)
+  const persistence = sessionPersistenceQueue.then(() => persistSessions(nextSessions))
+  sessionPersistenceQueue = persistence.catch(() => {
+    // Keep future persistence writes from being blocked by this failure.
+  })
+  await persistence
+}
+
 export function saveSessionFolders(sessionFolders: SessionFolder[]) {
   const sortedFolders = [...sessionFolders].sort((left, right) => left.createdAt - right.createdAt)
   cachedSessionFolders = cloneValue(sortedFolders)

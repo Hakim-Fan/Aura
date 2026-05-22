@@ -3361,6 +3361,50 @@ fn parse_task_sequence(task_id: &str) -> u64 {
         .unwrap_or(0)
 }
 
+fn emit_agent_task_update<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    context: &serde_json::Value,
+    snapshot: &AgentTaskSnapshot,
+    event_type: &str,
+) {
+    let payload = serde_json::json!({
+        "taskId": snapshot.id,
+        "sessionId": context.get("sessionId").and_then(|value| value.as_str()),
+        "messageId": context.get("messageId").and_then(|value| value.as_str()),
+        "assistantMessageId": context.get("assistantMessageId").and_then(|value| value.as_str()),
+        "userMessageId": context.get("userMessageId").and_then(|value| value.as_str()),
+        "status": snapshot.status,
+        "phase": snapshot.phase,
+        "eventType": event_type,
+        "terminal": is_terminal_task_status(&snapshot.status),
+        "updatedAt": current_timestamp_ms(),
+    });
+    let _ = app.emit("agent-task-updated", payload);
+}
+
+fn should_emit_agent_task_update(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "started"
+            | "text_delta"
+            | "reasoning_delta"
+            | "reasoning_discard"
+            | "usage"
+            | "context_compression"
+            | "retry_progress"
+            | "tool_event"
+            | "work_memory"
+            | "appended_inputs"
+            | "task_tree"
+            | "route_decision"
+            | "runtime_status"
+            | "approval_required"
+            | "user_input_required"
+            | "completed"
+            | "failed"
+    )
+}
+
 fn prune_terminal_task_snapshots(tasks: &mut HashMap<String, AgentTaskHandle>) {
     let mut terminal_tasks: Vec<(String, u64)> = tasks
         .iter()
@@ -3854,6 +3898,12 @@ fn spawn_agent_task<R: Runtime>(
                 break;
             };
 
+            let event_type = event
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
             match event.get("type").and_then(|value| value.as_str()) {
                 Some("started") => with_snapshot(&stdout_snapshot, |current| {
                     append_app_log(
@@ -4286,6 +4336,17 @@ fn spawn_agent_task<R: Runtime>(
                 }),
                 _ => {}
             }
+
+            if should_emit_agent_task_update(&event_type) {
+                if let Ok(current) = stdout_snapshot.lock() {
+                    emit_agent_task_update(
+                        &stdout_app,
+                        &stdout_log_context,
+                        &current,
+                        &event_type,
+                    );
+                }
+            }
         }
 
         // --- 核心修复：检测管道断开带来的异常退出 ---
@@ -4316,6 +4377,12 @@ fn spawn_agent_task<R: Runtime>(
                 } else {
                     stderr_message
                 });
+                emit_agent_task_update(
+                    &stdout_app,
+                    &stdout_log_context,
+                    current,
+                    "bridge_process_disconnected",
+                );
             }
         });
     });

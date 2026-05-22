@@ -33,6 +33,7 @@ import {
   searchSessionIds,
   saveSessionFolders,
   saveSessions,
+  saveSessionsAndAwaitPersistence,
   saveSettings,
 } from './lib/storage'
 import {
@@ -263,6 +264,10 @@ function getErrorMessage(caught: unknown, fallback: string) {
     return String(caught)
   }
   return fallback
+}
+
+function isAgentTaskNotFoundError(caught: unknown) {
+  return getErrorMessage(caught, '').includes('Agent task not found')
 }
 
 function createSession(settings: AgentSettings): Session {
@@ -596,6 +601,19 @@ type RunningTaskBinding = {
   taskId: string
   messageId: string
   variantIndex: number
+}
+
+type AgentTaskUpdateEvent = {
+  taskId?: string
+  sessionId?: string
+  messageId?: string
+  assistantMessageId?: string
+  userMessageId?: string
+  status?: string
+  phase?: string
+  eventType?: string
+  terminal?: boolean
+  updatedAt?: number
 }
 
 type ToastState = {
@@ -1141,7 +1159,9 @@ function createPendingAssistantMessage(): ChatMessage {
 
 const REPLAN_ARCHIVE_PREFIX = 'replan-archive'
 const REPLAN_ARCHIVE_ORDER_OFFSET = 10_000
-const AGENT_TASK_POLL_INTERVAL_MS = 1000
+const AGENT_TASK_EVENT_SYNC_DEBOUNCE_MS = 180
+const AGENT_TASK_FALLBACK_CHECK_INTERVAL_MS = 5_000
+const AGENT_TASK_EVENT_STALE_MS = 15_000
 const MAX_ARCHIVED_REASONING_ENTRIES = 2
 const MAX_ARCHIVED_REASONING_CHARS = 1_200
 const MAX_ARCHIVED_PHASE_OUTPUTS = 3
@@ -1975,10 +1995,15 @@ export function MainWindowApp() {
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const runningTasksBySessionRef = useRef<Record<string, RunningTaskBinding>>({})
   const previousRunningTasksBySessionRef = useRef<Record<string, RunningTaskBinding>>({})
+  const agentTaskLastEventAtRef = useRef<Record<string, number>>({})
+  const sessionsRef = useRef<Session[]>(sessions)
 
   useEffect(() => {
     runningTasksBySessionRef.current = runningTasksBySession
   }, [runningTasksBySession])
+  useEffect(() => {
+    sessionsRef.current = sessions
+  }, [sessions])
   const [previewContent, setPreviewContent] = useState('')
   const [previewImage, setPreviewImage] = useState('')
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -2402,8 +2427,52 @@ export function MainWindowApp() {
     }
 
     let cancelled = false
+    let unlistenTaskUpdates: (() => void) | undefined
+    const syncTimers: Record<string, number> = {}
+    const syncingTaskIds = new Set<string>()
+    const pendingSyncs: Record<string, { sessionId: string; binding: RunningTaskBinding }> = {}
 
-    async function pollTask(sessionId: string, binding: RunningTaskBinding) {
+    function clearSyncTimer(taskId: string) {
+      const timer = syncTimers[taskId]
+      if (typeof timer === 'number') {
+        window.clearTimeout(timer)
+        delete syncTimers[taskId]
+      }
+    }
+
+    function scheduleTaskSync(sessionId: string, binding: RunningTaskBinding, delayMs: number) {
+      clearSyncTimer(binding.taskId)
+      syncTimers[binding.taskId] = window.setTimeout(() => {
+        delete syncTimers[binding.taskId]
+        void syncTaskSnapshot(sessionId, binding)
+      }, Math.max(0, delayMs))
+    }
+
+    function findRunningBindingForEvent(payload: AgentTaskUpdateEvent) {
+      const taskId = payload.taskId?.trim()
+      const sessionId = payload.sessionId?.trim()
+      if (sessionId) {
+        const binding = runningTasksBySessionRef.current[sessionId]
+        if (binding && (!taskId || binding.taskId === taskId)) {
+          return { sessionId, binding }
+        }
+      }
+      if (taskId) {
+        for (const [nextSessionId, binding] of Object.entries(runningTasksBySessionRef.current)) {
+          if (binding.taskId === taskId) {
+            return { sessionId: nextSessionId, binding }
+          }
+        }
+      }
+      return null
+    }
+
+    async function syncTaskSnapshot(sessionId: string, binding: RunningTaskBinding) {
+      if (syncingTaskIds.has(binding.taskId)) {
+        pendingSyncs[binding.taskId] = { sessionId, binding }
+        return
+      }
+      syncingTaskIds.add(binding.taskId)
       try {
         const snapshot = await getAgentTask(binding.taskId)
         if (cancelled) {
@@ -2419,17 +2488,6 @@ export function MainWindowApp() {
         }))
 
         const snapshotFinished = snapshot.status === 'completed' || snapshot.status === 'failed'
-        if (snapshotFinished) {
-          const details = buildMessageEventDetailRecords(snapshot.toolEvents)
-          if (details.length > 0) {
-            await upsertPersistedMessageEventDetails(
-              binding.messageId,
-              binding.variantIndex,
-              details,
-            )
-          }
-        }
-
         const snapshotMessageEvents = buildSnapshotMessageEvents(snapshot, {
           lazyDetails: snapshotFinished,
         })
@@ -2494,79 +2552,89 @@ export function MainWindowApp() {
         }))
 
         if (snapshotFinished) {
-          setSessions(current =>
-            current
-              .map(session =>
-                session.id === sessionId
-                  ? {
-                    ...session,
-                    contextCompression: normalizeTaskContextCompression(
-                      session,
-                      snapshot.contextCompression,
-                    ),
-                    messages: session.messages.map(message =>
-                      message.id === binding.messageId
-                        ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => {
-                          const mergedArtifacts = mergeExecutionArtifacts(
-                            currentVariant,
+          const finalSessions = sortSessionsByRecentActivity(
+            sessionsRef.current.map(session =>
+              session.id === sessionId
+                ? {
+                  ...session,
+                  contextCompression: normalizeTaskContextCompression(
+                    session,
+                    snapshot.contextCompression,
+                  ),
+                  messages: session.messages.map(message =>
+                    message.id === binding.messageId
+                      ? updateMessageVariantAtIndex(message, binding.variantIndex, currentVariant => {
+                        const mergedArtifacts = mergeExecutionArtifacts(
+                          currentVariant,
+                          snapshot,
+                          snapshotMessageEvents,
+                        )
+                        return {
+                          ...currentVariant,
+                          content:
+                            snapshot.status === 'completed'
+                              ? snapshot.message || currentVariant.content
+                              : snapshot.message || currentVariant.content,
+                          reasoning: mergedArtifacts.reasoning,
+                          phaseOutputs: mergedArtifacts.phaseOutputs,
+                          usage: snapshot.usage || currentVariant.usage,
+                          capabilitySnapshot:
+                            snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
+                          status:
+                            snapshot.status === 'completed'
+                              ? ('completed' as const)
+                              : ('failed' as const),
+                          events: mergedArtifacts.events,
+                          steps: mergedArtifacts.steps,
+                          activity: buildMessageActivity(
+                            snapshot.status,
+                            currentVariant.createdAt || Date.now(),
+                            snapshot.toolEvents,
+                            snapshot.taskTree,
                             snapshot,
-                            snapshotMessageEvents,
-                          )
-                          return {
-                            ...currentVariant,
-                            content:
-                              snapshot.status === 'completed'
-                                ? snapshot.message || currentVariant.content
-                                : snapshot.message || currentVariant.content,
-                            reasoning: mergedArtifacts.reasoning,
-                            phaseOutputs: mergedArtifacts.phaseOutputs,
-                            usage: snapshot.usage || currentVariant.usage,
-                            capabilitySnapshot:
-                              snapshot.capabilitySnapshot || currentVariant.capabilitySnapshot,
-                            status:
-                              snapshot.status === 'completed'
-                                ? ('completed' as const)
-                                : ('failed' as const),
-                            events: mergedArtifacts.events,
-                            steps: mergedArtifacts.steps,
-                            activity: buildMessageActivity(
-                              snapshot.status,
-                              currentVariant.createdAt || Date.now(),
-                              snapshot.toolEvents,
-                              snapshot.taskTree,
-                              snapshot,
-                              resolveActivityExpanded(snapshot.status, currentVariant.activity?.expanded),
-                            ),
-                            appendedInputs:
-                              snapshot.appendedInputs || currentVariant.appendedInputs,
-                            error:
-                              snapshot.status === 'failed'
-                                ? buildSnapshotErrorMessage(snapshot)
-                                : undefined,
-                            errorInfo:
-                              snapshot.status === 'failed'
-                                ? snapshot.errorInfo
-                                : undefined,
-                            retryInfo: retryInfoForSnapshot(snapshot),
-                            agentMode: snapshot.agentMode || currentVariant.agentMode,
-                            routeDecision:
-                              snapshot.routeDecision || currentVariant.routeDecision,
-                            completionState:
-                              snapshot.completionState || currentVariant.completionState,
-                            evidenceSummary:
-                              snapshot.evidenceSummary || currentVariant.evidenceSummary,
-                            deliveryNote:
-                              snapshot.deliveryNote || currentVariant.deliveryNote,
-                          }
-                        })
-                        : message,
-                    ),
-                    updatedAt: Date.now(),
-                  }
-                  : session,
-              )
-              .sort((a, b) => b.updatedAt - a.updatedAt),
+                            resolveActivityExpanded(snapshot.status, currentVariant.activity?.expanded),
+                          ),
+                          appendedInputs:
+                            snapshot.appendedInputs || currentVariant.appendedInputs,
+                          error:
+                            snapshot.status === 'failed'
+                              ? buildSnapshotErrorMessage(snapshot)
+                              : undefined,
+                          errorInfo:
+                            snapshot.status === 'failed'
+                              ? snapshot.errorInfo
+                              : undefined,
+                          retryInfo: retryInfoForSnapshot(snapshot),
+                          agentMode: snapshot.agentMode || currentVariant.agentMode,
+                          routeDecision:
+                            snapshot.routeDecision || currentVariant.routeDecision,
+                          completionState:
+                            snapshot.completionState || currentVariant.completionState,
+                          evidenceSummary:
+                            snapshot.evidenceSummary || currentVariant.evidenceSummary,
+                          deliveryNote:
+                            snapshot.deliveryNote || currentVariant.deliveryNote,
+                        }
+                      })
+                      : message,
+                  ),
+                  updatedAt: Date.now(),
+                }
+                : session,
+            ),
           )
+          sessionsRef.current = finalSessions
+          setSessions(finalSessions)
+          await saveSessionsAndAwaitPersistence(finalSessions)
+
+          const details = buildMessageEventDetailRecords(snapshot.toolEvents)
+          if (details.length > 0) {
+            await upsertPersistedMessageEventDetails(
+              binding.messageId,
+              binding.variantIndex,
+              details,
+            )
+          }
 
           setRunningTasksBySession(current => {
             const next = { ...current }
@@ -2587,52 +2655,82 @@ export function MainWindowApp() {
           return
         }
 
-        const message = caught instanceof Error ? caught.message : '轮询任务状态失败。'
+        if (isAgentTaskNotFoundError(caught)) {
+          setRunningTasksBySession(current => {
+            if (current[sessionId]?.taskId !== binding.taskId) {
+              return current
+            }
+            const next = { ...current }
+            delete next[sessionId]
+            return next
+          })
+          setAgentTasksBySession(current => {
+            const next = { ...current }
+            delete next[sessionId]
+            return next
+          })
+          delete agentTaskLastEventAtRef.current[binding.taskId]
+          return
+        }
+
+        const message = getErrorMessage(caught, '同步任务状态失败。')
         setError(message)
-        updateSession(sessionId, session => ({
-          ...session,
-          messages: session.messages.map(entry =>
-            entry.id === binding.messageId
-              ? updateMessageVariantAtIndex(entry, binding.variantIndex, currentVariant => ({
-                ...currentVariant,
-                status: 'failed' as const,
-                error: message,
-                errorInfo: undefined,
-                retryInfo: clearRetryProgressInfo(currentVariant.retryInfo),
-                activity: currentVariant.activity
-                  ? {
-                    ...currentVariant.activity,
-                    status: 'failed',
-                    finishedAt: Date.now(),
-                  }
-                  : currentVariant.activity,
-              }))
-              : entry,
-          ),
-          updatedAt: Date.now(),
-        }))
-        setRunningTasksBySession(current => {
-          const next = { ...current }
-          delete next[sessionId]
-          return next
-        })
-        setAgentTasksBySession(current => {
-          const next = { ...current }
-          delete next[sessionId]
-          return next
-        })
+      } finally {
+        syncingTaskIds.delete(binding.taskId)
+        const pending = pendingSyncs[binding.taskId]
+        if (pending && !cancelled) {
+          delete pendingSyncs[binding.taskId]
+          scheduleTaskSync(pending.sessionId, pending.binding, 0)
+        }
       }
     }
 
-    async function pollAll() {
-      await Promise.all(bindings.map(([sessionId, binding]) => pollTask(sessionId, binding)))
+    for (const [sessionId, binding] of bindings) {
+      agentTaskLastEventAtRef.current[binding.taskId] ||= Date.now()
+      scheduleTaskSync(sessionId, binding, AGENT_TASK_EVENT_SYNC_DEBOUNCE_MS)
     }
 
-    void pollAll()
-    const timer = window.setInterval(() => void pollAll(), AGENT_TASK_POLL_INTERVAL_MS)
+    void listen<AgentTaskUpdateEvent>('agent-task-updated', event => {
+      const payload = event.payload || {}
+      const found = findRunningBindingForEvent(payload)
+      if (!found) {
+        return
+      }
+      agentTaskLastEventAtRef.current[found.binding.taskId] = Date.now()
+      scheduleTaskSync(
+        found.sessionId,
+        found.binding,
+        payload.terminal ? 0 : AGENT_TASK_EVENT_SYNC_DEBOUNCE_MS,
+      )
+    }).then(unlisten => {
+      if (cancelled) {
+        unlisten()
+        return
+      }
+      unlistenTaskUpdates = unlisten
+    })
+
+    const staleCheckTimer = window.setInterval(() => {
+      const now = Date.now()
+      for (const [sessionId, binding] of Object.entries(runningTasksBySessionRef.current)) {
+        const lastEventAt = agentTaskLastEventAtRef.current[binding.taskId] || 0
+        if (now - lastEventAt >= AGENT_TASK_EVENT_STALE_MS) {
+          agentTaskLastEventAtRef.current[binding.taskId] = now
+          scheduleTaskSync(sessionId, binding, 0)
+        }
+      }
+    }, AGENT_TASK_FALLBACK_CHECK_INTERVAL_MS)
+
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      unlistenTaskUpdates?.()
+      window.clearInterval(staleCheckTimer)
+      for (const timer of Object.values(syncTimers)) {
+        window.clearTimeout(timer)
+      }
+      for (const taskId of Object.keys(pendingSyncs)) {
+        delete pendingSyncs[taskId]
+      }
     }
   }, [runningTasksBySession])
 
@@ -4047,6 +4145,7 @@ export function MainWindowApp() {
       if (currentSnapshot) {
         const details = buildMessageEventDetailRecords(currentSnapshot.toolEvents)
         if (details.length > 0) {
+          await saveSessionsAndAwaitPersistence(sessionsRef.current)
           await upsertPersistedMessageEventDetails(
             activeRunningTask.messageId,
             activeRunningTask.variantIndex,
