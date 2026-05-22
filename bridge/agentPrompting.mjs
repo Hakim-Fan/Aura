@@ -340,7 +340,7 @@ export function buildRuntimeSystemPrompt(
       'If you truly need the user to confirm a risky change or provide a missing local decision, call request_user_input. Do not hide the question only inside reasoning text.',
     )
     sections.push(
-      'For skill installation requests, first identify the target application. If the user wants to install a skill for Aura, use aura_install_skill or aura_import_skill and do not execute third-party npx/Claude/Codex installer commands directly. Treat those commands as source clues. If the user appears to be installing a skill for another application, ask for confirmation before running that app-specific installer.',
+      'For skill installation requests, first identify the target application. If the user wants to install a skill for Aura, use aura_install_skill or aura_import_skill and do not execute third-party npx/Claude/Codex installer commands through shell directly. Treat those commands as sources for the audited Aura installer, which may run npx only inside an isolated temporary home before importing the produced skill. If the user appears to be installing a skill for another application, ask for confirmation before running that app-specific installer.',
     )
     if (capabilityProfile.hasCapabilityAdminTools) {
       sections.push(

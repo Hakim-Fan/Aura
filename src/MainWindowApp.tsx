@@ -838,6 +838,57 @@ function presentToolEventTitle(event: ToolEvent) {
   return prettifyIdentifier(rawName)
 }
 
+const EDITING_TOOL_NAMES = new Set([
+  'apply_patch',
+  'write_file',
+  'edit_file',
+  'multi_edit_file',
+  'replace_line_range',
+])
+
+function firstEditingPathFromStructuredOutput(output?: Record<string, unknown>) {
+  if (!output) {
+    return ''
+  }
+  if (typeof output.path === 'string' && output.path.trim()) {
+    return output.path.trim()
+  }
+  const pathList = [
+    ...(Array.isArray(output.affectedPaths) ? output.affectedPaths : []),
+    ...(Array.isArray(output.paths) ? output.paths : []),
+  ].filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+  if (pathList.length > 0) {
+    return pathList[0].trim()
+  }
+  const files = Array.isArray(output.files)
+    ? output.files
+    : Array.isArray(output.preview)
+      ? output.preview
+      : []
+  const file = files.find(entry => entry && typeof entry === 'object') as
+    | Record<string, unknown>
+    | undefined
+  return typeof file?.path === 'string' && file.path.trim()
+    ? file.path.trim()
+    : typeof file?.relativePath === 'string' && file.relativePath.trim()
+      ? file.relativePath.trim()
+      : ''
+}
+
+function presentEditingEventTitle(event: ToolEvent, structuredOutput?: Record<string, unknown>) {
+  if (!EDITING_TOOL_NAMES.has(event.name)) {
+    return ''
+  }
+  const path = firstEditingPathFromStructuredOutput(structuredOutput)
+  if (event.status === 'running') {
+    return path ? `正在写入 ${path}` : '正在写入文件'
+  }
+  if (event.status === 'error') {
+    return path ? `写入失败 ${path}` : '文件写入失败'
+  }
+  return path ? `已写入 ${path}` : '文件写入完成'
+}
+
 function mapToolEventToMessageEvent(
   event: ToolEvent,
   options: { lazyDetails?: boolean } = {},
@@ -853,7 +904,7 @@ function mapToolEventToMessageEvent(
   const messageEvent: MessageEvent = {
     id: event.id,
     kind,
-    title: presentToolEventTitle(event),
+    title: presentEditingEventTitle(event, compactPayload.structuredOutput) || presentToolEventTitle(event),
     summary: event.summary,
     toolName: event.name,
     order: event.order,

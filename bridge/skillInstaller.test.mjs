@@ -58,6 +58,67 @@ test('resolveAuraSkillInstallSource treats npx commands as source clues instead 
   }
 })
 
+test('resolveAuraSkillInstallSource rejects README-only sources instead of installing weak skills', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-skill-installer-'))
+  const sourceDir = path.join(workspace, 'readme-only')
+  await fs.mkdir(sourceDir, { recursive: true })
+  await fs.writeFile(
+    path.join(sourceDir, 'README.md'),
+    '# Package README\n\nThis is documentation, not a runnable skill.\n',
+    'utf8',
+  )
+
+  await assert.rejects(
+    resolveAuraSkillInstallSource({
+      cwd: workspace,
+      source: sourceDir,
+      sourceType: 'local',
+    }),
+    /No valid SKILL\.md|does not look like a valid skill/u,
+  )
+})
+
+test('resolveAuraSkillInstallSource imports Aura skill output produced by npx in a sandbox home', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-skill-installer-'))
+  const fakeBin = path.join(workspace, 'bin')
+  const fakeNpx = path.join(fakeBin, 'npx')
+  await fs.mkdir(fakeBin, { recursive: true })
+  await fs.writeFile(
+    fakeNpx,
+    [
+      '#!/bin/sh',
+      'set -eu',
+      'mkdir -p "$AURA_HOME/skills/generated-skill"',
+      'cat > "$AURA_HOME/skills/generated-skill/SKILL.md" <<\'EOF\'',
+      '---',
+      'name: Generated Skill',
+      'description: Installed by a sandboxed npx command.',
+      '---',
+      '',
+      '# Generated Skill',
+      'EOF',
+    ].join('\n'),
+    'utf8',
+  )
+  await fs.chmod(fakeNpx, 0o755)
+
+  const staged = await resolveAuraSkillInstallSource({
+    cwd: workspace,
+    source: `${fakeNpx} -y fake-skill-installer`,
+    sourceType: 'npx',
+    fetchImpl: async () => new Response('not found', { status: 404 }),
+  })
+
+  try {
+    assert.equal(staged.inferredSkillId, 'generated-skill')
+    assert.equal(staged.name, 'Generated Skill')
+    assert.match(staged.note, /isolated temporary home/)
+    assert.match(await fs.readFile(staged.skillFilePath, 'utf8'), /sandboxed npx/)
+  } finally {
+    await staged.cleanup()
+  }
+})
+
 test('resolveAuraSkillInstallSource stages a GitHub tree URL through the contents API', async () => {
   const requestedUrls = []
   const skillContent = [

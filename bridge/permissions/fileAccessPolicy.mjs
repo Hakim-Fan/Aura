@@ -38,6 +38,24 @@ function expandUserPath(target = '.') {
   return value
 }
 
+function normalizeExternalSkillDirs(settings = {}) {
+  const dirs = Array.isArray(settings?.externalSkillDirs)
+    ? settings.externalSkillDirs
+    : []
+  return dirs
+    .filter(entry => typeof entry === 'string' && entry.trim())
+    .map(entry => path.resolve(expandUserPath(entry.trim())))
+}
+
+export function isBoundExternalSkillPath(resolvedPath, settings = {}) {
+  if (!resolvedPath) {
+    return false
+  }
+  return normalizeExternalSkillDirs(settings).some(dir =>
+    pathIsInside(resolvedPath, dir),
+  )
+}
+
 export function resolveFileAccessPath(cwd, target = '.') {
   const root = path.resolve(cwd)
   const expandedTarget = expandUserPath(target)
@@ -149,9 +167,17 @@ export function evaluateFileToolAccessPolicy({ tool, args, settings = {} } = {})
     return null
   }
 
+  const policyExternalPaths =
+    operation.access === 'read'
+      ? externalPaths.filter(entry => !isBoundExternalSkillPath(entry.resolved, settings))
+      : externalPaths
+  if (policyExternalPaths.length === 0) {
+    return null
+  }
+
   const writesAuraCapability =
     operation.access === 'write' &&
-    externalPaths.some(entry => isAuraCapabilityPath(entry.resolved))
+    policyExternalPaths.some(entry => isAuraCapabilityPath(entry.resolved))
   if (writesAuraCapability) {
     return buildDecision('deny', {
       approvalCategory: 'external_file_write',
@@ -165,7 +191,7 @@ export function evaluateFileToolAccessPolicy({ tool, args, settings = {} } = {})
       details: {
         workspaceRoot: path.resolve(cwd),
         access: operation.access,
-        externalPaths,
+        externalPaths: policyExternalPaths,
       },
     })
   }
@@ -194,7 +220,7 @@ export function evaluateFileToolAccessPolicy({ tool, args, settings = {} } = {})
     details: {
       workspaceRoot: path.resolve(cwd),
       access: operation.access,
-      externalPaths,
+      externalPaths: policyExternalPaths,
     },
   })
 }

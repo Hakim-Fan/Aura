@@ -48,6 +48,67 @@ test('execution policy prompts for file-tool reads outside workspace', () => {
   assert.equal(result.code, 'FILE_EXTERNAL_READ_ACCESS')
 })
 
+test('execution policy allows file-tool reads inside bound external skill directories', () => {
+  const workspace = path.join(os.tmpdir(), 'aura-policy-workspace')
+  const externalSkillDir = path.join(os.tmpdir(), 'aura-bound-skills')
+  const result = evaluateToolExecutionPolicy({
+    tool: {
+      name: 'read_file',
+    },
+    args: {
+      path: path.join(externalSkillDir, 'docx', 'SKILL.md'),
+    },
+    settings: {
+      cwd: workspace,
+      externalSkillDirs: [externalSkillDir],
+    },
+  })
+
+  assert.equal(result.action, 'allow')
+})
+
+test('execution policy still prompts for writes inside bound external skill directories', () => {
+  const workspace = path.join(os.tmpdir(), 'aura-policy-workspace')
+  const externalSkillDir = path.join(os.tmpdir(), 'aura-bound-skills')
+  const result = evaluateToolExecutionPolicy({
+    tool: {
+      name: 'write_file',
+      approvalCategory: 'file_write',
+    },
+    args: {
+      path: path.join(externalSkillDir, 'docx', 'SKILL.md'),
+      content: '# Mutated\n',
+    },
+    settings: {
+      cwd: workspace,
+      externalSkillDirs: [externalSkillDir],
+    },
+  })
+
+  assert.equal(result.action, 'prompt')
+  assert.equal(result.approvalCategory, 'external_file_write')
+})
+
+test('execution policy allows shell reads inside bound external skill directories', () => {
+  const workspace = path.join(os.tmpdir(), 'aura-policy-workspace')
+  const externalSkillDir = path.join(os.tmpdir(), 'aura-bound-skills')
+  const result = evaluateToolExecutionPolicy({
+    tool: {
+      name: 'exec_command',
+      approvalCategory: 'shell',
+    },
+    args: {
+      cmd: `cat ${path.join(externalSkillDir, 'docx', 'SKILL.md')}`,
+    },
+    settings: {
+      cwd: workspace,
+      externalSkillDirs: [externalSkillDir],
+    },
+  })
+
+  assert.equal(result.action, 'allow')
+})
+
 test('execution policy expands home-relative file-tool paths before sandbox checks', () => {
   const workspace = path.join(os.tmpdir(), 'aura-policy-workspace')
   const result = evaluateToolExecutionPolicy({

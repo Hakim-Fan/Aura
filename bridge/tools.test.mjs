@@ -804,6 +804,41 @@ test('invokeTool includes editing transaction preview for exact edit approval re
   assert.equal(preview.files[0].diffStat.removedLines, 1)
 })
 
+test('invokeTool emits live file-writing summaries for editing tools', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-write-progress-'))
+  await fs.mkdir(path.join(workspace, 'src'), { recursive: true })
+  const writeFile = createBuiltinTools({ cwd: workspace }).find(tool => tool.name === 'write_file')
+  const events = []
+
+  await invokeTool(
+    writeFile,
+    {
+      path: 'src/sample.txt',
+      content: 'hello\n',
+    },
+    [],
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: true,
+      },
+      onToolEvent(event) {
+        events.push({ ...event })
+      },
+    },
+  )
+
+  assert.ok(
+    events.some(event =>
+      event.status === 'running' &&
+      /正在写入 src\/sample\.txt|准备写入 src\/sample\.txt/u.test(event.summary),
+    ),
+  )
+  assert.match(events.at(-1)?.summary || '', /src\/sample\.txt/)
+})
+
 test('invokeTool blocks shell scripts that write source files', async () => {
   const events = []
   let shellRan = false

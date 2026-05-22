@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -6,8 +7,18 @@ import { promisify } from 'node:util'
 import { parseCommandSpec } from './utils.mjs'
 
 const gunzipAsync = promisify(zlib.gunzip)
+const execFileAsync = promisify(execFile)
 const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 const MAX_STAGED_FILES = 1_000
+const NPX_INSTALL_TIMEOUT_MS = 120_000
+const IGNORED_MARKDOWN_FILES = new Set([
+  'readme.md',
+  'changelog.md',
+  'license.md',
+  'contributing.md',
+  'security.md',
+  'code_of_conduct.md',
+])
 
 function normalizePathSegment(value) {
   return String(value || '')
@@ -174,17 +185,55 @@ async function findSkillCandidates(rootPath, currentPath = rootPath, candidates 
         path: currentPath,
         skillFilePath: entryPath,
         score: currentPath === rootPath ? 100 : 80,
+        reason: 'SKILL.md',
       })
     } else if (lowerName.endsWith('.md')) {
+      if (IGNORED_MARKDOWN_FILES.has(lowerName)) {
+        continue
+      }
+      const score = await scoreMarkdownSkillFile(entryPath, lowerName)
+      if (score <= 0) {
+        continue
+      }
       candidates.push({
         type: 'file',
         path: entryPath,
         skillFilePath: entryPath,
-        score: lowerName.includes('skill') ? 40 : 10,
+        score,
+        reason: 'skill-like markdown',
       })
     }
   }
   return candidates
+}
+
+async function scoreMarkdownSkillFile(filePath, lowerName = path.basename(filePath).toLowerCase()) {
+  let content = ''
+  try {
+    content = await fs.readFile(filePath, 'utf8')
+  } catch {
+    return 0
+  }
+
+  const hasName = !!extractFrontmatterField(content, 'name')
+  const hasDescription = !!extractFrontmatterField(content, 'description')
+  const hasTriggers =
+    !!extractFrontmatterField(content, 'triggers') ||
+    !!extractFrontmatterField(content, 'description') ||
+    /(?:^|\n)\s*##?\s*(?:when to use|trigger|triggers|usage|instructions)\b/iu.test(content)
+  const hasSkillHeading = /(?:^|\n)\s*#\s+.+skill\b/iu.test(content)
+  const nameMentionsSkill = lowerName.includes('skill')
+
+  if (hasName && hasDescription) {
+    return 65
+  }
+  if (hasName && hasTriggers) {
+    return 55
+  }
+  if (nameMentionsSkill && (hasName || hasDescription || hasSkillHeading)) {
+    return 45
+  }
+  return 0
 }
 
 async function selectSkillCandidate(rootPath, requestedId = '') {
@@ -192,6 +241,10 @@ async function selectSkillCandidate(rootPath, requestedId = '') {
   if (stats.isFile()) {
     if (path.extname(rootPath).toLowerCase() !== '.md') {
       throw new Error(`Expected a markdown skill file, got: ${rootPath}`)
+    }
+    const lowerName = path.basename(rootPath).toLowerCase()
+    if (lowerName !== 'skill.md' && await scoreMarkdownSkillFile(rootPath, lowerName) <= 0) {
+      throw new Error('The markdown file does not look like a valid skill. Provide a SKILL.md file or markdown with skill metadata.')
     }
     return {
       stagedPath: rootPath,
@@ -202,7 +255,7 @@ async function selectSkillCandidate(rootPath, requestedId = '') {
 
   const candidates = await findSkillCandidates(rootPath)
   if (candidates.length === 0) {
-    throw new Error('No SKILL.md or markdown skill file was found in the source.')
+    throw new Error('No valid SKILL.md or skill metadata markdown file was found in the source.')
   }
 
   const requested = sanitizeSkillId(requestedId, '')
@@ -436,10 +489,15 @@ async function stageTarGzPackage(buffer, requestedId, fallbackId) {
     offset += Math.ceil(size / 512) * 512
   }
 
-  const selected = await selectSkillCandidate(tempRoot, requestedId || fallbackId)
-  return {
-    ...selected,
-    tempRoot,
+  try {
+    const selected = await selectSkillCandidate(tempRoot, requestedId || fallbackId)
+    return {
+      ...selected,
+      tempRoot,
+    }
+  } catch (error) {
+    await fs.rm(tempRoot, { recursive: true, force: true })
+    throw error
   }
 }
 
@@ -502,6 +560,131 @@ function firstNpmPackageFromNpxArgs(args) {
   return packageOptionValue
 }
 
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function buildNpxSandboxEnv(tempRoot) {
+  const homeDir = path.join(tempRoot, 'home')
+  const auraHome = path.join(homeDir, '.aura')
+
+  return {
+    homeDir,
+    env: {
+      ...process.env,
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+      AURA_HOME: auraHome,
+      XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+      XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
+      npm_config_cache: path.join(tempRoot, 'npm-cache'),
+      npm_config_prefix: path.join(tempRoot, 'npm-prefix'),
+      npm_config_yes: 'true',
+      npm_config_update_notifier: 'false',
+      npm_config_fund: 'false',
+      npm_config_audit: 'false',
+    },
+  }
+}
+
+function npxSkillSearchRoots(tempRoot, homeDir) {
+  return [
+    path.join(homeDir, '.aura', 'skills'),
+    path.join(tempRoot, 'aura', 'skills'),
+    path.join(tempRoot, 'skills'),
+    tempRoot,
+  ]
+}
+
+async function selectFirstAvailableSkillCandidate(searchRoots, requestedId) {
+  const attemptedErrors = []
+  const seen = new Set()
+  for (const root of searchRoots) {
+    const normalizedRoot = path.resolve(root)
+    if (seen.has(normalizedRoot)) {
+      continue
+    }
+    seen.add(normalizedRoot)
+    if (!await pathExists(normalizedRoot)) {
+      continue
+    }
+    try {
+      return await selectSkillCandidate(normalizedRoot, requestedId)
+    } catch (error) {
+      attemptedErrors.push(error?.message || String(error))
+    }
+  }
+  throw new Error(
+    attemptedErrors.length > 0
+      ? attemptedErrors[attemptedErrors.length - 1]
+      : 'No valid skill output was found after running the npx installer.',
+  )
+}
+
+async function stageNpxSandboxExecution(command, requestedId, signal) {
+  const spec = parseCommandSpec(command)
+  const executable = spec.command
+  if (!looksLikeNpxCommand(command)) {
+    throw new Error(`Expected an npx command, got: ${command}`)
+  }
+
+  const tempRoot = await createTempRoot()
+  const { homeDir, env } = buildNpxSandboxEnv(tempRoot)
+  await fs.mkdir(homeDir, { recursive: true })
+
+  try {
+    await execFileAsync(executable, spec.args, {
+      cwd: tempRoot,
+      env,
+      timeout: NPX_INSTALL_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+      signal,
+    })
+  } catch (error) {
+    try {
+      const selected = await selectFirstAvailableSkillCandidate(
+        npxSkillSearchRoots(tempRoot, homeDir),
+        requestedId,
+      )
+      return {
+        ...selected,
+        tempRoot,
+        sourceDescription: `npx:${command}`,
+        note:
+          'Executed the npx installer in an isolated temporary home and imported the skill it produced. The installer exited with a non-zero status after writing a valid skill.',
+      }
+    } catch {
+      await fs.rm(tempRoot, { recursive: true, force: true })
+      const detail = [error?.message, error?.stderr].filter(Boolean).join('\n').trim()
+      throw new Error(
+        `npx installer did not produce a valid Aura skill in the sandbox.${detail ? `\n${detail}` : ''}`,
+      )
+    }
+  }
+
+  try {
+    const selected = await selectFirstAvailableSkillCandidate(
+      npxSkillSearchRoots(tempRoot, homeDir),
+      requestedId,
+    )
+    return {
+      ...selected,
+      tempRoot,
+      sourceDescription: `npx:${command}`,
+      note:
+        'Executed the npx installer in an isolated temporary home and imported the skill it produced.',
+    }
+  } catch (error) {
+    await fs.rm(tempRoot, { recursive: true, force: true })
+    throw error
+  }
+}
+
 async function stageNpxCommand(fetchImpl, command, requestedId, signal) {
   const spec = parseCommandSpec(command)
   const directSource = firstInstallSourceFromArgs(spec.args)
@@ -521,11 +704,16 @@ async function stageNpxCommand(fetchImpl, command, requestedId, signal) {
     throw new Error('Could not identify a package or URL inside the npx command.')
   }
 
-  const staged = await stageNpmPackage(fetchImpl, packageName, requestedId, signal)
-  return {
-    ...staged,
-    sourceDescription: `npx:${command}`,
-    note: 'Parsed the npx command as an npm package source; the installer did not execute the npx script.',
+  try {
+    const staged = await stageNpmPackage(fetchImpl, packageName, requestedId, signal)
+    return {
+      ...staged,
+      sourceDescription: `npx:${command}`,
+      note:
+        'Parsed the npx command as an npm package source and imported the valid skill from the package tarball.',
+    }
+  } catch {
+    return stageNpxSandboxExecution(command, requestedId, signal)
   }
 }
 

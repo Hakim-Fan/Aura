@@ -107,6 +107,75 @@ function structuredEventOutputForTool(toolName, value) {
   return value
 }
 
+function firstEditingPathFromUpdate(value = {}) {
+  if (!value || typeof value !== 'object') {
+    return ''
+  }
+  if (typeof value.path === 'string' && value.path.trim()) {
+    return value.path.trim()
+  }
+  const paths = [
+    ...(Array.isArray(value.affectedPaths) ? value.affectedPaths : []),
+    ...(Array.isArray(value.paths) ? value.paths : []),
+  ].filter(entry => typeof entry === 'string' && entry.trim())
+  if (paths.length > 0) {
+    return paths[0].trim()
+  }
+  const files = Array.isArray(value.files)
+    ? value.files
+    : Array.isArray(value.preview)
+      ? value.preview
+      : []
+  const file = files.find(entry => entry && typeof entry === 'object')
+  return typeof file?.path === 'string' && file.path.trim()
+    ? file.path.trim()
+    : typeof file?.relativePath === 'string' && file.relativePath.trim()
+      ? file.relativePath.trim()
+      : ''
+}
+
+function editingProgressSummary(toolName, value) {
+  if (!STRUCTURED_EVENT_OUTPUT_TOOLS.has(toolName) || !value || typeof value !== 'object') {
+    return ''
+  }
+  const stage = typeof value.stage === 'string' ? value.stage : ''
+  const phase = typeof value.phase === 'string' ? value.phase : ''
+  const path = firstEditingPathFromUpdate(value)
+  const total = Number.isFinite(Number(value.total)) ? Math.max(0, Math.round(Number(value.total))) : 0
+  const completed = Number.isFinite(Number(value.completed)) ? Math.max(0, Math.round(Number(value.completed))) : 0
+  const progress = total > 0 ? ` (${Math.min(completed, total)}/${total})` : ''
+
+  if (stage === 'edit_transaction_apply' || phase === 'applying') {
+    return path
+      ? `正在写入 ${path}${progress}`
+      : `正在写入文件${progress}`
+  }
+  if (stage === 'edit_transaction_progress' || phase === 'applied') {
+    return path
+      ? `正在写入 ${path}${progress}`
+      : `正在写入文件${progress}`
+  }
+  if (stage === 'patch_progress' && (phase === 'applying' || phase === 'applied')) {
+    return path
+      ? `正在写入 ${path}${progress}`
+      : `正在应用补丁${progress}`
+  }
+  if (stage === 'edit_transaction_begin') {
+    return path ? `准备写入 ${path}` : '准备写入文件'
+  }
+  if (stage === 'edit_transaction_verify' || phase === 'verified') {
+    return path ? `正在校验 ${path}` : '正在校验文件写入'
+  }
+  if (stage === 'edit_transaction_end' || stage === 'patch_end') {
+    return typeof value.summary === 'string' && value.summary.trim()
+      ? value.summary.trim()
+      : path
+        ? `已写入 ${path}`
+        : '已完成文件写入'
+  }
+  return typeof value.summary === 'string' ? value.summary.trim() : ''
+}
+
 function commandExitFailureForTool(toolName, output) {
   if (!COMMAND_EXIT_STATUS_TOOLS.has(toolName) || !output || typeof output !== 'object') {
     return null
@@ -2577,7 +2646,7 @@ export function createBuiltinTools(context) {
       aliases: ['installauraskill', 'install_skill', 'skill_install'],
       approvalCategory: 'file_write',
       description:
-        'Install a skill into Aura from a local path, pasted SKILL.md content, raw URL, GitHub source such as https://github.com/owner/repo/tree/ref/path, npm package, or npx command without executing third-party installer scripts. Use this directly whenever the user wants to install a skill for Aura; do not pre-download or shell-copy into ~/.aura/skills.',
+        'Install and enable a skill into Aura global skills from a local path, pasted SKILL.md content, raw URL, GitHub source such as https://github.com/owner/repo/tree/ref/path, npm package, or npx command. For npx commands, the installer first tries safe package extraction and only falls back to executing npx inside an isolated temporary home before importing the produced skill. Use this directly whenever the user wants to install a skill for Aura; do not pre-download or shell-copy into ~/.aura/skills.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -3400,8 +3469,10 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
               effectiveTool.name,
               nextOutput,
             )
+            const progressSummary = editingProgressSummary(effectiveTool.name, nextOutput)
             updateEvent({
               status: 'running',
+              summary: progressSummary || eventSummary,
               output: stringifyOutput(nextOutput),
               structuredOutput,
             })
@@ -3431,6 +3502,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       effectiveTool,
     )
     const structuredOutput = structuredEventOutputForTool(effectiveTool.name, output)
+    const finalSummary = editingProgressSummary(effectiveTool.name, output)
     const nonzeroExitCode = commandExitFailureForTool(effectiveTool.name, output)
     const commandExitError =
       nonzeroExitCode === null
@@ -3446,6 +3518,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         })
     updateEvent({
       status: commandExitError ? 'error' : 'success',
+      summary: finalSummary || eventSummary,
       ...completeEventTiming(),
       output: stringifyOutput(output),
       structuredOutput,

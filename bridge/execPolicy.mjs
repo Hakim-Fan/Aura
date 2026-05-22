@@ -1,6 +1,9 @@
 import os from 'node:os'
 import path from 'node:path'
-import { evaluateFileToolAccessPolicy } from './permissions/fileAccessPolicy.mjs'
+import {
+  evaluateFileToolAccessPolicy,
+  isBoundExternalSkillPath,
+} from './permissions/fileAccessPolicy.mjs'
 import { parseArgString } from './utils.mjs'
 
 const SOURCE_WRITE_EXTENSIONS =
@@ -357,6 +360,9 @@ export function evaluateToolExecutionPolicy({
     : ''
   if (cwd) {
     const externalPaths = collectExternalPathReferences(command, cwd)
+      .filter(entry =>
+        !(entry.access === 'read' && isBoundExternalSkillPath(entry.resolvedPath, settings)),
+      )
     if (externalPaths.length > 0) {
       const writesAuraHome = externalPaths.some(
         entry => entry.scope === 'aura_home' && entry.access === 'write',

@@ -2275,6 +2275,41 @@ export function stripInlineToolCallText(text) {
   return extractInlineToolCalls(text).text
 }
 
+const OBSERVABLE_PROGRESS_REPLAN_PROMPT = [
+  '上一次响应在当前执行步骤中长时间没有产生可观察进展。',
+  '不要简单重复原计划。',
+  '请保留已完成步骤，只对当前卡住或过大的步骤做局部重规划。',
+  '',
+  '如果当前任务或当前步骤过大，请拆分为多个可观察、可验证、可恢复的小步骤。',
+  '每个小步骤都应该产生明确进展，例如：',
+  '- 写入或修改一个文件',
+  '- 读取并确认一个关键事实',
+  '- 运行一次验证命令',
+  '- 生成一个可检查的阶段性产物',
+  '- 更新计划状态并说明下一个最小动作',
+  '',
+  '下一步请优先执行一个最小可观察动作，而不是继续长篇分析或一次性生成完整结果。',
+].join('\n')
+
+function shouldInjectObservableProgressReplan(error) {
+  const code =
+    typeof error?.errorInfo?.code === 'string'
+      ? error.errorInfo.code
+      : typeof error?.code === 'string'
+        ? error.code
+        : ''
+  if (code === 'PROVIDER_STREAM_STALLED') {
+    return true
+  }
+
+  const summary = summarizeRetryError(error)
+  return (
+    summary.includes('流式输出长时间没有继续') ||
+    summary.includes('Streaming response stalled') ||
+    summary.includes('long time without producing observable progress')
+  )
+}
+
 export const __testInternals = {
   buildOpenAiAssistantToolCallTranscriptEntry,
   buildFinalizerPrompt,
@@ -2295,6 +2330,8 @@ export const __testInternals = {
   resolveCompactionSettings,
   runProviderOperationWithRetry,
   shouldNudgeForObservableProgress,
+  shouldInjectObservableProgressReplan,
+  OBSERVABLE_PROGRESS_REPLAN_PROMPT,
   updateUnresolvedToolErrorForRepair,
 }
 
@@ -2758,6 +2795,7 @@ async function runProviderOperationWithRetry(
     maxRetries = PROVIDER_RETRY_DELAYS_MS.length,
     stage = 'response',
     hooks,
+    prepareRetry,
   } = {},
 ) {
   let lastError
@@ -2826,6 +2864,15 @@ async function runProviderOperationWithRetry(
           lastErrorSummary: summarizeRetryError(normalized),
         }),
       )
+      if (typeof prepareRetry === 'function') {
+        await prepareRetry({
+          error: normalized,
+          attemptNumber: attempt,
+          nextAttemptNumber: attempt + 1,
+          retryCount: nextRetryCount,
+          stage,
+        })
+      }
       retryCount = nextRetryCount
       if (nextRetryDelayMs > 0) {
         await wait(nextRetryDelayMs)
@@ -3602,6 +3649,7 @@ export async function runOpenAiCompatibleAgent({
       const reasoningBlockId = createProviderReasoningBlockId(hooks, 'openai', step)
       const reasoningStartedAt = Date.now()
       const { reasoningOrder, toolOrder } = nextProviderTimelineOrders(hooks, step)
+      let replanPromptInjected = false
 
       const attemptResult = await runProviderOperationWithRetry(
         async (attemptState) => {
@@ -3813,6 +3861,31 @@ export async function runOpenAiCompatibleAgent({
           maxRetries,
           stage: 'response',
           hooks,
+          prepareRetry({ error }) {
+            if (
+              replanPromptInjected ||
+              !shouldInjectObservableProgressReplan(error)
+            ) {
+              return
+            }
+            transcript.push({
+              role: 'user',
+              content: OBSERVABLE_PROGRESS_REPLAN_PROMPT,
+            })
+            replanPromptInjected = true
+            hooks?.onReasoningDelta?.(
+              '检测到当前执行步骤长时间没有产生可观察进展，已要求模型保留已完成工作并对卡住步骤做局部重规划。',
+              {
+                blockId:
+                  typeof hooks?.createExecutionStepId === 'function'
+                    ? hooks.createExecutionStepId('reasoning', 'replan')
+                    : 'runtime-replan',
+                kind: 'summary',
+                order: -80,
+                createdAt: Date.now(),
+              },
+            )
+          },
         },
       )
       const stepResult = attemptResult.value
@@ -4160,6 +4233,7 @@ export async function runGoogleAgent({
       const reasoningBlockId = createProviderReasoningBlockId(hooks, 'google', step)
       const reasoningStartedAt = Date.now()
       const { reasoningOrder, toolOrder } = nextProviderTimelineOrders(hooks, step)
+      let replanPromptInjected = false
 
       const attemptResult = await runProviderOperationWithRetry(
         async (attemptState) => {
@@ -4328,6 +4402,31 @@ export async function runGoogleAgent({
           maxRetries,
           stage: 'response',
           hooks,
+          prepareRetry({ error }) {
+            if (
+              replanPromptInjected ||
+              !shouldInjectObservableProgressReplan(error)
+            ) {
+              return
+            }
+            transcript.push({
+              role: 'user',
+              parts: [{ text: OBSERVABLE_PROGRESS_REPLAN_PROMPT }],
+            })
+            replanPromptInjected = true
+            hooks?.onReasoningDelta?.(
+              '检测到当前执行步骤长时间没有产生可观察进展，已要求模型保留已完成工作并对卡住步骤做局部重规划。',
+              {
+                blockId:
+                  typeof hooks?.createExecutionStepId === 'function'
+                    ? hooks.createExecutionStepId('reasoning', 'replan')
+                    : 'runtime-replan',
+                kind: 'summary',
+                order: -80,
+                createdAt: Date.now(),
+              },
+            )
+          },
         },
       )
       const stepResult = attemptResult.value

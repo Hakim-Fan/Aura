@@ -20,6 +20,8 @@ const {
   resolveCompactionSettings,
   runProviderOperationWithRetry,
   shouldNudgeForObservableProgress,
+  shouldInjectObservableProgressReplan,
+  OBSERVABLE_PROGRESS_REPLAN_PROMPT,
   updateUnresolvedToolErrorForRepair,
 } = __testInternals
 
@@ -394,6 +396,40 @@ test('runProviderOperationWithRetry discards failed attempt reasoning before ret
   assert.equal(discardEvents[0]?.blockId, 'reasoning-openai-step-1')
   assert.equal(discardEvents[0]?.attemptNumber, 1)
   assert.equal(discardEvents[0]?.nextAttemptNumber, 2)
+})
+
+test('runProviderOperationWithRetry can prepare a local replan prompt before retry', async () => {
+  const injectedPrompts = []
+  let attempts = 0
+
+  const stalledError = new Error('模型服务流式输出长时间没有继续。')
+  stalledError.errorInfo = {
+    code: 'PROVIDER_STREAM_STALLED',
+    retryable: true,
+  }
+
+  const result = await runProviderOperationWithRetry(
+    async () => {
+      attempts += 1
+      if (attempts === 1) {
+        throw stalledError
+      }
+      return 'ok'
+    },
+    {
+      messages: [],
+      prepareRetry({ error }) {
+        if (shouldInjectObservableProgressReplan(error)) {
+          injectedPrompts.push(OBSERVABLE_PROGRESS_REPLAN_PROMPT)
+        }
+      },
+    },
+  )
+
+  assert.equal(result.value, 'ok')
+  assert.equal(injectedPrompts.length, 1)
+  assert.match(injectedPrompts[0], /不要简单重复原计划/)
+  assert.match(injectedPrompts[0], /多个可观察、可验证、可恢复的小步骤/)
 })
 
 test('buildFinalizerPrompt can omit duplicated tool and reasoning digests', () => {
