@@ -507,6 +507,9 @@ export function buildDefaultAgentPromptBlocks(
     routeState?.answerMode === 'execute'
       ? 'Execution-mode contract: the user expects concrete work, not another planning pass. todo_write, reading files, and explaining intent are coordination/context only; they do not satisfy an execution step by themselves. After a plan/todo update, move to the concrete tool that creates, edits, runs, verifies, or persists the requested output. If the requested output is large, create the smallest durable file or artifact first, then extend it in bounded chunks.'
       : null,
+    routeState?.answerMode === 'execute'
+      ? 'For large generated deliverables such as HTML prototypes, PRDs, slide decks, reports, or converted documents, avoid a single huge tool-call argument. Persist a compact scaffold or artifact first, then continue with bounded edits/chunks and checkpoints.'
+      : null,
     'Use tools when they materially reduce uncertainty or let you complete the user request. The mounted tool list is the source of truth for this turn.',
     'If a needed capability is not obvious and tool_search is mounted, inspect the current tool catalog before claiming the capability is unavailable.',
     'If the user request needs files, commands, web retrieval, browser interaction, or capability management and the matching tool is mounted, use the tool directly instead of asking the user to do the work.',

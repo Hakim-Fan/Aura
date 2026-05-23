@@ -1176,6 +1176,32 @@ function extractPartialProviderReasoning(normalized) {
     : ''
 }
 
+function extractPartialProviderToolCalls(normalized) {
+  const entries = normalized?.errorInfo?.partialToolCalls
+  if (!Array.isArray(entries)) {
+    return []
+  }
+  return entries
+    .filter(entry => entry && typeof entry === 'object')
+    .map(entry => ({
+      id: typeof entry.id === 'string' ? entry.id : undefined,
+      name: typeof entry.name === 'string' ? entry.name : undefined,
+      path: typeof entry.path === 'string' ? entry.path : undefined,
+      artifactHint: typeof entry.artifactHint === 'string' ? entry.artifactHint : undefined,
+      argumentsChars: Number.isFinite(Number(entry.argumentsChars))
+        ? Math.max(0, Math.round(Number(entry.argumentsChars)))
+        : undefined,
+      contentChars: Number.isFinite(Number(entry.contentChars))
+        ? Math.max(0, Math.round(Number(entry.contentChars)))
+        : undefined,
+      completeJson: entry.completeJson === true,
+      argumentsPreview: typeof entry.argumentsPreview === 'string'
+        ? entry.argumentsPreview.slice(0, 900)
+        : undefined,
+    }))
+    .slice(0, 8)
+}
+
 function extractProviderRetryInfo(value) {
   if (!value || typeof value !== 'object' || !value.retryInfo || typeof value.retryInfo !== 'object') {
     return undefined
@@ -1994,7 +2020,8 @@ function buildDefaultStepExecutionContract(step = {}) {
     '- Do not answer with another plan, status report, or todo-only update.',
     '- Do not call todo_write as the only action in this step.',
     '- Your next concrete action should call one of: write_file, apply_patch, edit_file, multi_edit_file, replace_line_range, create_artifact, append_artifact_chunk.',
-    '- If the full output is large, first write a small runnable/inspectable skeleton or draft artifact, then continue by appending or editing bounded chunks.',
+    '- If the full output is large, do not attempt one giant tool-call payload. First write a small runnable/inspectable skeleton or draft artifact, then continue by appending or editing bounded chunks.',
+    '- For HTML/PPT/PRD/prototype generation, the first write should be a compact scaffold with the target file/path and essential structure only; later turns can fill sections incrementally.',
   ].join('\n')
 }
 
@@ -2219,6 +2246,7 @@ function buildCheckpointContinuationPrompt({
   toolEvents = [],
   partialMessage = '',
   partialReasoning = '',
+  partialToolCalls = [],
   error,
   stepRuntime,
 } = {}) {
@@ -2236,6 +2264,13 @@ function buildCheckpointContinuationPrompt({
   const checkpointStepRuntime = checkpoint?.contextSnapshot?.runtime?.stepRuntime
   const activeStepRuntime = stepRuntime || checkpointStepRuntime
   const activeStep = activeStepRuntime?.steps?.[activeStepRuntime.currentIndex]
+  const partialToolCallSummaries = Array.isArray(partialToolCalls)
+    ? partialToolCalls.slice(0, 8)
+    : []
+  const stalledDuringMutationTool = partialToolCallSummaries.some(entry =>
+    ['write_file', 'apply_patch', 'edit_file', 'multi_edit_file', 'replace_line_range', 'create_artifact', 'append_artifact_chunk']
+      .includes(String(entry?.name || '')),
+  )
   const workMemories = Array.isArray(context?.workMemories)
     ? context.workMemories.slice(-8).map(memory => ({
         id: memory?.id,
@@ -2255,6 +2290,9 @@ function buildCheckpointContinuationPrompt({
     '- 不要重新执行已经成功且仍可复用的转换、生成、导出或验证步骤。',
     '- 如果需要精确的大输出内容，优先调用 read_artifact_slice 读取必要片段。',
     '- 继续执行下一个最小可观察步骤；如果当前步骤要求文件/产物证据，优先调用写入、编辑、artifact 或验证工具，不要只更新 todo 或继续解释计划。',
+    stalledDuringMutationTool
+      ? '- 注意：上次中断时模型已经开始生成写入/产物工具调用但没有闭合执行。不要重试一次性生成完整大文件参数；这次先调用 write_file/create_artifact 写一个小而可检查的骨架，然后用 apply_patch/edit_file/append_artifact_chunk 分块补全。'
+      : null,
     '- 如果成果已经足够，整理最终回答；否则不要用普通文字假装完成。',
     '',
     checkpointSummary ? `最近 checkpoint:\n${JSON.stringify(checkpointSummary, null, 2)}` : null,
@@ -2270,6 +2308,9 @@ function buildCheckpointContinuationPrompt({
     recentTools.length > 0 ? `最近工具结果摘要:\n${JSON.stringify(recentTools, null, 2)}` : null,
     progress ? `当前 progress ledger:\n${JSON.stringify(progress, null, 2)}` : null,
     workMemories.length > 0 ? `可复用 work memory:\n${JSON.stringify(workMemories, null, 2)}` : null,
+    partialToolCallSummaries.length > 0
+      ? `中断前已开始但未完成执行的工具调用摘要:\n${JSON.stringify(partialToolCallSummaries, null, 2)}`
+      : null,
     partialMessage.trim()
       ? `中断前模型已写出的草稿片段:\n${partialMessage.slice(0, 4000)}`
       : null,
@@ -2289,6 +2330,7 @@ function buildCheckpointContinuationMessages({
   toolEvents,
   partialMessage,
   partialReasoning,
+  partialToolCalls,
   error,
   stepRuntime,
 } = {}) {
@@ -2308,6 +2350,7 @@ function buildCheckpointContinuationMessages({
       toolEvents,
       partialMessage: cleanedPartial,
       partialReasoning,
+      partialToolCalls,
       error,
       stepRuntime,
     }),
@@ -3401,12 +3444,14 @@ export async function runDefaultAgent(request) {
     const normalized = normalizeAgentError(error)
     const partialMessage = extractPartialProviderMessage(normalized)
     const partialReasoning = extractPartialProviderReasoning(normalized)
+    const partialToolCalls = extractPartialProviderToolCalls(normalized)
     const retryInfo = extractProviderRetryInfo(normalized)
     const hasRecoveryContext =
       checkpointId ||
       toolEvents.length > 0 ||
       partialMessage.length > 0 ||
-      partialReasoning.length > 0
+      partialReasoning.length > 0 ||
+      partialToolCalls.length > 0
 
     if (hasRecoveryContext) {
       createCheckpointForRecoverableProgress('interrupted_with_progress', 0, {
@@ -3414,7 +3459,8 @@ export async function runDefaultAgent(request) {
           Boolean(checkpointId) ||
           toolEvents.length > 0 ||
           partialMessage.length > 0 ||
-          partialReasoning.length > 0,
+          partialReasoning.length > 0 ||
+          partialToolCalls.length > 0,
         errorCode: normalized.code,
         errorSource: normalized.source,
       })
@@ -3428,6 +3474,7 @@ export async function runDefaultAgent(request) {
       let resumeErrorForAttempt = normalized
       let resumePartialMessage = partialMessage
       let resumePartialReasoning = partialReasoning
+      let resumePartialToolCalls = partialToolCalls
       let resumeRetryInfo = retryInfo
       const maxCheckpointResumeAttempts = 3
 
@@ -3452,6 +3499,7 @@ export async function runDefaultAgent(request) {
             toolEvents,
             partialMessage: resumePartialMessage,
             partialReasoning: resumePartialReasoning,
+            partialToolCalls: resumePartialToolCalls,
             error: resumeErrorForAttempt,
             stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
           })
@@ -3467,6 +3515,7 @@ export async function runDefaultAgent(request) {
                   toolEventCount: toolEvents.length,
                   hasPartialMessage: resumePartialMessage.length > 0,
                   hasPartialReasoning: resumePartialReasoning.length > 0,
+                  hasPartialToolCalls: resumePartialToolCalls.length > 0,
                   resumeAttempt: resumeAttempt + 1,
                 },
               ],
@@ -3548,6 +3597,7 @@ export async function runDefaultAgent(request) {
           const resumeNormalized = normalizeAgentError(resumeError)
           const nextPartialMessage = extractPartialProviderMessage(resumeNormalized)
           const nextPartialReasoning = extractPartialProviderReasoning(resumeNormalized)
+          const nextPartialToolCalls = extractPartialProviderToolCalls(resumeNormalized)
           const nextRetryInfo = extractProviderRetryInfo(resumeNormalized)
           const canRetryCheckpointResume =
             resumeAttempt + 1 < maxCheckpointResumeAttempts &&
@@ -3557,7 +3607,8 @@ export async function runDefaultAgent(request) {
               checkpointId ||
               toolEvents.length > continuationToolEventStart ||
               nextPartialMessage.length > 0 ||
-              nextPartialReasoning.length > 0
+              nextPartialReasoning.length > 0 ||
+              nextPartialToolCalls.length > 0
             )
           if (!canRetryCheckpointResume) {
             break
@@ -3570,6 +3621,7 @@ export async function runDefaultAgent(request) {
           resumeErrorForAttempt = resumeNormalized
           resumePartialMessage = nextPartialMessage
           resumePartialReasoning = nextPartialReasoning
+          resumePartialToolCalls = nextPartialToolCalls
           resumeRetryInfo = nextRetryInfo
         }
       }

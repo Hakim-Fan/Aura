@@ -2407,6 +2407,7 @@ export const __testInternals = {
   runProviderOperationWithRetry,
   shouldNudgeForObservableProgress,
   shouldInjectObservableProgressReplan,
+  summarizePartialToolCalls,
   OBSERVABLE_PROGRESS_REPLAN_PROMPT,
   updateUnresolvedToolErrorForRepair,
 }
@@ -2803,7 +2804,15 @@ function scorePartialProviderState(partialState) {
 
   const messageLength = (partialState.partialMessage || '').trim().length
   const reasoningLength = (partialState.partialReasoning || '').trim().length
-  return messageLength * 4 + reasoningLength
+  const toolCallScore = Array.isArray(partialState.partialToolCalls)
+    ? partialState.partialToolCalls.reduce((total, entry) => {
+        const argsChars = Number.isFinite(Number(entry?.argumentsChars))
+          ? Math.max(0, Number(entry.argumentsChars))
+          : String(entry?.argumentsPreview || '').length
+        return total + 400 + Math.min(argsChars, 12_000)
+      }, 0)
+    : 0
+  return messageLength * 4 + reasoningLength + toolCallScore
 }
 
 function hasPartialProviderState(partialState) {
@@ -2836,8 +2845,78 @@ function attachPartialProviderState(error, partialState) {
 
   nextErrorInfo.partialMessage = partialState.partialMessage || ''
   nextErrorInfo.partialReasoning = partialState.partialReasoning || ''
+  if (Array.isArray(partialState.partialToolCalls) && partialState.partialToolCalls.length > 0) {
+    nextErrorInfo.partialToolCalls = partialState.partialToolCalls
+  }
   target.errorInfo = nextErrorInfo
   return target
+}
+
+function extractPartialJsonStringField(rawArgs = '', fieldNames = []) {
+  const text = String(rawArgs || '')
+  for (const fieldName of fieldNames) {
+    const escaped = String(fieldName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const match = new RegExp(`"${escaped}"\\s*:\\s*"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)`, 'u').exec(text)
+    if (!match) {
+      continue
+    }
+    try {
+      return JSON.parse(`"${match[1]}"`)
+    } catch {
+      return match[1]
+    }
+  }
+  return ''
+}
+
+function summarizePartialToolCall(toolCall = {}) {
+  const name = String(toolCall?.function?.name || '').trim()
+  const rawArgs = String(toolCall?.function?.arguments || '')
+  const summary = {
+    id: String(toolCall?.id || '').trim() || undefined,
+    name: name || undefined,
+    argumentsChars: rawArgs.length,
+    argumentsPreview: truncate(rawArgs.replace(/\s+/g, ' ').trim(), 900),
+    completeJson: false,
+  }
+
+  try {
+    const parsed = rawArgs.trim() ? JSON.parse(rawArgs) : {}
+    summary.completeJson = true
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const pathValue = parsed.path || parsed.filePath
+      if (typeof pathValue === 'string' && pathValue.trim()) {
+        summary.path = pathValue.trim()
+      }
+      const contentValue = parsed.content || parsed.text || parsed.patch || parsed.chunk
+      if (typeof contentValue === 'string') {
+        summary.contentChars = contentValue.length
+      }
+      const artifactValue = parsed.artifactId || parsed.title || parsed.type
+      if (typeof artifactValue === 'string' && artifactValue.trim()) {
+        summary.artifactHint = artifactValue.trim().slice(0, 160)
+      }
+    }
+  } catch {
+    // Incomplete streamed tool arguments are expected on provider stalls.
+    const pathValue = extractPartialJsonStringField(rawArgs, ['path', 'filePath'])
+    if (pathValue.trim()) {
+      summary.path = pathValue.trim()
+    }
+    const contentValue = extractPartialJsonStringField(rawArgs, ['content', 'text', 'patch', 'chunk'])
+    if (contentValue) {
+      summary.contentChars = contentValue.length
+    }
+  }
+
+  return summary
+}
+
+function summarizePartialToolCalls(toolCalls = []) {
+  return (Array.isArray(toolCalls) ? toolCalls : [])
+    .map(summarizePartialToolCall)
+    .filter(entry => entry.name || entry.argumentsChars > 0)
+    .slice(0, 8)
 }
 
 function attachProviderRetryInfo(error, retryInfo) {
@@ -2891,10 +2970,11 @@ async function runProviderOperationWithRetry(
   const maxAttempts = maxRetries + 1
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const attemptState = {
+  const attemptState = {
       receivedOutput: false,
       partialMessage: '',
       partialReasoning: '',
+      partialToolCalls: [],
     }
 
     try {
@@ -3880,6 +3960,7 @@ export async function runOpenAiCompatibleAgent({
               ) {
                 attemptState.receivedOutput = true
                 mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
+                attemptState.partialToolCalls = summarizePartialToolCalls(toolCalls)
                 applyPatchStreamingReporter.inspect(toolCalls)
               }
             },
@@ -4458,6 +4539,13 @@ export async function runGoogleAgent({
                 attemptState.receivedOutput = true
               }
               collectGeminiFunctionCalls(functionCalls, parts)
+              attemptState.partialToolCalls = functionCalls.slice(0, 8).map((entry, index) => ({
+                id: `gemini-function-call-${index}`,
+                name: entry.name,
+                argumentsChars: JSON.stringify(entry.args || {}).length,
+                argumentsPreview: truncate(JSON.stringify(entry.args || {}), 900),
+                completeJson: true,
+              }))
             },
             {
               messages: conversationMessages,

@@ -22,6 +22,7 @@ const {
   runProviderOperationWithRetry,
   shouldNudgeForObservableProgress,
   shouldInjectObservableProgressReplan,
+  summarizePartialToolCalls,
   OBSERVABLE_PROGRESS_REPLAN_PROMPT,
   updateUnresolvedToolErrorForRepair,
 } = __testInternals
@@ -469,6 +470,43 @@ test('runProviderOperationWithRetry escalates partial stream stalls without prov
 
   assert.equal(attempts, 1)
   assert.equal(retryEvents.length, 0)
+})
+
+test('runProviderOperationWithRetry attaches partial streamed tool calls on stall', async () => {
+  const stalledError = new Error('模型服务流式输出长时间没有继续。')
+  stalledError.code = 'PROVIDER_STREAM_STALLED'
+  stalledError.errorInfo = {
+    code: 'PROVIDER_STREAM_STALLED',
+    retryable: true,
+  }
+
+  await assert.rejects(
+    runProviderOperationWithRetry(
+      async (attemptState) => {
+        attemptState.receivedOutput = true
+        attemptState.partialToolCalls = summarizePartialToolCalls([
+          {
+            id: 'call-write',
+            type: 'function',
+            function: {
+              name: 'write_file',
+              arguments: '{"path":"prototype.html","content":"<html><body>',
+            },
+          },
+        ])
+        throw stalledError
+      },
+      { messages: [] },
+    ),
+    error => {
+      assert.equal(error.code, 'PROVIDER_STREAM_STALLED')
+      assert.equal(error.errorInfo?.partialToolCalls?.[0]?.name, 'write_file')
+      assert.equal(error.errorInfo?.partialToolCalls?.[0]?.path, 'prototype.html')
+      assert.equal(error.errorInfo?.partialToolCalls?.[0]?.completeJson, false)
+      assert.match(error.errorInfo?.partialToolCalls?.[0]?.argumentsPreview || '', /prototype\.html/)
+      return true
+    },
+  )
 })
 
 test('buildFinalizerPrompt can omit duplicated tool and reasoning digests', () => {

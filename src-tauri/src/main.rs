@@ -5813,6 +5813,19 @@ fn upsert_message_version_sqlite<R: Runtime>(
     let connection = open_app_db(&app)?;
     let fallback_version_id = format!("{message_id}:v{version_index}");
     let version_id = get_json_string_field(&version, "id", &fallback_version_id);
+    let persisted_version_id = connection
+        .query_row(
+            "SELECT id
+             FROM message_versions
+             WHERE id = ?1 OR (message_id = ?2 AND version_index = ?3 AND deleted_at = 0)
+             ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END
+             LIMIT 1",
+            params![&version_id, &message_id, version_index],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to inspect existing SQLite message version: {error}"))?
+        .unwrap_or(version_id);
     connection
         .execute(
             "INSERT INTO message_versions (
@@ -5820,7 +5833,9 @@ fn upsert_message_version_sqlite<R: Runtime>(
                 usage_json, capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json,
                 appended_inputs_json, agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json, deleted_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, 0)
-             ON CONFLICT(message_id, version_index) DO UPDATE SET
+             ON CONFLICT(id) DO UPDATE SET
+                message_id = excluded.message_id,
+                version_index = excluded.version_index,
                 content = excluded.content,
                 parts_json = excluded.parts_json,
                 status = excluded.status,
@@ -5844,7 +5859,7 @@ fn upsert_message_version_sqlite<R: Runtime>(
                 id = excluded.id,
                 deleted_at = 0",
             params![
-                version_id,
+                persisted_version_id,
                 message_id,
                 version_index,
                 get_json_string_field(&version, "content", ""),
