@@ -73,6 +73,9 @@ import {
   createCheckpointManager,
 } from './checkpoint.mjs'
 import {
+  upsertWorkMemory,
+} from './workMemory.mjs'
+import {
   buildErrorDetails,
   buildMetricsSummaryDetails,
   buildRunFinishedDetails,
@@ -1786,6 +1789,413 @@ function collectDefaultAgentCheckpointTriggers({
   return triggers
 }
 
+function compactCheckpointTrigger(trigger = {}) {
+  return {
+    reason: trigger.reason,
+    stage: trigger.stage,
+    toolName: trigger.toolName,
+    toolEventId: trigger.toolEventId,
+    artifacts: Array.isArray(trigger.artifacts)
+      ? trigger.artifacts.slice(0, 8).map(artifact => ({
+          id: artifact?.id,
+          type: artifact?.type,
+          title: artifact?.title,
+          chunkCount: artifact?.chunkCount,
+        }))
+      : [],
+    files: Array.isArray(trigger.files) ? trigger.files.slice(0, 12) : [],
+    summary: summarizeToolOutput(trigger.summary, 500),
+    nextAction: trigger.nextAction,
+    tokenEstimate: trigger.tokenEstimate,
+    charCount: trigger.charCount,
+  }
+}
+
+function recordPhaseHandoffMemory(context, triggers = [], reason = 'phase_handoff') {
+  if (!context || !Array.isArray(triggers) || triggers.length === 0) {
+    return null
+  }
+  const compactTriggers = triggers.map(compactCheckpointTrigger)
+  const artifacts = compactTriggers.flatMap(trigger => trigger.artifacts || [])
+  const files = [...new Set(compactTriggers.flatMap(trigger => trigger.files || []))]
+  const stage =
+    compactTriggers.find(trigger => trigger.stage)?.stage ||
+    compactTriggers.find(trigger => trigger.reason)?.reason ||
+    reason
+  const toolNames = [...new Set(compactTriggers.map(trigger => trigger.toolName).filter(Boolean))]
+  const summary = [
+    `Phase handoff recorded for ${stage}.`,
+    toolNames.length > 0 ? `Tools: ${toolNames.slice(0, 6).join(', ')}.` : '',
+    artifacts.length > 0 ? `Artifacts: ${artifacts.map(artifact => artifact.id).filter(Boolean).slice(0, 6).join(', ')}.` : '',
+    files.length > 0 ? `Files: ${files.slice(0, 6).join(', ')}.` : '',
+    'Continue from these compact references instead of replaying older detailed tool output.',
+  ].filter(Boolean).join(' ')
+  const logContext = context.logContext || {}
+  const memory = {
+    id: `work-memory-${logContext.sessionId || 'session'}-${logContext.taskId || 'task'}-phase-${Date.now().toString(36)}`,
+    sessionId: logContext.sessionId,
+    taskId: logContext.taskId,
+    assistantMessageId: logContext.assistantMessageId,
+    kind: 'phase_handoff',
+    title: `Phase handoff: ${stage}`,
+    summary,
+    status: 'draft',
+    content: {
+      reason,
+      stage,
+      artifacts,
+      files,
+      triggers: compactTriggers,
+    },
+    sourceRefs: [
+      ...artifacts.map(artifact => ({ artifactId: artifact.id, type: artifact.type })).filter(ref => ref.artifactId),
+      ...files.map(file => ({ path: file })),
+    ].slice(0, 12),
+    nextUse:
+      'Use this compact phase handoff for the next step. Read artifact slices or files only when exact content is needed.',
+  }
+  context.workMemories = upsertWorkMemory(context.workMemories || [], memory)
+  return memory
+}
+
+function shouldUseDefaultStepRuntime(settings = {}, runtime = {}, classification = {}, taskFrame = {}) {
+  const reasons = Array.isArray(classification?.reasons) ? classification.reasons : []
+  return (
+    settings?.executionMode === 'long-task' ||
+    runtime?.enableStepRuntime === true ||
+    runtime?.modelPlanningResult !== undefined ||
+    taskFrame?.blocksFastPath === true ||
+    taskFrame?.priorExecution ||
+    classification?.pathMode === 'long' ||
+    classification?.complexity === 'complex' ||
+    classification?.hasAttachments === true ||
+    reasons.includes('attachments_present') ||
+    reasons.includes('long_input') ||
+    reasons.includes('complexity_keyword') ||
+    reasons.includes('task_continuation')
+  )
+}
+
+function shouldForceDefaultAgentExecutionRoute(settings = {}, classification = {}, taskFrame = {}) {
+  const reasons = Array.isArray(classification?.reasons) ? classification.reasons : []
+  return Boolean(
+    settings?.executionMode === 'long-task' ||
+    taskFrame?.requiresEvidenceForDone === true ||
+    classification?.requiresWrite === true ||
+    classification?.continuesTask === true ||
+    reasons.includes('write_or_execute_intent') ||
+    reasons.includes('task_continuation')
+  )
+}
+
+function applyDefaultAgentExecutionRoute(routeState, settings = {}, classification = {}, taskFrame = {}) {
+  if (!shouldForceDefaultAgentExecutionRoute(settings, classification, taskFrame)) {
+    return routeState
+  }
+
+  return {
+    ...routeState,
+    answerMode: 'execute',
+    executionMode: 'long-task',
+    completionPolicy: {
+      ...(routeState.completionPolicy || {}),
+      canClaimDone: true,
+      requiresEvidenceForDone: true,
+    },
+  }
+}
+
+const EXECUTION_ARTIFACT_STEP_PATTERN =
+  /\b(?:create|generate|write|save|build|export|convert|render|produce|modify|update|edit|patch|implement)\b|(?:创建|生成|写入|保存|构建|导出|转换|渲染|产出|修改|更新|编辑|实现|制作)/iu
+const ARTIFACT_TARGET_PATTERN =
+  /\b(?:file|html|markdown|md|docx?|pptx?|slides?|deck|prd|prototype|artifact|report|document|page|app)\b|(?:文件|页面|原型|文档|报告|幻灯片|演示|应用|产物)/iu
+
+const REQUIRED_EVIDENCE_ALIASES = new Map([
+  ['file_created', 'file_mutation'],
+  ['file_written', 'file_mutation'],
+  ['file_saved', 'file_mutation'],
+  ['file_updated', 'file_mutation'],
+  ['file_modified', 'file_mutation'],
+  ['write_effect', 'file_mutation'],
+  ['artifact_created', 'artifact_present'],
+  ['artifact_written', 'artifact_present'],
+  ['artifact_updated', 'artifact_present'],
+  ['verified', 'verification_passed'],
+  ['file_verified', 'verification_passed'],
+  ['tests_passed', 'test_pass'],
+])
+
+function normalizeEvidenceName(value) {
+  const key = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
+  return REQUIRED_EVIDENCE_ALIASES.get(key) || key
+}
+
+function stepLooksLikeArtifactExecution(step = {}) {
+  const text = [
+    step?.description,
+    step?.title,
+    step?.summary,
+    step?.acceptance,
+    step?.acceptanceCriteria,
+    step?.validation,
+  ]
+    .filter(Boolean)
+    .join(' ')
+  const kind = String(step?.kind || step?.type || 'execute').toLowerCase()
+  return (
+    kind === 'execute' &&
+    EXECUTION_ARTIFACT_STEP_PATTERN.test(text) &&
+    ARTIFACT_TARGET_PATTERN.test(text)
+  )
+}
+
+function normalizeDefaultStepRequiredEvidence(step = {}) {
+  const provided = (Array.isArray(step?.requiredEvidence) ? step.requiredEvidence : [])
+    .map(normalizeEvidenceName)
+    .filter(Boolean)
+  const evidence = new Set(provided)
+
+  if (stepLooksLikeArtifactExecution(step)) {
+    evidence.add('file_mutation')
+  }
+
+  const kind = String(step?.kind || step?.type || '').toLowerCase()
+  if (kind === 'verify' && evidence.size === 0) {
+    evidence.add('verification_passed')
+  }
+  if (kind === 'respond' && evidence.size === 0) {
+    evidence.add('final_answer')
+  }
+
+  return [...evidence].slice(0, 8)
+}
+
+function buildDefaultStepExecutionContract(step = {}) {
+  const required = new Set(
+    (Array.isArray(step?.requiredEvidence) ? step.requiredEvidence : [])
+      .map(normalizeEvidenceName)
+      .filter(Boolean),
+  )
+  const needsFileOrArtifact =
+    required.has('file_mutation') ||
+    required.has('artifact_present') ||
+    stepLooksLikeArtifactExecution(step)
+
+  if (!needsFileOrArtifact) {
+    return ''
+  }
+
+  return [
+    'Execution contract for this selected step:',
+    '- This step requires durable file/artifact evidence before it can be treated as complete.',
+    '- Do not answer with another plan, status report, or todo-only update.',
+    '- Do not call todo_write as the only action in this step.',
+    '- Your next concrete action should call one of: write_file, apply_patch, edit_file, multi_edit_file, replace_line_range, create_artifact, append_artifact_chunk.',
+    '- If the full output is large, first write a small runnable/inspectable skeleton or draft artifact, then continue by appending or editing bounded chunks.',
+  ].join('\n')
+}
+
+function normalizeDefaultStepPlan(planningResult = {}) {
+  const planning = planningResult?.planning || planningResult
+  const steps = Array.isArray(planning?.steps) ? planning.steps : []
+  const normalizedSteps = steps
+    .map((step, index) => ({
+      id: String(step?.id || `step-${index + 1}`).trim() || `step-${index + 1}`,
+      title: String(step?.description || step?.title || step?.summary || `Step ${index + 1}`)
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120),
+      kind: String(step?.kind || step?.type || 'execute').trim() || 'execute',
+      acceptance: String(step?.acceptance || step?.acceptanceCriteria || step?.validation || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 260),
+      requiredEvidence: normalizeDefaultStepRequiredEvidence(step),
+      status: 'pending',
+      attempts: 0,
+      toolEventStartIndex: 0,
+      checkpointId: undefined,
+      completedAt: undefined,
+    }))
+    .filter(step => step.title)
+
+  if (normalizedSteps.length === 0) {
+    return null
+  }
+
+  return {
+    enabled: true,
+    state: 'PLAN',
+    goal: String(planning?.goal || 'Complete the user request').replace(/\s+/g, ' ').trim(),
+    steps: normalizedSteps.slice(0, 8),
+    currentIndex: 0,
+    planning,
+    planningReasoning: planningResult?.planningReasoning,
+    createdAt: Date.now(),
+  }
+}
+
+function currentDefaultStep(stepRuntime) {
+  if (!stepRuntime?.enabled) return null
+  return stepRuntime.steps[stepRuntime.currentIndex] || null
+}
+
+function buildDefaultStepRuntimePrompt(stepRuntime, context = {}) {
+  const step = currentDefaultStep(stepRuntime)
+  if (!step) return ''
+  const completed = stepRuntime.steps
+    .filter(entry => entry.status === 'completed')
+    .map(entry => `${entry.id}: ${entry.title}`)
+  const artifacts = summarizeRuntimeArtifacts(context).slice(-8)
+  const executionContract = buildDefaultStepExecutionContract(step)
+  return [
+    'Default-agent step runtime is active. Execute only the selected plan step in this model turn.',
+    `State: EXECUTE_STEP`,
+    `Goal: ${stepRuntime.goal}`,
+    `Selected step ${stepRuntime.currentIndex + 1}/${stepRuntime.steps.length}: ${step.id} - ${step.title}`,
+    step.kind ? `Step kind: ${step.kind}` : null,
+    step.acceptance ? `Completion criteria: ${step.acceptance}` : null,
+    step.requiredEvidence.length > 0 ? `Required evidence: ${step.requiredEvidence.join(', ')}` : null,
+    completed.length > 0 ? `Completed earlier steps: ${completed.join('; ')}` : null,
+    artifacts.length > 0 ? `Available artifact refs: ${JSON.stringify(artifacts)}` : null,
+    executionContract || null,
+    'Do not continue into later plan steps in this turn. Produce or verify the selected step output, then stop with a concise status.',
+  ].filter(Boolean).join('\n')
+}
+
+function evidenceFromToolEvents(toolEvents = [], startIndex = 0) {
+  const events = toolEvents.slice(startIndex)
+  const successful = events.filter(event => event?.status === 'success')
+  const names = new Set(successful.map(event => event.name))
+  const evidence = new Set()
+  if (successful.length > 0) evidence.add('execution_performed')
+  if (successful.some(event => ['read_file', 'read_block', 'search_code', 'glob_files'].includes(event.name))) {
+    evidence.add('context_collected')
+  }
+  if (successful.some(event => ['read_file', 'read_block'].includes(event.name))) {
+    evidence.add('file_read')
+    evidence.add('file_parsed')
+  }
+  if (successful.some(event => event.name === 'aura_read_skill')) evidence.add('skill_read')
+  if (successful.some(event => ['read_file', 'read_block', 'aura_read_skill'].includes(event.name))) {
+    evidence.add('structured_output')
+  }
+  if (successful.some(event => ['write_file', 'apply_patch', 'edit_file', 'multi_edit_file', 'replace_line_range'].includes(event.name))) {
+    evidence.add('file_mutation')
+  }
+  if (successful.some(event => ['create_artifact', 'append_artifact_chunk', 'assistant_output_spillover'].includes(event.name))) {
+    evidence.add('artifact_present')
+  }
+  if (successful.some(event => event.name === 'verify_artifact')) {
+    evidence.add('verification_passed')
+    evidence.add('file_verified')
+  }
+  if (names.has('run_shell') || names.has('exec_command')) {
+    evidence.add('command_output')
+    evidence.add('test_pass')
+  }
+  return {
+    evidence: [...evidence],
+    successful,
+    events,
+  }
+}
+
+function isDefaultStepComplete({ step, result, toolEvents, startIndex }) {
+  if (!step) return false
+  const observed = evidenceFromToolEvents(toolEvents, startIndex)
+  const evidence = new Set(observed.evidence)
+  if (String(result?.message || '').trim()) evidence.add('final_answer')
+  const required = Array.isArray(step.requiredEvidence) && step.requiredEvidence.length > 0
+    ? step.requiredEvidence
+    : step.kind === 'verify'
+      ? ['verification_passed']
+      : step.kind === 'respond'
+        ? ['final_answer']
+        : ['execution_performed']
+
+  const satisfied = required.every(item => evidence.has(item))
+  if (satisfied) return true
+
+  if (step.kind === 'respond' && String(result?.message || '').trim()) return true
+  if (observed.successful.length > 0 && !isCompletionStateIncompleteForExecution(result, {}, {})) {
+    return true
+  }
+  return false
+}
+
+function buildDefaultStepContinuationMessage(stepRuntime, step, result, toolEvents, startIndex) {
+  const observed = evidenceFromToolEvents(toolEvents, startIndex)
+  return {
+    role: 'user',
+    content: [
+      `Step ${step.id} completed: ${step.title}`,
+      step.acceptance ? `Acceptance: ${step.acceptance}` : null,
+      observed.evidence.length > 0 ? `Evidence: ${observed.evidence.join(', ')}` : null,
+      observed.successful.length > 0
+        ? `Successful tools: ${observed.successful.map(event => event.name).join(', ')}`
+        : null,
+      result?.message ? `Step result summary: ${summarizeToolOutput(result.message, 900)}` : null,
+      currentDefaultStep(stepRuntime)
+        ? 'Continue with the next selected step only.'
+        : 'All planned steps are completed. Prepare the final answer.',
+    ].filter(Boolean).join('\n'),
+  }
+}
+
+function buildDefaultStepIncompleteMessage(step, toolEvents, startIndex) {
+  const observed = evidenceFromToolEvents(toolEvents, startIndex)
+  const required = Array.isArray(step?.requiredEvidence) && step.requiredEvidence.length > 0
+    ? step.requiredEvidence.map(normalizeEvidenceName)
+    : step?.kind === 'verify'
+      ? ['verification_passed']
+      : step?.kind === 'respond'
+        ? ['final_answer']
+        : ['execution_performed']
+  const observedEvidence = new Set(observed.evidence)
+  const missing = required.filter(item => !observedEvidence.has(item))
+  const executionContract = buildDefaultStepExecutionContract(step)
+
+  return {
+    role: 'user',
+    content: [
+      `Step ${step.id} is not complete yet: ${step.title}`,
+      step.acceptance ? `Completion criteria: ${step.acceptance}` : null,
+      required.length > 0 ? `Required evidence: ${required.join(', ')}` : null,
+      observed.evidence.length > 0 ? `Observed evidence so far: ${observed.evidence.join(', ')}` : null,
+      missing.length > 0 ? `Missing evidence: ${missing.join(', ')}` : null,
+      observed.successful.length > 0
+        ? `Recent successful tools: ${observed.successful.map(event => event.name).join(', ')}`
+        : null,
+      executionContract || null,
+      'Continue this same selected step only. Do not move to later steps.',
+    ].filter(Boolean).join('\n'),
+  }
+}
+
+function defaultStepRuntimeSnapshot(stepRuntime) {
+  if (!stepRuntime?.enabled) return undefined
+  return {
+    goal: stepRuntime.goal,
+    state: stepRuntime.currentIndex >= stepRuntime.steps.length ? 'FINALIZE' : stepRuntime.state,
+    currentIndex: stepRuntime.currentIndex,
+    steps: stepRuntime.steps.map(step => ({
+      id: step.id,
+      title: step.title,
+      kind: step.kind,
+      status: step.status,
+      attempts: step.attempts,
+      checkpointId: step.checkpointId,
+      completedAt: step.completedAt,
+      acceptance: step.acceptance,
+      requiredEvidence: step.requiredEvidence,
+    })),
+  }
+}
+
 function isProviderStreamStallError(normalized = {}, retryInfo = {}) {
   const values = [
     normalized.code,
@@ -1810,6 +2220,7 @@ function buildCheckpointContinuationPrompt({
   partialMessage = '',
   partialReasoning = '',
   error,
+  stepRuntime,
 } = {}) {
   const checkpointSummary = checkpoint
     ? {
@@ -1822,6 +2233,9 @@ function buildCheckpointContinuationPrompt({
   const artifacts = summarizeRuntimeArtifacts(context)
   const recentTools = toolEvents.slice(-8).map(compactCheckpointToolEvent)
   const progress = context?.progressLedger || null
+  const checkpointStepRuntime = checkpoint?.contextSnapshot?.runtime?.stepRuntime
+  const activeStepRuntime = stepRuntime || checkpointStepRuntime
+  const activeStep = activeStepRuntime?.steps?.[activeStepRuntime.currentIndex]
   const workMemories = Array.isArray(context?.workMemories)
     ? context.workMemories.slice(-8).map(memory => ({
         id: memory?.id,
@@ -1840,9 +2254,18 @@ function buildCheckpointContinuationPrompt({
     '- 先复用已完成工具结果、runtime artifacts、已写文件和 progress ledger。',
     '- 不要重新执行已经成功且仍可复用的转换、生成、导出或验证步骤。',
     '- 如果需要精确的大输出内容，优先调用 read_artifact_slice 读取必要片段。',
-    '- 继续执行下一个最小可观察步骤；如果成果已经足够，整理最终回答。',
+    '- 继续执行下一个最小可观察步骤；如果当前步骤要求文件/产物证据，优先调用写入、编辑、artifact 或验证工具，不要只更新 todo 或继续解释计划。',
+    '- 如果成果已经足够，整理最终回答；否则不要用普通文字假装完成。',
     '',
     checkpointSummary ? `最近 checkpoint:\n${JSON.stringify(checkpointSummary, null, 2)}` : null,
+    activeStep
+      ? `当前选中步骤恢复合约:\n${JSON.stringify({
+        state: activeStepRuntime?.state || 'EXECUTE_STEP',
+        currentIndex: activeStepRuntime?.currentIndex,
+        step: activeStep,
+        executionContract: buildDefaultStepExecutionContract(activeStep) || undefined,
+      }, null, 2)}`
+      : null,
     artifacts.length > 0 ? `可复用 artifacts:\n${JSON.stringify(artifacts, null, 2)}` : null,
     recentTools.length > 0 ? `最近工具结果摘要:\n${JSON.stringify(recentTools, null, 2)}` : null,
     progress ? `当前 progress ledger:\n${JSON.stringify(progress, null, 2)}` : null,
@@ -1867,6 +2290,7 @@ function buildCheckpointContinuationMessages({
   partialMessage,
   partialReasoning,
   error,
+  stepRuntime,
 } = {}) {
   const nextMessages = [...messages]
   const cleanedPartial = stripInlineToolCallText(partialMessage || '').trim()
@@ -1885,6 +2309,7 @@ function buildCheckpointContinuationMessages({
       partialMessage: cleanedPartial,
       partialReasoning,
       error,
+      stepRuntime,
     }),
   })
   return nextMessages
@@ -2385,13 +2810,22 @@ export async function runDefaultAgent(request) {
     discoverableToolCount: toolRegistry.discoverableEntries.length,
     highRiskToolCount: toolRegistry.catalog?.highRiskCount || 0,
   })
-  const normalizedClassification = null
+  const taskFrame = resolveTaskFrame({ messages, runtime, settings })
+  const normalizedClassification = applyTaskFrameToClassification(
+    classifyAgentTask({ messages, settings }),
+    taskFrame,
+  )
   const strategy = {
     chain: 'default-agent',
     reason: 'model-directed',
   }
 
-  let routeState = initialRouteState
+  let routeState = applyDefaultAgentExecutionRoute(
+    initialRouteState,
+    settings,
+    normalizedClassification,
+    taskFrame,
+  )
   const visitedTiers = new Set([routeState.capabilityTier])
   const routeNotes = []
   const routeHistory = []
@@ -2435,6 +2869,7 @@ export async function runDefaultAgent(request) {
   })
   let checkpointId = null
   let checkpointCount = 0
+  let stepRuntime = null
 
   function createDefaultAgentCheckpoint(reason, metadata = {}) {
     const snapshot = checkpointManager.createSnapshot({
@@ -2447,6 +2882,7 @@ export async function runDefaultAgent(request) {
         artifacts: summarizeRuntimeArtifacts(context),
         progress: context.progressLedger || null,
         latestContextCompression: getLatestContextCompression(),
+        stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
         reason,
         triggers: metadata.triggers,
       },
@@ -2459,6 +2895,7 @@ export async function runDefaultAgent(request) {
         reason,
         checkpointKind: metadata.checkpointKind || 'default_agent_progress',
         pass: metadata.pass,
+        phaseHandoffId: metadata.phaseHandoffId,
         triggerCount: Array.isArray(metadata.triggers) ? metadata.triggers.length : undefined,
         triggers: Array.isArray(metadata.triggers) ? metadata.triggers.slice(0, 12) : undefined,
         routeState: { capabilityTier: routeState.capabilityTier },
@@ -2466,11 +2903,18 @@ export async function runDefaultAgent(request) {
     )
     checkpointId = checkpoint.id
     checkpointCount += 1
+    const activePlanStep = taskTracker.getActivePlanStep?.()
     hooks?.onProgress?.({
       type: 'checkpoint_created',
       checkpointId,
       reason,
       checkpointCount,
+      state: stepRuntime?.state,
+      stepId: checkpoint.stepId,
+      planId: activePlanStep?.planId,
+      subtaskId: activePlanStep?.subtaskId,
+      checkpointKind: checkpoint.metadata?.checkpointKind,
+      phaseHandoffId: metadata.phaseHandoffId,
       triggerCount: Array.isArray(metadata.triggers) ? metadata.triggers.length : undefined,
     })
     return checkpoint
@@ -2485,19 +2929,78 @@ export async function runDefaultAgent(request) {
     if (triggers.length === 0 && !extra.force) {
       return null
     }
+    const phaseHandoff = recordPhaseHandoffMemory(context, triggers, reason)
     return createDefaultAgentCheckpoint(reason, {
       ...extra,
       triggers,
+      phaseHandoffId: phaseHandoff?.id,
     })
   }
 
+  if (shouldUseDefaultStepRuntime(settings, runtime, normalizedClassification, taskFrame)) {
+    const planningGate = await runModelPlanningGate({
+      request: {
+        ...request,
+        messages,
+        settings,
+        hooks,
+        carryoverContext,
+      },
+      classification: normalizedClassification || {},
+      taskFrame,
+    })
+    if (planningGate?.type === 'direct_answer') {
+      taskTracker.completeTask(currentTaskId, '生成直接回答')
+      return {
+        ...planningGate.result,
+        usage: getAccumulatedUsage() || planningGate.result?.usage,
+        contextCompression: getLatestContextCompression(),
+        agentMode: 'default-agent',
+        routeDecision: lastRouteDecision,
+        reasoning: planningGate.planningReasoning?.content ? [planningGate.planningReasoning] : [],
+        workMemories: context.workMemories,
+        status: 'completed',
+        taskTree: taskTracker.getTree(),
+        checkpointId,
+        checkpointCount,
+        stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
+      }
+    }
+    stepRuntime = normalizeDefaultStepPlan(planningGate)
+    if (stepRuntime?.enabled) {
+      hooks?.onTaskTree?.(planToTaskTree(planningGate.plan))
+      hooks?.onReasoningDelta?.(
+        `步骤状态机已启动：${stepRuntime.steps.length} 个计划步骤。`,
+        {
+          blockId: typeof hooks?.createExecutionStepId === 'function'
+            ? hooks.createExecutionStepId('reasoning', 'step-runtime')
+            : 'default-step-runtime',
+          kind: 'summary',
+          order: -70,
+          createdAt: Date.now(),
+        },
+      )
+    }
+  }
+
   try {
-    for (let pass = 0; pass < 1; pass += 1) {
+    const maxDefaultAgentPasses = stepRuntime?.enabled
+      ? Math.max(1, stepRuntime.steps.length * 2)
+      : 1
+    for (let pass = 0; pass < maxDefaultAgentPasses; pass += 1) {
       createDefaultAgentCheckpoint('pass_started', {
         pass,
         stepId: `pass-${pass}`,
         checkpointKind: 'default_agent_pass_start',
       })
+      const activeStep = currentDefaultStep(stepRuntime)
+      if (stepRuntime?.enabled && !activeStep) {
+        stepRuntime.state = 'FINALIZE'
+        break
+      }
+      if (activeStep) {
+        stepRuntime.state = 'SELECT_NEXT_STEP'
+      }
 
       const availableEscalations = getRouteEscalationTargets(routeState, {
         visitedTiers,
@@ -2557,6 +3060,10 @@ export async function runDefaultAgent(request) {
         ),
         carryoverContext,
       )
+      const stepRuntimePrompt = buildDefaultStepRuntimePrompt(stepRuntime, context)
+      if (stepRuntimePrompt) {
+        lastSystemPrompt = [lastSystemPrompt, stepRuntimePrompt].filter(Boolean).join('\n\n')
+      }
       const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
         lastSystemPrompt,
         context,
@@ -2598,6 +3105,12 @@ export async function runDefaultAgent(request) {
       })
       hooks?.onRouteDecision?.(lastRouteDecision)
       const turnToolEventStart = toolEvents.length
+      if (activeStep) {
+        stepRuntime.state = 'EXECUTE_STEP'
+        activeStep.status = 'running'
+        activeStep.attempts = (activeStep.attempts || 0) + 1
+        activeStep.toolEventStartIndex = turnToolEventStart
+      }
 
       let turnResult
       try {
@@ -2793,6 +3306,52 @@ export async function runDefaultAgent(request) {
         continue
       }
 
+      if (stepRuntime?.enabled && activeStep) {
+        stepRuntime.state = 'OBSERVE'
+        const stepCompleted = isDefaultStepComplete({
+          step: activeStep,
+          result,
+          toolEvents,
+          startIndex: turnToolEventStart,
+        })
+        stepRuntime.state = 'CHECK_COMPLETION'
+        messages = turnResult.resolvedMessages || messages
+
+        if (stepCompleted) {
+          activeStep.status = 'completed'
+          activeStep.completedAt = Date.now()
+          stepRuntime.state = 'CHECKPOINT_AND_HANDOFF'
+          const stepCheckpoint = createCheckpointForRecoverableProgress('step_completed', turnToolEventStart, {
+            force: true,
+            stepId: activeStep.id,
+            stepTitle: activeStep.title,
+          })
+          activeStep.checkpointId = stepCheckpoint?.id || checkpointId
+          stepRuntime.currentIndex += 1
+          const nextStep = currentDefaultStep(stepRuntime)
+          messages.push(buildDefaultStepContinuationMessage(
+            stepRuntime,
+            activeStep,
+            result,
+            toolEvents,
+            turnToolEventStart,
+          ))
+          if (nextStep) {
+            nextStep.status = 'pending'
+            hooks?.onPhaseChange?.('preparing')
+            continue
+          }
+        } else if ((activeStep.attempts || 0) < 3) {
+          messages.push(buildDefaultStepIncompleteMessage(
+            activeStep,
+            toolEvents,
+            turnToolEventStart,
+          ))
+          hooks?.onPhaseChange?.('preparing')
+          continue
+        }
+      }
+
       const summaryReasoning = summarizeReasoning(
         turnResult.resolvedMessages,
         toolEvents,
@@ -2827,6 +3386,7 @@ export async function runDefaultAgent(request) {
         taskTree: taskTracker.getTree(),
         checkpointId,
         checkpointCount,
+        stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
       }
     }
 
@@ -2843,11 +3403,18 @@ export async function runDefaultAgent(request) {
     const partialReasoning = extractPartialProviderReasoning(normalized)
     const retryInfo = extractProviderRetryInfo(normalized)
     const hasRecoveryContext =
-      toolEvents.length > 0 || partialMessage.length > 0
+      checkpointId ||
+      toolEvents.length > 0 ||
+      partialMessage.length > 0 ||
+      partialReasoning.length > 0
 
     if (hasRecoveryContext) {
       createCheckpointForRecoverableProgress('interrupted_with_progress', 0, {
-        force: toolEvents.length > 0 || partialMessage.length > 0,
+        force:
+          Boolean(checkpointId) ||
+          toolEvents.length > 0 ||
+          partialMessage.length > 0 ||
+          partialReasoning.length > 0,
         errorCode: normalized.code,
         errorSource: normalized.source,
       })
@@ -2858,110 +3425,153 @@ export async function runDefaultAgent(request) {
       hasRecoveryContext &&
       isProviderStreamStallError(normalized, retryInfo)
     ) {
-      const continuationToolEventStart = toolEvents.length
-      try {
-        hooks?.onPhaseChange?.('recovering', {
-          reason: 'provider_stream_stalled_checkpoint_resume',
-          checkpointId,
-          lastErrorSummary: retryInfo?.lastErrorSummary || normalized.message,
-        })
-        const checkpoint = checkpointId
-          ? checkpointManager.getCheckpoint(checkpointId)
-          : checkpointManager.getLatestCheckpointForTask(currentTaskId)
-        const continuationMessages = buildCheckpointContinuationMessages({
-          messages,
-          checkpoint,
-          context,
-          toolEvents,
-          partialMessage,
-          partialReasoning,
-          error: normalized,
-        })
-        createDefaultAgentCheckpoint('before_checkpoint_resume', {
-          checkpointKind: 'default_agent_checkpoint_resume',
-          stepId: 'checkpoint-resume',
-          triggers: [
+      let resumeErrorForAttempt = normalized
+      let resumePartialMessage = partialMessage
+      let resumePartialReasoning = partialReasoning
+      let resumeRetryInfo = retryInfo
+      const maxCheckpointResumeAttempts = 3
+
+      for (let resumeAttempt = 0; resumeAttempt < maxCheckpointResumeAttempts; resumeAttempt += 1) {
+        const continuationToolEventStart = toolEvents.length
+        try {
+          hooks?.onPhaseChange?.('recovering', {
+            reason: resumeAttempt === 0
+              ? 'provider_stream_stalled_checkpoint_resume'
+              : 'provider_stream_stalled_checkpoint_resume_retry',
+            checkpointId,
+            lastErrorSummary: resumeRetryInfo?.lastErrorSummary || resumeErrorForAttempt.message,
+            resumeAttempt: resumeAttempt + 1,
+          })
+          const checkpoint = checkpointId
+            ? checkpointManager.getCheckpoint(checkpointId)
+            : checkpointManager.getLatestCheckpointForTask(currentTaskId)
+          const continuationMessages = buildCheckpointContinuationMessages({
+            messages,
+            checkpoint,
+            context,
+            toolEvents,
+            partialMessage: resumePartialMessage,
+            partialReasoning: resumePartialReasoning,
+            error: resumeErrorForAttempt,
+            stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
+          })
+          createDefaultAgentCheckpoint(
+            resumeAttempt === 0 ? 'before_checkpoint_resume' : 'before_checkpoint_resume_retry',
             {
-              reason: 'provider_stream_stalled',
-              checkpointId: checkpoint?.id || checkpointId,
-              toolEventCount: toolEvents.length,
-              hasPartialMessage: partialMessage.length > 0,
+              checkpointKind: 'default_agent_checkpoint_resume',
+              stepId: `checkpoint-resume-${resumeAttempt + 1}`,
+              triggers: [
+                {
+                  reason: 'provider_stream_stalled',
+                  checkpointId: checkpoint?.id || checkpointId,
+                  toolEventCount: toolEvents.length,
+                  hasPartialMessage: resumePartialMessage.length > 0,
+                  hasPartialReasoning: resumePartialReasoning.length > 0,
+                  resumeAttempt: resumeAttempt + 1,
+                },
+              ],
             },
-          ],
-        })
-        const resumedTurn = await runProviderTurn({
-          settings: lastEffectiveRunSettings,
-          systemPrompt: lastSystemPrompt,
-          messages: continuationMessages,
-          tools: lastAllTools,
-          toolEvents,
-          routeState: lastPromptRouteState,
-          hooks: {
-            ...hooks,
-            workMemoryContext: context,
-            getActivePlanStep() {
-              return taskTracker.getActivePlanStep?.()
+          )
+          const resumedTurn = await runProviderTurn({
+            settings: lastEffectiveRunSettings,
+            systemPrompt: lastSystemPrompt,
+            messages: continuationMessages,
+            tools: lastAllTools,
+            toolEvents,
+            routeState: lastPromptRouteState,
+            hooks: {
+              ...hooks,
+              workMemoryContext: context,
+              getActivePlanStep() {
+                return taskTracker.getActivePlanStep?.()
+              },
+              onTodoWrite(items) {
+                taskTracker.syncTodoItems?.(items)
+              },
+              rethrowToolError(error) {
+                return extractRouteEscalationRequest(error) !== null
+              },
             },
-            onTodoWrite(items) {
-              taskTracker.syncTodoItems?.(items)
-            },
-            rethrowToolError(error) {
-              return extractRouteEscalationRequest(error) !== null
-            },
-          },
-          taskTracker,
-          currentTaskId,
-        })
-        createCheckpointForRecoverableProgress('after_checkpoint_resume_progress', continuationToolEventStart, {
-          force: toolEvents.length > continuationToolEventStart,
-        })
-        let resumedResult = enforceEvidencePolicy(
-          sanitizeResultMessage(resumedTurn.result, toolEvents),
-          toolEvents,
-          lastPromptRouteState,
-          buildRuntimeBlocks(lastRouteDecision?.stopReason),
-        )
-        resumedResult = {
-          ...applyCompletionGate(resumedResult, lastPromptRouteState),
-          recovered: true,
+            taskTracker,
+            currentTaskId,
+          })
+          createCheckpointForRecoverableProgress('after_checkpoint_resume_progress', continuationToolEventStart, {
+            force: toolEvents.length > continuationToolEventStart,
+          })
+          let resumedResult = enforceEvidencePolicy(
+            sanitizeResultMessage(resumedTurn.result, toolEvents),
+            toolEvents,
+            lastPromptRouteState,
+            buildRuntimeBlocks(lastRouteDecision?.stopReason),
+          )
+          resumedResult = {
+            ...applyCompletionGate(resumedResult, lastPromptRouteState),
+            recovered: true,
+          }
+          const summaryReasoning = summarizeReasoning(
+            resumedTurn.resolvedMessages || continuationMessages,
+            toolEvents,
+            resumedResult.message,
+            hooks,
+          )
+          hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
+            blockId: summaryReasoning[0].id,
+            kind: summaryReasoning[0].kind,
+            order: summaryReasoning[0].order,
+            createdAt: summaryReasoning[0].createdAt,
+          })
+          completeCurrentTaskWithResult(
+            taskTracker,
+            currentTaskId,
+            settings,
+            lastPromptRouteState,
+            resumedResult,
+          )
+          return {
+            ...resumedResult,
+            toolEvents,
+            agentMode: 'default-agent',
+            routeDecision: lastRouteDecision,
+            capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
+            reasoning: summaryReasoning,
+            workMemories: context.workMemories,
+            retryInfo: markRecoveredRetryInfo(resumedTurn.result?.retryInfo, resumeRetryInfo || retryInfo),
+            usage: getAccumulatedUsage() || resumedResult.usage,
+            contextCompression: getLatestContextCompression(),
+            status: 'completed',
+            taskTree: taskTracker.getTree(),
+            checkpointId,
+            checkpointCount,
+            stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
+          }
+        } catch (resumeError) {
+          const resumeNormalized = normalizeAgentError(resumeError)
+          const nextPartialMessage = extractPartialProviderMessage(resumeNormalized)
+          const nextPartialReasoning = extractPartialProviderReasoning(resumeNormalized)
+          const nextRetryInfo = extractProviderRetryInfo(resumeNormalized)
+          const canRetryCheckpointResume =
+            resumeAttempt + 1 < maxCheckpointResumeAttempts &&
+            resumeNormalized.source === 'provider' &&
+            isProviderStreamStallError(resumeNormalized, nextRetryInfo) &&
+            (
+              checkpointId ||
+              toolEvents.length > continuationToolEventStart ||
+              nextPartialMessage.length > 0 ||
+              nextPartialReasoning.length > 0
+            )
+          if (!canRetryCheckpointResume) {
+            break
+          }
+          createCheckpointForRecoverableProgress('resume_interrupted_with_progress', continuationToolEventStart, {
+            force: true,
+            errorCode: resumeNormalized.code,
+            errorSource: resumeNormalized.source,
+          })
+          resumeErrorForAttempt = resumeNormalized
+          resumePartialMessage = nextPartialMessage
+          resumePartialReasoning = nextPartialReasoning
+          resumeRetryInfo = nextRetryInfo
         }
-        const summaryReasoning = summarizeReasoning(
-          resumedTurn.resolvedMessages || continuationMessages,
-          toolEvents,
-          resumedResult.message,
-          hooks,
-        )
-        hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
-          blockId: summaryReasoning[0].id,
-          kind: summaryReasoning[0].kind,
-          order: summaryReasoning[0].order,
-          createdAt: summaryReasoning[0].createdAt,
-        })
-        completeCurrentTaskWithResult(
-          taskTracker,
-          currentTaskId,
-          settings,
-          lastPromptRouteState,
-          resumedResult,
-        )
-        return {
-          ...resumedResult,
-          toolEvents,
-          agentMode: 'default-agent',
-          routeDecision: lastRouteDecision,
-          capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
-          reasoning: summaryReasoning,
-          workMemories: context.workMemories,
-          retryInfo: markRecoveredRetryInfo(resumedTurn.result?.retryInfo, retryInfo),
-          usage: getAccumulatedUsage() || resumedResult.usage,
-          contextCompression: getLatestContextCompression(),
-          status: 'completed',
-          taskTree: taskTracker.getTree(),
-          checkpointId,
-          checkpointCount,
-        }
-      } catch (resumeError) {
-        // Checkpoint resume is best-effort. Fall back to finalizing the preserved progress below.
       }
     }
 
@@ -3112,6 +3722,7 @@ export async function runDefaultAgent(request) {
         taskTree: taskTracker.getTree(),
         checkpointId,
         checkpointCount,
+        stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
       }
     }
 

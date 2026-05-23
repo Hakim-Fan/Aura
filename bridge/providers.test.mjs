@@ -433,6 +433,44 @@ test('runProviderOperationWithRetry can prepare a local replan prompt before ret
   assert.match(injectedPrompts[0], /多个可观察、可验证、可恢复的小步骤/)
 })
 
+test('runProviderOperationWithRetry escalates partial stream stalls without provider retry', async () => {
+  const retryEvents = []
+  let attempts = 0
+  const stalledError = new Error('模型服务流式输出长时间没有继续。')
+  stalledError.code = 'PROVIDER_STREAM_STALLED'
+  stalledError.errorInfo = {
+    code: 'PROVIDER_STREAM_STALLED',
+    retryable: true,
+  }
+
+  await assert.rejects(
+    runProviderOperationWithRetry(
+      async (attemptState) => {
+        attempts += 1
+        attemptState.receivedOutput = true
+        attemptState.partialReasoning = 'partial reasoning before stall'
+        throw stalledError
+      },
+      {
+        messages: [],
+        hooks: {
+          onRetryProgress(retryInfo) {
+            retryEvents.push(retryInfo)
+          },
+        },
+      },
+    ),
+    error => {
+      assert.equal(error.code, 'PROVIDER_STREAM_STALLED')
+      assert.equal(error.errorInfo?.partialReasoning, 'partial reasoning before stall')
+      return true
+    },
+  )
+
+  assert.equal(attempts, 1)
+  assert.equal(retryEvents.length, 0)
+})
+
 test('buildFinalizerPrompt can omit duplicated tool and reasoning digests', () => {
   const prompt = buildFinalizerPrompt({
     toolEvents: [

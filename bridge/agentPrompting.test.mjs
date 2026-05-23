@@ -28,6 +28,15 @@ const modelDirectedState = {
   responseStyle: 'adaptive-default',
 }
 
+const executionState = {
+  ...modelDirectedState,
+  answerMode: 'execute',
+  executionMode: 'long-task',
+  completionPolicy: {
+    requiresEvidenceForDone: true,
+  },
+}
+
 test('default-agent prompt lets the main model choose answer, tools, or plan', () => {
   const prompt = buildDefaultAgentSystemPrompt(
     baseSettings,
@@ -61,6 +70,22 @@ test('default-agent prompt keeps mounted write tools available', () => {
   assert.match(prompt, /prefer apply_patch/i)
   assert.match(prompt, /targeted verification/i)
   assert.match(prompt, /exec_command/i)
+})
+
+test('default-agent prompt makes execution mode evidence-led', () => {
+  const prompt = buildDefaultAgentSystemPrompt(
+    baseSettings,
+    '',
+    '',
+    executionState,
+    {
+      hasWorkspaceWriteTools: true,
+    },
+  )
+
+  assert.match(prompt, /Execution-mode contract/i)
+  assert.match(prompt, /todo_write, reading files, and explaining intent are coordination\/context only/i)
+  assert.match(prompt, /smallest durable file or artifact first/i)
 })
 
 test('capability exposure note describes default-agent capabilities', () => {

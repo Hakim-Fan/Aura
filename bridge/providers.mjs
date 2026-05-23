@@ -2605,7 +2605,7 @@ function wait(ms) {
 }
 
 const PROVIDER_CONNECT_TIMEOUT_MS = 45_000
-const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 90_000
+const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 45_000
 const PROVIDER_FINALIZATION_TIMEOUT_MS = 60_000
 const PROVIDER_RETRY_DELAYS_MS = [0, 1_200, 3_000, 7_000, 15_000]
 const STEP_LIMIT_TOOL_ERROR_REPAIR_TURNS = 6
@@ -2864,6 +2864,17 @@ function summarizeRetryError(error) {
   return String(error || '').trim()
 }
 
+function shouldEscalateStreamStallToAgent(error, attemptState = {}) {
+  return (
+    error?.code === 'PROVIDER_STREAM_STALLED' &&
+    (
+      attemptState.receivedOutput === true ||
+      String(attemptState.partialMessage || '').trim().length > 0 ||
+      String(attemptState.partialReasoning || '').trim().length > 0
+    )
+  )
+}
+
 async function runProviderOperationWithRetry(
   operation,
   {
@@ -2916,6 +2927,10 @@ async function runProviderOperationWithRetry(
         }),
       )
       lastError = normalized
+
+      if (shouldEscalateStreamStallToAgent(normalized, attemptState)) {
+        throw normalized
+      }
 
       if (attempt >= maxAttempts || !isRetryableProviderError(normalized)) {
         throw normalized

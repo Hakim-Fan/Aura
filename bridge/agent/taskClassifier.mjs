@@ -60,6 +60,11 @@ const COMPLEXITY_PATTERNS = [
   /(?:架构|迁移|多步|计划|路线图|对比|分析|审查|调研|研究|方案)/u,
 ]
 
+const CONTINUATION_PATTERNS = [
+  /\b(?:continue|resume|proceed|carry on|next step|finish the task|complete the task)\b/iu,
+  /(?:继续|续跑|接着|下一步|第\s*\d+\s*步|完成任务|继续任务|继续执行|从.*继续)/u,
+]
+
 export function classifyAgentTask({ messages = [], settings = {} } = {}) {
   const latestUser = latestUserMessage(messages)
   const text = collectMessageText(latestUser)
@@ -86,6 +91,7 @@ export function classifyAgentTask({ messages = [], settings = {} } = {}) {
   const workspaceRelated = containsAny(WORKSPACE_PATTERNS, normalized)
   const needsCurrentInfo = containsAny(WEB_OR_CURRENT_PATTERNS, normalized)
   const looksComplex = containsAny(COMPLEXITY_PATTERNS, normalized)
+  const continuesTask = containsAny(CONTINUATION_PATTERNS, normalized)
   const attachmentPresent = hasAttachments(latestUser)
   const longTaskRequested = settings?.executionMode === 'long-task'
   const longText = normalized.length > LONG_TEXT_THRESHOLD
@@ -95,10 +101,11 @@ export function classifyAgentTask({ messages = [], settings = {} } = {}) {
   if (workspaceRelated) reasons.push('workspace_related')
   if (needsCurrentInfo) reasons.push('current_or_web_info_needed')
   if (looksComplex) reasons.push('complexity_keyword')
+  if (continuesTask) reasons.push('task_continuation')
   if (longTaskRequested) reasons.push('long_task_mode')
   if (longText) reasons.push('long_input')
 
-  if (longTaskRequested || longText || looksComplex) {
+  if (longTaskRequested || longText || looksComplex || continuesTask) {
     pathMode = 'long'
     complexity = 'complex'
     risk = requiresWrite || attachmentPresent ? 'high' : 'medium'
@@ -123,6 +130,7 @@ export function classifyAgentTask({ messages = [], settings = {} } = {}) {
     requiresWrite,
     workspaceRelated,
     needsCurrentInfo,
+    continuesTask,
     hasAttachments: attachmentPresent,
     reason: reasons.join(', ') || 'standard default-agent execution',
     reasons,

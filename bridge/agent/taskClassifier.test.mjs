@@ -56,6 +56,18 @@ test('classifyAgentTask sends long or architecture tasks to long path', () => {
   assert.ok(result.reasons.includes('complexity_keyword'))
 })
 
+test('classifyAgentTask treats task continuation as long task execution', () => {
+  const result = classifyAgentTask({
+    messages: [userMessage('继续第2步骤，完成任务')],
+    settings: { executionMode: 'bounded' },
+  })
+
+  assert.equal(result.pathMode, 'long')
+  assert.equal(result.complexity, 'complex')
+  assert.equal(result.continuesTask, true)
+  assert.ok(result.reasons.includes('task_continuation'))
+})
+
 test('classifyAgentTask keeps current web facts out of fast path', () => {
   const result = classifyAgentTask({
     messages: [userMessage('今天 OpenAI 最新模型是什么？')],

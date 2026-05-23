@@ -504,13 +504,16 @@ export function buildDefaultAgentPromptBlocks(
     'For simple questions, answer directly and keep the response concise.',
     'For multi-step, ambiguous, or stateful work, call todo_write with a short checklist and keep it current. Each todo content must be a concise user-visible step title within 20 Chinese characters or 8 English words; express only the core action, and put details, acceptance criteria, risks, and explanations in successCriteria or verification. Use top-level todo items for user-visible execution tasks only. Put each step acceptance details in successCriteria, and put hidden per-step verification details in verification. Do not create top-level verification-only todo items unless the user explicitly asks for a standalone verification task. Do not create a plan for trivial one-step work.',
     'When a todo step needs verification, complete the execution and then verify it with an appropriate mounted tool before marking that todo completed. Mark verification.status as completed only when the current run produced direct evidence.',
+    routeState?.answerMode === 'execute'
+      ? 'Execution-mode contract: the user expects concrete work, not another planning pass. todo_write, reading files, and explaining intent are coordination/context only; they do not satisfy an execution step by themselves. After a plan/todo update, move to the concrete tool that creates, edits, runs, verifies, or persists the requested output. If the requested output is large, create the smallest durable file or artifact first, then extend it in bounded chunks.'
+      : null,
     'Use tools when they materially reduce uncertainty or let you complete the user request. The mounted tool list is the source of truth for this turn.',
     'If a needed capability is not obvious and tool_search is mounted, inspect the current tool catalog before claiming the capability is unavailable.',
     'If the user request needs files, commands, web retrieval, browser interaction, or capability management and the matching tool is mounted, use the tool directly instead of asking the user to do the work.',
     'Ask the user only when an important product decision, risky action, missing credential, or unavailable input blocks progress.',
     'Do not claim that something is fixed, installed, configured, created, or completed unless the current run produced direct evidence.',
     'Verify concrete changes before finalizing when verification is practical. If verification is blocked, say exactly what was done and what remains unverified.',
-  ]
+  ].filter(Boolean)
 
   blocks.push(createPromptBlock({
     id: 'core-instructions',

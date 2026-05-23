@@ -113,6 +113,9 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
     onContextCompression(contextCompression) {
       forwarded.push(['compression', contextCompression.id])
     },
+    onProgress(event) {
+      forwarded.push(['progress', event.type])
+    },
     onPhaseChange(phase) {
       forwarded.push(['phase', phase])
     },
@@ -173,6 +176,17 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
     originalTokenEstimate: 1000,
     compressedTokenEstimate: 400,
   })
+  hooks.onProgress({
+    type: 'checkpoint_created',
+    checkpointId: 'checkpoint-1',
+    checkpointCount: 2,
+    reason: 'step_completed',
+    state: 'CHECKPOINT_AND_HANDOFF',
+    planId: 'plan-1',
+    subtaskId: 'step-1',
+    checkpointKind: 'default_agent_progress',
+    triggerCount: 1,
+  })
   hooks.onPhaseChange('recovering', {
     reason: '模型服务请求失败。',
     code: 'HTTP_400',
@@ -189,6 +203,7 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
     ['audit', 'success'],
     ['catalog', 10],
     ['compression', 'compression-1'],
+    ['progress', 'checkpoint_created'],
     ['phase', 'recovering'],
   ])
   assert.deepEqual(runtimeEvents.map(event => event.event), [
@@ -199,6 +214,7 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
     'agent.tool.audit',
     'agent.tool.catalog.loaded',
     'agent.context.compression',
+    'agent.checkpoint.created',
     'agent.recovery.event',
   ])
   const toolRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.tool.event')
@@ -206,6 +222,10 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
   assert.equal(toolRuntimeEvent.details.permissionScope, 'workspace_write')
   const catalogRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.tool.catalog.loaded')
   assert.equal(catalogRuntimeEvent.details.highRiskToolCount, 4)
+  const checkpointRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.checkpoint.created')
+  assert.equal(checkpointRuntimeEvent.details.checkpointId, 'checkpoint-1')
+  assert.equal(checkpointRuntimeEvent.details.checkpointCount, 2)
+  assert.equal(checkpointRuntimeEvent.details.state, 'CHECKPOINT_AND_HANDOFF')
   const recoveryRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.recovery.event')
   assert.equal(recoveryRuntimeEvent.details.code, 'HTTP_400')
   assert.equal(recoveryRuntimeEvent.details.providerStatus, 400)
@@ -266,6 +286,15 @@ test('run finished and error detail helpers expose validation-friendly summaries
   assert.equal(metrics.graphNextAction, 'run_verification')
   assert.equal(metrics.inputTokens, 17)
   assert.equal(metrics.outputTokens, 9)
+
+  const defaultAgentMetrics = buildMetricsSummaryDetails({
+    status: 'completed',
+    checkpointCount: 3,
+    stepRuntime: { state: 'FINALIZE' },
+    usage: { inputTokens: 5, outputTokens: 2 },
+  }, logger)
+  assert.equal(defaultAgentMetrics.checkpointCount, 3)
+  assert.equal(defaultAgentMetrics.graphState, 'FINALIZE')
 
   const error = new Error('Provider failed with a long message')
   error.code = 'PROVIDER_FAILED'

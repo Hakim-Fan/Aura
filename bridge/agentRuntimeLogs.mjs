@@ -146,6 +146,8 @@ export function buildMetricsSummaryDetails(result = {}, logger, status = 'comple
   const finished = buildRunFinishedDetails(result, logger, status)
   const graphExecutions = Array.isArray(result?.graphExecutions) ? result.graphExecutions : []
   const graphCheckpoints = Array.isArray(result?.graphCheckpoints) ? result.graphCheckpoints : []
+  const resultCheckpointCount = safeNumber(result?.checkpointCount)
+  const resultRecoveryCount = safeNumber(result?.recoveryCount)
   const recovered =
     finished.recovered ||
     graphExecutions.some(execution =>
@@ -164,10 +166,10 @@ export function buildMetricsSummaryDetails(result = {}, logger, status = 'comple
     architectureMode: logger?.baseDetails?.architectureMode,
     requestedArchitectureMode: logger?.baseDetails?.requestedArchitectureMode,
     pathMode: result?.pathMode || logger?.baseDetails?.pathMode,
-    checkpointCount: graphCheckpoints.length,
-    recoveryCount,
+    checkpointCount: resultCheckpointCount ?? graphCheckpoints.length,
+    recoveryCount: resultRecoveryCount ?? recoveryCount,
     recovered,
-    graphState: result?.graphState,
+    graphState: result?.graphState || result?.stepRuntime?.state,
     graphExecutionCount: graphExecutions.length,
     graphCompletionReason: result?.graphCompletion?.reason,
     graphNextAction: result?.graphCompletion?.nextAction,
@@ -362,6 +364,30 @@ export function wrapAgentRuntimeHooks(hooks = {}, logger) {
         status: memory?.status,
       })
       hooks?.onWorkMemory?.(memory)
+    },
+    onProgress(event = {}) {
+      if (event?.type === 'checkpoint_created') {
+        logger.emit('agent.checkpoint.created', {
+          checkpointId: event?.checkpointId,
+          checkpointCount: safeNumber(event?.checkpointCount),
+          reason: compactString(event?.reason, 240),
+          state: compactString(event?.state || event?.graphState, 120),
+          planId: compactString(event?.planId, 240),
+          subtaskId: compactString(event?.subtaskId || event?.stepId, 240),
+          checkpointKind: compactString(event?.checkpointKind, 160),
+          triggerCount: safeNumber(event?.triggerCount),
+          phaseHandoffId: compactString(event?.phaseHandoffId, 240),
+        })
+      } else if (event?.type === 'checkpoint_restored') {
+        logger.emit('agent.checkpoint.restored', {
+          checkpointId: event?.checkpointId,
+          reason: compactString(event?.reason, 240),
+          state: compactString(event?.state || event?.graphState, 120),
+          planId: compactString(event?.planId, 240),
+          subtaskId: compactString(event?.subtaskId || event?.stepId, 240),
+        })
+      }
+      hooks?.onProgress?.(event)
     },
     onPhaseChange(phase, meta = {}) {
       if (phase === 'recovering') {

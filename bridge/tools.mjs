@@ -900,6 +900,34 @@ export function buildRuntimeArtifactPrompt(context) {
   ].join('\n')
 }
 
+export function buildRuntimeWorkMemoryPrompt(context) {
+  const memories = Array.isArray(context?.workMemories)
+    ? context.workMemories
+    : []
+  const relevant = memories
+    .filter(memory =>
+      memory &&
+      typeof memory === 'object' &&
+      memory.kind !== 'tool_evidence' &&
+      memory.kind !== 'task_progress',
+    )
+    .slice(-6)
+  if (relevant.length === 0) {
+    return ''
+  }
+
+  return [
+    'Runtime work memory from this ongoing task:',
+    ...relevant.map((memory, index) => [
+      `${index + 1}. ${memory.title || memory.kind || 'memory'} [${memory.status || 'draft'}]`,
+      memory.summary ? `Summary: ${truncate(memory.summary, 700)}` : null,
+      memory.nextUse ? `Next use: ${truncate(memory.nextUse, 360)}` : null,
+      memory.content ? `Refs: ${truncate(stringifyOutput(memory.content), 700)}` : null,
+    ].filter(Boolean).join('\n')),
+    'Prefer these compact handoffs over older detailed transcript when continuing the same stage.',
+  ].join('\n')
+}
+
 function normalizeArtifactType(value) {
   const type = String(value || 'draft')
     .trim()
@@ -1245,8 +1273,9 @@ export function buildRuntimeToolEvidencePrompt(context) {
 export function appendRuntimeToolEvidenceToSystemPrompt(systemPrompt, context) {
   const progressPrompt = buildRuntimeProgressPrompt(context)
   const artifactPrompt = buildRuntimeArtifactPrompt(context)
+  const workMemoryPrompt = buildRuntimeWorkMemoryPrompt(context)
   const evidencePrompt = buildRuntimeToolEvidencePrompt(context)
-  if (!progressPrompt && !artifactPrompt && !evidencePrompt) {
+  if (!progressPrompt && !artifactPrompt && !workMemoryPrompt && !evidencePrompt) {
     return systemPrompt
   }
 
@@ -1255,6 +1284,7 @@ export function appendRuntimeToolEvidenceToSystemPrompt(systemPrompt, context) {
     'Ongoing task checkpoints are available below. They summarize current progress and successful tools already run in this task so compressed history does not cause duplicate work.',
     progressPrompt,
     artifactPrompt,
+    workMemoryPrompt,
     evidencePrompt,
   ].filter(Boolean).join('\n\n')
 }

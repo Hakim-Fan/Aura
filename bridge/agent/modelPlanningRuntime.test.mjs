@@ -182,3 +182,12 @@ test('model planning system prompt carries the configured locale policy', () => 
   assert.match(prompt, /Primary response locale: 简体中文 \(zh-CN\)/)
   assert.match(prompt, /Language policy: all user-facing answers/i)
 })
+
+test('model planning system prompt requires execution evidence for generated artifacts', () => {
+  const prompt = buildModelPlanningSystemPrompt({
+    locale: 'zh-CN',
+  })
+
+  assert.match(prompt, /requiredEvidence MUST include file_mutation or artifact_present/)
+  assert.match(prompt, /Do not mark an execution step satisfied by todo\/status updates alone/)
+})

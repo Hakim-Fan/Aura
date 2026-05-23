@@ -314,7 +314,11 @@ function buildMultiAgentTools({
   runtimeMeta,
   taskTracker,
 }) {
-  if (!settings.enableMultiAgent || (runtimeMeta.subagentDepth || 0) >= 1) {
+  if (
+    !settings.enableMultiAgent ||
+    !settings.experimentalSubagentEnabled ||
+    (runtimeMeta.subagentDepth || 0) >= 1
+  ) {
     return []
   }
 
