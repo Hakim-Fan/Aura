@@ -1576,6 +1576,320 @@ function summarizeToolOutput(output, maxLength = 220) {
     : normalized
 }
 
+const DEFAULT_AGENT_CHECKPOINT_TOOLS = new Set([
+  'apply_patch',
+  'append_artifact_chunk',
+  'create_artifact',
+  'edit_file',
+  'multi_edit_file',
+  'replace_line_range',
+  'verify_artifact',
+  'write_file',
+])
+
+function parseCheckpointOutput(output) {
+  if (!output) {
+    return null
+  }
+  if (typeof output === 'object') {
+    return output
+  }
+  try {
+    return JSON.parse(String(output))
+  } catch {
+    return null
+  }
+}
+
+function compactCheckpointToolEvent(event = {}) {
+  return {
+    id: event.id,
+    toolCallId: event.toolCallId,
+    name: event.name,
+    source: event.source,
+    status: event.status,
+    summary: summarizeToolOutput(event.summary || event.error || event.output, 500),
+    input: summarizeToolOutput(event.input, 500),
+    riskLevel: event.riskLevel,
+    permissionScope: event.permissionScope,
+    approvalCategory: event.approvalCategory,
+    errorInfo: event.errorInfo
+      ? {
+          code: event.errorInfo.code,
+          category: event.errorInfo.category,
+          retryable: event.errorInfo.retryable,
+        }
+      : undefined,
+    structuredOutput: event.structuredOutput
+      ? {
+          operation: event.structuredOutput.operation,
+          summary: summarizeToolOutput(event.structuredOutput.summary, 500),
+          path: event.structuredOutput.path,
+          files: Array.isArray(event.structuredOutput.files)
+            ? event.structuredOutput.files.slice(0, 12).map(file => ({
+                path: file?.path || file?.relativePath,
+                operation: file?.operation || file?.kind,
+              }))
+            : undefined,
+        }
+      : undefined,
+  }
+}
+
+function summarizeRuntimeArtifacts(context = {}) {
+  const artifacts = Array.isArray(context.artifactStore?.artifacts)
+    ? context.artifactStore.artifacts
+    : []
+  return artifacts.slice(-20).map(artifact => ({
+    id: artifact.id,
+    type: artifact.type,
+    title: artifact.title,
+    chunkCount: Array.isArray(artifact.chunks) ? artifact.chunks.length : 0,
+    itemCount: Array.isArray(artifact.chunks)
+      ? artifact.chunks.reduce(
+          (total, chunk) => total + Math.max(0, Math.round(Number(chunk?.itemCount) || 0)),
+          0,
+        )
+      : 0,
+    metadata: artifact.metadata
+      ? {
+          toolName: artifact.metadata.toolName,
+          stage: artifact.metadata.stage,
+          tokenEstimate: artifact.metadata.tokenEstimate,
+          charCount: artifact.metadata.charCount,
+        }
+      : undefined,
+    updatedAt: artifact.updatedAt,
+  }))
+}
+
+function extractCheckpointArtifactsFromEvent(event = {}) {
+  const parsed = parseCheckpointOutput(event.output)
+  const candidates = [
+    parsed?.artifact,
+    parsed?.appendedChunk?.artifact,
+    parsed?.checkpoint?.artifact,
+    ...(Array.isArray(parsed?.artifacts) ? parsed.artifacts : []),
+  ].filter(Boolean)
+
+  return candidates
+    .map(artifact => {
+      if (typeof artifact === 'string') {
+        return { id: artifact }
+      }
+      if (!artifact || typeof artifact !== 'object' || !artifact.id) {
+        return null
+      }
+      return {
+        id: artifact.id,
+        type: artifact.type,
+        title: artifact.title,
+        chunkCount: artifact.chunkCount,
+      }
+    })
+    .filter(Boolean)
+}
+
+function extractCheckpointFilesFromEvent(event = {}) {
+  const files = []
+  const parsed = parseCheckpointOutput(event.output)
+  const structured = event.structuredOutput
+
+  for (const value of [
+    parsed?.path,
+    parsed?.filePath,
+    parsed?.outputPath,
+    structured?.path,
+    structured?.filePath,
+    structured?.outputPath,
+  ]) {
+    if (typeof value === 'string' && value.trim()) {
+      files.push(value.trim())
+    }
+  }
+
+  for (const source of [parsed?.files, parsed?.paths, structured?.files, structured?.paths]) {
+    if (!Array.isArray(source)) continue
+    for (const item of source) {
+      const value =
+        typeof item === 'string'
+          ? item
+          : item?.path || item?.relativePath || item?.filePath || item?.outputPath
+      if (typeof value === 'string' && value.trim()) {
+        files.push(value.trim())
+      }
+    }
+  }
+
+  return [...new Set(files)].slice(0, 20)
+}
+
+function checkpointReasonForToolEvent(event = {}) {
+  if (event.status !== 'success') {
+    return ''
+  }
+  const name = String(event.name || '')
+  if (DEFAULT_AGENT_CHECKPOINT_TOOLS.has(name)) {
+    return name === 'verify_artifact'
+      ? 'verification_passed'
+      : name.includes('artifact')
+        ? 'artifact_updated'
+        : 'durable_tool_completed'
+  }
+  if (/(convert|export|generate|render|build|write|verify|artifact)/iu.test(name)) {
+    return 'durable_tool_completed'
+  }
+  const summary = `${event.summary || ''} ${summarizeToolOutput(event.output, 1000)}`
+  return /(generated|created|converted|exported|verified|wrote|saved as artifact)/iu.test(summary)
+    ? 'durable_tool_completed'
+    : ''
+}
+
+function collectDefaultAgentCheckpointTriggers({
+  context,
+  toolEvents = [],
+  startIndex = 0,
+} = {}) {
+  const triggers = []
+  const hints = Array.isArray(context?.checkpointHints)
+    ? context.checkpointHints.splice(0)
+    : []
+
+  for (const hint of hints) {
+    if (!hint?.recommended) continue
+    triggers.push({
+      reason: hint.reason || 'runtime_checkpoint_hint',
+      stage: hint.stage,
+      toolName: hint.toolName,
+      toolCallId: hint.toolCallId,
+      artifacts: Array.isArray(hint.artifacts) ? hint.artifacts : [],
+      files: Array.isArray(hint.files) ? hint.files : [],
+      nextAction: hint.nextAction,
+      tokenEstimate: hint.tokenEstimate,
+      charCount: hint.charCount,
+    })
+  }
+
+  for (const event of toolEvents.slice(startIndex)) {
+    const reason = checkpointReasonForToolEvent(event)
+    if (!reason) continue
+    triggers.push({
+      reason,
+      toolEventId: event.id,
+      toolName: event.name,
+      artifacts: extractCheckpointArtifactsFromEvent(event),
+      files: extractCheckpointFilesFromEvent(event),
+      summary: summarizeToolOutput(event.summary || event.output, 500),
+    })
+  }
+
+  return triggers
+}
+
+function isProviderStreamStallError(normalized = {}, retryInfo = {}) {
+  const values = [
+    normalized.code,
+    normalized.errorInfo?.code,
+    normalized.message,
+    normalized.rawMessage,
+    retryInfo?.lastErrorSummary,
+  ]
+    .filter(value => typeof value === 'string')
+    .join('\n')
+  return (
+    values.includes('PROVIDER_STREAM_STALLED') ||
+    values.includes('模型服务流式输出长时间没有继续') ||
+    values.includes('Streaming response stalled')
+  )
+}
+
+function buildCheckpointContinuationPrompt({
+  checkpoint,
+  context,
+  toolEvents = [],
+  partialMessage = '',
+  partialReasoning = '',
+  error,
+} = {}) {
+  const checkpointSummary = checkpoint
+    ? {
+        id: checkpoint.id,
+        stepId: checkpoint.stepId,
+        metadata: checkpoint.metadata,
+        createdAt: checkpoint.createdAt,
+      }
+    : null
+  const artifacts = summarizeRuntimeArtifacts(context)
+  const recentTools = toolEvents.slice(-8).map(compactCheckpointToolEvent)
+  const progress = context?.progressLedger || null
+  const workMemories = Array.isArray(context?.workMemories)
+    ? context.workMemories.slice(-8).map(memory => ({
+        id: memory?.id,
+        kind: memory?.kind,
+        title: memory?.title,
+        summary: summarizeToolOutput(memory?.summary || memory?.content, 700),
+        status: memory?.status,
+        nextUse: memory?.nextUse,
+      }))
+    : []
+
+  return [
+    '上一次模型流式输出在长时间无新 chunk 后中断。不要从头开始，基于最近 checkpoint 和已完成成果继续。',
+    '',
+    '恢复规则：',
+    '- 先复用已完成工具结果、runtime artifacts、已写文件和 progress ledger。',
+    '- 不要重新执行已经成功且仍可复用的转换、生成、导出或验证步骤。',
+    '- 如果需要精确的大输出内容，优先调用 read_artifact_slice 读取必要片段。',
+    '- 继续执行下一个最小可观察步骤；如果成果已经足够，整理最终回答。',
+    '',
+    checkpointSummary ? `最近 checkpoint:\n${JSON.stringify(checkpointSummary, null, 2)}` : null,
+    artifacts.length > 0 ? `可复用 artifacts:\n${JSON.stringify(artifacts, null, 2)}` : null,
+    recentTools.length > 0 ? `最近工具结果摘要:\n${JSON.stringify(recentTools, null, 2)}` : null,
+    progress ? `当前 progress ledger:\n${JSON.stringify(progress, null, 2)}` : null,
+    workMemories.length > 0 ? `可复用 work memory:\n${JSON.stringify(workMemories, null, 2)}` : null,
+    partialMessage.trim()
+      ? `中断前模型已写出的草稿片段:\n${partialMessage.slice(0, 4000)}`
+      : null,
+    partialReasoning.trim()
+      ? `中断前 provider reasoning 摘要片段:\n${partialReasoning.slice(0, 1800)}`
+      : null,
+    error?.message ? `中断原因: ${error.message}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function buildCheckpointContinuationMessages({
+  messages = [],
+  checkpoint,
+  context,
+  toolEvents,
+  partialMessage,
+  partialReasoning,
+  error,
+} = {}) {
+  const nextMessages = [...messages]
+  const cleanedPartial = stripInlineToolCallText(partialMessage || '').trim()
+  if (cleanedPartial) {
+    nextMessages.push({
+      role: 'assistant',
+      content: cleanedPartial.slice(0, 6000),
+    })
+  }
+  nextMessages.push({
+    role: 'user',
+    content: buildCheckpointContinuationPrompt({
+      checkpoint,
+      context,
+      toolEvents,
+      partialMessage: cleanedPartial,
+      partialReasoning,
+      error,
+    }),
+  })
+  return nextMessages
+}
+
 function buildToolCallOnlyFallbackMessage(toolEvents) {
   const recentSuccessful = toolEvents
     .filter(event => event.status === 'success')
@@ -2084,6 +2398,9 @@ export async function runDefaultAgent(request) {
   let routeEscalationCount = 0
   let toolFailureContinuationCount = 0
   let lastSelectedCapabilities = null
+  let lastEffectiveRunSettings = settings
+  let lastPromptRouteState = routeState
+  let lastAllTools = []
   let lastSystemPrompt = ''
   let previousPromptBlocks = findLatestPromptBlockSnapshot(messages)
   let lastRouteDecision = {
@@ -2117,27 +2434,70 @@ export async function runDefaultAgent(request) {
     },
   })
   let checkpointId = null
+  let checkpointCount = 0
+
+  function createDefaultAgentCheckpoint(reason, metadata = {}) {
+    const snapshot = checkpointManager.createSnapshot({
+      messages,
+      toolEvents: toolEvents.map(compactCheckpointToolEvent),
+      routeState,
+      workMemories: context.workMemories,
+      taskTree: taskTracker.getTree(),
+      runtime: {
+        artifacts: summarizeRuntimeArtifacts(context),
+        progress: context.progressLedger || null,
+        latestContextCompression: getLatestContextCompression(),
+        reason,
+        triggers: metadata.triggers,
+      },
+    })
+    const checkpoint = checkpointManager.createCheckpoint(
+      currentTaskId,
+      metadata.stepId || reason,
+      snapshot,
+      {
+        reason,
+        checkpointKind: metadata.checkpointKind || 'default_agent_progress',
+        pass: metadata.pass,
+        triggerCount: Array.isArray(metadata.triggers) ? metadata.triggers.length : undefined,
+        triggers: Array.isArray(metadata.triggers) ? metadata.triggers.slice(0, 12) : undefined,
+        routeState: { capabilityTier: routeState.capabilityTier },
+      },
+    )
+    checkpointId = checkpoint.id
+    checkpointCount += 1
+    hooks?.onProgress?.({
+      type: 'checkpoint_created',
+      checkpointId,
+      reason,
+      checkpointCount,
+      triggerCount: Array.isArray(metadata.triggers) ? metadata.triggers.length : undefined,
+    })
+    return checkpoint
+  }
+
+  function createCheckpointForRecoverableProgress(reason, startIndex, extra = {}) {
+    const triggers = collectDefaultAgentCheckpointTriggers({
+      context,
+      toolEvents,
+      startIndex,
+    })
+    if (triggers.length === 0 && !extra.force) {
+      return null
+    }
+    return createDefaultAgentCheckpoint(reason, {
+      ...extra,
+      triggers,
+    })
+  }
 
   try {
     for (let pass = 0; pass < 1; pass += 1) {
-      const snapshot = checkpointManager.createSnapshot({
-        messages,
-        toolEvents,
-        routeState,
-        workMemories: context.workMemories,
-        taskTree: taskTracker.getTree(),
+      createDefaultAgentCheckpoint('pass_started', {
+        pass,
+        stepId: `pass-${pass}`,
+        checkpointKind: 'default_agent_pass_start',
       })
-      const checkpoint = checkpointManager.createCheckpoint(
-        currentTaskId,
-        `pass-${pass}`,
-        snapshot,
-        {
-          pass,
-          routeState: { capabilityTier: routeState.capabilityTier },
-        }
-      )
-      checkpointId = checkpoint.id
-      hooks?.onProgress?.({ type: 'checkpoint_created', checkpointId, pass })
 
       const availableEscalations = getRouteEscalationTargets(routeState, {
         visitedTiers,
@@ -2147,6 +2507,8 @@ export async function runDefaultAgent(request) {
         availableEscalations,
       }
       const effectiveRunSettings = buildEffectiveRunSettings(settings, promptRouteState)
+      lastEffectiveRunSettings = effectiveRunSettings
+      lastPromptRouteState = promptRouteState
       const toolRouter = createToolRouter(toolRegistry, routeState)
       const routedTools = applyRouteToolBudgets(
         toolRouter.modelVisibleTools,
@@ -2200,6 +2562,7 @@ export async function runDefaultAgent(request) {
         context,
       )
       const allTools = selectedCapabilities.selectedTools
+      lastAllTools = allTools
       const toolSchemaTokens = estimateMountedToolSchemaTokens(allTools, effectiveRunSettings)
       const runtimeCompression = await maybeCompressMessagesForContext({
         messages,
@@ -2289,6 +2652,10 @@ export async function runDefaultAgent(request) {
         }
         throw error
       }
+
+      createCheckpointForRecoverableProgress('after_recoverable_tool_progress', turnToolEventStart, {
+        pass,
+      })
 
       let result = turnResult.result
       const latestPromptContextSnapshot = buildPromptContextSnapshot(
@@ -2458,6 +2825,8 @@ export async function runDefaultAgent(request) {
         retryInfo: result.retryInfo,
         status: 'completed',
         taskTree: taskTracker.getTree(),
+        checkpointId,
+        checkpointCount,
       }
     }
 
@@ -2475,6 +2844,126 @@ export async function runDefaultAgent(request) {
     const retryInfo = extractProviderRetryInfo(normalized)
     const hasRecoveryContext =
       toolEvents.length > 0 || partialMessage.length > 0
+
+    if (hasRecoveryContext) {
+      createCheckpointForRecoverableProgress('interrupted_with_progress', 0, {
+        force: toolEvents.length > 0 || partialMessage.length > 0,
+        errorCode: normalized.code,
+        errorSource: normalized.source,
+      })
+    }
+
+    if (
+      normalized.source === 'provider' &&
+      hasRecoveryContext &&
+      isProviderStreamStallError(normalized, retryInfo)
+    ) {
+      const continuationToolEventStart = toolEvents.length
+      try {
+        hooks?.onPhaseChange?.('recovering', {
+          reason: 'provider_stream_stalled_checkpoint_resume',
+          checkpointId,
+          lastErrorSummary: retryInfo?.lastErrorSummary || normalized.message,
+        })
+        const checkpoint = checkpointId
+          ? checkpointManager.getCheckpoint(checkpointId)
+          : checkpointManager.getLatestCheckpointForTask(currentTaskId)
+        const continuationMessages = buildCheckpointContinuationMessages({
+          messages,
+          checkpoint,
+          context,
+          toolEvents,
+          partialMessage,
+          partialReasoning,
+          error: normalized,
+        })
+        createDefaultAgentCheckpoint('before_checkpoint_resume', {
+          checkpointKind: 'default_agent_checkpoint_resume',
+          stepId: 'checkpoint-resume',
+          triggers: [
+            {
+              reason: 'provider_stream_stalled',
+              checkpointId: checkpoint?.id || checkpointId,
+              toolEventCount: toolEvents.length,
+              hasPartialMessage: partialMessage.length > 0,
+            },
+          ],
+        })
+        const resumedTurn = await runProviderTurn({
+          settings: lastEffectiveRunSettings,
+          systemPrompt: lastSystemPrompt,
+          messages: continuationMessages,
+          tools: lastAllTools,
+          toolEvents,
+          routeState: lastPromptRouteState,
+          hooks: {
+            ...hooks,
+            workMemoryContext: context,
+            getActivePlanStep() {
+              return taskTracker.getActivePlanStep?.()
+            },
+            onTodoWrite(items) {
+              taskTracker.syncTodoItems?.(items)
+            },
+            rethrowToolError(error) {
+              return extractRouteEscalationRequest(error) !== null
+            },
+          },
+          taskTracker,
+          currentTaskId,
+        })
+        createCheckpointForRecoverableProgress('after_checkpoint_resume_progress', continuationToolEventStart, {
+          force: toolEvents.length > continuationToolEventStart,
+        })
+        let resumedResult = enforceEvidencePolicy(
+          sanitizeResultMessage(resumedTurn.result, toolEvents),
+          toolEvents,
+          lastPromptRouteState,
+          buildRuntimeBlocks(lastRouteDecision?.stopReason),
+        )
+        resumedResult = {
+          ...applyCompletionGate(resumedResult, lastPromptRouteState),
+          recovered: true,
+        }
+        const summaryReasoning = summarizeReasoning(
+          resumedTurn.resolvedMessages || continuationMessages,
+          toolEvents,
+          resumedResult.message,
+          hooks,
+        )
+        hooks?.onReasoningDelta?.(summaryReasoning[0].content, {
+          blockId: summaryReasoning[0].id,
+          kind: summaryReasoning[0].kind,
+          order: summaryReasoning[0].order,
+          createdAt: summaryReasoning[0].createdAt,
+        })
+        completeCurrentTaskWithResult(
+          taskTracker,
+          currentTaskId,
+          settings,
+          lastPromptRouteState,
+          resumedResult,
+        )
+        return {
+          ...resumedResult,
+          toolEvents,
+          agentMode: 'default-agent',
+          routeDecision: lastRouteDecision,
+          capabilitySnapshot: lastSelectedCapabilities?.capabilitySnapshot,
+          reasoning: summaryReasoning,
+          workMemories: context.workMemories,
+          retryInfo: markRecoveredRetryInfo(resumedTurn.result?.retryInfo, retryInfo),
+          usage: getAccumulatedUsage() || resumedResult.usage,
+          contextCompression: getLatestContextCompression(),
+          status: 'completed',
+          taskTree: taskTracker.getTree(),
+          checkpointId,
+          checkpointCount,
+        }
+      } catch (resumeError) {
+        // Checkpoint resume is best-effort. Fall back to finalizing the preserved progress below.
+      }
+    }
 
     if (normalized.source === 'provider' && hasRecoveryContext) {
       let recoveryRetryInfo
@@ -2568,6 +3057,8 @@ export async function runDefaultAgent(request) {
             contextCompression: getLatestContextCompression(),
             status: 'completed',
             taskTree: taskTracker.getTree(),
+            checkpointId,
+            checkpointCount,
           }
         }
       } catch (recoveryError) {
@@ -2619,6 +3110,8 @@ export async function runDefaultAgent(request) {
         contextCompression: getLatestContextCompression(),
         status: 'completed',
         taskTree: taskTracker.getTree(),
+        checkpointId,
+        checkpointCount,
       }
     }
 
@@ -2630,6 +3123,7 @@ export async function runDefaultAgent(request) {
     enriched.errorInfo = normalized.errorInfo
     enriched.retryInfo = retryInfo
     enriched.agentMode = 'default-agent'
+    enriched.checkpointCount = checkpointCount
     enriched.routeDecision = {
       ...lastRouteDecision,
       stopReason:

@@ -12,6 +12,7 @@ const {
   getProviderRetryDelayMs,
   hasWriteRepairAttemptSince,
   maybeSpillAssistantContent,
+  maybeSpillToolOutputForTranscript,
   mergeOpenAiToolCalls,
   normalizeGoogleUsage,
   normalizeOpenAiUsage,
@@ -486,6 +487,33 @@ test('maybeSpillAssistantContent saves long intermediate output as an artifact s
   assert.equal(toolEvents.length, 1)
   assert.match(toolEvents[0].summary, /Long intermediate assistant output saved/)
   assert.equal(reasoningDeltas.length, 1)
+})
+
+test('maybeSpillToolOutputForTranscript saves large tool output as an artifact reference', () => {
+  const context = { cwd: process.cwd() }
+  const result = maybeSpillToolOutputForTranscript({
+    toolOutput: 'converted markdown paragraph '.repeat(7000),
+    settings: { model: 'gpt-test' },
+    hooks: {
+      workMemoryContext: context,
+    },
+    toolName: 'convert_doc_to_markdown',
+    toolCallId: 'call-1',
+    providerKind: 'openai',
+    stage: 'step-1',
+  })
+
+  assert.match(result, /Large tool output saved/)
+  assert.match(result, /Tool: convert_doc_to_markdown/)
+  assert.match(result, /Artifact: tool_output-/)
+  assert.match(result, /read_artifact_slice/)
+  assert.equal(context.artifactStore.artifacts.length, 1)
+  assert.equal(context.artifactStore.artifacts[0].type, 'tool_output')
+  assert.equal(context.artifactStore.artifacts[0].metadata.toolName, 'convert_doc_to_markdown')
+  assert.match(context.artifactStore.artifacts[0].chunks[0].content.text, /converted markdown paragraph/)
+  assert.equal(context.checkpointHints.length, 1)
+  assert.equal(context.checkpointHints[0].reason, 'large_tool_output_spilled')
+  assert.equal(context.checkpointHints[0].artifacts[0].id, context.artifactStore.artifacts[0].id)
 })
 
 test('resolveCompactionSettings prefers a dedicated analysis profile and model when configured', () => {

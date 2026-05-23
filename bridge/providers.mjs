@@ -61,6 +61,7 @@ function nextProviderTimelineOrders(hooks, step) {
 
 const ASSISTANT_SPILLOVER_TRIGGER_TOKENS = 6_000
 const ASSISTANT_SPILLOVER_SUMMARY_CHARS = 1_200
+const TOOL_OUTPUT_SPILLOVER_PREVIEW_TOKENS = 400
 const FINALIZER_DRAFT_MESSAGE_MAX_CHARS = 6_000
 
 function buildTranscriptTruncationBudgets(settings = {}) {
@@ -99,22 +100,96 @@ function truncateAssistantContentForTranscript(content, settings = {}) {
   return middleTruncateText(source, budgets.assistantContentMaxTokens, settings)
 }
 
-function truncateToolOutputForTranscript(toolOutput, settings = {}) {
+function maybeSpillToolOutputForTranscript({
+  toolOutput,
+  settings = {},
+  hooks,
+  toolName = 'tool',
+  toolCallId,
+  providerKind = 'provider',
+  stage,
+}) {
   const source =
     typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput)
   if (!source?.trim()) {
     return toolOutput
   }
+
   const budgets = buildTranscriptTruncationBudgets(settings)
-  const truncated = middleTruncateText(
-    source,
-    budgets.toolOutputMaxTokens,
-    settings,
-  )
-  if (truncated === source) {
+  const tokenEstimate = estimateTextTokens(source, settings)
+  if (tokenEstimate <= budgets.toolOutputMaxTokens) {
     return toolOutput
   }
-  return truncated
+
+  if (!hooks?.workMemoryContext) {
+    return middleTruncateText(source, budgets.toolOutputMaxTokens, settings)
+  }
+
+  const summaryText = summarizeSpilloverText(source)
+  const spilled = spillRuntimeArtifact(hooks.workMemoryContext, {
+    type: 'tool_output',
+    title: `${toolName} output`,
+    content: {
+      toolName,
+      toolCallId,
+      providerKind,
+      stage,
+      text: source,
+    },
+    summary: summaryText,
+    metadata: {
+      toolName,
+      toolCallId,
+      providerKind,
+      stage,
+      tokenEstimate,
+      charCount: source.length,
+    },
+    sourceRefs: [
+      {
+        toolName,
+        toolCallId,
+        providerKind,
+        stage,
+      },
+    ],
+  })
+
+  if (!spilled?.summary?.id) {
+    return middleTruncateText(source, budgets.toolOutputMaxTokens, settings)
+  }
+
+  hooks.workMemoryContext.checkpointHints ||= []
+  hooks.workMemoryContext.checkpointHints.push({
+    recommended: true,
+    reason: 'large_tool_output_spilled',
+    stage,
+    toolName,
+    toolCallId,
+    artifacts: [spilled.summary],
+    nextAction: 'continue_from_runtime_artifact',
+    tokenEstimate,
+    charCount: source.length,
+  })
+
+  const previewTokens = Math.max(
+    120,
+    Math.min(
+      TOOL_OUTPUT_SPILLOVER_PREVIEW_TOKENS,
+      Math.floor(budgets.toolOutputMaxTokens * 0.35),
+    ),
+  )
+  const preview = middleTruncateText(source, previewTokens, settings)
+
+  return [
+    '[Large tool output saved outside the active transcript]',
+    `Tool: ${toolName}`,
+    `Artifact: ${spilled.summary.id}`,
+    `Original estimate: ${tokenEstimate} tokens, ${source.length} chars.`,
+    `Summary: ${summaryText}`,
+    'Use runtime artifact summaries first. Call read_artifact_slice only if exact prior output is needed.',
+    preview ? `Preview:\n${preview}` : null,
+  ].filter(Boolean).join('\n')
 }
 
 function formatToolErrorForTranscript(error, toolName, errorReport = {}) {
@@ -2321,6 +2396,7 @@ export const __testInternals = {
   getProviderRetryDelayMs,
   hasWriteRepairAttemptSince,
   maybeSpillAssistantContent,
+  maybeSpillToolOutputForTranscript,
   mergeStreamedField,
   mergeOpenAiToolCalls,
   normalizeGoogleUsage,
@@ -4093,7 +4169,15 @@ export async function runOpenAiCompatibleAgent({
           transcript.push({
             role: 'tool',
             tool_call_id: toolCall.id,
-            content: truncateToolOutputForTranscript(result.output, settings),
+            content: maybeSpillToolOutputForTranscript({
+              toolOutput: result.output,
+              settings,
+              hooks,
+              toolName: toolCall.function.name,
+              toolCallId: toolCall.id,
+              providerKind: 'openai',
+              stage: `step-${step + 1}`,
+            }),
           })
         } else {
           const errorReport = result.error instanceof ToolExecutionError
@@ -4628,7 +4712,14 @@ export async function runGoogleAgent({
         toolEvents.push(toolEventEntry)
 
         const outputContent = result.success
-          ? truncateToolOutputForTranscript(result.output, settings)
+          ? maybeSpillToolOutputForTranscript({
+              toolOutput: result.output,
+              settings,
+              hooks,
+              toolName: entry.name,
+              providerKind: 'google',
+              stage: `step-${step + 1}`,
+            })
           : formatToolErrorForTranscript(result.error, entry.name,
               result.error instanceof ToolExecutionError ? result.error.toStructuredReport() : {})
 

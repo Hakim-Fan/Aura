@@ -1575,6 +1575,173 @@ function buildSkillImmediateUseHint(skillId, enabled) {
   return `This skill is enabled immediately. For the current task, decide whether it matches the user request now; if it does, call aura_read_skill with skillId "${skillId}" before continuing and follow the skill instructions. Do not wait for the user to mention the skill.`
 }
 
+function normalizeSkillLookupValue(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+}
+
+function skillLookupLabels(skill = {}) {
+  return Array.from(
+    new Set(
+      [
+        skill.id,
+        skill.name,
+      ]
+        .filter(value => typeof value === 'string')
+        .map(value => value.trim())
+        .filter(Boolean),
+    ),
+  )
+}
+
+function levenshteinDistance(left = '', right = '') {
+  const source = String(left)
+  const target = String(right)
+  if (source === target) return 0
+  if (!source) return target.length
+  if (!target) return source.length
+
+  let previous = Array.from({ length: target.length + 1 }, (_, index) => index)
+  for (let sourceIndex = 1; sourceIndex <= source.length; sourceIndex += 1) {
+    const current = [sourceIndex]
+    for (let targetIndex = 1; targetIndex <= target.length; targetIndex += 1) {
+      const substitutionCost = source[sourceIndex - 1] === target[targetIndex - 1] ? 0 : 1
+      current[targetIndex] = Math.min(
+        previous[targetIndex] + 1,
+        current[targetIndex - 1] + 1,
+        previous[targetIndex - 1] + substitutionCost,
+      )
+    }
+    previous = current
+  }
+  return previous[target.length]
+}
+
+function summarizeAvailableSkills(skills = []) {
+  return skills
+    .filter(skill => skill?.id)
+    .map(skill => ({
+      id: skill.id,
+      name: skill.name || skill.id,
+      description: skill.description || '',
+      external: Boolean(skill.external),
+    }))
+}
+
+function findSkillLookupMatch(skills = [], requestedSkillId = '') {
+  const requested = String(requestedSkillId || '').trim()
+  if (!requested) {
+    return {
+      skill: null,
+      resolvedFrom: '',
+      matchType: 'empty',
+      similarSkills: [],
+    }
+  }
+
+  const exact = skills.find(skill => skill?.id === requested)
+  if (exact) {
+    return {
+      skill: exact,
+      resolvedFrom: '',
+      matchType: 'exact',
+      similarSkills: [],
+    }
+  }
+
+  const requestedLower = requested.toLowerCase()
+  const caseInsensitiveMatches = skills.filter(skill =>
+    skillLookupLabels(skill).some(label => label.toLowerCase() === requestedLower),
+  )
+  if (caseInsensitiveMatches.length === 1) {
+    return {
+      skill: caseInsensitiveMatches[0],
+      resolvedFrom: requested,
+      matchType: 'case_insensitive',
+      similarSkills: [],
+    }
+  }
+
+  const requestedNormalized = normalizeSkillLookupValue(requested)
+  const normalizedMatches = requestedNormalized
+    ? skills.filter(skill =>
+        skillLookupLabels(skill).some(label => normalizeSkillLookupValue(label) === requestedNormalized),
+      )
+    : []
+  if (normalizedMatches.length === 1) {
+    return {
+      skill: normalizedMatches[0],
+      resolvedFrom: requested,
+      matchType: 'normalized',
+      similarSkills: [],
+    }
+  }
+
+  const ranked = skills
+    .filter(skill => skill?.id)
+    .map(skill => {
+      const labels = skillLookupLabels(skill)
+      const distances = labels
+        .map(label => normalizeSkillLookupValue(label))
+        .filter(Boolean)
+        .map(label => levenshteinDistance(requestedNormalized, label))
+      const distance = distances.length > 0 ? Math.min(...distances) : Number.POSITIVE_INFINITY
+      const bestLength = Math.max(
+        requestedNormalized.length,
+        ...labels.map(label => normalizeSkillLookupValue(label).length),
+        1,
+      )
+      return {
+        id: skill.id,
+        name: skill.name || skill.id,
+        distance,
+        similarity: 1 - distance / bestLength,
+        skill,
+      }
+    })
+    .filter(entry => Number.isFinite(entry.distance))
+    .sort((left, right) =>
+      left.distance - right.distance ||
+      right.similarity - left.similarity ||
+      left.id.localeCompare(right.id),
+    )
+
+  const best = ranked[0]
+  const second = ranked[1]
+  if (
+    best &&
+    best.distance <= 2 &&
+    best.similarity >= 0.72 &&
+    (!second || second.distance > best.distance)
+  ) {
+    return {
+      skill: best.skill,
+      resolvedFrom: requested,
+      matchType: 'similar',
+      similarSkills: ranked.slice(0, 5).map(({ skill, distance, similarity }) => ({
+        id: skill.id,
+        name: skill.name || skill.id,
+        distance,
+        similarity: Number(similarity.toFixed(3)),
+      })),
+    }
+  }
+
+  return {
+    skill: null,
+    resolvedFrom: requested,
+    matchType: 'not_found',
+    similarSkills: ranked.slice(0, 5).map(({ skill, distance, similarity }) => ({
+      id: skill.id,
+      name: skill.name || skill.id,
+      distance,
+      similarity: Number(similarity.toFixed(3)),
+    })),
+  }
+}
+
 function normalizeStringArray(items) {
   if (!Array.isArray(items)) {
     return []
@@ -2528,13 +2695,13 @@ export function createBuiltinTools(context) {
       name: 'aura_read_skill',
       aliases: ['readskill', 'skillfile', 'openskill'],
       description:
-        'Read the full content of an installed Aura skill by id. When an enabled skill matches the current file type or domain, call this before using generic shell/Python/Node commands so the skill instructions drive the implementation.',
+        'Read the full content of an installed Aura skill by id. When an enabled skill matches the current file type or domain, call this before using generic shell/Python/Node commands so the skill instructions drive the implementation. If the requested id is unavailable, the tool returns availableSkills instead of repeating a not_found error.',
       inputSchema: {
         type: 'object',
         properties: {
           skillId: {
             type: 'string',
-            description: 'Installed skill id to inspect.',
+            description: 'Installed skill id to inspect. Use the exact id from enabled skill summaries when possible.',
           },
         },
         required: ['skillId'],
@@ -2542,17 +2709,34 @@ export function createBuiltinTools(context) {
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const aura = await getAuraState(context)
-        const skill = (aura.skills || []).find(entry => entry.id === args.skillId)
+        const skills = Array.isArray(aura.skills) ? aura.skills : []
+        const requestedSkillId = args.skillId || ''
+        const match = findSkillLookupMatch(skills, requestedSkillId)
+        const skill = match.skill
         if (!skill) {
-          throw new Error(`Skill not found: ${args.skillId}`)
+          const availableSkills = summarizeAvailableSkills(skills)
+          return stringifyOutput({
+            found: false,
+            requestedSkillId,
+            availableSkills,
+            similarSkills: match.similarSkills,
+            suggestedAction:
+              availableSkills.length > 0
+                ? `Skill "${requestedSkillId}" was not found. Choose one exact id from availableSkills and call aura_read_skill again.`
+                : 'No Aura skills are currently available. Enable or install a matching skill before reading it.',
+          })
         }
         const skillPath = skill.entryPath || skill.path
         if (!skillPath) {
-          throw new Error(`Skill file path is unavailable for: ${args.skillId}`)
+          throw new Error(`Skill file path is unavailable for: ${skill.id || requestedSkillId}`)
         }
         const content = await fs.readFile(skillPath, 'utf8')
         return stringifyOutput({
+          found: true,
           skillId: skill.id,
+          requestedSkillId,
+          resolvedFrom: match.resolvedFrom || undefined,
+          matchType: match.matchType,
           name: skill.name,
           description: skill.description,
           path: skillPath,

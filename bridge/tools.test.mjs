@@ -1548,3 +1548,78 @@ test('aura_install_skill installs inline content into Aura skills and enables it
     /Installed from inline content/,
   )
 })
+
+test('aura_read_skill resolves a unique close skill id before reading', async () => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-read-skill-fuzzy-'))
+  const skillPath = path.join(temp, 'html-ppt.md')
+  await fs.writeFile(skillPath, '# HTML PPT\n\nUse the html-ppt workflow.', 'utf8')
+
+  const readSkill = createBuiltinTools({
+    cwd: temp,
+    async appControl(action) {
+      if (action !== 'ensure_aura_home') {
+        throw new Error(`Unexpected app action: ${action}`)
+      }
+      return {
+        skills: [
+          {
+            id: 'html-ppt',
+            name: 'html-ppt',
+            description: 'HTML PPT Studio',
+            path: skillPath,
+          },
+        ],
+      }
+    },
+  }).find(tool => tool.name === 'aura_read_skill')
+
+  const output = parseToolResultJson(await readSkill.run({ skillId: 'html-pt' }))
+
+  assert.equal(output.found, true)
+  assert.equal(output.skillId, 'html-ppt')
+  assert.equal(output.requestedSkillId, 'html-pt')
+  assert.equal(output.resolvedFrom, 'html-pt')
+  assert.equal(output.matchType, 'similar')
+  assert.match(output.content, /html-ppt workflow/)
+})
+
+test('aura_read_skill returns available skills instead of throwing when missing', async () => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-read-skill-missing-'))
+  const skillPath = path.join(temp, 'docx.md')
+  await fs.writeFile(skillPath, '# DOCX\n', 'utf8')
+
+  const readSkill = createBuiltinTools({
+    cwd: temp,
+    async appControl(action) {
+      if (action !== 'ensure_aura_home') {
+        throw new Error(`Unexpected app action: ${action}`)
+      }
+      return {
+        skills: [
+          {
+            id: 'docx',
+            name: 'docx',
+            description: 'Word document workflow',
+            path: skillPath,
+          },
+          {
+            id: 'html-ppt',
+            name: 'html-ppt',
+            description: 'HTML PPT Studio',
+            path: path.join(temp, 'html-ppt.md'),
+          },
+        ],
+      }
+    },
+  }).find(tool => tool.name === 'aura_read_skill')
+
+  const output = parseToolResultJson(await readSkill.run({ skillId: 'missing-skill' }))
+
+  assert.equal(output.found, false)
+  assert.equal(output.requestedSkillId, 'missing-skill')
+  assert.deepEqual(
+    output.availableSkills.map(skill => skill.id),
+    ['docx', 'html-ppt'],
+  )
+  assert.match(output.suggestedAction, /availableSkills/)
+})

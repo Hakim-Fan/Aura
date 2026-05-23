@@ -113,7 +113,7 @@ const PHASE_STALL_TIMEOUTS_MS = {
   planning: 60_000,
   compressing_context: 90_000,
   model_connecting: 45_000,
-  model_streaming: 90_000,
+  model_streaming: 30_000,
   tool_running: 120_000,
   finalizing: 60_000,
   recovering: 60_000,
