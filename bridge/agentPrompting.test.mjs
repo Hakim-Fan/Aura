@@ -85,7 +85,7 @@ test('default-agent prompt makes execution mode evidence-led', () => {
 
   assert.match(prompt, /Execution-mode contract/i)
   assert.match(prompt, /todo_write, reading files, and explaining intent are coordination\/context only/i)
-  assert.match(prompt, /smallest durable file or artifact first/i)
+  assert.match(prompt, /smallest durable file first/i)
 })
 
 test('capability exposure note describes default-agent capabilities', () => {

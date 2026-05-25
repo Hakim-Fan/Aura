@@ -513,7 +513,7 @@ function normalizeSessionContextCompression(value: unknown): SessionContextCompr
 }
 
 function normalizeAgentMode(value: unknown): AgentArchitectureMode | undefined {
-  return value === 'default-agent' || value === 'orchestrated'
+  return value === 'default-agent'
     ? value
     : undefined
 }
@@ -1535,7 +1535,7 @@ function parseSettings(raw: string | null): AgentSettings {
 }
 
 function normalizeAgentArchitectureMode(value: unknown): AgentArchitectureMode {
-  return value === 'orchestrated' ? 'orchestrated' : 'default-agent'
+  return 'default-agent'
 }
 
 function normalizeExecutionMode(value: unknown): ExecutionMode {

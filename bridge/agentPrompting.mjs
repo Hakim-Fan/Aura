@@ -272,10 +272,9 @@ export function buildRuntimeSystemPrompt(
     buildUserCustomInstructionsPrompt(settings),
     [
       'Work memory discipline: reasoning and scratchpad text are temporary process, not reusable task memory.',
-      'When a stage produces reusable synthesized outcomes that are not already obvious from a tool result, such as schema drafts, implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
-      'The runtime may also save compact progress/tool checkpoints automatically; treat those checkpoints as handoff hints and avoid repeating already successful extraction or setup steps.',
-      'For long tasks, treat context as a working window rather than durable storage. Process one bounded chunk at a time, call update_progress after durable chunks, and keep ordinary assistant text short until final delivery.',
-      'Do not write full intermediate tables, large drafts, long logs, or raw reasoning into assistant content. If a large result must persist, write or update a file/artifact and keep only its reference, counts, decisions, open questions, and next action in progress/work memory.',
+      'The runtime may save compact progress/tool checkpoints automatically; treat those checkpoints as handoff hints and avoid repeating already successful extraction or setup steps.',
+      'For long tasks, treat context as a working window rather than durable storage. Process one bounded chunk at a time, persist requested deliverables with real file/edit/command tools, and keep ordinary assistant text short until final delivery.',
+      'Do not write full intermediate tables, large drafts, long logs, or raw reasoning into assistant content. If a large user-visible result must persist, write or update a real workspace file and keep only its path, counts, decisions, open questions, and next action in work memory.',
     'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
     ].join('\n'),
     `Primary response locale: ${localeLabel} (${locale}).`,
@@ -505,10 +504,10 @@ export function buildDefaultAgentPromptBlocks(
     'For multi-step, ambiguous, or stateful work, call todo_write with a short checklist and keep it current. Each todo content must be a concise user-visible step title within 20 Chinese characters or 8 English words; express only the core action, and put details, acceptance criteria, risks, and explanations in successCriteria or verification. Use top-level todo items for user-visible execution tasks only. Put each step acceptance details in successCriteria, and put hidden per-step verification details in verification. Do not create top-level verification-only todo items unless the user explicitly asks for a standalone verification task. Do not create a plan for trivial one-step work.',
     'When a todo step needs verification, complete the execution and then verify it with an appropriate mounted tool before marking that todo completed. Mark verification.status as completed only when the current run produced direct evidence.',
     routeState?.answerMode === 'execute'
-      ? 'Execution-mode contract: the user expects concrete work, not another planning pass. todo_write, reading files, and explaining intent are coordination/context only; they do not satisfy an execution step by themselves. After a plan/todo update, move to the concrete tool that creates, edits, runs, verifies, or persists the requested output. If the requested output is large, create the smallest durable file or artifact first, then extend it in bounded chunks.'
+      ? 'Execution-mode contract: the user expects concrete work, not another planning pass. todo_write, reading files, and explaining intent are coordination/context only; they do not satisfy an execution step by themselves. After a plan/todo update, move to the concrete tool that creates, edits, runs, verifies, or persists the requested output. If the requested output is large, create the smallest durable file first, then extend it in bounded chunks.'
       : null,
     routeState?.answerMode === 'execute'
-      ? 'For large generated deliverables such as HTML prototypes, PRDs, slide decks, reports, or converted documents, avoid a single huge tool-call argument. Persist a compact scaffold or artifact first, then continue with bounded edits/chunks and checkpoints.'
+      ? 'For large generated deliverables such as HTML prototypes, PRDs, slide decks, reports, or converted documents, avoid a single huge tool-call argument. Persist a compact workspace file scaffold first, then continue with bounded edits and checkpoints.'
       : null,
     'Use tools when they materially reduce uncertainty or let you complete the user request. The mounted tool list is the source of truth for this turn.',
     'If a needed capability is not obvious and tool_search is mounted, inspect the current tool catalog before claiming the capability is unavailable.',
@@ -535,9 +534,9 @@ export function buildDefaultAgentPromptBlocks(
       buildReasoningInstruction(settings),
       [
         'Work memory discipline: reasoning and scratchpad text are temporary process, not reusable task memory.',
-        'When a stage produces reusable synthesized outcomes that are not already obvious from a tool result, such as implementation decisions, verification results, open questions, or a compact next-step handoff, call record_work_memory with a short structured artifact.',
-        'For long tasks, treat context as a working window rather than durable storage. Process one bounded chunk at a time, call update_progress after durable chunks, and keep ordinary assistant text short until final delivery.',
-        'Do not write full intermediate tables, large drafts, long logs, or raw reasoning into assistant content. If a large result must persist, write or update a file/artifact and keep only its reference, counts, decisions, open questions, and next action in progress/work memory.',
+        'The runtime may save compact progress/tool checkpoints automatically; treat those checkpoints as handoff hints and avoid repeating already successful extraction or setup steps.',
+        'For long tasks, treat context as a working window rather than durable storage. Process one bounded chunk at a time, persist requested deliverables with real file/edit/command tools, and keep ordinary assistant text short until final delivery.',
+        'Do not write full intermediate tables, large drafts, long logs, or raw reasoning into assistant content. If a large user-visible result must persist, write or update a real workspace file and keep only its path, counts, decisions, open questions, and next action in work memory.',
         'Do not record generic plans, raw chain-of-thought, speculative mid-stream thoughts, or obvious facts. Mark incomplete but useful artifacts as draft, and mark unverified assumptions as assumption.',
       ].join('\n'),
     ].join('\n\n'),

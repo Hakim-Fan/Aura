@@ -235,9 +235,7 @@ export type CapabilityUsageSnapshot = {
   mcpServers: CapabilityUsageEntry[]
 }
 
-export type AgentArchitectureMode =
-  | 'default-agent'
-  | 'orchestrated'
+export type AgentArchitectureMode = 'default-agent'
 
 export type UserCustomInstructions = {
   workRules: string

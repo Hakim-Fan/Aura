@@ -32,20 +32,15 @@ function safeNumber(value) {
 }
 
 export function normalizeAgentArchitectureMode(value) {
-  const normalized = safeString(value).toLowerCase()
-  return normalized === 'orchestrated' ? 'orchestrated' : 'default-agent'
+  safeString(value)
+  return 'default-agent'
 }
 
 export function resolveAgentExecutionMode(settings = {}) {
-  const architectureMode = normalizeAgentArchitectureMode(settings?.agentArchitectureMode)
-  const requestedArchitectureMode = architectureMode
-  const effectiveAgentMode = architectureMode === 'orchestrated'
-    ? 'orchestrated'
-    : 'default-agent'
-  const pathMode =
-    architectureMode === 'orchestrated'
-      ? 'long'
-      : 'default'
+  const requestedArchitectureMode = safeString(settings?.agentArchitectureMode) || 'default-agent'
+  const architectureMode = 'default-agent'
+  const effectiveAgentMode = 'default-agent'
+  const pathMode = 'default'
   const fallbackToLegacy =
     false
 
@@ -169,7 +164,7 @@ export function buildMetricsSummaryDetails(result = {}, logger, status = 'comple
     checkpointCount: resultCheckpointCount ?? graphCheckpoints.length,
     recoveryCount: resultRecoveryCount ?? recoveryCount,
     recovered,
-    graphState: result?.graphState || result?.stepRuntime?.state,
+    graphState: result?.graphState,
     graphExecutionCount: graphExecutions.length,
     graphCompletionReason: result?.graphCompletion?.reason,
     graphNextAction: result?.graphCompletion?.nextAction,

@@ -1230,42 +1230,6 @@ export function inferRouteState(messages, options = {}) {
   return inferRouteStateFromKeywords(messages, options.settings)
 }
 
-export function selectAgentStrategy(classification, hardSignals = {}, options = {}) {
-  let chain = 'default-agent'
-  let reason = 'default-fast-path'
-
-  if (hardSignals.forceOrchestrated === true) {
-    chain = 'orchestrated'
-    reason = 'forced-by-hard-signal'
-  } else if (!classification) {
-    reason = 'keyword-fallback'
-  } else if (classification.confidence === 'low') {
-    reason = 'low-confidence-default'
-  } else if (
-    classification.taskComplexity === 'high' &&
-    classification.planDepth !== 'single_step'
-  ) {
-    chain = 'orchestrated'
-    reason = 'high-complexity'
-  } else if (
-    classification.answerMode === 'execute' &&
-    classification.planDepth === 'long_horizon'
-  ) {
-    chain = 'orchestrated'
-    reason = 'long-horizon-execution'
-  }
-
-  if (chain === 'orchestrated' && options.orchestratedAvailable === false) {
-    return {
-      chain: 'default-agent',
-      requestedChain: 'orchestrated',
-      reason: 'orchestrated-unavailable-fallback',
-    }
-  }
-
-  return { chain, reason }
-}
-
 export function getRouteEscalationTargets(routeState, options = {}) {
   if (!routeState || !Array.isArray(routeState.allowEscalationTo)) {
     return []

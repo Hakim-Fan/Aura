@@ -10,10 +10,10 @@ import {
   wrapAgentRuntimeHooks,
 } from './agentRuntimeLogs.mjs'
 
-test('normalizeAgentArchitectureMode only exposes default-agent and orchestrated', () => {
+test('normalizeAgentArchitectureMode only exposes default-agent', () => {
   assert.equal(normalizeAgentArchitectureMode(undefined), 'default-agent')
   assert.equal(normalizeAgentArchitectureMode('default-agent'), 'default-agent')
-  assert.equal(normalizeAgentArchitectureMode('orchestrated'), 'orchestrated')
+  assert.equal(normalizeAgentArchitectureMode('orchestrated'), 'default-agent')
   assert.equal(normalizeAgentArchitectureMode('unexpected'), 'default-agent')
 })
 
@@ -27,9 +27,9 @@ test('resolveAgentExecutionMode uses default-agent as the main execution core', 
   })
   assert.deepEqual(resolveAgentExecutionMode({ agentArchitectureMode: 'orchestrated' }), {
     requestedArchitectureMode: 'orchestrated',
-    architectureMode: 'orchestrated',
-    effectiveAgentMode: 'orchestrated',
-    pathMode: 'long',
+    architectureMode: 'default-agent',
+    effectiveAgentMode: 'default-agent',
+    pathMode: 'default',
     fallbackToLegacy: false,
   })
 })
@@ -181,7 +181,6 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
     checkpointId: 'checkpoint-1',
     checkpointCount: 2,
     reason: 'step_completed',
-    state: 'CHECKPOINT_AND_HANDOFF',
     planId: 'plan-1',
     subtaskId: 'step-1',
     checkpointKind: 'default_agent_progress',
@@ -225,7 +224,6 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
   const checkpointRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.checkpoint.created')
   assert.equal(checkpointRuntimeEvent.details.checkpointId, 'checkpoint-1')
   assert.equal(checkpointRuntimeEvent.details.checkpointCount, 2)
-  assert.equal(checkpointRuntimeEvent.details.state, 'CHECKPOINT_AND_HANDOFF')
   const recoveryRuntimeEvent = runtimeEvents.find(event => event.event === 'agent.recovery.event')
   assert.equal(recoveryRuntimeEvent.details.code, 'HTTP_400')
   assert.equal(recoveryRuntimeEvent.details.providerStatus, 400)
@@ -290,11 +288,10 @@ test('run finished and error detail helpers expose validation-friendly summaries
   const defaultAgentMetrics = buildMetricsSummaryDetails({
     status: 'completed',
     checkpointCount: 3,
-    stepRuntime: { state: 'FINALIZE' },
     usage: { inputTokens: 5, outputTokens: 2 },
   }, logger)
   assert.equal(defaultAgentMetrics.checkpointCount, 3)
-  assert.equal(defaultAgentMetrics.graphState, 'FINALIZE')
+  assert.equal(defaultAgentMetrics.graphState, undefined)
 
   const error = new Error('Provider failed with a long message')
   error.code = 'PROVIDER_FAILED'

@@ -1919,41 +1919,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
           </section>
 
           {/* <section className="dashboard-card">
-            <div className="section-title">Agent 架构</div>
-            <div className="settings-mode-stack">
-              <label className="toggle-inline">
-                <input
-                  checked={
-                    draftSettings.agentArchitectureMode === 'default-agent'
-                  }
-                  type="radio"
-                  onChange={() => handleSettingsChange('agentArchitectureMode', 'default-agent')}
-                />
-                <div className="flex flex-col">
-                  <strong>标准模式</strong>
-                  <span className="muted">
-                    适合绝大多数任务。会先判断你当前问题需要哪些能力，再按需挂载最小工具集，直接开始解决问题，速度更快也更稳。
-                  </span>
-                </div>
-              </label>
-              <label className="toggle-inline disabled">
-                <input
-                  disabled
-                  checked={draftSettings.agentArchitectureMode === 'orchestrated'}
-                  type="radio"
-                  readOnly
-                />
-                <div className="flex flex-col">
-                  <strong>编排模式</strong>
-                  <span className="muted">
-                    面向更复杂的多阶段任务，例如先规划、再执行、再验收的长链路工作。该模式仍在开发中，当前版本暂未开放切换。
-                  </span>
-                </div>
-              </label>
-            </div>
-          </section> */}
-
-          {/* <section className="dashboard-card">
             <div className="section-title">任务轮数</div>
             <p className="muted">
               普通模式下，Agent 每完成一轮“模型判断 + 工具调用 + 继续推理”都会消耗一次轮数。

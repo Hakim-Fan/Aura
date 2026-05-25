@@ -19,7 +19,6 @@ import {
   escalateRouteState,
   getRouteEscalationTargets,
   inferRouteState,
-  selectAgentStrategy,
 } from './agentRouting.mjs'
 import {
   buildSkillPrompt,
@@ -57,7 +56,6 @@ import {
 import {
   buildDeliveryPolicy,
   collectEvidenceFromToolEvents,
-  collectStepEvidenceFromToolEvents,
   deriveCompletionState,
   enforceEvidencePolicy,
 } from './agentEvidence.mjs'
@@ -65,10 +63,6 @@ import { applyCompletionGate } from './completionGate.mjs'
 import { evaluateRuntimeCapabilityContract } from './runtimeCapabilityContract.mjs'
 import { createToolRegistry } from './toolRegistry.mjs'
 import { createToolRouter } from './toolRouter.mjs'
-import {
-  ORCHESTRATED_AGENT_AVAILABLE,
-  runOrchestratedAgent,
-} from './agentModes/orchestrated.mjs'
 import { createExecutionStepIdFactory } from './executionIds.mjs'
 import {
   createCheckpointManager,
@@ -89,23 +83,6 @@ import {
   applyTaskFrameToClassification,
   resolveTaskFrame,
 } from './agent/taskFrame.mjs'
-import {
-  createHybridPlan,
-  runHybridStateGraph,
-} from './agent/stateGraphRuntime.mjs'
-import {
-  createHybridPlanFromModelPlan,
-  planToTaskTree,
-} from './agent/plannerRuntime.mjs'
-import {
-  buildModelPlanningSystemPrompt,
-  buildModelPlanningUserPrompt,
-  parseModelPlanningResult,
-} from './agent/modelPlanningRuntime.mjs'
-import {
-  buildRejectedPlanResult,
-  requestPlanApproval,
-} from './agent/planApprovalRuntime.mjs'
 import { compactVisibleTaskTitle } from './taskTitles.mjs'
 import {
   buildToolFailureContinuationNote,
@@ -1592,8 +1569,6 @@ function summarizeToolOutput(output, maxLength = 220) {
 
 const DEFAULT_AGENT_CHECKPOINT_TOOLS = new Set([
   'apply_patch',
-  'append_artifact_chunk',
-  'create_artifact',
   'edit_file',
   'multi_edit_file',
   'replace_line_range',
@@ -1869,24 +1844,6 @@ function recordPhaseHandoffMemory(context, triggers = [], reason = 'phase_handof
   return memory
 }
 
-function shouldUseDefaultStepRuntime(settings = {}, runtime = {}, classification = {}, taskFrame = {}) {
-  const reasons = Array.isArray(classification?.reasons) ? classification.reasons : []
-  return (
-    settings?.executionMode === 'long-task' ||
-    runtime?.enableStepRuntime === true ||
-    runtime?.modelPlanningResult !== undefined ||
-    taskFrame?.blocksFastPath === true ||
-    taskFrame?.priorExecution ||
-    classification?.pathMode === 'long' ||
-    classification?.complexity === 'complex' ||
-    classification?.hasAttachments === true ||
-    reasons.includes('attachments_present') ||
-    reasons.includes('long_input') ||
-    reasons.includes('complexity_keyword') ||
-    reasons.includes('task_continuation')
-  )
-}
-
 function shouldForceDefaultAgentExecutionRoute(settings = {}, classification = {}, taskFrame = {}) {
   const reasons = Array.isArray(classification?.reasons) ? classification.reasons : []
   return Boolean(
@@ -1916,387 +1873,6 @@ function applyDefaultAgentExecutionRoute(routeState, settings = {}, classificati
   }
 }
 
-const DURABLE_EVIDENCE_TYPES = new Set([
-  'file_mutation',
-  'artifact_present',
-])
-
-const OBSERVABLE_EXECUTION_EVIDENCE_TYPES = new Set([
-  'file_mutation',
-  'artifact_present',
-  'command_output',
-  'test_pass',
-  'verification_passed',
-  'file_verified',
-])
-
-const CONTEXT_ONLY_EVIDENCE_TYPES = new Set([
-  'context_collected',
-  'skill_read',
-  'file_read',
-  'file_parsed',
-  'structured_output',
-  'search_result',
-])
-
-const EXPECTED_OUTCOME_ALIASES = new Map([
-  ['context_read', 'context'],
-  ['context_only', 'context'],
-  ['durable', 'durable_artifact'],
-  ['artifact', 'durable_artifact'],
-  ['file', 'durable_artifact'],
-  ['file_artifact', 'durable_artifact'],
-  ['verify', 'verification'],
-  ['validated', 'verification'],
-  ['answer', 'final_response'],
-  ['response', 'final_response'],
-])
-
-const REQUIRED_EVIDENCE_ALIASES = new Map([
-  ['file_created', 'file_mutation'],
-  ['file_written', 'file_mutation'],
-  ['file_saved', 'file_mutation'],
-  ['file_updated', 'file_mutation'],
-  ['file_modified', 'file_mutation'],
-  ['write_effect', 'file_mutation'],
-  ['artifact_created', 'artifact_present'],
-  ['artifact_written', 'artifact_present'],
-  ['artifact_updated', 'artifact_present'],
-  ['verified', 'verification_passed'],
-  ['file_verified', 'verification_passed'],
-  ['tests_passed', 'test_pass'],
-])
-
-function normalizeEvidenceName(value) {
-  const key = String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, '_')
-  return REQUIRED_EVIDENCE_ALIASES.get(key) || key
-}
-
-function normalizeExpectedOutcome(value, kind = '') {
-  const normalized = String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, '_')
-  const aliased = EXPECTED_OUTCOME_ALIASES.get(normalized) || normalized
-  if (['context', 'durable_artifact', 'verification', 'final_response'].includes(aliased)) {
-    return aliased
-  }
-  if (kind === 'context') return 'context'
-  if (kind === 'verify') return 'verification'
-  if (kind === 'respond') return 'final_response'
-  return ''
-}
-
-function normalizeOutputTarget(value) {
-  if (!value || typeof value !== 'object') return undefined
-  const type = String(value.type || '').replace(/\s+/g, ' ').trim().slice(0, 80)
-  const pathHint = String(value.pathHint || value.path || '').replace(/\s+/g, ' ').trim().slice(0, 260)
-  if (!type && !pathHint) return undefined
-  return { type, pathHint }
-}
-
-function hasAnyEvidence(evidence, allowed) {
-  return evidence.some(item => allowed.has(normalizeEvidenceName(item)))
-}
-
-function stepRequiresDurableEvidence(step = {}) {
-  const evidence = Array.isArray(step?.requiredEvidence) ? step.requiredEvidence : []
-  return (
-    normalizeExpectedOutcome(step?.expectedOutcome, String(step?.kind || '').toLowerCase()) === 'durable_artifact' ||
-    hasAnyEvidence(evidence, DURABLE_EVIDENCE_TYPES)
-  )
-}
-
-function normalizeDefaultStepRequiredEvidence(step = {}) {
-  const provided = (Array.isArray(step?.requiredEvidence) ? step.requiredEvidence : [])
-    .map(normalizeEvidenceName)
-    .filter(Boolean)
-  const evidence = new Set(provided)
-
-  const kind = String(step?.kind || step?.type || '').toLowerCase()
-  const expectedOutcome = normalizeExpectedOutcome(
-    step?.expectedOutcome || step?.expected_outcome || step?.outcome,
-    kind,
-  )
-  if (expectedOutcome === 'durable_artifact' && !hasAnyEvidence([...evidence], DURABLE_EVIDENCE_TYPES)) {
-    evidence.add('file_mutation')
-  }
-  if (expectedOutcome === 'verification' && !hasAnyEvidence([...evidence], new Set(['verification_passed', 'test_pass', 'file_verified']))) {
-    evidence.add('verification_passed')
-  }
-  if (expectedOutcome === 'final_response' && evidence.size === 0) {
-    evidence.add('final_answer')
-  }
-  if (kind === 'verify' && evidence.size === 0) {
-    evidence.add('verification_passed')
-  }
-  if (kind === 'respond' && evidence.size === 0) {
-    evidence.add('final_answer')
-  }
-
-  return [...evidence].slice(0, 8)
-}
-
-function buildDefaultStepExecutionContract(step = {}) {
-  const required = new Set(
-    (Array.isArray(step?.requiredEvidence) ? step.requiredEvidence : [])
-      .map(normalizeEvidenceName)
-      .filter(Boolean),
-  )
-  const needsFileOrArtifact =
-    required.has('file_mutation') ||
-    required.has('artifact_present') ||
-    stepRequiresDurableEvidence(step)
-
-  if (!needsFileOrArtifact) {
-    return ''
-  }
-
-  return [
-    'Execution contract for this selected step:',
-    '- This step requires durable file/artifact evidence before it can be treated as complete.',
-    '- Do not answer with another plan, status report, or todo-only update.',
-    '- Do not call todo_write as the only action in this step.',
-    '- Your next concrete action should call one of: write_file, apply_patch, edit_file, multi_edit_file, replace_line_range, create_artifact, append_artifact_chunk, or a shell command when a conversion/build/export tool naturally generates the target file.',
-    '- If the full output is large, do not attempt one giant tool-call payload. First write a small runnable/inspectable skeleton or draft artifact, then continue by appending or editing bounded chunks.',
-    '- For large generated deliverables, the first write should be a compact scaffold with the target file/path and essential structure only; later turns can fill sections incrementally.',
-  ].join('\n')
-}
-
-function normalizeDefaultStepPlan(planningResult = {}) {
-  const planning = planningResult?.planning || planningResult
-  const steps = Array.isArray(planning?.steps) ? planning.steps : []
-  const normalizedSteps = steps
-    .map((step, index) => {
-      const kind = String(step?.kind || step?.type || 'execute').trim() || 'execute'
-      const expectedOutcome = normalizeExpectedOutcome(
-        step?.expectedOutcome || step?.expected_outcome || step?.outcome,
-        kind.toLowerCase(),
-      )
-      const requiredEvidence = normalizeDefaultStepRequiredEvidence({
-        ...step,
-        kind,
-        expectedOutcome,
-      })
-      const shouldRequireObservableExecution =
-        kind.toLowerCase() === 'execute' &&
-        !hasAnyEvidence(requiredEvidence, OBSERVABLE_EXECUTION_EVIDENCE_TYPES)
-      if (shouldRequireObservableExecution) {
-        requiredEvidence.push('file_mutation')
-      }
-      const effectiveExpectedOutcome = expectedOutcome ||
-        (shouldRequireObservableExecution ? 'durable_artifact' : '')
-      return {
-        id: String(step?.id || `step-${index + 1}`).trim() || `step-${index + 1}`,
-        title: String(step?.description || step?.title || step?.summary || `Step ${index + 1}`)
-          .replace(/\s+/g, ' ')
-          .trim()
-          .slice(0, 120),
-        kind,
-        expectedOutcome: effectiveExpectedOutcome,
-        outputTarget: normalizeOutputTarget(step?.outputTarget || step?.output_target),
-        acceptance: String(step?.acceptance || step?.acceptanceCriteria || step?.validation || '')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .slice(0, 260),
-        requiredEvidence: [...new Set(requiredEvidence)].slice(0, 8),
-        status: 'pending',
-        attempts: 0,
-        durableStallCount: 0,
-        toolEventStartIndex: 0,
-        checkpointId: undefined,
-        completedAt: undefined,
-      }
-    })
-    .filter(step => step.title)
-
-  if (normalizedSteps.length === 0) {
-    return null
-  }
-
-  return {
-    enabled: true,
-    state: 'PLAN',
-    goal: String(planning?.goal || 'Complete the user request').replace(/\s+/g, ' ').trim(),
-    steps: normalizedSteps.slice(0, 8),
-    currentIndex: 0,
-    planning,
-    planningReasoning: planningResult?.planningReasoning,
-    createdAt: Date.now(),
-  }
-}
-
-function currentDefaultStep(stepRuntime) {
-  if (!stepRuntime?.enabled) return null
-  return stepRuntime.steps[stepRuntime.currentIndex] || null
-}
-
-function buildDefaultStepRuntimePrompt(stepRuntime, context = {}) {
-  const step = currentDefaultStep(stepRuntime)
-  if (!step) return ''
-  const completed = stepRuntime.steps
-    .filter(entry => entry.status === 'completed')
-    .map(entry => `${entry.id}: ${entry.title}`)
-  const artifacts = summarizeRuntimeArtifacts(context).slice(-8)
-  const executionContract = buildDefaultStepExecutionContract(step)
-  return [
-    'Default-agent step runtime is active. Execute only the selected plan step in this model turn.',
-    `State: EXECUTE_STEP`,
-    `Goal: ${stepRuntime.goal}`,
-    `Selected step ${stepRuntime.currentIndex + 1}/${stepRuntime.steps.length}: ${step.id} - ${step.title}`,
-    step.kind ? `Step kind: ${step.kind}` : null,
-    step.expectedOutcome ? `Expected outcome: ${step.expectedOutcome}` : null,
-    step.acceptance ? `Completion criteria: ${step.acceptance}` : null,
-    step.requiredEvidence.length > 0 ? `Required evidence: ${step.requiredEvidence.join(', ')}` : null,
-    completed.length > 0 ? `Completed earlier steps: ${completed.join('; ')}` : null,
-    artifacts.length > 0 ? `Available artifact refs: ${JSON.stringify(artifacts)}` : null,
-    executionContract || null,
-    'Do not continue into later plan steps in this turn. Produce or verify the selected step output, then stop with a concise status.',
-  ].filter(Boolean).join('\n')
-}
-
-function evidenceFromToolEvents(toolEvents = [], startIndex = 0) {
-  return collectStepEvidenceFromToolEvents(toolEvents, startIndex)
-}
-
-function observedHasDurableProgress(observed) {
-  return hasAnyEvidence(observed?.evidence || [], DURABLE_EVIDENCE_TYPES)
-}
-
-function observedIsOnlyContextProgress(observed) {
-  const evidence = (observed?.evidence || [])
-    .map(normalizeEvidenceName)
-    .filter(item => item !== 'execution_performed')
-  return evidence.length > 0 && evidence.every(item => CONTEXT_ONLY_EVIDENCE_TYPES.has(item))
-}
-
-function getStepRequiredEvidence(step = {}) {
-  if (Array.isArray(step.requiredEvidence) && step.requiredEvidence.length > 0) {
-    return step.requiredEvidence.map(normalizeEvidenceName)
-  }
-  if (step.kind === 'verify') return ['verification_passed']
-  if (step.kind === 'respond') return ['final_answer']
-  return ['execution_performed']
-}
-
-function evaluateStepOutcome({ step, result, toolEvents, startIndex }) {
-  if (!step) {
-    return {
-      complete: false,
-      required: [],
-      missing: [],
-      observed: evidenceFromToolEvents(toolEvents, startIndex),
-      durableStall: false,
-      contextOnly: false,
-    }
-  }
-  const observed = evidenceFromToolEvents(toolEvents, startIndex)
-  const evidence = new Set(observed.evidence)
-  if (String(result?.message || '').trim()) evidence.add('final_answer')
-  const required = getStepRequiredEvidence(step)
-  const missing = required.filter(item => !evidence.has(item))
-  const complete =
-    missing.length === 0 ||
-    (step.kind === 'respond' && String(result?.message || '').trim())
-
-  return {
-    complete,
-    required,
-    missing,
-    observed,
-    durableStall: stepRequiresDurableEvidence(step) && !observedHasDurableProgress(observed),
-    contextOnly: observedIsOnlyContextProgress(observed),
-  }
-}
-
-function isDefaultStepComplete({ step, result, toolEvents, startIndex }) {
-  return evaluateStepOutcome({ step, result, toolEvents, startIndex }).complete
-}
-
-function buildDefaultStepContinuationMessage(stepRuntime, step, result, toolEvents, startIndex) {
-  const observed = evidenceFromToolEvents(toolEvents, startIndex)
-  return {
-    role: 'user',
-    content: [
-      `Step ${step.id} completed: ${step.title}`,
-      step.acceptance ? `Acceptance: ${step.acceptance}` : null,
-      observed.evidence.length > 0 ? `Evidence: ${observed.evidence.join(', ')}` : null,
-      observed.successful.length > 0
-        ? `Successful tools: ${observed.successful.map(event => event.name).join(', ')}`
-        : null,
-      result?.message ? `Step result summary: ${summarizeToolOutput(result.message, 900)}` : null,
-      currentDefaultStep(stepRuntime)
-        ? 'Continue with the next selected step only.'
-        : 'All planned steps are completed. Prepare the final answer.',
-    ].filter(Boolean).join('\n'),
-  }
-}
-
-function buildDefaultStepIncompleteMessage(step, toolEvents, startIndex) {
-  const outcome = evaluateStepOutcome({
-    step,
-    result: {},
-    toolEvents,
-    startIndex,
-  })
-  const { observed, required, missing, durableStall, contextOnly } = outcome
-  const executionContract = buildDefaultStepExecutionContract(step)
-
-  return {
-    role: 'user',
-    content: [
-      `Step ${step.id} is not complete yet: ${step.title}`,
-      step.acceptance ? `Completion criteria: ${step.acceptance}` : null,
-      step.expectedOutcome ? `Expected outcome: ${step.expectedOutcome}` : null,
-      required.length > 0 ? `Required evidence: ${required.join(', ')}` : null,
-      observed.evidence.length > 0 ? `Observed evidence so far: ${observed.evidence.join(', ')}` : null,
-      missing.length > 0 ? `Missing evidence: ${missing.join(', ')}` : null,
-      observed.successful.length > 0
-        ? `Recent successful tools: ${observed.successful.map(event => event.name).join(', ')}`
-        : null,
-      executionContract || null,
-      durableStall
-        ? [
-            'Durable-progress recovery:',
-            '- The current step has not produced a checkable file/artifact yet.',
-            '- Do not repeat the same plan, todo-only update, or read-only inspection.',
-            '- Replan only this current step into the smallest action that leaves durable evidence.',
-            '- The next action should produce or modify a file/artifact, or run a command that naturally creates the target output.',
-          ].join('\n')
-        : contextOnly
-          ? 'The recent progress is context-only. Continue with a concrete observable action, not more planning.'
-          : null,
-      'Continue this same selected step only. Do not move to later steps.',
-    ].filter(Boolean).join('\n'),
-  }
-}
-
-function defaultStepRuntimeSnapshot(stepRuntime) {
-  if (!stepRuntime?.enabled) return undefined
-  return {
-    goal: stepRuntime.goal,
-    state: stepRuntime.currentIndex >= stepRuntime.steps.length ? 'FINALIZE' : stepRuntime.state,
-    currentIndex: stepRuntime.currentIndex,
-    steps: stepRuntime.steps.map(step => ({
-      id: step.id,
-      title: step.title,
-      kind: step.kind,
-      status: step.status,
-      attempts: step.attempts,
-      durableStallCount: step.durableStallCount,
-      checkpointId: step.checkpointId,
-      completedAt: step.completedAt,
-      expectedOutcome: step.expectedOutcome,
-      outputTarget: step.outputTarget,
-      acceptance: step.acceptance,
-      requiredEvidence: step.requiredEvidence,
-    })),
-  }
-}
-
 function isProviderStreamStallError(normalized = {}, retryInfo = {}) {
   const values = [
     normalized.code,
@@ -2322,7 +1898,6 @@ function buildCheckpointContinuationPrompt({
   partialReasoning = '',
   partialToolCalls = [],
   error,
-  stepRuntime,
 } = {}) {
   const checkpointSummary = checkpoint
     ? {
@@ -2334,15 +1909,11 @@ function buildCheckpointContinuationPrompt({
     : null
   const artifacts = summarizeRuntimeArtifacts(context)
   const recentTools = toolEvents.slice(-8).map(compactCheckpointToolEvent)
-  const progress = context?.progressLedger || null
-  const checkpointStepRuntime = checkpoint?.contextSnapshot?.runtime?.stepRuntime
-  const activeStepRuntime = stepRuntime || checkpointStepRuntime
-  const activeStep = activeStepRuntime?.steps?.[activeStepRuntime.currentIndex]
   const partialToolCallSummaries = Array.isArray(partialToolCalls)
     ? partialToolCalls.slice(0, 8)
     : []
   const stalledDuringMutationTool = partialToolCallSummaries.some(entry =>
-    ['write_file', 'apply_patch', 'edit_file', 'multi_edit_file', 'replace_line_range', 'create_artifact', 'append_artifact_chunk']
+    ['write_file', 'apply_patch', 'edit_file', 'multi_edit_file', 'replace_line_range']
       .includes(String(entry?.name || '')),
   )
   const workMemories = Array.isArray(context?.workMemories)
@@ -2360,27 +1931,18 @@ function buildCheckpointContinuationPrompt({
     '上一次模型流式输出在长时间无新 chunk 后中断。不要从头开始，基于最近 checkpoint 和已完成成果继续。',
     '',
     '恢复规则：',
-    '- 先复用已完成工具结果、runtime artifacts、已写文件和 progress ledger。',
+    '- 先复用已完成工具结果、runtime artifacts、已写文件和 work memory。',
     '- 不要重新执行已经成功且仍可复用的转换、生成、导出或验证步骤。',
     '- 如果需要精确的大输出内容，优先调用 read_artifact_slice 读取必要片段。',
-    '- 继续执行下一个最小可观察步骤；如果当前步骤要求文件/产物证据，优先调用写入、编辑、artifact 或验证工具，不要只更新 todo 或继续解释计划。',
+    '- 继续执行下一个最小可观察步骤；如果用户要求文件/代码产物，优先调用写入、编辑或验证工具，不要只更新 todo 或继续解释计划。',
     stalledDuringMutationTool
-      ? '- 注意：上次中断时模型已经开始生成写入/产物工具调用但没有闭合执行。不要重试一次性生成完整大文件参数；这次先调用 write_file/create_artifact 写一个小而可检查的骨架，然后用 apply_patch/edit_file/append_artifact_chunk 分块补全。'
+      ? '- 注意：上次中断时模型已经开始生成写入工具调用但没有闭合执行。不要重试一次性生成完整大文件参数；这次先调用 write_file 写一个小而可检查的骨架，然后用 apply_patch/edit_file 分块补全。'
       : null,
     '- 如果成果已经足够，整理最终回答；否则不要用普通文字假装完成。',
     '',
     checkpointSummary ? `最近 checkpoint:\n${JSON.stringify(checkpointSummary, null, 2)}` : null,
-    activeStep
-      ? `当前选中步骤恢复合约:\n${JSON.stringify({
-        state: activeStepRuntime?.state || 'EXECUTE_STEP',
-        currentIndex: activeStepRuntime?.currentIndex,
-        step: activeStep,
-        executionContract: buildDefaultStepExecutionContract(activeStep) || undefined,
-      }, null, 2)}`
-      : null,
     artifacts.length > 0 ? `可复用 artifacts:\n${JSON.stringify(artifacts, null, 2)}` : null,
     recentTools.length > 0 ? `最近工具结果摘要:\n${JSON.stringify(recentTools, null, 2)}` : null,
-    progress ? `当前 progress ledger:\n${JSON.stringify(progress, null, 2)}` : null,
     workMemories.length > 0 ? `可复用 work memory:\n${JSON.stringify(workMemories, null, 2)}` : null,
     partialToolCallSummaries.length > 0
       ? `中断前已开始但未完成执行的工具调用摘要:\n${JSON.stringify(partialToolCallSummaries, null, 2)}`
@@ -2406,7 +1968,6 @@ function buildCheckpointContinuationMessages({
   partialReasoning,
   partialToolCalls,
   error,
-  stepRuntime,
 } = {}) {
   const nextMessages = [...messages]
   const cleanedPartial = stripInlineToolCallText(partialMessage || '').trim()
@@ -2426,7 +1987,6 @@ function buildCheckpointContinuationMessages({
       partialReasoning,
       partialToolCalls,
       error,
-      stepRuntime,
     }),
   })
   return nextMessages
@@ -2434,11 +1994,6 @@ function buildCheckpointContinuationMessages({
 
 export const __testInternals = {
   buildCheckpointContinuationMessages,
-  buildDefaultStepIncompleteMessage,
-  evidenceFromToolEvents,
-  evaluateStepOutcome,
-  isDefaultStepComplete,
-  normalizeDefaultStepPlan,
 }
 
 function buildToolCallOnlyFallbackMessage(toolEvents) {
@@ -2995,7 +2550,6 @@ export async function runDefaultAgent(request) {
   })
   let checkpointId = null
   let checkpointCount = 0
-  let stepRuntime = null
 
   function createDefaultAgentCheckpoint(reason, metadata = {}) {
     const snapshot = checkpointManager.createSnapshot({
@@ -3006,9 +2560,7 @@ export async function runDefaultAgent(request) {
       taskTree: taskTracker.getTree(),
       runtime: {
         artifacts: summarizeRuntimeArtifacts(context),
-        progress: context.progressLedger || null,
         latestContextCompression: getLatestContextCompression(),
-        stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
         reason,
         triggers: metadata.triggers,
       },
@@ -3035,7 +2587,6 @@ export async function runDefaultAgent(request) {
       checkpointId,
       reason,
       checkpointCount,
-      state: stepRuntime?.state,
       stepId: checkpoint.stepId,
       planId: activePlanStep?.planId,
       subtaskId: activePlanStep?.subtaskId,
@@ -3063,71 +2614,9 @@ export async function runDefaultAgent(request) {
     })
   }
 
-  if (shouldUseDefaultStepRuntime(settings, runtime, normalizedClassification, taskFrame)) {
-    const planningGate = await runModelPlanningGate({
-      request: {
-        ...request,
-        messages,
-        settings,
-        hooks,
-        carryoverContext,
-      },
-      classification: normalizedClassification || {},
-      taskFrame,
-    })
-    if (planningGate?.type === 'direct_answer') {
-      taskTracker.completeTask(currentTaskId, '生成直接回答')
-      return {
-        ...planningGate.result,
-        usage: getAccumulatedUsage() || planningGate.result?.usage,
-        contextCompression: getLatestContextCompression(),
-        agentMode: 'default-agent',
-        routeDecision: lastRouteDecision,
-        reasoning: planningGate.planningReasoning?.content ? [planningGate.planningReasoning] : [],
-        workMemories: context.workMemories,
-        status: 'completed',
-        taskTree: taskTracker.getTree(),
-        checkpointId,
-        checkpointCount,
-        stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
-      }
-    }
-    stepRuntime = normalizeDefaultStepPlan(planningGate)
-    if (stepRuntime?.enabled) {
-      hooks?.onTaskTree?.(planToTaskTree(planningGate.plan))
-      hooks?.onReasoningDelta?.(
-        `步骤状态机已启动：${stepRuntime.steps.length} 个计划步骤。`,
-        {
-          blockId: typeof hooks?.createExecutionStepId === 'function'
-            ? hooks.createExecutionStepId('reasoning', 'step-runtime')
-            : 'default-step-runtime',
-          kind: 'summary',
-          order: -70,
-          createdAt: Date.now(),
-        },
-      )
-    }
-  }
-
   try {
-    const maxDefaultAgentPasses = stepRuntime?.enabled
-      ? Math.max(1, stepRuntime.steps.length * 2)
-      : 1
+    const maxDefaultAgentPasses = MAX_ROUTE_RUNTIME_PASSES
     for (let pass = 0; pass < maxDefaultAgentPasses; pass += 1) {
-      createDefaultAgentCheckpoint('pass_started', {
-        pass,
-        stepId: `pass-${pass}`,
-        checkpointKind: 'default_agent_pass_start',
-      })
-      const activeStep = currentDefaultStep(stepRuntime)
-      if (stepRuntime?.enabled && !activeStep) {
-        stepRuntime.state = 'FINALIZE'
-        break
-      }
-      if (activeStep) {
-        stepRuntime.state = 'SELECT_NEXT_STEP'
-      }
-
       const availableEscalations = getRouteEscalationTargets(routeState, {
         visitedTiers,
       })
@@ -3186,10 +2675,6 @@ export async function runDefaultAgent(request) {
         ),
         carryoverContext,
       )
-      const stepRuntimePrompt = buildDefaultStepRuntimePrompt(stepRuntime, context)
-      if (stepRuntimePrompt) {
-        lastSystemPrompt = [lastSystemPrompt, stepRuntimePrompt].filter(Boolean).join('\n\n')
-      }
       const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
         lastSystemPrompt,
         context,
@@ -3231,12 +2716,6 @@ export async function runDefaultAgent(request) {
       })
       hooks?.onRouteDecision?.(lastRouteDecision)
       const turnToolEventStart = toolEvents.length
-      if (activeStep) {
-        stepRuntime.state = 'EXECUTE_STEP'
-        activeStep.status = 'running'
-        activeStep.attempts = (activeStep.attempts || 0) + 1
-        activeStep.toolEventStartIndex = turnToolEventStart
-      }
 
       let turnResult
       try {
@@ -3432,57 +2911,6 @@ export async function runDefaultAgent(request) {
         continue
       }
 
-      if (stepRuntime?.enabled && activeStep) {
-        stepRuntime.state = 'OBSERVE'
-        const stepCompleted = isDefaultStepComplete({
-          step: activeStep,
-          result,
-          toolEvents,
-          startIndex: turnToolEventStart,
-        })
-        stepRuntime.state = 'CHECK_COMPLETION'
-        messages = turnResult.resolvedMessages || messages
-
-        if (stepCompleted) {
-          activeStep.status = 'completed'
-          activeStep.completedAt = Date.now()
-          activeStep.durableStallCount = 0
-          stepRuntime.state = 'CHECKPOINT_AND_HANDOFF'
-          const stepCheckpoint = createCheckpointForRecoverableProgress('step_completed', turnToolEventStart, {
-            force: true,
-            stepId: activeStep.id,
-            stepTitle: activeStep.title,
-          })
-          activeStep.checkpointId = stepCheckpoint?.id || checkpointId
-          stepRuntime.currentIndex += 1
-          const nextStep = currentDefaultStep(stepRuntime)
-          messages.push(buildDefaultStepContinuationMessage(
-            stepRuntime,
-            activeStep,
-            result,
-            toolEvents,
-            turnToolEventStart,
-          ))
-          if (nextStep) {
-            nextStep.status = 'pending'
-            hooks?.onPhaseChange?.('preparing')
-            continue
-          }
-        } else if ((activeStep.attempts || 0) < 3) {
-          const observed = evidenceFromToolEvents(toolEvents, turnToolEventStart)
-          if (stepRequiresDurableEvidence(activeStep) && !observedHasDurableProgress(observed)) {
-            activeStep.durableStallCount = (activeStep.durableStallCount || 0) + 1
-          }
-          messages.push(buildDefaultStepIncompleteMessage(
-            activeStep,
-            toolEvents,
-            turnToolEventStart,
-          ))
-          hooks?.onPhaseChange?.('preparing')
-          continue
-        }
-      }
-
       const summaryReasoning = summarizeReasoning(
         turnResult.resolvedMessages,
         toolEvents,
@@ -3516,7 +2944,6 @@ export async function runDefaultAgent(request) {
         taskTree: taskTracker.getTree(),
         checkpointId,
         checkpointCount,
-        stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
       }
     }
 
@@ -3553,8 +2980,6 @@ export async function runDefaultAgent(request) {
       })
     }
 
-    let stepRuntimeRecoveryBlocked = false
-
     if (
       normalized.source === 'provider' &&
       hasRecoveryContext &&
@@ -3590,7 +3015,6 @@ export async function runDefaultAgent(request) {
             partialReasoning: resumePartialReasoning,
             partialToolCalls: resumePartialToolCalls,
             error: resumeErrorForAttempt,
-            stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
           })
           createDefaultAgentCheckpoint(
             resumeAttempt === 0 ? 'before_checkpoint_resume' : 'before_checkpoint_resume_retry',
@@ -3646,63 +3070,6 @@ export async function runDefaultAgent(request) {
             ...applyCompletionGate(resumedResult, lastPromptRouteState),
             recovered: true,
           }
-          if (stepRuntime?.enabled) {
-            const activeStep = currentDefaultStep(stepRuntime)
-            if (activeStep) {
-              const resumedMessages = resumedTurn.resolvedMessages || continuationMessages
-              const stepCompleted = isDefaultStepComplete({
-                step: activeStep,
-                result: resumedResult,
-                toolEvents,
-                startIndex: continuationToolEventStart,
-              })
-              messages = resumedMessages
-
-              if (stepCompleted) {
-                activeStep.status = 'completed'
-                activeStep.completedAt = Date.now()
-                activeStep.durableStallCount = 0
-                const stepCheckpoint = createCheckpointForRecoverableProgress('step_completed_after_resume', continuationToolEventStart, {
-                  force: true,
-                  stepId: activeStep.id,
-                  stepTitle: activeStep.title,
-                })
-                activeStep.checkpointId = stepCheckpoint?.id || checkpointId
-                stepRuntime.currentIndex += 1
-                const nextStep = currentDefaultStep(stepRuntime)
-                if (nextStep) {
-                  nextStep.status = 'pending'
-                  messages.push(buildDefaultStepContinuationMessage(
-                    stepRuntime,
-                    activeStep,
-                    resumedResult,
-                    toolEvents,
-                    continuationToolEventStart,
-                  ))
-                  if (resumeAttempt + 1 < maxCheckpointResumeAttempts) {
-                    continue
-                  }
-                  stepRuntimeRecoveryBlocked = true
-                  break
-                }
-              } else {
-                const observed = evidenceFromToolEvents(toolEvents, continuationToolEventStart)
-                if (stepRequiresDurableEvidence(activeStep) && !observedHasDurableProgress(observed)) {
-                  activeStep.durableStallCount = (activeStep.durableStallCount || 0) + 1
-                }
-                messages.push(buildDefaultStepIncompleteMessage(
-                  activeStep,
-                  toolEvents,
-                  continuationToolEventStart,
-                ))
-                if (resumeAttempt + 1 < maxCheckpointResumeAttempts) {
-                  continue
-                }
-                stepRuntimeRecoveryBlocked = true
-                break
-              }
-            }
-          }
           const summaryReasoning = summarizeReasoning(
             resumedTurn.resolvedMessages || continuationMessages,
             toolEvents,
@@ -3736,7 +3103,6 @@ export async function runDefaultAgent(request) {
             taskTree: taskTracker.getTree(),
             checkpointId,
             checkpointCount,
-            stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
           }
         } catch (resumeError) {
           const resumeNormalized = normalizeAgentError(resumeError)
@@ -3772,7 +3138,7 @@ export async function runDefaultAgent(request) {
       }
     }
 
-    if (normalized.source === 'provider' && hasRecoveryContext && !stepRuntimeRecoveryBlocked) {
+    if (normalized.source === 'provider' && hasRecoveryContext) {
       let recoveryRetryInfo
       const recoveryCompletionContext = buildCompletionContext(
         routeState,
@@ -3917,7 +3283,6 @@ export async function runDefaultAgent(request) {
         taskTree: taskTracker.getTree(),
         checkpointId,
         checkpointCount,
-        stepRuntime: defaultStepRuntimeSnapshot(stepRuntime),
       }
     }
 
@@ -4031,247 +3396,6 @@ async function runFastPathAgent(request, classification, taskFrame) {
   }
 }
 
-function buildDirectPlanningAnswerResult(planning, classification, taskFrame) {
-  return {
-    status: 'completed',
-    message: planning.answer || '',
-    toolEvents: [],
-    taskTree: [],
-    reasoning: [],
-    completionState: 'not_executed',
-    agentMode: 'default-agent',
-    pathMode: 'fast',
-    routeDecision: {
-      answerMode: 'advise',
-      capabilityTier: 'none',
-      budgets: {},
-      allowEscalationTo: [],
-      availableEscalations: [],
-      escalationCount: 0,
-      tierHistory: ['none'],
-      stopReason: 'direct_answer',
-      mountedCapabilities: {
-        skills: [],
-        plugins: [],
-        mcpServers: [],
-        tools: [],
-      },
-    },
-    classifier: classification,
-    taskFrame,
-    planningDecision: planning,
-  }
-}
-
-function createPlanningReasoningEntry(request = {}) {
-  const baseId =
-    request?.logContext?.assistantMessageId ||
-    request?.logContext?.taskId ||
-    `planning-${Date.now().toString(36)}`
-  return {
-    id: `${baseId}-planning-gate`,
-    kind: 'summary',
-    content: '',
-    order: -80,
-    createdAt: Date.now(),
-  }
-}
-
-function appendPlanningReasoning(entry, hooks, line) {
-  if (!entry || !line) {
-    return
-  }
-  const delta = entry.content ? `\n${line}` : line
-  entry.content = entry.content ? `${entry.content}\n${line}` : line
-  hooks?.onReasoningDelta?.(delta, {
-    blockId: entry.id,
-    kind: entry.kind,
-    order: entry.order,
-    createdAt: entry.createdAt,
-  })
-}
-
-function formatPlanningDecisionSummary(planning = {}) {
-  const relation = planning.taskRelation?.type
-  const relationText = relation ? `任务关系 ${relation}` : ''
-  if (planning.type === 'direct_answer') {
-    return ['判断结果：直接回答', relationText]
-      .filter(Boolean)
-      .join(' · ')
-  }
-
-  const stepCount = Array.isArray(planning.steps) ? planning.steps.length : 0
-  return [
-    '判断结果：需要执行计划',
-    planning.risk ? `风险 ${planning.risk}` : '',
-    stepCount > 0 ? `${stepCount} 个步骤` : '',
-    relationText,
-  ]
-    .filter(Boolean)
-    .join(' · ')
-}
-
-function prependReasoningEntry(result, entry) {
-  if (!result || !entry?.content?.trim()) {
-    return result
-  }
-  const reasoning = Array.isArray(result.reasoning) ? result.reasoning : []
-  if (reasoning.some(item => item?.id === entry.id)) {
-    return result
-  }
-  return {
-    ...result,
-    reasoning: [entry, ...reasoning],
-  }
-}
-
-async function runModelPlanningGate({
-  request,
-  classification,
-  taskFrame,
-  logger,
-}) {
-  const settings = request?.settings || {}
-  const hooks = request?.hooks || {}
-  const planningReasoning = createPlanningReasoningEntry(request)
-  appendPlanningReasoning(
-    planningReasoning,
-    hooks,
-    '任务规划判断：正在判断这次请求是否需要长任务、执行计划或直接回答。',
-  )
-  if (request?.runtime?.modelPlanningResult) {
-    const planning = parseModelPlanningResult(
-      typeof request.runtime.modelPlanningResult === 'string'
-        ? request.runtime.modelPlanningResult
-        : JSON.stringify(request.runtime.modelPlanningResult),
-    )
-    logger?.emit?.('agent.planning.resolved', {
-      planner: 'runtime_override',
-      decision: planning.type,
-      risk: planning.risk,
-      stepCount: Array.isArray(planning.steps) ? planning.steps.length : 0,
-      parseError: planning.parseError === true,
-      taskRelationType: planning.taskRelation?.type,
-      taskRelationConfidence: planning.taskRelation?.confidence,
-      contextRequest: planning.contextRequest,
-    })
-    appendPlanningReasoning(planningReasoning, hooks, formatPlanningDecisionSummary(planning))
-    if (planning.type === 'direct_answer') {
-      return {
-        type: 'direct_answer',
-        result: buildDirectPlanningAnswerResult(planning, classification, taskFrame),
-        planning,
-        planningReasoning,
-      }
-    }
-    return {
-      type: 'plan',
-      planning,
-      planningReasoning,
-      plan: createHybridPlanFromModelPlan({
-        modelPlan: planning,
-        request,
-        classification: {
-          ...classification,
-          pathMode: 'long',
-          complexity: 'complex',
-          risk: planning.risk || classification?.risk,
-        },
-      }),
-    }
-  }
-  if (settings?.provider !== 'custom' && !settings?.apiKey?.trim()) {
-    throw createStructuredError('模型调用失败，当前缺少 API Key。', {
-      source: 'provider',
-      category: 'authentication',
-      code: 'MISSING_API_KEY',
-      detail: 'Missing API key.',
-      suggestedAction: '请先在设置页填写可用的 Provider API Key。',
-    })
-  }
-
-  logger?.emit?.('agent.planning.started', {
-    planner: 'model_planning_prompt',
-    priorPathMode: classification?.pathMode,
-    reason: classification?.reason,
-  })
-  hooks?.onPhaseChange?.('planning')
-
-  const planningHooks = {
-    ...hooks,
-    onTextDelta: undefined,
-    onReasoningDelta: undefined,
-  }
-    const planningTurn = await runProviderTurn({
-      settings,
-      systemPrompt: buildModelPlanningSystemPrompt(settings),
-      messages: [
-        {
-          role: 'user',
-          content: buildModelPlanningUserPrompt({
-            messages: request?.messages,
-            settings,
-            carryoverContext: request?.carryoverContext,
-            logContext: request?.logContext,
-          }),
-        },
-      ],
-    tools: [],
-    toolEvents: [],
-    routeState: {
-      answerMode: 'advise',
-      capabilityTier: 'none',
-      budgets: {},
-      allowEscalationTo: [],
-      responseStyle: 'concise',
-      completionPolicy: {
-        requiresEvidenceForDone: false,
-      },
-    },
-    hooks: planningHooks,
-  })
-  const planning = parseModelPlanningResult(planningTurn?.result?.message || '')
-  logger?.emit?.('agent.planning.resolved', {
-    planner: 'model_planning_prompt',
-    decision: planning.type,
-    risk: planning.risk,
-    stepCount: Array.isArray(planning.steps) ? planning.steps.length : 0,
-    parseError: planning.parseError === true,
-    taskRelationType: planning.taskRelation?.type,
-    taskRelationConfidence: planning.taskRelation?.confidence,
-    contextRequest: planning.contextRequest,
-  })
-  appendPlanningReasoning(planningReasoning, hooks, formatPlanningDecisionSummary(planning))
-  if (planning.goal) {
-    appendPlanningReasoning(planningReasoning, hooks, `目标：${planning.goal}`)
-  }
-
-  if (planning.type === 'direct_answer') {
-    return {
-      type: 'direct_answer',
-      result: buildDirectPlanningAnswerResult(planning, classification, taskFrame),
-      planning,
-      planningReasoning,
-    }
-  }
-
-  return {
-    type: 'plan',
-    planning,
-    planningReasoning,
-    plan: createHybridPlanFromModelPlan({
-      modelPlan: planning,
-      request,
-      classification: {
-        ...classification,
-        pathMode: 'long',
-        complexity: 'complex',
-        risk: planning.risk || classification?.risk,
-      },
-    }),
-  }
-}
-
 export async function runAgent(request) {
   const mode = resolveAgentExecutionMode(request?.settings)
   const runtimeLogger = createAgentRuntimeLogger({
@@ -4283,10 +3407,7 @@ export async function runAgent(request) {
   const hooks = wrapAgentRuntimeHooks(request?.hooks || {}, runtimeLogger)
   const effectiveSettings = {
     ...(request?.settings || {}),
-    agentArchitectureMode:
-      mode.effectiveAgentMode === 'orchestrated'
-        ? 'orchestrated'
-        : 'default-agent',
+    agentArchitectureMode: 'default-agent',
   }
   const effectiveRequest = {
     ...request,
@@ -4326,17 +3447,13 @@ export async function runAgent(request) {
   runtimeLogger.emit('agent.path.selected', {
     pathMode: executionPathMode,
     reason:
-      mode.effectiveAgentMode === 'orchestrated'
-        ? 'orchestrated execution requested'
-        : 'default-agent model-directed execution',
+      'default-agent model-directed execution',
     confidence: 'model-directed',
     estimatedRisk: 'model-directed',
   })
 
   try {
-    const result = mode.effectiveAgentMode === 'orchestrated'
-      ? await runOrchestratedAgent(effectiveRequest)
-      : await runDefaultAgent(effectiveRequest)
+    const result = await runDefaultAgent(effectiveRequest)
     if (result?.recovered === true || result?.retryInfo?.recovered === true) {
       runtimeLogger.emit('agent.recovery.event', {
         stage: 'completed',

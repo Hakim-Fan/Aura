@@ -21,9 +21,6 @@ const WRITE_EFFECT_TOOLS = new Set([
   'edit_file',
   'multi_edit_file',
   'replace_line_range',
-  'create_artifact',
-  'append_artifact_chunk',
-  'assistant_output_spillover',
   'aura_install_skill',
   'aura_enable_skill',
   'aura_enable_plugin',
@@ -255,13 +252,6 @@ function collectProducedEvidence(event, effectTypes) {
 
     if (effectTypes.includes('write')) {
       producedEvidence.push('file_mutation')
-      if (
-        name === 'create_artifact' ||
-        name === 'append_artifact_chunk' ||
-        name === 'assistant_output_spillover'
-      ) {
-        producedEvidence.push('artifact_present')
-      }
       if (artifactVerification.verifiedCount > 0) {
         producedEvidence.push('file_verified')
       }
@@ -295,7 +285,6 @@ function collectProducedEvidence(event, effectTypes) {
       const commandText = String(event?.input || event?.summary || '')
       if (hasShellFileMutationEvidence(structuredOutput)) {
         producedEvidence.push('file_mutation')
-        producedEvidence.push('artifact_present')
         if (artifactVerification.hasPresentArtifact) {
           producedEvidence.push('file_verified')
         }
