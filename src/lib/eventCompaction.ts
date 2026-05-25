@@ -71,6 +71,20 @@ function compactStructuredOutput(value: unknown): Record<string, unknown> | unde
     : undefined
 }
 
+function shouldKeepCompactStructuredOutput(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    Array.isArray(record.preview) ||
+    Array.isArray(record.files) ||
+    Array.isArray(record.fileChanges) ||
+    record.operation === 'shell_file_mutation' ||
+    record.stage === 'shell_file_mutation'
+  )
+}
+
 export function compactMessageEvent(event: MessageEvent): MessageEvent {
   return {
     ...event,
@@ -109,7 +123,9 @@ export function stripMessageEventDetail(event: MessageEvent): MessageEvent {
     ...event,
     input: undefined,
     output: undefined,
-    structuredOutput: undefined,
+    structuredOutput: shouldKeepCompactStructuredOutput(event.structuredOutput)
+      ? compactStructuredOutput(event.structuredOutput)
+      : undefined,
     error: undefined,
     detailAvailable: true,
     detailRef: event.detailRef || event.id,

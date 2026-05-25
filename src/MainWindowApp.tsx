@@ -862,6 +862,9 @@ const EDITING_TOOL_NAMES = new Set([
   'edit_file',
   'multi_edit_file',
   'replace_line_range',
+  'exec_command',
+  'run_shell',
+  'write_stdin',
 ])
 
 function firstEditingPathFromStructuredOutput(output?: Record<string, unknown>) {
@@ -895,6 +898,15 @@ function firstEditingPathFromStructuredOutput(output?: Record<string, unknown>) 
 
 function presentEditingEventTitle(event: ToolEvent, structuredOutput?: Record<string, unknown>) {
   if (!EDITING_TOOL_NAMES.has(event.name)) {
+    return ''
+  }
+  const isShellFileMutation =
+    structuredOutput?.operation === 'shell_file_mutation' ||
+    structuredOutput?.stage === 'shell_file_mutation'
+  if (
+    !isShellFileMutation &&
+    (event.name === 'exec_command' || event.name === 'run_shell' || event.name === 'write_stdin')
+  ) {
     return ''
   }
   const path = firstEditingPathFromStructuredOutput(structuredOutput)
@@ -1996,6 +2008,7 @@ export function MainWindowApp() {
   const runningTasksBySessionRef = useRef<Record<string, RunningTaskBinding>>({})
   const previousRunningTasksBySessionRef = useRef<Record<string, RunningTaskBinding>>({})
   const agentTaskLastEventAtRef = useRef<Record<string, number>>({})
+  const abortingAgentTaskIdsRef = useRef<Set<string>>(new Set())
   const sessionsRef = useRef<Session[]>(sessions)
 
   useEffect(() => {
@@ -4138,14 +4151,66 @@ export function MainWindowApp() {
     if (!activeSession || !agentTask?.id || !activeRunningTask) {
       return
     }
+    const taskId = agentTask.id
+    if (abortingAgentTaskIdsRef.current.has(taskId)) {
+      return
+    }
+    abortingAgentTaskIdsRef.current.add(taskId)
     try {
-      await abortAgentTask(agentTask.id)
+      await abortAgentTask(taskId)
       const stoppedAt = Date.now()
       const currentSnapshot = agentTasksBySession[activeSession.id]
+      const stoppedSessions = sessionsRef.current.map(session =>
+        session.id === activeSession.id
+          ? {
+            ...session,
+            messages: session.messages.map(message =>
+              message.id === activeRunningTask.messageId
+                ? updateMessageVariantAtIndex(message, activeRunningTask.variantIndex, currentVariant => ({
+                  ...currentVariant,
+                  status: 'failed' as const,
+                  error: '已停止本次回答。',
+                  errorInfo: {
+                    source: 'system',
+                    category: 'cancelled',
+                    code: 'USER_ABORTED',
+                    summary: '这次回答已被中途停止。',
+                    suggestedAction: '如果还需要继续，可以重新发起一次生成。',
+                  },
+                  appendedInputs:
+                    currentSnapshot?.appendedInputs || currentVariant.appendedInputs,
+                  phaseOutputs:
+                    currentSnapshot?.phaseOutputs || currentVariant.phaseOutputs,
+                  events:
+                    currentSnapshot?.toolEvents.map(event =>
+                      mapToolEventToMessageEvent(event, { lazyDetails: true }),
+                    ) ||
+                    currentVariant.events,
+                  steps: currentSnapshot?.taskTree || currentVariant.steps,
+                  activity: currentVariant.activity
+                    ? {
+                      ...currentVariant.activity,
+                      status: 'failed',
+                      finishedAt: stoppedAt,
+                      expanded: false,
+                    }
+                    : currentVariant.activity,
+                  retryInfo: clearRetryProgressInfo(
+                    currentSnapshot?.retryInfo || currentVariant.retryInfo,
+                  ),
+                }))
+                : message,
+            ),
+            updatedAt: stoppedAt,
+          }
+          : session,
+      )
+      sessionsRef.current = stoppedSessions
+      setSessions(stoppedSessions)
+      await saveSessionsAndAwaitPersistence(stoppedSessions)
       if (currentSnapshot) {
         const details = buildMessageEventDetailRecords(currentSnapshot.toolEvents)
         if (details.length > 0) {
-          await saveSessionsAndAwaitPersistence(sessionsRef.current)
           await upsertPersistedMessageEventDetails(
             activeRunningTask.messageId,
             activeRunningTask.variantIndex,
@@ -4153,47 +4218,6 @@ export function MainWindowApp() {
           )
         }
       }
-      updateSession(activeSession.id, session => ({
-        ...session,
-        messages: session.messages.map(message =>
-          message.id === activeRunningTask.messageId
-            ? updateMessageVariantAtIndex(message, activeRunningTask.variantIndex, currentVariant => ({
-              ...currentVariant,
-              status: 'failed' as const,
-              error: '已停止本次回答。',
-              errorInfo: {
-                source: 'system',
-                category: 'cancelled',
-                code: 'USER_ABORTED',
-                summary: '这次回答已被中途停止。',
-                suggestedAction: '如果还需要继续，可以重新发起一次生成。',
-              },
-              appendedInputs:
-                currentSnapshot?.appendedInputs || currentVariant.appendedInputs,
-              phaseOutputs:
-                currentSnapshot?.phaseOutputs || currentVariant.phaseOutputs,
-              events:
-                currentSnapshot?.toolEvents.map(event =>
-                  mapToolEventToMessageEvent(event, { lazyDetails: true }),
-                ) ||
-                currentVariant.events,
-              steps: currentSnapshot?.taskTree || currentVariant.steps,
-              activity: currentVariant.activity
-                ? {
-                  ...currentVariant.activity,
-                  status: 'failed',
-                  finishedAt: stoppedAt,
-                  expanded: false,
-                }
-                : currentVariant.activity,
-              retryInfo: clearRetryProgressInfo(
-                currentSnapshot?.retryInfo || currentVariant.retryInfo,
-              ),
-            }))
-            : message,
-        ),
-        updatedAt: stoppedAt,
-      }))
       setRunningTasksBySession(current => {
         const next = { ...current }
         delete next[activeSession.id]
@@ -4206,6 +4230,8 @@ export function MainWindowApp() {
       })
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '终止任务失败。')
+    } finally {
+      abortingAgentTaskIdsRef.current.delete(taskId)
     }
   }
 

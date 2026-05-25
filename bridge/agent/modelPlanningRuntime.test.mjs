@@ -18,7 +18,7 @@ test('model planning parser accepts direct answers', () => {
 
 test('model planning parser accepts executable plans', () => {
   const result = parseModelPlanningResult(`\`\`\`json
-{"type":"plan","goal":"解析 docx","risk":"medium","steps":[{"id":"1","description":"读取附件标题","kind":"context","acceptance":"已经理解 docx 解析方法","requiredEvidence":["skill_read"]},{"id":"2","description":"生成实体表","kind":"execute","acceptance":"输出实体表定义","requiredEvidence":["file_parsed","structured_output"]}],"successCriteria":["每个子标题都有表"]}
+{"type":"plan","goal":"解析 docx","risk":"medium","steps":[{"id":"1","description":"读取附件标题","kind":"context","expectedOutcome":"context","acceptance":"已经理解 docx 解析方法","requiredEvidence":["skill_read"]},{"id":"2","description":"生成实体表","kind":"execute","expectedOutcome":"durable_artifact","acceptance":"输出实体表定义","requiredEvidence":["file_mutation"],"outputTarget":{"type":"file","pathHint":"entities.md"}}],"successCriteria":["每个子标题都有表"]}
 \`\`\``)
 
   assert.equal(result.type, 'plan')
@@ -26,8 +26,11 @@ test('model planning parser accepts executable plans', () => {
   assert.equal(result.risk, 'medium')
   assert.equal(result.steps.length, 2)
   assert.equal(result.steps[0].kind, 'context')
+  assert.equal(result.steps[0].expectedOutcome, 'context')
   assert.equal(result.steps[0].acceptance, '已经理解 docx 解析方法')
-  assert.deepEqual(result.steps[1].requiredEvidence, ['file_parsed', 'structured_output'])
+  assert.equal(result.steps[1].expectedOutcome, 'durable_artifact')
+  assert.deepEqual(result.steps[1].requiredEvidence, ['file_mutation'])
+  assert.equal(result.steps[1].outputTarget.pathHint, 'entities.md')
   assert.equal(result.successCriteria[0], '每个子标题都有表')
 })
 
@@ -189,5 +192,6 @@ test('model planning system prompt requires execution evidence for generated art
   })
 
   assert.match(prompt, /requiredEvidence MUST include file_mutation or artifact_present/)
+  assert.match(prompt, /Set expectedOutcome by the result the step must leave behind/)
   assert.match(prompt, /Do not mark an execution step satisfied by todo\/status updates alone/)
 })

@@ -123,6 +123,43 @@ test('successful read-only shell command is verified by exit code', () => {
   )
 })
 
+test('shell command file mutations count as write and artifact evidence', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'run_shell',
+      source: 'builtin',
+      status: 'success',
+      input: '$ pandoc input.docx -o output.md',
+      structuredOutput: {
+        status: 'exited',
+        running: false,
+        exitCode: 0,
+        operation: 'shell_file_mutation',
+        affectedPaths: ['output.md'],
+        fileChanges: [
+          {
+            path: 'output.md',
+            exists: true,
+            kind: 'create',
+          },
+        ],
+      },
+    },
+  ])
+
+  assert.equal(evidence.hasSuccessfulCommand, true)
+  assert.equal(evidence.hasWriteEffect, true)
+  assert.equal(evidence.hasArtifactEvidence, true)
+  assert.deepEqual(evidence.artifactPaths, ['output.md'])
+  assert.equal(
+    deriveCompletionState(
+      { answerMode: 'execute', executionMode: 'long-task' },
+      evidence,
+    ),
+    'executed_verified',
+  )
+})
+
 test('nonzero command exit is always an execution failure', () => {
   const evidence = collectEvidenceFromToolEvents([
     {

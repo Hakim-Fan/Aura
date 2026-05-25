@@ -3376,6 +3376,9 @@ const EDITING_PREVIEW_TOOL_NAMES = new Set([
   'edit_file',
   'multi_edit_file',
   'replace_line_range',
+  'exec_command',
+  'run_shell',
+  'write_stdin',
 ])
 
 function hasPatchPreviewOutput(output: Record<string, unknown> | null) {

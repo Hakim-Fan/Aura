@@ -3,6 +3,11 @@ import { buildShellEnv } from '../shellEnv.mjs'
 import { resolveCommandShell } from '../shellRuntime.mjs'
 import { createStructuredError } from '../runtimeErrors.mjs'
 import { truncate } from '../utils.mjs'
+import {
+  attachWorkspaceFileMutations,
+  detectWorkspaceFileMutations,
+  snapshotWorkspaceFiles,
+} from './workspaceMutationTracker.mjs'
 
 const DEFAULT_YIELD_TIME_MS = 1_000
 const DEFAULT_MAX_OUTPUT_CHARS = 12_000
@@ -297,7 +302,7 @@ export function createUnifiedExecRuntime({ shell } = {}) {
     ])
   }
 
-  function buildStructuredResult(session, maxOutputChars) {
+  async function buildStructuredResult(session, maxOutputChars) {
     const slice = collectOutputSlice(
       session,
       session.stdoutCursor,
@@ -309,7 +314,7 @@ export function createUnifiedExecRuntime({ shell } = {}) {
     touchSession(session)
     scheduleIdleTermination(session, disposeSession)
 
-    return {
+    let result = {
       sessionId: session.id,
       status: session.spawnError
         ? 'spawn_failed'
@@ -338,6 +343,14 @@ export function createUnifiedExecRuntime({ shell } = {}) {
       timedOut: session.timedOut === true,
       terminationReason: session.terminationReason || '',
     }
+
+    if (!session.running && session.mutationSnapshot && !session.mutationSummaryResolved) {
+      session.mutationSummaryResolved = true
+      session.mutationSummary = await detectWorkspaceFileMutations(session.mutationSnapshot)
+    }
+
+    result = attachWorkspaceFileMutations(result, session.mutationSummary)
+    return result
   }
 
   async function execCommand(
@@ -349,6 +362,7 @@ export function createUnifiedExecRuntime({ shell } = {}) {
       yieldTimeMs = DEFAULT_YIELD_TIME_MS,
       maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS,
       timeoutMs = 0,
+      workspaceRoot,
     },
     runtime = {},
   ) {
@@ -366,6 +380,7 @@ export function createUnifiedExecRuntime({ shell } = {}) {
 
     const env = buildShellEnv()
     const commandShell = resolveCommandShell({ env, shell })
+    const mutationSnapshot = await snapshotWorkspaceFiles(workspaceRoot || cwd)
     const child = spawn(commandShell.file, commandShell.args(command, login), {
       cwd,
       env,
@@ -398,6 +413,9 @@ export function createUnifiedExecRuntime({ shell } = {}) {
       idleTimer: null,
       commandTimeoutTimer: null,
       forceKillTimer: null,
+      mutationSnapshot,
+      mutationSummary: null,
+      mutationSummaryResolved: false,
     }
 
     sessions.set(session.id, session)
@@ -442,7 +460,7 @@ export function createUnifiedExecRuntime({ shell } = {}) {
       throw session.spawnError
     }
 
-    return buildStructuredResult(session, maxOutputChars)
+    return await buildStructuredResult(session, maxOutputChars)
   }
 
   async function writeStdin(
@@ -520,7 +538,7 @@ export function createUnifiedExecRuntime({ shell } = {}) {
       throw session.spawnError
     }
 
-    return buildStructuredResult(session, maxOutputChars)
+    return await buildStructuredResult(session, maxOutputChars)
   }
 
   async function closeAllSessions() {

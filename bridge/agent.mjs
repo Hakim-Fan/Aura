@@ -57,6 +57,7 @@ import {
 import {
   buildDeliveryPolicy,
   collectEvidenceFromToolEvents,
+  collectStepEvidenceFromToolEvents,
   deriveCompletionState,
   enforceEvidencePolicy,
 } from './agentEvidence.mjs'
@@ -663,14 +664,6 @@ function buildCompletionContext(routeState, toolEvents, runtimeBlocks = {}) {
   }
 }
 
-function isLongTaskCompletionBlocked(settings, routeState, result = {}) {
-  return (
-    settings?.executionMode === 'long-task' &&
-    routeState?.answerMode === 'execute' &&
-    result?.completionState !== 'executed_verified'
-  )
-}
-
 function isCompletionStateIncompleteForExecution(result = {}, routeState = {}, taskFrame = {}) {
   if (
     result?.completionState === 'failed_after_execution' ||
@@ -689,19 +682,11 @@ function isCompletionStateIncompleteForExecution(result = {}, routeState = {}, t
   return result?.completionState === 'not_executed' && requiresEvidence
 }
 
-function completeCurrentTaskWithResult(taskTracker, currentTaskId, settings, routeState, result) {
+function completeCurrentTaskWithResult(taskTracker, currentTaskId, routeState, result) {
   if (isCompletionStateIncompleteForExecution(result, routeState)) {
     taskTracker.completeTask(
       currentTaskId,
       result?.deliveryPolicy?.deliveryNote || '执行未完成，未标记为完成',
-      'failed',
-    )
-    return
-  }
-  if (isLongTaskCompletionBlocked(settings, routeState, result)) {
-    taskTracker.completeTask(
-      currentTaskId,
-      '长任务缺少产物或验证证据，未标记为完成',
       'failed',
     )
     return
@@ -1931,10 +1916,41 @@ function applyDefaultAgentExecutionRoute(routeState, settings = {}, classificati
   }
 }
 
-const EXECUTION_ARTIFACT_STEP_PATTERN =
-  /\b(?:create|generate|write|save|build|export|convert|render|produce|modify|update|edit|patch|implement)\b|(?:创建|生成|写入|保存|构建|导出|转换|渲染|产出|修改|更新|编辑|实现|制作)/iu
-const ARTIFACT_TARGET_PATTERN =
-  /\b(?:file|html|markdown|md|docx?|pptx?|slides?|deck|prd|prototype|artifact|report|document|page|app)\b|(?:文件|页面|原型|文档|报告|幻灯片|演示|应用|产物)/iu
+const DURABLE_EVIDENCE_TYPES = new Set([
+  'file_mutation',
+  'artifact_present',
+])
+
+const OBSERVABLE_EXECUTION_EVIDENCE_TYPES = new Set([
+  'file_mutation',
+  'artifact_present',
+  'command_output',
+  'test_pass',
+  'verification_passed',
+  'file_verified',
+])
+
+const CONTEXT_ONLY_EVIDENCE_TYPES = new Set([
+  'context_collected',
+  'skill_read',
+  'file_read',
+  'file_parsed',
+  'structured_output',
+  'search_result',
+])
+
+const EXPECTED_OUTCOME_ALIASES = new Map([
+  ['context_read', 'context'],
+  ['context_only', 'context'],
+  ['durable', 'durable_artifact'],
+  ['artifact', 'durable_artifact'],
+  ['file', 'durable_artifact'],
+  ['file_artifact', 'durable_artifact'],
+  ['verify', 'verification'],
+  ['validated', 'verification'],
+  ['answer', 'final_response'],
+  ['response', 'final_response'],
+])
 
 const REQUIRED_EVIDENCE_ALIASES = new Map([
   ['file_created', 'file_mutation'],
@@ -1959,22 +1975,38 @@ function normalizeEvidenceName(value) {
   return REQUIRED_EVIDENCE_ALIASES.get(key) || key
 }
 
-function stepLooksLikeArtifactExecution(step = {}) {
-  const text = [
-    step?.description,
-    step?.title,
-    step?.summary,
-    step?.acceptance,
-    step?.acceptanceCriteria,
-    step?.validation,
-  ]
-    .filter(Boolean)
-    .join(' ')
-  const kind = String(step?.kind || step?.type || 'execute').toLowerCase()
+function normalizeExpectedOutcome(value, kind = '') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
+  const aliased = EXPECTED_OUTCOME_ALIASES.get(normalized) || normalized
+  if (['context', 'durable_artifact', 'verification', 'final_response'].includes(aliased)) {
+    return aliased
+  }
+  if (kind === 'context') return 'context'
+  if (kind === 'verify') return 'verification'
+  if (kind === 'respond') return 'final_response'
+  return ''
+}
+
+function normalizeOutputTarget(value) {
+  if (!value || typeof value !== 'object') return undefined
+  const type = String(value.type || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+  const pathHint = String(value.pathHint || value.path || '').replace(/\s+/g, ' ').trim().slice(0, 260)
+  if (!type && !pathHint) return undefined
+  return { type, pathHint }
+}
+
+function hasAnyEvidence(evidence, allowed) {
+  return evidence.some(item => allowed.has(normalizeEvidenceName(item)))
+}
+
+function stepRequiresDurableEvidence(step = {}) {
+  const evidence = Array.isArray(step?.requiredEvidence) ? step.requiredEvidence : []
   return (
-    kind === 'execute' &&
-    EXECUTION_ARTIFACT_STEP_PATTERN.test(text) &&
-    ARTIFACT_TARGET_PATTERN.test(text)
+    normalizeExpectedOutcome(step?.expectedOutcome, String(step?.kind || '').toLowerCase()) === 'durable_artifact' ||
+    hasAnyEvidence(evidence, DURABLE_EVIDENCE_TYPES)
   )
 }
 
@@ -1984,11 +2016,20 @@ function normalizeDefaultStepRequiredEvidence(step = {}) {
     .filter(Boolean)
   const evidence = new Set(provided)
 
-  if (stepLooksLikeArtifactExecution(step)) {
+  const kind = String(step?.kind || step?.type || '').toLowerCase()
+  const expectedOutcome = normalizeExpectedOutcome(
+    step?.expectedOutcome || step?.expected_outcome || step?.outcome,
+    kind,
+  )
+  if (expectedOutcome === 'durable_artifact' && !hasAnyEvidence([...evidence], DURABLE_EVIDENCE_TYPES)) {
     evidence.add('file_mutation')
   }
-
-  const kind = String(step?.kind || step?.type || '').toLowerCase()
+  if (expectedOutcome === 'verification' && !hasAnyEvidence([...evidence], new Set(['verification_passed', 'test_pass', 'file_verified']))) {
+    evidence.add('verification_passed')
+  }
+  if (expectedOutcome === 'final_response' && evidence.size === 0) {
+    evidence.add('final_answer')
+  }
   if (kind === 'verify' && evidence.size === 0) {
     evidence.add('verification_passed')
   }
@@ -2008,7 +2049,7 @@ function buildDefaultStepExecutionContract(step = {}) {
   const needsFileOrArtifact =
     required.has('file_mutation') ||
     required.has('artifact_present') ||
-    stepLooksLikeArtifactExecution(step)
+    stepRequiresDurableEvidence(step)
 
   if (!needsFileOrArtifact) {
     return ''
@@ -2019,9 +2060,9 @@ function buildDefaultStepExecutionContract(step = {}) {
     '- This step requires durable file/artifact evidence before it can be treated as complete.',
     '- Do not answer with another plan, status report, or todo-only update.',
     '- Do not call todo_write as the only action in this step.',
-    '- Your next concrete action should call one of: write_file, apply_patch, edit_file, multi_edit_file, replace_line_range, create_artifact, append_artifact_chunk.',
+    '- Your next concrete action should call one of: write_file, apply_patch, edit_file, multi_edit_file, replace_line_range, create_artifact, append_artifact_chunk, or a shell command when a conversion/build/export tool naturally generates the target file.',
     '- If the full output is large, do not attempt one giant tool-call payload. First write a small runnable/inspectable skeleton or draft artifact, then continue by appending or editing bounded chunks.',
-    '- For HTML/PPT/PRD/prototype generation, the first write should be a compact scaffold with the target file/path and essential structure only; later turns can fill sections incrementally.',
+    '- For large generated deliverables, the first write should be a compact scaffold with the target file/path and essential structure only; later turns can fill sections incrementally.',
   ].join('\n')
 }
 
@@ -2029,24 +2070,47 @@ function normalizeDefaultStepPlan(planningResult = {}) {
   const planning = planningResult?.planning || planningResult
   const steps = Array.isArray(planning?.steps) ? planning.steps : []
   const normalizedSteps = steps
-    .map((step, index) => ({
-      id: String(step?.id || `step-${index + 1}`).trim() || `step-${index + 1}`,
-      title: String(step?.description || step?.title || step?.summary || `Step ${index + 1}`)
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 120),
-      kind: String(step?.kind || step?.type || 'execute').trim() || 'execute',
-      acceptance: String(step?.acceptance || step?.acceptanceCriteria || step?.validation || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 260),
-      requiredEvidence: normalizeDefaultStepRequiredEvidence(step),
-      status: 'pending',
-      attempts: 0,
-      toolEventStartIndex: 0,
-      checkpointId: undefined,
-      completedAt: undefined,
-    }))
+    .map((step, index) => {
+      const kind = String(step?.kind || step?.type || 'execute').trim() || 'execute'
+      const expectedOutcome = normalizeExpectedOutcome(
+        step?.expectedOutcome || step?.expected_outcome || step?.outcome,
+        kind.toLowerCase(),
+      )
+      const requiredEvidence = normalizeDefaultStepRequiredEvidence({
+        ...step,
+        kind,
+        expectedOutcome,
+      })
+      const shouldRequireObservableExecution =
+        kind.toLowerCase() === 'execute' &&
+        !hasAnyEvidence(requiredEvidence, OBSERVABLE_EXECUTION_EVIDENCE_TYPES)
+      if (shouldRequireObservableExecution) {
+        requiredEvidence.push('file_mutation')
+      }
+      const effectiveExpectedOutcome = expectedOutcome ||
+        (shouldRequireObservableExecution ? 'durable_artifact' : '')
+      return {
+        id: String(step?.id || `step-${index + 1}`).trim() || `step-${index + 1}`,
+        title: String(step?.description || step?.title || step?.summary || `Step ${index + 1}`)
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 120),
+        kind,
+        expectedOutcome: effectiveExpectedOutcome,
+        outputTarget: normalizeOutputTarget(step?.outputTarget || step?.output_target),
+        acceptance: String(step?.acceptance || step?.acceptanceCriteria || step?.validation || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 260),
+        requiredEvidence: [...new Set(requiredEvidence)].slice(0, 8),
+        status: 'pending',
+        attempts: 0,
+        durableStallCount: 0,
+        toolEventStartIndex: 0,
+        checkpointId: undefined,
+        completedAt: undefined,
+      }
+    })
     .filter(step => step.title)
 
   if (normalizedSteps.length === 0) {
@@ -2084,6 +2148,7 @@ function buildDefaultStepRuntimePrompt(stepRuntime, context = {}) {
     `Goal: ${stepRuntime.goal}`,
     `Selected step ${stepRuntime.currentIndex + 1}/${stepRuntime.steps.length}: ${step.id} - ${step.title}`,
     step.kind ? `Step kind: ${step.kind}` : null,
+    step.expectedOutcome ? `Expected outcome: ${step.expectedOutcome}` : null,
     step.acceptance ? `Completion criteria: ${step.acceptance}` : null,
     step.requiredEvidence.length > 0 ? `Required evidence: ${step.requiredEvidence.join(', ')}` : null,
     completed.length > 0 ? `Completed earlier steps: ${completed.join('; ')}` : null,
@@ -2094,64 +2159,61 @@ function buildDefaultStepRuntimePrompt(stepRuntime, context = {}) {
 }
 
 function evidenceFromToolEvents(toolEvents = [], startIndex = 0) {
-  const events = toolEvents.slice(startIndex)
-  const successful = events.filter(event => event?.status === 'success')
-  const names = new Set(successful.map(event => event.name))
-  const evidence = new Set()
-  if (successful.length > 0) evidence.add('execution_performed')
-  if (successful.some(event => ['read_file', 'read_block', 'search_code', 'glob_files'].includes(event.name))) {
-    evidence.add('context_collected')
+  return collectStepEvidenceFromToolEvents(toolEvents, startIndex)
+}
+
+function observedHasDurableProgress(observed) {
+  return hasAnyEvidence(observed?.evidence || [], DURABLE_EVIDENCE_TYPES)
+}
+
+function observedIsOnlyContextProgress(observed) {
+  const evidence = (observed?.evidence || [])
+    .map(normalizeEvidenceName)
+    .filter(item => item !== 'execution_performed')
+  return evidence.length > 0 && evidence.every(item => CONTEXT_ONLY_EVIDENCE_TYPES.has(item))
+}
+
+function getStepRequiredEvidence(step = {}) {
+  if (Array.isArray(step.requiredEvidence) && step.requiredEvidence.length > 0) {
+    return step.requiredEvidence.map(normalizeEvidenceName)
   }
-  if (successful.some(event => ['read_file', 'read_block'].includes(event.name))) {
-    evidence.add('file_read')
-    evidence.add('file_parsed')
+  if (step.kind === 'verify') return ['verification_passed']
+  if (step.kind === 'respond') return ['final_answer']
+  return ['execution_performed']
+}
+
+function evaluateStepOutcome({ step, result, toolEvents, startIndex }) {
+  if (!step) {
+    return {
+      complete: false,
+      required: [],
+      missing: [],
+      observed: evidenceFromToolEvents(toolEvents, startIndex),
+      durableStall: false,
+      contextOnly: false,
+    }
   }
-  if (successful.some(event => event.name === 'aura_read_skill')) evidence.add('skill_read')
-  if (successful.some(event => ['read_file', 'read_block', 'aura_read_skill'].includes(event.name))) {
-    evidence.add('structured_output')
-  }
-  if (successful.some(event => ['write_file', 'apply_patch', 'edit_file', 'multi_edit_file', 'replace_line_range'].includes(event.name))) {
-    evidence.add('file_mutation')
-  }
-  if (successful.some(event => ['create_artifact', 'append_artifact_chunk', 'assistant_output_spillover'].includes(event.name))) {
-    evidence.add('artifact_present')
-  }
-  if (successful.some(event => event.name === 'verify_artifact')) {
-    evidence.add('verification_passed')
-    evidence.add('file_verified')
-  }
-  if (names.has('run_shell') || names.has('exec_command')) {
-    evidence.add('command_output')
-    evidence.add('test_pass')
-  }
+  const observed = evidenceFromToolEvents(toolEvents, startIndex)
+  const evidence = new Set(observed.evidence)
+  if (String(result?.message || '').trim()) evidence.add('final_answer')
+  const required = getStepRequiredEvidence(step)
+  const missing = required.filter(item => !evidence.has(item))
+  const complete =
+    missing.length === 0 ||
+    (step.kind === 'respond' && String(result?.message || '').trim())
+
   return {
-    evidence: [...evidence],
-    successful,
-    events,
+    complete,
+    required,
+    missing,
+    observed,
+    durableStall: stepRequiresDurableEvidence(step) && !observedHasDurableProgress(observed),
+    contextOnly: observedIsOnlyContextProgress(observed),
   }
 }
 
 function isDefaultStepComplete({ step, result, toolEvents, startIndex }) {
-  if (!step) return false
-  const observed = evidenceFromToolEvents(toolEvents, startIndex)
-  const evidence = new Set(observed.evidence)
-  if (String(result?.message || '').trim()) evidence.add('final_answer')
-  const required = Array.isArray(step.requiredEvidence) && step.requiredEvidence.length > 0
-    ? step.requiredEvidence
-    : step.kind === 'verify'
-      ? ['verification_passed']
-      : step.kind === 'respond'
-        ? ['final_answer']
-        : ['execution_performed']
-
-  const satisfied = required.every(item => evidence.has(item))
-  if (satisfied) return true
-
-  if (step.kind === 'respond' && String(result?.message || '').trim()) return true
-  if (observed.successful.length > 0 && !isCompletionStateIncompleteForExecution(result, {}, {})) {
-    return true
-  }
-  return false
+  return evaluateStepOutcome({ step, result, toolEvents, startIndex }).complete
 }
 
 function buildDefaultStepContinuationMessage(stepRuntime, step, result, toolEvents, startIndex) {
@@ -2174,16 +2236,13 @@ function buildDefaultStepContinuationMessage(stepRuntime, step, result, toolEven
 }
 
 function buildDefaultStepIncompleteMessage(step, toolEvents, startIndex) {
-  const observed = evidenceFromToolEvents(toolEvents, startIndex)
-  const required = Array.isArray(step?.requiredEvidence) && step.requiredEvidence.length > 0
-    ? step.requiredEvidence.map(normalizeEvidenceName)
-    : step?.kind === 'verify'
-      ? ['verification_passed']
-      : step?.kind === 'respond'
-        ? ['final_answer']
-        : ['execution_performed']
-  const observedEvidence = new Set(observed.evidence)
-  const missing = required.filter(item => !observedEvidence.has(item))
+  const outcome = evaluateStepOutcome({
+    step,
+    result: {},
+    toolEvents,
+    startIndex,
+  })
+  const { observed, required, missing, durableStall, contextOnly } = outcome
   const executionContract = buildDefaultStepExecutionContract(step)
 
   return {
@@ -2191,6 +2250,7 @@ function buildDefaultStepIncompleteMessage(step, toolEvents, startIndex) {
     content: [
       `Step ${step.id} is not complete yet: ${step.title}`,
       step.acceptance ? `Completion criteria: ${step.acceptance}` : null,
+      step.expectedOutcome ? `Expected outcome: ${step.expectedOutcome}` : null,
       required.length > 0 ? `Required evidence: ${required.join(', ')}` : null,
       observed.evidence.length > 0 ? `Observed evidence so far: ${observed.evidence.join(', ')}` : null,
       missing.length > 0 ? `Missing evidence: ${missing.join(', ')}` : null,
@@ -2198,6 +2258,17 @@ function buildDefaultStepIncompleteMessage(step, toolEvents, startIndex) {
         ? `Recent successful tools: ${observed.successful.map(event => event.name).join(', ')}`
         : null,
       executionContract || null,
+      durableStall
+        ? [
+            'Durable-progress recovery:',
+            '- The current step has not produced a checkable file/artifact yet.',
+            '- Do not repeat the same plan, todo-only update, or read-only inspection.',
+            '- Replan only this current step into the smallest action that leaves durable evidence.',
+            '- The next action should produce or modify a file/artifact, or run a command that naturally creates the target output.',
+          ].join('\n')
+        : contextOnly
+          ? 'The recent progress is context-only. Continue with a concrete observable action, not more planning.'
+          : null,
       'Continue this same selected step only. Do not move to later steps.',
     ].filter(Boolean).join('\n'),
   }
@@ -2215,8 +2286,11 @@ function defaultStepRuntimeSnapshot(stepRuntime) {
       kind: step.kind,
       status: step.status,
       attempts: step.attempts,
+      durableStallCount: step.durableStallCount,
       checkpointId: step.checkpointId,
       completedAt: step.completedAt,
+      expectedOutcome: step.expectedOutcome,
+      outputTarget: step.outputTarget,
       acceptance: step.acceptance,
       requiredEvidence: step.requiredEvidence,
     })),
@@ -2356,6 +2430,15 @@ function buildCheckpointContinuationMessages({
     }),
   })
   return nextMessages
+}
+
+export const __testInternals = {
+  buildCheckpointContinuationMessages,
+  buildDefaultStepIncompleteMessage,
+  evidenceFromToolEvents,
+  evaluateStepOutcome,
+  isDefaultStepComplete,
+  normalizeDefaultStepPlan,
 }
 
 function buildToolCallOnlyFallbackMessage(toolEvents) {
@@ -3363,6 +3446,7 @@ export async function runDefaultAgent(request) {
         if (stepCompleted) {
           activeStep.status = 'completed'
           activeStep.completedAt = Date.now()
+          activeStep.durableStallCount = 0
           stepRuntime.state = 'CHECKPOINT_AND_HANDOFF'
           const stepCheckpoint = createCheckpointForRecoverableProgress('step_completed', turnToolEventStart, {
             force: true,
@@ -3385,6 +3469,10 @@ export async function runDefaultAgent(request) {
             continue
           }
         } else if ((activeStep.attempts || 0) < 3) {
+          const observed = evidenceFromToolEvents(toolEvents, turnToolEventStart)
+          if (stepRequiresDurableEvidence(activeStep) && !observedHasDurableProgress(observed)) {
+            activeStep.durableStallCount = (activeStep.durableStallCount || 0) + 1
+          }
           messages.push(buildDefaultStepIncompleteMessage(
             activeStep,
             toolEvents,
@@ -3411,7 +3499,6 @@ export async function runDefaultAgent(request) {
       completeCurrentTaskWithResult(
         taskTracker,
         currentTaskId,
-        settings,
         promptRouteState,
         result,
       )
@@ -3465,6 +3552,8 @@ export async function runDefaultAgent(request) {
         errorSource: normalized.source,
       })
     }
+
+    let stepRuntimeRecoveryBlocked = false
 
     if (
       normalized.source === 'provider' &&
@@ -3557,6 +3646,63 @@ export async function runDefaultAgent(request) {
             ...applyCompletionGate(resumedResult, lastPromptRouteState),
             recovered: true,
           }
+          if (stepRuntime?.enabled) {
+            const activeStep = currentDefaultStep(stepRuntime)
+            if (activeStep) {
+              const resumedMessages = resumedTurn.resolvedMessages || continuationMessages
+              const stepCompleted = isDefaultStepComplete({
+                step: activeStep,
+                result: resumedResult,
+                toolEvents,
+                startIndex: continuationToolEventStart,
+              })
+              messages = resumedMessages
+
+              if (stepCompleted) {
+                activeStep.status = 'completed'
+                activeStep.completedAt = Date.now()
+                activeStep.durableStallCount = 0
+                const stepCheckpoint = createCheckpointForRecoverableProgress('step_completed_after_resume', continuationToolEventStart, {
+                  force: true,
+                  stepId: activeStep.id,
+                  stepTitle: activeStep.title,
+                })
+                activeStep.checkpointId = stepCheckpoint?.id || checkpointId
+                stepRuntime.currentIndex += 1
+                const nextStep = currentDefaultStep(stepRuntime)
+                if (nextStep) {
+                  nextStep.status = 'pending'
+                  messages.push(buildDefaultStepContinuationMessage(
+                    stepRuntime,
+                    activeStep,
+                    resumedResult,
+                    toolEvents,
+                    continuationToolEventStart,
+                  ))
+                  if (resumeAttempt + 1 < maxCheckpointResumeAttempts) {
+                    continue
+                  }
+                  stepRuntimeRecoveryBlocked = true
+                  break
+                }
+              } else {
+                const observed = evidenceFromToolEvents(toolEvents, continuationToolEventStart)
+                if (stepRequiresDurableEvidence(activeStep) && !observedHasDurableProgress(observed)) {
+                  activeStep.durableStallCount = (activeStep.durableStallCount || 0) + 1
+                }
+                messages.push(buildDefaultStepIncompleteMessage(
+                  activeStep,
+                  toolEvents,
+                  continuationToolEventStart,
+                ))
+                if (resumeAttempt + 1 < maxCheckpointResumeAttempts) {
+                  continue
+                }
+                stepRuntimeRecoveryBlocked = true
+                break
+              }
+            }
+          }
           const summaryReasoning = summarizeReasoning(
             resumedTurn.resolvedMessages || continuationMessages,
             toolEvents,
@@ -3572,7 +3718,6 @@ export async function runDefaultAgent(request) {
           completeCurrentTaskWithResult(
             taskTracker,
             currentTaskId,
-            settings,
             lastPromptRouteState,
             resumedResult,
           )
@@ -3627,7 +3772,7 @@ export async function runDefaultAgent(request) {
       }
     }
 
-    if (normalized.source === 'provider' && hasRecoveryContext) {
+    if (normalized.source === 'provider' && hasRecoveryContext && !stepRuntimeRecoveryBlocked) {
       let recoveryRetryInfo
       const recoveryCompletionContext = buildCompletionContext(
         routeState,
@@ -3702,7 +3847,6 @@ export async function runDefaultAgent(request) {
           completeCurrentTaskWithResult(
             taskTracker,
             currentTaskId,
-            settings,
             routeState,
             recoveredResult,
           )
@@ -3755,7 +3899,6 @@ export async function runDefaultAgent(request) {
       completeCurrentTaskWithResult(
         taskTracker,
         currentTaskId,
-        settings,
         routeState,
         fallbackResult,
       )

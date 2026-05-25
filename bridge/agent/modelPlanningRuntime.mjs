@@ -110,9 +110,10 @@ export function buildModelPlanningSystemPrompt(settings = {}) {
     '{"taskRelation":{"type":"new_task|continue_current|follow_up_current|switch_to_recent|clarification","targetTaskId":null,"confidence":0.0,"reason":"..."},"executionMode":"direct_answer|plan_then_execute","contextRequest":{"includeRecentMessages":true,"includeCurrentTaskSummary":false,"includeWorkMemory":false,"includeArtifacts":false,"includeFileSummaries":false,"needsFreshFileRead":false,"reason":"..."},"response":{"type":"direct_answer","answer":"..."}}',
     '',
     'For an executable plan, set executionMode to plan_then_execute and make response:',
-    '{"type":"plan","goal":"...","risk":"low|medium|high","requiresApproval":false,"steps":[{"id":"1","description":"short step title","kind":"context|execute|verify|respond","acceptance":"what proves this step is done","requiredEvidence":["skill_read","file_read"]}],"successCriteria":["..."],"notes":"..."}',
+    '{"type":"plan","goal":"...","risk":"low|medium|high","requiresApproval":false,"steps":[{"id":"1","description":"short step title","kind":"context|execute|verify|respond","expectedOutcome":"context|durable_artifact|verification|final_response","acceptance":"what proves this step is done","requiredEvidence":["skill_read","file_read"],"outputTarget":{"type":"file|artifact|command|none","pathHint":""}}],"successCriteria":["..."],"notes":"..."}',
     'Allowed requiredEvidence values: context_collected, skill_read, file_read, file_parsed, structured_output, command_output, file_mutation, artifact_present, test_pass, verification_passed, final_answer.',
-    'For execute steps that create, generate, save, write, modify, export, convert, or build files/artifacts, requiredEvidence MUST include file_mutation or artifact_present. For verify steps, requiredEvidence MUST include verification_passed, test_pass, or file_read/file_verified evidence. Do not mark an execution step satisfied by todo/status updates alone.',
+    'Set expectedOutcome by the result the step must leave behind, not by keywords. If the step must leave a durable user-checkable output, choose durable_artifact. If it only gathers facts, choose context. If it proves an existing result, choose verification. If it answers the user, choose final_response.',
+    'For durable_artifact steps, requiredEvidence MUST include file_mutation or artifact_present. For verification steps, requiredEvidence MUST include verification_passed, test_pass, or file_read/file_verified evidence. Do not mark an execution step satisfied by todo/status updates alone.',
     '',
     'Legacy outputs {"type":"direct_answer",...} and {"type":"plan",...} are accepted, but prefer the Planning Router shape above.',
     '',
@@ -295,6 +296,10 @@ export function parseModelPlanningResult(text) {
       id: compactString(step?.id || String(index + 1), 40) || String(index + 1),
       description: compactString(step?.description || step?.title || step?.summary, 220),
       kind: compactString(step?.kind || step?.type, 80),
+      expectedOutcome: compactString(
+        step?.expectedOutcome || step?.expected_outcome || step?.outcome,
+        80,
+      ),
       requiredCapability: compactString(step?.requiredCapability || step?.capability, 80),
       acceptance: compactString(
         step?.acceptance || step?.acceptanceCriteria || step?.validation || step?.successCriteria,
@@ -305,6 +310,12 @@ export function parseModelPlanningResult(text) {
       )
         .map(entry => compactString(entry, 80))
         .filter(Boolean),
+      outputTarget: step?.outputTarget && typeof step.outputTarget === 'object'
+        ? {
+            type: compactString(step.outputTarget.type, 80),
+            pathHint: compactString(step.outputTarget.pathHint || step.outputTarget.path || '', 260),
+          }
+        : undefined,
     }))
     .filter(step => step.description)
 

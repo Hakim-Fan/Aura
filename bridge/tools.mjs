@@ -33,6 +33,11 @@ import {
   createEditingTools,
 } from './editing/toolHandlers.mjs'
 import { createUnifiedExecRuntime } from './editing/unifiedExecRuntime.mjs'
+import {
+  attachWorkspaceFileMutations,
+  detectWorkspaceFileMutations,
+  snapshotWorkspaceFiles,
+} from './editing/workspaceMutationTracker.mjs'
 import { buildShellEnv } from './shellEnv.mjs'
 import { resolveCommandShell } from './shellRuntime.mjs'
 import { resolveAuraSkillInstallSource } from './skillInstaller.mjs'
@@ -98,6 +103,16 @@ function sha256String(value = '') {
 }
 
 function structuredEventOutputForTool(toolName, value) {
+  if (
+    COMMAND_EXIT_STATUS_TOOLS.has(toolName) &&
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Array.isArray(value.fileChanges) &&
+    value.fileChanges.length > 0
+  ) {
+    return value
+  }
   if (!STRUCTURED_EVENT_OUTPUT_TOOLS.has(toolName)) {
     return undefined
   }
@@ -2576,6 +2591,7 @@ export function createBuiltinTools(context) {
           {
             cmd: args.cmd,
             cwd,
+            workspaceRoot: context.cwd,
             login: args.login,
             tty: args.tty,
             yieldTimeMs: args.yieldTimeMs,
@@ -2666,13 +2682,16 @@ export function createBuiltinTools(context) {
       },
       liveUpdates: true,
       async run(args, runtime = {}) {
-        return runShellStreaming(
+        const mutationSnapshot = await snapshotWorkspaceFiles(context.cwd)
+        const output = await runShellStreaming(
           args.command,
           context.cwd,
           args.timeoutMs ?? 60_000,
           output => runtime.onUpdate?.(output),
           runtime.signal,
         )
+        const mutationSummary = await detectWorkspaceFileMutations(mutationSnapshot)
+        return attachWorkspaceFileMutations(output, mutationSummary)
       },
     },
     {

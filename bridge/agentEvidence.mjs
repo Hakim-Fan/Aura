@@ -21,6 +21,9 @@ const WRITE_EFFECT_TOOLS = new Set([
   'edit_file',
   'multi_edit_file',
   'replace_line_range',
+  'create_artifact',
+  'append_artifact_chunk',
+  'assistant_output_spillover',
   'aura_install_skill',
   'aura_enable_skill',
   'aura_enable_plugin',
@@ -104,10 +107,28 @@ function extractArtifactRecords(structuredOutput) {
     isArtifactRecord(structuredOutput) ? structuredOutput : null,
     isArtifactRecord(structuredOutput.verification) ? structuredOutput.verification : null,
     ...(Array.isArray(structuredOutput.files) ? structuredOutput.files.filter(isArtifactRecord) : []),
+    ...(Array.isArray(structuredOutput.fileChanges)
+      ? structuredOutput.fileChanges.filter(isArtifactRecord)
+      : []),
     ...(Array.isArray(structuredOutput.results)
       ? structuredOutput.results.filter(isArtifactRecord)
       : []),
   ].filter(Boolean)
+}
+
+function hasShellFileMutationEvidence(structuredOutput) {
+  return Boolean(
+    structuredOutput &&
+      typeof structuredOutput === 'object' &&
+      (
+        structuredOutput.operation === 'shell_file_mutation' ||
+        structuredOutput.stage === 'shell_file_mutation' ||
+        (
+          Array.isArray(structuredOutput.fileChanges) &&
+          structuredOutput.fileChanges.length > 0
+        )
+      ),
+  )
 }
 
 function summarizeArtifactVerification(structuredOutput) {
@@ -154,7 +175,8 @@ function detectEffectTypes(event) {
   }
 
   if (EXECUTE_EFFECT_TOOLS.has(name)) {
-    return ['execute']
+    const structuredOutput = parseStructuredOutput(event?.structuredOutput || event?.output)
+    return hasShellFileMutationEvidence(structuredOutput) ? ['execute', 'write'] : ['execute']
   }
 
   if (BROWSER_EFFECT_TOOLS.has(name)) {
@@ -233,6 +255,13 @@ function collectProducedEvidence(event, effectTypes) {
 
     if (effectTypes.includes('write')) {
       producedEvidence.push('file_mutation')
+      if (
+        name === 'create_artifact' ||
+        name === 'append_artifact_chunk' ||
+        name === 'assistant_output_spillover'
+      ) {
+        producedEvidence.push('artifact_present')
+      }
       if (artifactVerification.verifiedCount > 0) {
         producedEvidence.push('file_verified')
       }
@@ -264,6 +293,13 @@ function collectProducedEvidence(event, effectTypes) {
 
     if (COMMAND_SESSION_TOOLS.has(name)) {
       const commandText = String(event?.input || event?.summary || '')
+      if (hasShellFileMutationEvidence(structuredOutput)) {
+        producedEvidence.push('file_mutation')
+        producedEvidence.push('artifact_present')
+        if (artifactVerification.hasPresentArtifact) {
+          producedEvidence.push('file_verified')
+        }
+      }
       if (/\.(docx|xlsx|xls|csv|tsv|pdf|json|md|txt)\b/i.test(commandText)) {
         producedEvidence.push('file_parsed')
       }
@@ -439,6 +475,98 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     hasApprovalBlock: records.some(record => record.status === 'denied'),
     hasCapabilityBlock: false,
     hasExecutionFailure,
+  }
+}
+
+export function collectStepEvidenceFromToolEvents(toolEvents = [], startIndex = 0) {
+  const events = (Array.isArray(toolEvents) ? toolEvents : []).slice(startIndex)
+  const successful = events.filter(event => event?.status === 'success')
+  const records = collectEvidenceFromToolEvents(events).records
+  const successfulRecords = records.filter(record => record.status === 'success')
+  const evidence = new Set()
+
+  const hasObservableExecution = successfulRecords.some(record =>
+    record.effectTypes.some(effectType =>
+      effectType === 'write' ||
+      effectType === 'execute' ||
+      effectType === 'browser' ||
+      effectType === 'read',
+    ),
+  )
+  if (hasObservableExecution) {
+    evidence.add('execution_performed')
+  }
+
+  if (successfulRecords.some(record =>
+    record.effectTypes.includes('read') ||
+    record.producedEvidence.includes('file_read') ||
+    record.producedEvidence.includes('search_result') ||
+    record.producedEvidence.includes('web_search_result') ||
+    record.producedEvidence.includes('web_research_result') ||
+    record.producedEvidence.includes('web_fetch_content') ||
+    record.producedEvidence.includes('web_fetch_summary')
+  )) {
+    evidence.add('context_collected')
+  }
+
+  for (const record of successfulRecords) {
+    for (const item of record.producedEvidence) {
+      switch (item) {
+        case 'skill_read':
+          evidence.add('skill_read')
+          evidence.add('structured_output')
+          break
+        case 'file_read':
+          evidence.add('file_read')
+          evidence.add('file_parsed')
+          break
+        case 'search_result':
+        case 'web_search_result':
+        case 'web_research_result':
+          evidence.add('search_result')
+          break
+        case 'structured_output':
+          evidence.add('structured_output')
+          break
+        case 'file_mutation':
+          evidence.add('file_mutation')
+          evidence.add('artifact_present')
+          break
+        case 'artifact_present':
+          evidence.add('artifact_present')
+          break
+        case 'file_verified':
+        case 'artifact_read_back':
+        case 'artifact_hash_recorded':
+          evidence.add('verification_passed')
+          evidence.add('file_verified')
+          break
+        case 'test_pass':
+          evidence.add('verification_passed')
+          evidence.add('test_pass')
+          break
+        case 'command_output':
+        case 'command_exit_0':
+          evidence.add('command_output')
+          break
+        default:
+          break
+      }
+    }
+  }
+
+  if (successfulRecords.some(record =>
+    record.toolName === 'run_shell' ||
+    record.toolName === 'exec_command' ||
+    record.toolName === 'write_stdin'
+  )) {
+    evidence.add('command_output')
+  }
+
+  return {
+    evidence: [...evidence],
+    successful,
+    events,
   }
 }
 
