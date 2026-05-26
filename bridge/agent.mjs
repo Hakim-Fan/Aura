@@ -60,6 +60,10 @@ import {
   enforceEvidencePolicy,
 } from './agentEvidence.mjs'
 import { applyCompletionGate } from './completionGate.mjs'
+import {
+  buildStopVerifierContinuationMessages,
+  runStopVerifier,
+} from './stopVerifier.mjs'
 import { evaluateRuntimeCapabilityContract } from './runtimeCapabilityContract.mjs'
 import { createToolRegistry } from './toolRegistry.mjs'
 import { createToolRouter } from './toolRouter.mjs'
@@ -2128,40 +2132,6 @@ function createTaskTracker(hooks, rootTitle) {
     }
   }
 
-  function todoKindToTaskKind(kind) {
-    switch (kind) {
-      case 'inspect':
-        return 'inspect_step'
-      case 'research':
-        return 'research_step'
-      case 'respond':
-        return 'respond'
-      case 'recovery':
-        return 'recovery_step'
-      case 'execute':
-      default:
-        return 'execute'
-    }
-  }
-
-  function verificationStatusForTodo(todo) {
-    const status = todo?.verification?.status
-    switch (status) {
-      case 'completed':
-        return 'verified'
-      case 'in_progress':
-        return 'running'
-      case 'failed':
-        return 'failed'
-      case 'blocked':
-        return 'blocked'
-      case 'pending':
-        return 'pending'
-      default:
-        return undefined
-    }
-  }
-
   function todoNodeId(todo, index) {
     return `${root.id}-todo-${sanitizeTaskIdPart(todo?.id || index + 1)}`
   }
@@ -2258,40 +2228,33 @@ function createTaskTracker(hooks, rootTitle) {
       emit()
       return child
     },
-    syncTodoItems(items = []) {
+    syncTodoItems(items = [], explanation = '') {
       const previousById = new Map(root.children.map(child => [child.id, child]))
       const visibleItems = Array.isArray(items)
-        ? items.filter(item => item?.kind !== 'verify')
+        ? items
         : []
       root.children = visibleItems.map((item, index) => {
         const id = todoNodeId(item, index)
         const previous = previousById.get(id)
-        const verificationStatus = verificationStatusForTodo(item)
-        const verification = item.verification
-          ? {
-            ...item.verification,
-            status: item.verification.status || 'pending',
-          }
-          : undefined
+        const step = item.step || item.content
+        const activeTitle =
+          item.status === 'in_progress' && item.activeForm
+            ? item.activeForm
+            : step
         return {
           ...(previous || {}),
           id,
-          title: compactVisibleTaskTitle(item.content, `步骤 ${index + 1}`),
-          summary:
-            item.successCriteria ||
-            item.verification?.evidence ||
-            previous?.summary ||
-            '',
-          kind: todoKindToTaskKind(item.kind),
+          title: compactVisibleTaskTitle(activeTitle, `步骤 ${index + 1}`),
+          summary: explanation || previous?.summary || '',
+          kind: 'execute',
           status: todoStatusToTaskStatus(item.status),
           children: [],
           errors: previous?.errors || [],
           retryAttempts: previous?.retryAttempts || 0,
           checkpoint: previous?.checkpoint || null,
           todoId: item.id,
-          successCriteria: item.successCriteria || undefined,
-          verification,
-          verificationStatus,
+          activeForm: item.activeForm || undefined,
+          planExplanation: explanation || undefined,
         }
       })
       emit()
@@ -2512,6 +2475,8 @@ export async function runDefaultAgent(request) {
   const routeHistory = []
   let routeEscalationCount = 0
   let toolFailureContinuationCount = 0
+  let stopVerifierAttempts = 0
+  const maxStopVerifierAttempts = 2
   let lastSelectedCapabilities = null
   let lastEffectiveRunSettings = settings
   let lastPromptRouteState = routeState
@@ -2732,8 +2697,8 @@ export async function runDefaultAgent(request) {
             getActivePlanStep() {
               return taskTracker.getActivePlanStep?.()
             },
-            onTodoWrite(items) {
-              taskTracker.syncTodoItems?.(items)
+            onTodoWrite(items, explanation) {
+              taskTracker.syncTodoItems?.(items, explanation)
             },
             rethrowToolError(error) {
               return extractRouteEscalationRequest(error) !== null
@@ -2835,6 +2800,36 @@ export async function runDefaultAgent(request) {
       const runtimeBlocks = buildRuntimeBlocks(routeStopReason)
       result = enforceEvidencePolicy(result, toolEvents, promptRouteState, runtimeBlocks)
       result = applyCompletionGate(result, promptRouteState)
+
+      const stopVerifierResult = runStopVerifier({
+        result,
+        routeState: promptRouteState,
+        attempt: stopVerifierAttempts,
+        maxAttempts: maxStopVerifierAttempts,
+      })
+      if (!stopVerifierResult.ok && !routeStopReason) {
+        stopVerifierAttempts += 1
+        routeNotes.push(`stop_verifier_blocked:${stopVerifierResult.reason}`)
+        messages = buildStopVerifierContinuationMessages({
+          messages: turnResult.resolvedMessages,
+          result,
+          verifierResult: stopVerifierResult,
+        })
+        taskTracker.setStatus(
+          currentTaskId,
+          'running',
+          '最终验证未通过，继续执行或补充验证证据',
+        )
+        hooks?.onPhaseChange?.('preparing', {
+          reason: 'stop_verifier_blocked',
+          verifierReason: stopVerifierResult.reason,
+          stopVerifierAttempts,
+        })
+        continue
+      }
+      if (stopVerifierResult.exhausted) {
+        routeNotes.push(`stop_verifier_exhausted:${stopVerifierResult.reason}`)
+      }
 
       const toolFailureContinuation = shouldContinueAfterToolFailure({
         result,
@@ -3047,8 +3042,8 @@ export async function runDefaultAgent(request) {
               getActivePlanStep() {
                 return taskTracker.getActivePlanStep?.()
               },
-              onTodoWrite(items) {
-                taskTracker.syncTodoItems?.(items)
+              onTodoWrite(items, explanation) {
+                taskTracker.syncTodoItems?.(items, explanation)
               },
               rethrowToolError(error) {
                 return extractRouteEscalationRequest(error) !== null

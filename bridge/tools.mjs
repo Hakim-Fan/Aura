@@ -546,125 +546,90 @@ function createTodoId(content = '', index = 0) {
 }
 
 function normalizeTodoStatus(value) {
-  return ['completed', 'in_progress', 'failed', 'blocked'].includes(value)
+  return ['completed', 'in_progress'].includes(value)
     ? value
     : 'pending'
 }
 
-function normalizeTodoKind(value) {
-  const normalized = String(value || '').trim().toLowerCase()
-  return [
-    'inspect',
-    'research',
-    'execute',
-    'verify',
-    'respond',
-    'recovery',
-  ].includes(normalized)
-    ? normalized
-    : 'execute'
-}
-
-function normalizeTodoVerification(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null
-  }
-  const content =
-    typeof value.content === 'string'
-      ? value.content.trim()
-      : typeof value.description === 'string'
-        ? value.description.trim()
-        : ''
-  const methodHint =
-    typeof value.methodHint === 'string'
-      ? value.methodHint.trim()
-      : typeof value.method === 'string'
-        ? value.method.trim()
-        : typeof value.verificationHint === 'string'
-          ? value.verificationHint.trim()
-          : ''
-  const evidence =
-    typeof value.evidence === 'string'
-      ? value.evidence.trim()
-      : typeof value.result === 'string'
-        ? value.result.trim()
-        : ''
-  const successCriteria =
-    typeof value.successCriteria === 'string' ? value.successCriteria.trim() : ''
-  return {
-    id:
-      typeof value.id === 'string' && value.id.trim()
-        ? value.id.trim()
-        : '',
-    content,
-    status: normalizeTodoStatus(value.status),
-    methodHint,
-    evidence,
-    successCriteria,
-  }
-}
-
-function normalizeTodoItems(input) {
-  let items = input
-  if (typeof items === 'string' && items.trim()) {
+function normalizeTodoPlanInput(input) {
+  let value = input
+  if (typeof value === 'string' && value.trim()) {
     try {
-      items = JSON.parse(items)
+      value = JSON.parse(value)
     } catch {
-      items = []
+      value = []
     }
   }
-  if (items && typeof items === 'object' && !Array.isArray(items)) {
-    items = Array.isArray(items.items)
-      ? items.items
-      : Array.isArray(items.todos)
-        ? items.todos
-        : []
+
+  const explanation =
+    value && typeof value === 'object' && !Array.isArray(value) && typeof value.explanation === 'string'
+      ? value.explanation.trim()
+      : ''
+  let items = value
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const nestedItems = value.plan ?? value.items ?? value.todos
+    if (typeof nestedItems === 'string' && nestedItems.trim()) {
+      try {
+        const parsedNestedItems = JSON.parse(nestedItems)
+        items = Array.isArray(parsedNestedItems)
+          ? parsedNestedItems
+          : parsedNestedItems && typeof parsedNestedItems === 'object'
+            ? parsedNestedItems.plan ?? parsedNestedItems.items ?? parsedNestedItems.todos ?? []
+            : []
+      } catch {
+        items = []
+      }
+    } else {
+      items = Array.isArray(nestedItems) ? nestedItems : []
+    }
   }
   if (!Array.isArray(items)) {
-    return []
+    return { explanation, items: [] }
   }
 
-  return items
+  const normalizedItems = items
     .map((item, index) => {
       if (!item || typeof item !== 'object') {
         return null
       }
 
+      const step =
+        typeof item.step === 'string'
+          ? item.step.trim()
+          : typeof item.content === 'string'
+            ? item.content.trim()
+            : typeof item.text === 'string'
+              ? item.text.trim()
+              : ''
+      if (!step) {
+        return null
+      }
+      const activeForm =
+        typeof item.activeForm === 'string'
+          ? item.activeForm.trim()
+          : typeof item.active_form === 'string'
+            ? item.active_form.trim()
+            : ''
       const content =
         typeof item.content === 'string'
           ? item.content.trim()
-          : typeof item.text === 'string'
-            ? item.text.trim()
-            : ''
-      if (!content) {
-        return null
-      }
-
+          : step
       const status = normalizeTodoStatus(item.status)
-      const kind = normalizeTodoKind(item.kind || item.type)
-      const successCriteria =
-        typeof item.successCriteria === 'string'
-          ? item.successCriteria.trim()
-          : typeof item.acceptance === 'string'
-            ? item.acceptance.trim()
-            : ''
-      const verification = normalizeTodoVerification(
-        item.verification || item.verify || item.validation,
-      )
 
       return {
         id:
           typeof item.id === 'string' && item.id.trim()
             ? item.id.trim()
-            : createTodoId(content, index),
+            : createTodoId(step, index),
+        step,
         content,
         status,
-        kind,
-        successCriteria,
-        verification,
+        activeForm,
       }
     })
     .filter(Boolean)
+
+  return { explanation, items: normalizedItems }
 }
 
 function normalizeWorkMemoryIdPart(value, fallback = 'task') {
@@ -722,13 +687,14 @@ async function recordContextWorkMemory(context, args, runtime = {}) {
   return persistContextWorkMemory(context, memory, runtime)
 }
 
-function buildTodoProgressSummary(items) {
+function buildTodoProgressSummary(items, explanation = '') {
   const completed = items.filter(item => item.status === 'completed')
   const inProgress = items.filter(item => item.status === 'in_progress')
   const pending = items.filter(item => item.status === 'pending')
-  const completedText = completed.map(item => item.content).slice(0, 6).join('; ')
-  const activeText = inProgress.map(item => item.content).slice(0, 3).join('; ')
+  const completedText = completed.map(item => item.step || item.content).slice(0, 6).join('; ')
+  const activeText = inProgress.map(item => item.step || item.content).slice(0, 3).join('; ')
   return [
+    explanation ? `Plan update: ${explanation}.` : '',
     `Task progress checkpoint: ${completed.length}/${items.length} steps completed.`,
     completedText ? `Completed: ${completedText}.` : '',
     activeText ? `In progress: ${activeText}.` : '',
@@ -736,7 +702,7 @@ function buildTodoProgressSummary(items) {
   ].filter(Boolean).join(' ')
 }
 
-function buildTodoProgressMemory(context, items) {
+function buildTodoProgressMemory(context, items, explanation = '') {
   if (!Array.isArray(items) || items.length === 0) {
     return null
   }
@@ -747,19 +713,19 @@ function buildTodoProgressMemory(context, items) {
     id: stableWorkMemoryId(context, 'todo-progress'),
     kind: 'task_progress',
     title: 'Task progress checkpoint',
-    summary: buildTodoProgressSummary(items),
+    summary: buildTodoProgressSummary(items, explanation),
     status: 'draft',
     content: {
-      completed: completed.map(item => item.content),
-      inProgress: inProgress.map(item => item.content),
-      pending: pending.map(item => item.content),
+      explanation: explanation || undefined,
+      completed: completed.map(item => item.step || item.content),
+      inProgress: inProgress.map(item => item.step || item.content),
+      pending: pending.map(item => item.step || item.content),
       items: items.map(item => ({
         id: item.id,
+        step: item.step || item.content,
         content: item.content,
         status: item.status,
-        kind: item.kind,
-        successCriteria: item.successCriteria || undefined,
-        verification: item.verification || undefined,
+        activeForm: item.activeForm || undefined,
       })),
     },
     sourceRefs: [
@@ -1385,7 +1351,11 @@ function formatTodoList(items) {
           : item.status === 'in_progress'
             ? '[~]'
             : '[ ]'
-      return `${marker} ${item.content}`
+      const label =
+        item.status === 'in_progress' && item.activeForm
+          ? item.activeForm
+          : item.step || item.content
+      return `${marker} ${label}`
     })
     .join('\n')
 }
@@ -1932,7 +1902,7 @@ async function removeMcpServer(context, serverId) {
 }
 
 export function createBuiltinTools(context) {
-  context.todoState ||= { items: [] }
+  context.todoState ||= { explanation: '', items: [] }
   context.workMemories ||= []
   ensureArtifactStore(context)
   const unifiedExec = createUnifiedExecRuntime()
@@ -1998,67 +1968,65 @@ export function createBuiltinTools(context) {
       name: 'todo_write',
       aliases: ['todo', 'plan', 'tasklist'],
       description:
-        'Track the current plan as a structured todo list. Use it for multi-step or stateful work. Each item content is a short UI title: 20 Chinese characters or 8 English words max; put details in successCriteria or verification.',
+        'Track the current plan for progress display only. Use explanation for why the plan changed, and plan items with step/status/activeForm. Do not put acceptance criteria or verification evidence in todos.',
       inputSchema: {
         type: 'object',
         properties: {
-          items: {
+          explanation: {
+            type: 'string',
+            description:
+              'Optional short reason for this plan update. It is plan-level UI context, not a task step or verification rule.',
+          },
+          plan: {
             type: 'array',
             items: {
               type: 'object',
               properties: {
                 id: { type: 'string' },
-                content: {
+                step: {
                   type: 'string',
                   description:
-                    'Short user-visible step title, max 20 Chinese characters or 8 English words. Do not include long explanations, risks, or acceptance details here.',
+                    'Short user-visible step title, max 20 Chinese characters or 8 English words.',
                 },
                 status: {
                   type: 'string',
-                  description: 'One of: pending, in_progress, completed, failed, blocked.',
+                  description: 'One of: pending, in_progress, completed.',
                 },
-                kind: {
+                activeForm: {
                   type: 'string',
                   description:
-                    'Optional step kind. Use execute for user-visible work. Put verification details in verification instead of creating top-level verify-only items.',
-                },
-                successCriteria: {
-                  type: 'string',
-                  description:
-                    'Optional natural-language acceptance criteria for this step.',
-                },
-                verification: {
-                  type: 'object',
-                  description:
-                    'Optional hidden verification metadata for this step. The UI marks the parent step verified when verification.status is completed.',
-                  properties: {
-                    id: { type: 'string' },
-                    content: { type: 'string' },
-                    status: {
-                      type: 'string',
-                      description: 'One of: pending, in_progress, completed, failed, blocked.',
-                    },
-                    methodHint: { type: 'string' },
-                    evidence: { type: 'string' },
-                    successCriteria: { type: 'string' },
-                  },
+                    'Optional natural in-progress label. Example: step "环境检查", activeForm "正在检查环境".',
                 },
               },
-              required: ['content'],
+              required: ['step', 'status'],
             },
+          },
+          items: {
+            description:
+              'Compatibility alias for plan. Accepts an array of objects with step/content, status, and optional activeForm.',
           },
           todos: {
             description:
-              'Compatibility alias for items. Accepts an array of todo objects or a JSON string containing that array.',
+              'Compatibility alias for plan. Accepts an array of todo objects or a JSON string containing the plan.',
           },
         },
       },
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
-        const nextItems = normalizeTodoItems(args.items ?? args.todos)
+        const nextPlan = normalizeTodoPlanInput(
+          args.plan
+            ? { explanation: args.explanation, plan: args.plan }
+            : args.items
+              ? { explanation: args.explanation, items: args.items }
+              : args.todos
+                ? { explanation: args.explanation, todos: args.todos }
+                : args,
+        )
+        const nextItems = nextPlan.items
+        context.todoState.explanation = nextPlan.explanation
         context.todoState.items = nextItems
-        runtime.onTodoWrite?.(nextItems)
-        const todoMemory = buildTodoProgressMemory(context, nextItems)
+        runtime.onTodoWrite?.(nextItems, nextPlan.explanation)
+        const todoMemory = buildTodoProgressMemory(context, nextItems, nextPlan.explanation)
         if (todoMemory) {
           await recordContextWorkMemory(context, todoMemory, runtime)
         }
@@ -3383,8 +3351,8 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
           onWorkMemory(memory) {
             hooks.onWorkMemory?.(memory)
           },
-          onTodoWrite(items) {
-            hooks.onTodoWrite?.(items)
+          onTodoWrite(items, explanation) {
+            hooks.onTodoWrite?.(items, explanation)
           },
         }),
       ),

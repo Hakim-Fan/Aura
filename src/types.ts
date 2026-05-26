@@ -593,16 +593,8 @@ export type TaskNode = {
   status: TaskStatus
   children: TaskNode[]
   todoId?: string
-  successCriteria?: string
-  verificationStatus?: 'pending' | 'running' | 'verified' | 'failed' | 'blocked'
-  verification?: {
-    id?: string
-    content?: string
-    status?: 'pending' | 'in_progress' | 'completed' | 'failed' | 'blocked'
-    methodHint?: string
-    evidence?: string
-    successCriteria?: string
-  }
+  activeForm?: string
+  planExplanation?: string
 }
 
 export type McpServerConfig = {

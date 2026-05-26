@@ -167,21 +167,16 @@ export function resolveTaskFrame({ messages = [], runtime = {}, settings = {} } 
   const hasAttachments =
     safeArray(latestUser?.attachments).length > 0 ||
     safeArray(latestUser?.parts).some(part => part?.type && part.type !== 'text')
-  const graphCheckpoint =
-    isRecord(runtime?.graphCheckpoint) || isRecord(runtime?.restoreGraphCheckpoint)
-
   const blocksFastPath = Boolean(
     pendingActions.length > 0 ||
     priorExecution ||
     hasAttachments ||
-    graphCheckpoint ||
     settings?.executionMode === 'long-task',
   )
   const reasons = [
     pendingActions.length > 0 ? 'pending_action' : null,
     priorExecution ? priorExecution.reason : null,
     hasAttachments ? 'latest_user_has_attachments' : null,
-    graphCheckpoint ? 'graph_checkpoint_restore' : null,
     settings?.executionMode === 'long-task' ? 'long_task_mode' : null,
   ].filter(Boolean)
 

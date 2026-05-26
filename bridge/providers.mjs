@@ -15,6 +15,7 @@ import { buildDeliveryPolicy } from './agentEvidence.mjs'
 import { normalizeBaseUrl, stringifyOutput, truncate } from './utils.mjs'
 import { guardedFetch } from './web/net/guardedFetch.mjs'
 import { createApplyPatchStreamingReporter } from './editing/applyPatchStreaming.mjs'
+import { createWriteFileStreamingReporter } from './editing/writeFileStreaming.mjs'
 import {
   buildContextCompressionBudget,
   buildCompactionSystemPrompt,
@@ -1930,8 +1931,10 @@ async function readSseStream(response, onData, options = {}) {
   const reader = response.body.getReader()
   let buffer = ''
   let isFirstChunk = true
+  let sawDoneSignal = false
   const firstChunkTimeoutMs = options.firstChunkTimeoutMs || 45_000
-  const idleTimeoutMs = options.idleTimeoutMs || 90_000
+  const idleTimeoutMs = options.idleTimeoutMs || 300_000
+  const requireCompletionSignal = options.requireCompletionSignal === true
 
   try {
     while (true) {
@@ -1971,6 +1974,7 @@ async function readSseStream(response, onData, options = {}) {
 
         const payload = dataLines.join('\n')
         if (payload === '[DONE]') {
+          sawDoneSignal = true
           return
         }
 
@@ -1990,19 +1994,48 @@ async function readSseStream(response, onData, options = {}) {
   }
 
   const trailing = buffer.trim()
-  if (!trailing) {
+  if (!trailing && !requireCompletionSignal) {
     return
   }
 
   const dataLines = trailing
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice(5).trimStart())
+    ? trailing
+        .split(/\r?\n/u)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+    : []
 
   for (const payload of dataLines) {
-    if (payload && payload !== '[DONE]') {
+    if (payload === '[DONE]') {
+      sawDoneSignal = true
+      continue
+    }
+    if (payload) {
       await onData(payload)
     }
+  }
+
+  if (
+    requireCompletionSignal &&
+    !sawDoneSignal &&
+    typeof options.isComplete === 'function' &&
+    options.isComplete() === true
+  ) {
+    return
+  }
+
+  if (requireCompletionSignal && !sawDoneSignal) {
+    throw createClassifiedError('模型流式连接在完成前断开。', {
+      source: 'provider',
+      category: 'network',
+      code: 'PROVIDER_STREAM_DISCONNECTED',
+      rawMessage: presentProviderError(
+        'Streaming response disconnected before completion.',
+        options.messages,
+      ),
+      suggestedAction: '当前流式连接提前断开，运行时会重试当前模型请求。',
+      retryable: true,
+    })
   }
 }
 
@@ -2402,6 +2435,7 @@ export const __testInternals = {
   normalizeGoogleUsage,
   normalizeOpenAiUsage,
   parseToolArguments,
+  readSseStream,
   resolveCompactionOutputTokens,
   resolveCompactionSettings,
   runProviderOperationWithRetry,
@@ -2606,7 +2640,7 @@ function wait(ms) {
 }
 
 const PROVIDER_CONNECT_TIMEOUT_MS = 45_000
-const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 45_000
+const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 300_000
 const PROVIDER_FINALIZATION_TIMEOUT_MS = 60_000
 const PROVIDER_RETRY_DELAYS_MS = [0, 1_200, 3_000, 7_000, 15_000]
 const STEP_LIMIT_TOOL_ERROR_REPAIR_TURNS = 6
@@ -3174,14 +3208,14 @@ function maybeNormalizeProviderTermination(error, messages) {
     normalized.includes('econnrefused')
   ) {
     return createClassifiedError(
-      '模型连接异常断开。这可能表示当前模型或兼容接口不支持工具调用，或连接被中间设备终止。',
+      '模型流式连接异常断开。',
       {
-        code: 'provider_eof',
+        code: 'PROVIDER_STREAM_DISCONNECTED',
         source: 'provider',
-        category: 'unsupported',
+        category: 'network',
         rawMessage: presentProviderError(message, messages),
-        suggestedAction: '请切换到对工具调用支持更稳定的模型 / Provider，或检查网络连接。',
-        retryable: false,
+        suggestedAction: '当前流式连接提前断开，运行时会重试当前模型请求。',
+        retryable: true,
       },
     )
   }
@@ -3997,6 +4031,12 @@ export async function runOpenAiCompatibleAgent({
               order: toolOrder,
             },
           )
+          const writeFileStreamingReporter = createWriteFileStreamingReporter(
+            {
+              hooks,
+              order: toolOrder,
+            },
+          )
           const streamParser = createThinkStreamParser({
             onContent(text) {
               content += text
@@ -4064,6 +4104,7 @@ export async function runOpenAiCompatibleAgent({
                 mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
                 attemptState.partialToolCalls = summarizePartialToolCalls(toolCalls)
                 applyPatchStreamingReporter.inspect(toolCalls)
+                writeFileStreamingReporter.inspect(toolCalls)
               }
             },
             {
@@ -4077,6 +4118,8 @@ export async function runOpenAiCompatibleAgent({
               signal: abortController?.signal,
               returnOnAbort: () =>
                 shouldReturnForQueuedInputAbort(hooks, abortController?.signal),
+              requireCompletionSignal: true,
+              isComplete: () => Boolean(finishReason),
             },
           )
           if (shouldReturnForQueuedInputAbort(hooks, abortController?.signal)) {
@@ -4104,6 +4147,7 @@ export async function runOpenAiCompatibleAgent({
             ),
           )
           applyPatchStreamingReporter.inspect(toolCalls)
+          writeFileStreamingReporter.inspect(toolCalls)
 
           const inlineContentToolCalls = extractInlineToolCalls(
             content,
@@ -4115,6 +4159,7 @@ export async function runOpenAiCompatibleAgent({
             dedupeInlineToolCalls(toolCalls, inlineContentToolCalls.toolCalls),
           )
           applyPatchStreamingReporter.inspect(toolCalls)
+          writeFileStreamingReporter.inspect(toolCalls)
 
           return {
             content,
@@ -4723,6 +4768,8 @@ export async function runGoogleAgent({
               signal: abortController?.signal,
               returnOnAbort: () =>
                 shouldReturnForQueuedInputAbort(hooks, abortController?.signal),
+              requireCompletionSignal: true,
+              isComplete: () => Boolean(finishReason),
             },
           )
           if (shouldReturnForQueuedInputAbort(hooks, abortController?.signal)) {

@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { BadgeCheck, CheckCircle2, Circle, LoaderCircle, PauseCircle, XCircle } from 'lucide-react'
+import { CheckCircle2, Circle, LoaderCircle, PauseCircle, XCircle } from 'lucide-react'
 import type { TaskNode } from '../types'
 
 const STRUCTURAL_STEP_KINDS = new Set(['main', 'plan'])
@@ -101,7 +101,6 @@ function pickFocusedStep(steps: TaskNode[] = []) {
 }
 
 function TaskStep({ node, compact = false }: { node: TaskNode; compact?: boolean }) {
-  const verified = node.verificationStatus === 'verified'
   const displayTitle = compactVisibleTaskTitle(node.title)
   const titleTooltip = displayTitle === node.title ? undefined : node.title
   return (
@@ -120,15 +119,6 @@ function TaskStep({ node, compact = false }: { node: TaskNode; compact?: boolean
         title={titleTooltip}
       >
         <span className="min-w-0">{displayTitle}</span>
-        {verified ? (
-          <span
-            className="ml-2 inline-flex shrink-0 items-center gap-1 rounded-full border border-green-200 bg-green-50 px-1.5 py-0.5 align-middle text-11px font-700 text-green-600"
-            title={node.verification?.evidence || '验证通过'}
-          >
-            <BadgeCheck size={11} />
-            {!compact ? '已验证' : null}
-          </span>
-        ) : null}
       </span>
     </li>
   )
@@ -143,16 +133,26 @@ export const TaskTreeView = memo(function TaskTreeView({
 }) {
   const steps = collectStepNodes(nodes)
   const displayedSteps = collapsed ? [pickFocusedStep(steps)].filter(Boolean) : steps
+  const explanation = collapsed
+    ? ''
+    : steps.find(node => node.planExplanation)?.planExplanation || ''
 
   if (displayedSteps.length === 0) {
     return null
   }
 
   return (
-    <ol className={collapsed ? 'flex flex-col gap-0' : 'flex flex-col gap-2'}>
-      {displayedSteps.map(node => (
-        <TaskStep key={node.id} node={node} compact={collapsed} />
-      ))}
-    </ol>
+    <div className="flex flex-col gap-2">
+      {explanation ? (
+        <div className="text-12px font-500 leading-relaxed text-[var(--text-secondary)]">
+          计划已更新：{explanation}
+        </div>
+      ) : null}
+      <ol className={collapsed ? 'flex flex-col gap-0' : 'flex flex-col gap-2'}>
+        {displayedSteps.map(node => (
+          <TaskStep key={node.id} node={node} compact={collapsed} />
+        ))}
+      </ol>
+    </div>
   )
 })

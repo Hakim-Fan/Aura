@@ -1191,7 +1191,7 @@ function completionStateLabel(completionState?: CompletionState) {
     case 'not_executed':
       return '未执行'
     case 'executed_unverified':
-      return '已执行未验证'
+      return '已执行，待验证'
     case 'executed_verified':
       return '已验证完成'
     case 'blocked_by_approval':
@@ -1205,20 +1205,192 @@ function completionStateLabel(completionState?: CompletionState) {
   }
 }
 
-function completionStateTone(completionState?: CompletionState) {
-  switch (completionState) {
-    case 'executed_verified':
-      return 'border-emerald-200 bg-emerald-50 text-emerald-700'
-    case 'executed_unverified':
-      return 'border-amber-200 bg-amber-50 text-amber-700'
-    case 'blocked_by_approval':
-    case 'blocked_by_capability':
-      return 'border-orange-200 bg-orange-50 text-orange-700'
-    case 'failed_after_execution':
-      return 'border-red-200 bg-red-50 text-red-700'
-    case 'not_executed':
+type ToolCallSummaryRow = {
+  label: string
+  success: number
+  error: number
+  running: number
+  waiting: number
+}
+
+function createEmptyToolCallSummaryRow(label: string): ToolCallSummaryRow {
+  return {
+    label,
+    success: 0,
+    error: 0,
+    running: 0,
+    waiting: 0,
+  }
+}
+
+function incrementToolCallSummaryRow(row: ToolCallSummaryRow, status: 'success' | 'error' | 'running' | 'waiting') {
+  row[status] += 1
+}
+
+function toolCallStatusText(row: ToolCallSummaryRow) {
+  const parts = [
+    row.success > 0 && row.error === 0 && row.running === 0 && row.waiting === 0
+      ? '成功'
+      : row.success > 0
+        ? `${row.success} 次成功`
+        : null,
+    row.error > 0 ? `${row.error} 次失败` : null,
+    row.running > 0 ? `${row.running} 次运行中` : null,
+    row.waiting > 0 ? `${row.waiting} 次等待` : null,
+  ].filter(Boolean)
+  return parts.join('，') || '无状态'
+}
+
+function toolCallTotal(row: ToolCallSummaryRow) {
+  return row.success + row.error + row.running + row.waiting
+}
+
+function cleanToolDisplayName(value?: string) {
+  const normalized = normalizeComparableText(value || '')
+  return normalized || '未知工具'
+}
+
+function sourcePrefix(source?: MessageEvent['source']) {
+  switch (source) {
+    case 'mcp':
+      return 'MCP'
+    case 'plugin':
+      return 'Plugin'
+    case 'subagent':
+      return 'Subagent'
     default:
-      return 'border-[rgba(15,23,42,0.08)] bg-[rgba(15,23,42,0.03)] text-[var(--text-secondary)]'
+      return ''
+  }
+}
+
+function formatToolDisplayLabel(name: string, source?: MessageEvent['source'], kind?: MessageEvent['kind']) {
+  if (kind === 'skill') {
+    return `Skill · ${cleanToolDisplayName(name)}`
+  }
+  const prefix = sourcePrefix(source)
+  return prefix ? `${prefix} · ${cleanToolDisplayName(name)}` : cleanToolDisplayName(name)
+}
+
+function evidenceActionLabel(record: NonNullable<ChatMessage['evidenceSummary']>['records'][number]) {
+  return formatToolDisplayLabel(record.toolName || '未知工具', record.source)
+}
+
+function summarizeEvidenceActions(evidenceSummary?: ChatMessage['evidenceSummary']) {
+  const rows = new Map<string, ToolCallSummaryRow>()
+  for (const record of evidenceSummary?.records || []) {
+    const label = evidenceActionLabel(record)
+    const row = rows.get(label) || createEmptyToolCallSummaryRow(label)
+    incrementToolCallSummaryRow(
+      row,
+      record.status === 'error' || record.status === 'denied' ? 'error' : 'success',
+    )
+    rows.set(label, row)
+  }
+  return Array.from(rows.values())
+    .sort((left, right) => toolCallTotal(right) - toolCallTotal(left) || left.label.localeCompare(right.label))
+}
+
+function eventActionLabel(event: MessageEvent) {
+  const name = event.toolName || event.title || event.summary || eventKindLabel(event)
+  if (event.kind === 'approval') {
+    return formatToolDisplayLabel(name, event.source, event.kind)
+  }
+  if (event.kind === 'user_input') {
+    return formatToolDisplayLabel(name, event.source, event.kind)
+  }
+  return formatToolDisplayLabel(name, event.source, event.kind)
+}
+
+function summarizeEventActions(events?: MessageEvent[]) {
+  const rows = new Map<string, ToolCallSummaryRow>()
+  for (const event of events || []) {
+    if (isSearchControllerDecisionEvent(event)) {
+      continue
+    }
+    const label = eventActionLabel(event)
+    const row = rows.get(label) || createEmptyToolCallSummaryRow(label)
+    incrementToolCallSummaryRow(
+      row,
+      event.status === 'error'
+        ? 'error'
+        : event.status === 'running'
+          ? 'running'
+          : event.status === 'awaiting_approval' || event.status === 'awaiting_user_input'
+            ? 'waiting'
+            : 'success',
+    )
+    rows.set(label, row)
+  }
+  return Array.from(rows.values())
+    .sort((left, right) => toolCallTotal(right) - toolCallTotal(left) || left.label.localeCompare(right.label))
+}
+
+function collectStringPathsFromValue(value: unknown, paths: Set<string>, depth = 0) {
+  if (depth > 4 || value == null) {
+    return
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (
+      trimmed.length >= 3 &&
+      trimmed.length <= 260 &&
+      /(?:^\/|^\.\.?\/|[\\/])/.test(trimmed) &&
+      /\.[a-z0-9]{1,10}(?:$|[?#])/i.test(trimmed)
+    ) {
+      paths.add(trimmed)
+    }
+    return
+  }
+  if (Array.isArray(value)) {
+    value.forEach(item => collectStringPathsFromValue(item, paths, depth + 1))
+    return
+  }
+  if (typeof value === 'object') {
+    Object.entries(value as Record<string, unknown>).forEach(([key, child]) => {
+      if (/(?:path|file|artifact|output)/i.test(key)) {
+        collectStringPathsFromValue(child, paths, depth + 1)
+      }
+    })
+  }
+}
+
+function collectArtifactPathsFromEvents(events?: MessageEvent[]) {
+  const paths = new Set<string>()
+  for (const event of events || []) {
+    collectStringPathsFromValue(event.structuredOutput, paths)
+  }
+  return Array.from(paths)
+}
+
+function compactArtifactLabel(path: string) {
+  const normalized = path.trim()
+  if (!normalized) {
+    return ''
+  }
+  return normalized.split(/[\\/]/).filter(Boolean).at(-1) || normalized
+}
+
+function buildExecutionHoverSummary(message: ChatMessage) {
+  const evidenceSummary = message.evidenceSummary
+  const evidenceActions = summarizeEvidenceActions(evidenceSummary)
+  const eventActions = summarizeEventActions(message.events)
+  const actions = evidenceActions.length > 0 ? evidenceActions : eventActions
+  const artifactPaths = (evidenceSummary?.artifactPaths || []).filter(Boolean)
+  const fallbackArtifactPaths = artifactPaths.length > 0
+    ? artifactPaths
+    : collectArtifactPathsFromEvents(message.events)
+  const statusLabel =
+    completionStateLabel(message.completionState) ||
+    (message.activity ? activityStatusLabel(message.activity.status) : '')
+
+  if (!statusLabel && actions.length === 0 && fallbackArtifactPaths.length === 0) {
+    return null
+  }
+
+  return {
+    statusLabel,
+    actions,
+    artifactPaths: fallbackArtifactPaths,
   }
 }
 
@@ -5790,38 +5962,7 @@ function AssistantMessageCard({
     },
   ]
 
-  const usedTools = Array.from(
-    new Set(
-      (message.events || [])
-        .filter(event => !isSearchControllerDecisionEvent(event))
-        .filter(event => event.kind !== 'approval')
-        .filter(event => event.source === 'builtin' || event.source === 'subagent')
-        .map(event => event.title),
-    ),
-  )
-  const usedPlugins = Array.from(
-    new Set(
-      (message.events || [])
-        .filter(event => event.kind !== 'approval')
-        .filter(event => event.source === 'plugin')
-        .map(event => event.title),
-    ),
-  )
-  const usedMcp = Array.from(
-    new Set(
-      (message.events || [])
-        .filter(event => event.kind !== 'approval')
-        .filter(event => event.source === 'mcp')
-        .map(event => event.title),
-    ),
-  )
-  const invokedCount = usedTools.length + usedPlugins.length + usedMcp.length
-  const hasUsedCapabilities = invokedCount > 0
-  const invokedToolsGroups = [
-    { label: 'Built-in Tools', items: usedTools, type: 'Tool' },
-    { label: 'Plugins', items: usedPlugins, type: 'Plug' },
-    { label: 'MCP Servers', items: usedMcp, type: 'MCP' },
-  ].filter(group => group.items.length > 0)
+  const executionHoverSummary = buildExecutionHoverSummary(message)
   const shouldShowAnswer = Boolean(message.content)
   const canCopyAnswer = Boolean(message.content)
   const answerFilenameBase = `aura-answer-${message.id.slice(0, 8)}`
@@ -5913,42 +6054,69 @@ function AssistantMessageCard({
                   {isStreaming ? <RetryStatusDots /> : null}
                   {activity?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </button>
-                {hasUsedCapabilities ? (
-                  <div className="absolute left-0 top-full pt-2 z-30 w-max min-w-[14rem] max-w-[20rem] opacity-0 invisible -translate-y-1.5 group-hover/activity:opacity-100 group-hover/activity:visible group-hover/activity:translate-y-0 transition-all duration-200 ease-out origin-top-left">
+                {executionHoverSummary ? (
+                  <div className="absolute left-0 top-full pt-2 z-30 w-max min-w-[16rem] max-w-[22rem] opacity-0 invisible -translate-y-1.5 group-hover/activity:opacity-100 group-hover/activity:visible group-hover/activity:translate-y-0 transition-all duration-200 ease-out origin-top-left">
                     <div className="relative rounded-[16px] border border-[rgba(15,23,42,0.08)] bg-white px-4 py-3.5 text-left shadow-[0_16px_40px_-8px_rgba(0,0,0,0.15)] ring-1 ring-black/[0.03]">
                       <svg className="absolute left-5 -top-[5.5px] text-white drop-shadow-[0_-1px_1px_rgba(15,23,42,0.06)]" width="12" height="6" viewBox="0 0 12 6" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
                         <path d="M6 0L12 6H0L6 0Z" />
                       </svg>
-                      <div className="mb-2.5 flex items-center justify-between gap-1.5 border-b border-[rgba(15,23,42,0.06)] pb-2">
+                      {/* <div className="mb-2.5 flex items-center justify-between gap-1.5 border-b border-[rgba(15,23,42,0.06)] pb-2">
                         <div className="text-[10px] font-800 uppercase tracking-[0.1em] text-[var(--accent-soft-strong)] opacity-90">
-                          执行明细
+                          执行摘要
                         </div>
-                        <span className="rounded-full bg-[rgba(15,23,42,0.04)] px-1.5 py-[1px] text-[9px] font-700 text-[var(--text-secondary)] opacity-70">
-                          {invokedCount} 项
-                        </span>
-                      </div>
-                      <div className="flex flex-col gap-1.5">
-                        {invokedToolsGroups.map(group => (
-                          <details key={group.label} open className="group/details">
-                            <summary className="cursor-pointer list-none flex items-center justify-between mb-1.5 opacity-80 hover:opacity-100 transition-opacity">
-                              <span className="text-[10px] font-700 uppercase tracking-widest text-[var(--text-secondary)]">
-                                {group.label}
-                              </span>
-                              <ChevronDown size={12} className="text-[var(--text-secondary)] transition-transform group-open/details:rotate-180" />
-                            </summary>
-                            <div className="flex flex-wrap gap-1.5 mb-1 last:mb-0">
-                              {group.items.map(name => (
-                                <span
-                                  key={`${group.type}-${name}`}
-                                  className="inline-flex items-center gap-1.5 rounded-lg bg-[rgba(15,23,42,0.025)] border border-[rgba(15,23,42,0.05)] px-2.5 py-1 text-[11px] font-500 text-[var(--text-primary)]"
+                        {executionHoverSummary.statusLabel ? (
+                          <span className="rounded-full bg-[rgba(79,123,116,0.08)] px-1.5 py-[1px] text-[9px] font-800 text-[var(--accent-soft-strong)]">
+                            {executionHoverSummary.statusLabel}
+                          </span>
+                        ) : null}
+                      </div> */}
+                      <div className="flex flex-col gap-2">
+                        {executionHoverSummary.actions.length > 0 ? (
+                          <div className="flex flex-col gap-1.5">
+                            <div className="text-[10px] font-700 uppercase tracking-widest text-[var(--text-secondary)] opacity-70">
+                              工具调用
+                            </div>
+                            <div className="flex min-w-[18rem] flex-col gap-1">
+                              {executionHoverSummary.actions.slice(0, 6).map(action => (
+                                <div
+                                  key={action.label}
+                                  className="grid grid-cols-[minmax(5rem,1fr)_3.75rem_minmax(4.5rem,auto)] items-center gap-3 rounded-lg bg-[rgba(15,23,42,0.025)] px-2.5 py-1.5 text-[11px]"
                                 >
-                                  <span className="text-[9px] font-600 text-[var(--text-secondary)] opacity-60 uppercase tracking-wider">{group.type}</span>
-                                  {name}
-                                </span>
+                                  <span className="truncate font-700 text-[var(--text-primary)]">{action.label}</span>
+                                  <span className="text-right font-700 text-[var(--text-secondary)] opacity-70">
+                                    {toolCallTotal(action)} 次
+                                  </span>
+                                  <span className={`text-right font-700 ${action.error > 0 ? 'text-red-500' : action.running > 0 || action.waiting > 0 ? 'text-amber-600' : 'text-[var(--accent-soft-strong)]'}`}>
+                                    {toolCallStatusText(action)}
+                                  </span>
+                                </div>
                               ))}
                             </div>
-                          </details>
-                        ))}
+                          </div>
+                        ) : null}
+                        {executionHoverSummary.artifactPaths.length > 0 ? (
+                          <div className="flex flex-col gap-1 border-t border-[rgba(15,23,42,0.06)] pt-2">
+                            <div className="text-[10px] font-700 uppercase tracking-widest text-[var(--text-secondary)] opacity-70">
+                              产物
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              {executionHoverSummary.artifactPaths.slice(0, 3).map(path => (
+                                <code
+                                  key={path}
+                                  title={path}
+                                  className="truncate rounded-md bg-[rgba(15,23,42,0.035)] px-2 py-1 text-[11px] font-600 text-[var(--text-primary)]"
+                                >
+                                  {compactArtifactLabel(path)}
+                                </code>
+                              ))}
+                              {executionHoverSummary.artifactPaths.length > 3 ? (
+                                <span className="text-[10px] font-600 text-[var(--text-secondary)] opacity-70">
+                                  还有 {executionHoverSummary.artifactPaths.length - 3} 个产物
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   </div>

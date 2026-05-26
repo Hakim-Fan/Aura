@@ -17,6 +17,7 @@ const {
   normalizeGoogleUsage,
   normalizeOpenAiUsage,
   parseToolArguments,
+  readSseStream,
   resolveCompactionOutputTokens,
   resolveCompactionSettings,
   runProviderOperationWithRetry,
@@ -432,6 +433,86 @@ test('runProviderOperationWithRetry can prepare a local replan prompt before ret
   assert.equal(injectedPrompts.length, 1)
   assert.match(injectedPrompts[0], /不要简单重复原计划/)
   assert.match(injectedPrompts[0], /多个可观察、可验证、可恢复的小步骤/)
+})
+
+test('runProviderOperationWithRetry immediately retries stream disconnect errors', async () => {
+  let attempts = 0
+
+  const result = await runProviderOperationWithRetry(
+    async () => {
+      attempts += 1
+      if (attempts === 1) {
+        throw new Error('ECONNRESET')
+      }
+      return 'ok'
+    },
+    { messages: [] },
+  )
+
+  assert.equal(result.value, 'ok')
+  assert.equal(result.retryCount, 1)
+  assert.equal(attempts, 2)
+})
+
+test('readSseStream treats premature close before completion as retryable disconnect', async () => {
+  const encoder = new TextEncoder()
+  const response = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'))
+      controller.close()
+    },
+  }))
+  const payloads = []
+
+  await assert.rejects(
+    readSseStream(
+      response,
+      async payload => {
+        payloads.push(payload)
+      },
+      {
+        messages: [],
+        requireCompletionSignal: true,
+        firstChunkTimeoutMs: 1_000,
+        idleTimeoutMs: 1_000,
+      },
+    ),
+    error => {
+      assert.equal(error.code, 'PROVIDER_STREAM_DISCONNECTED')
+      assert.equal(error.errorInfo?.retryable, true)
+      return true
+    },
+  )
+
+  assert.equal(payloads.length, 1)
+})
+
+test('readSseStream accepts caller-confirmed completion without DONE marker', async () => {
+  const encoder = new TextEncoder()
+  let complete = false
+  const response = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"done":true}\n\n'))
+      controller.close()
+    },
+  }))
+
+  await readSseStream(
+    response,
+    async payload => {
+      const parsed = JSON.parse(payload)
+      complete = parsed.done === true
+    },
+    {
+      messages: [],
+      requireCompletionSignal: true,
+      isComplete: () => complete,
+      firstChunkTimeoutMs: 1_000,
+      idleTimeoutMs: 1_000,
+    },
+  )
+
+  assert.equal(complete, true)
 })
 
 test('runProviderOperationWithRetry escalates partial stream stalls without provider retry', async () => {

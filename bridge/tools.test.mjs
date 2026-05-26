@@ -322,12 +322,13 @@ test('todo_write accepts todos JSON string compatibility input', async () => {
       todos: JSON.stringify([
         {
           id: '1',
-          content: '编写 Node.js 脚本生成 17 个数据实体表的 Word 文档',
+          step: '编写 Node.js 脚本生成 17 个数据实体表的 Word 文档',
           status: 'in_progress',
+          activeForm: '正在编写 Node.js 脚本',
         },
         {
           id: '2',
-          content: '运行脚本生成 docx 文件',
+          step: '运行脚本生成 docx 文件',
           status: 'pending',
         },
       ]),
@@ -336,7 +337,7 @@ test('todo_write accepts todos JSON string compatibility input', async () => {
     {},
   )
 
-  assert.match(toolResultText(output), /\[~\] 编写 Node\.js 脚本生成 17 个数据实体表的 Word 文档/)
+  assert.match(toolResultText(output), /\[~\] 正在编写 Node\.js 脚本/)
   assert.match(toolResultText(output), /\[ \] 运行脚本生成 docx 文件/)
   assert.equal(context.todoState.items.length, 2)
 })
@@ -364,15 +365,16 @@ test('todo_write records a reusable task progress checkpoint', async () => {
   await invokeTool(
     todoWrite,
     {
-      items: [
+      explanation: '需要先解析文档再生成实体表',
+      plan: [
         {
           id: '1',
-          content: '解析文档 XML 并提取子标题',
+          step: '解析文档 XML 并提取子标题',
           status: 'completed',
         },
         {
           id: '2',
-          content: '生成数据实体表',
+          step: '生成数据实体表',
           status: 'in_progress',
         },
       ],
@@ -387,6 +389,7 @@ test('todo_write records a reusable task progress checkpoint', async () => {
 
   assert.equal(context.workMemories.length, 1)
   assert.equal(context.workMemories[0].kind, 'task_progress')
+  assert.match(context.workMemories[0].summary, /Plan update: 需要先解析文档再生成实体表/)
   assert.match(context.workMemories[0].summary, /1\/2 steps completed/)
   assert.deepEqual(context.workMemories[0].content.completed, ['解析文档 XML 并提取子标题'])
   assert.equal(emittedMemory.id, context.workMemories[0].id)
@@ -395,15 +398,15 @@ test('todo_write records a reusable task progress checkpoint', async () => {
   await invokeTool(
     todoWrite,
     {
-      items: [
+      plan: [
         {
           id: '1',
-          content: '解析文档 XML 并提取子标题',
+          step: '解析文档 XML 并提取子标题',
           status: 'completed',
         },
         {
           id: '2',
-          content: '生成数据实体表',
+          step: '生成数据实体表',
           status: 'completed',
         },
       ],
@@ -421,41 +424,38 @@ test('todo_write records a reusable task progress checkpoint', async () => {
   assert.match(executionContext, /Continuation rules/)
 })
 
-test('todo_write emits normalized execution todos with hidden verification metadata', async () => {
+test('todo_write emits display-only plan items with active form', async () => {
   const context = { cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-todo-ui-')) }
   const todoWrite = createBuiltinTools(context).find(tool => tool.name === 'todo_write')
   let emittedItems
+  let emittedExplanation
 
   await invokeTool(
     todoWrite,
     {
-      items: [
+      explanation: '先确认工具目录再继续',
+      plan: [
         {
-          content: '获取 docx skill 目录',
+          step: '获取 docx skill 目录',
           status: 'in_progress',
-          kind: 'execute',
-          successCriteria: '本地可以访问 docx skill 文件',
-          verification: {
-            content: '确认存在 skill.md 或 SKILL.md',
-            status: 'pending',
-            methodHint: '列出 skills/docx 目录',
-          },
+          activeForm: '正在获取 docx skill 目录',
         },
       ],
     },
     [],
     {
-      onTodoWrite(items) {
+      onTodoWrite(items, explanation) {
         emittedItems = items
+        emittedExplanation = explanation
       },
     },
   )
 
   assert.equal(emittedItems.length, 1)
-  assert.equal(emittedItems[0].kind, 'execute')
+  assert.equal(emittedItems[0].step, '获取 docx skill 目录')
   assert.equal(emittedItems[0].status, 'in_progress')
-  assert.equal(emittedItems[0].successCriteria, '本地可以访问 docx skill 文件')
-  assert.equal(emittedItems[0].verification.status, 'pending')
+  assert.equal(emittedItems[0].activeForm, '正在获取 docx skill 目录')
+  assert.equal(emittedExplanation, '先确认工具目录再继续')
   assert.match(emittedItems[0].id, /^todo-1-/)
 })
 
