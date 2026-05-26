@@ -3610,6 +3610,33 @@ function hasPatchPreviewOutput(output: Record<string, unknown> | null) {
   )
 }
 
+function isWriteFileStreamingPreviewEvent(event: MessageEvent) {
+  return (
+    event.toolName === 'write_file' &&
+    (event.id.includes('write-file-stream') ||
+      event.input === 'Streaming write_file arguments')
+  )
+}
+
+function filterSupersededWriteFileStreamingPreviewEvents(
+  events: MessageEvent[] = [],
+  shouldFilter: boolean,
+) {
+  if (!shouldFilter) {
+    return events
+  }
+  const hasCompletedWriteFile = events.some(
+    event =>
+      event.toolName === 'write_file' &&
+      event.status === 'success' &&
+      !isWriteFileStreamingPreviewEvent(event),
+  )
+  if (!hasCompletedWriteFile) {
+    return events
+  }
+  return events.filter(event => !isWriteFileStreamingPreviewEvent(event))
+}
+
 function readPatchPreviewFiles(output: Record<string, unknown>) {
   const rawFiles = Array.isArray(output.preview)
     ? output.preview
@@ -5866,6 +5893,10 @@ function AssistantMessageCard({
   )
   const appendedInputs = message.appendedInputs || []
   const isStreaming = message.status === 'pending' || message.status === 'streaming'
+  const messageEvents = useMemo(
+    () => filterSupersededWriteFileStreamingPreviewEvents(message.events || [], !isStreaming),
+    [message.events, isStreaming],
+  )
   const activeVariantId = getActiveMessageVariant(message).id || message.id
   useEffect(() => {
     setExecutionTraceExpanded(false)
@@ -5914,11 +5945,11 @@ function AssistantMessageCard({
   const executionTimeline = buildExecutionTimeline(
     displayReasoning,
     visiblePhaseOutputs,
-    message.events || [],
+    messageEvents,
   )
   const finalChangeSummary = useMemo(
-    () => collectFinalChangeSummary(message.events || []),
-    [message.events],
+    () => collectFinalChangeSummary(messageEvents),
+    [messageEvents],
   )
   const nonApprovalTimeline = executionTimeline.filter(
     item => !(isExecutionEventItem(item) && isAwaitingUserResponseEvent(item.event)),
@@ -5952,7 +5983,7 @@ function AssistantMessageCard({
   const shouldSuppressStreamingAnswerBody =
     isStreaming &&
     !showDetailedExecutionDetails &&
-    ((message.events?.length || 0) > 0 || visiblePhaseOutputs.length > 0 || visibleSteps.length > 0)
+    (messageEvents.length > 0 || visiblePhaseOutputs.length > 0 || visibleSteps.length > 0)
   const identifierActions = [
     {
       key: 'copy-message-id',
@@ -5962,7 +5993,7 @@ function AssistantMessageCard({
     },
   ]
 
-  const executionHoverSummary = buildExecutionHoverSummary(message)
+  const executionHoverSummary = buildExecutionHoverSummary({ ...message, events: messageEvents })
   const shouldShowAnswer = Boolean(message.content)
   const canCopyAnswer = Boolean(message.content)
   const answerFilenameBase = `aura-answer-${message.id.slice(0, 8)}`
@@ -5988,7 +6019,7 @@ function AssistantMessageCard({
     },
   ]
   const fallbackStatusTitle = !isStreaming && !shouldShowAnswer
-    ? (message.events?.length || 0) > 0
+    ? messageEvents.length > 0
       ? '模型执行了操作，但没有生成最终总结回答。'
       : providerReasoning.length > 0
         ? '模型已规划后续动作，但没有成功形成最终回答。'

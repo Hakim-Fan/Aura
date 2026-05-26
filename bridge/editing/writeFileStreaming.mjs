@@ -147,6 +147,20 @@ export function summarizeWriteFileProgress(rawArgs) {
 export function createWriteFileStreamingReporter({ hooks = {}, order } = {}) {
   const eventsByToolCall = new Map()
 
+  function emptyProgress() {
+    return {
+      stage: 'edit_transaction_preview',
+      phase: 'streaming_preview',
+      operation: 'write_file_streaming',
+      affectedPaths: [],
+      operations: [],
+      contentBytes: 0,
+      contentChars: 0,
+      complete: false,
+      summary: 'Generating write_file content...',
+    }
+  }
+
   function emit(toolCall, progress) {
     const toolCallId =
       typeof toolCall?.id === 'string' && toolCall.id.trim()
@@ -194,10 +208,7 @@ export function createWriteFileStreamingReporter({ hooks = {}, order } = {}) {
           continue
         }
         const progress = summarizeWriteFileProgress(toolCall.function.arguments || '')
-        if (!progress) {
-          continue
-        }
-        emit(toolCall, progress)
+        emit(toolCall, progress || emptyProgress())
       }
     },
   }

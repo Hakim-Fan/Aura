@@ -74,6 +74,33 @@ test('createWriteFileStreamingReporter emits by file and content size bucket', (
   assert.equal(JSON.parse(events[1].output).contentBytes, 5000)
 })
 
+test('createWriteFileStreamingReporter emits an early placeholder before arguments stream', () => {
+  const events = []
+  const reporter = createWriteFileStreamingReporter({
+    hooks: {
+      onToolEvent(event) {
+        events.push(event)
+      },
+    },
+  })
+
+  reporter.inspect([
+    {
+      id: 'call-write',
+      function: {
+        name: 'write_file',
+        arguments: '',
+      },
+    },
+  ])
+
+  assert.equal(events.length, 1)
+  assert.equal(events[0].name, 'write_file')
+  assert.equal(events[0].status, 'running')
+  assert.equal(events[0].summary, 'Generating write_file content...')
+  assert.equal(JSON.parse(events[0].output).contentBytes, 0)
+})
+
 test('createWriteFileStreamingReporter ignores other tools', () => {
   const events = []
   const reporter = createWriteFileStreamingReporter({
