@@ -210,6 +210,9 @@ export class CheckpointManager {
       toolEvents: context.toolEvents ? [...context.toolEvents] : [],
       routeState: context.routeState ? { ...context.routeState } : null,
       workMemories: context.workMemories ? [...context.workMemories] : [],
+      autoToolEvidence: context.autoToolEvidence ? [...context.autoToolEvidence] : [],
+      artifactStore: context.artifactStore ? { ...context.artifactStore } : null,
+      checkpointHints: context.checkpointHints ? [...context.checkpointHints] : [],
       taskTree: context.taskTree ? context.taskTree : null,
       runtime: context.runtime ? { ...context.runtime } : null,
       timestamp: Date.now(),
@@ -272,6 +275,9 @@ export async function restoreFromCheckpoint(checkpoint, executorContext) {
     if (context.toolEvents) executorContext.toolEvents = context.toolEvents
     if (context.routeState) executorContext.routeState = context.routeState
     if (context.workMemories) executorContext.workMemories = context.workMemories
+    if (context.autoToolEvidence) executorContext.autoToolEvidence = context.autoToolEvidence
+    if (context.artifactStore) executorContext.artifactStore = context.artifactStore
+    if (context.checkpointHints) executorContext.checkpointHints = context.checkpointHints
   }
 
   return {

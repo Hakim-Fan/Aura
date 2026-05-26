@@ -45,7 +45,7 @@ import {
 } from './contextCompression.mjs'
 import { createStructuredError, normalizeRuntimeError } from './runtimeErrors.mjs'
 import {
-  appendRuntimeToolEvidenceToSystemPrompt,
+  appendRuntimeExecutionContextToSystemPrompt,
   createBuiltinTools,
 } from './tools.mjs'
 import {
@@ -2675,7 +2675,7 @@ export async function runDefaultAgent(request) {
         ),
         carryoverContext,
       )
-      const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
+      const activeSystemPrompt = appendRuntimeExecutionContextToSystemPrompt(
         lastSystemPrompt,
         context,
       )
@@ -2778,7 +2778,7 @@ export async function runDefaultAgent(request) {
       let result = turnResult.result
       const latestPromptContextSnapshot = buildPromptContextSnapshot(
         effectiveRunSettings,
-        appendRuntimeToolEvidenceToSystemPrompt(lastSystemPrompt, context),
+        appendRuntimeExecutionContextToSystemPrompt(lastSystemPrompt, context),
         allTools,
         runtimeCompression.afterTokens,
         toolSchemaTokens,

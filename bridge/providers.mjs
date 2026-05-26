@@ -1,5 +1,5 @@
 import {
-  appendRuntimeToolEvidenceToSystemPrompt,
+  appendRuntimeExecutionContextToSystemPrompt,
   invokeTool,
   invokeToolWithRetry,
   spillRuntimeArtifact,
@@ -187,7 +187,7 @@ function maybeSpillToolOutputForTranscript({
     `Artifact: ${spilled.summary.id}`,
     `Original estimate: ${tokenEstimate} tokens, ${source.length} chars.`,
     `Summary: ${summaryText}`,
-    'Use runtime artifact summaries first. Call read_artifact_slice only if exact prior output is needed.',
+    'Use the runtime artifact index first. Call read_artifact_slice only if exact prior output is needed.',
     preview ? `Preview:\n${preview}` : null,
   ].filter(Boolean).join('\n')
 }
@@ -287,7 +287,7 @@ function maybeSpillAssistantContent({
     `Reason: ${reason}`,
     `Original estimate: ${tokenEstimate} tokens, ${source.length} chars.`,
     `Summary: ${summaryText}`,
-    'Continue from runtime progress/artifact summaries. Read a bounded artifact slice only if exact prior content is needed.',
+    'Continue from the runtime execution context and artifact index. Read a bounded artifact slice only if exact prior content is needed.',
   ].join('\n')
 
   const event = {
@@ -3894,7 +3894,7 @@ export async function runOpenAiCompatibleAgent({
           toolEvents,
         },
       )
-      const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
+      const activeSystemPrompt = appendRuntimeExecutionContextToSystemPrompt(
         systemPrompt,
         hooks?.workMemoryContext,
       )
@@ -4557,7 +4557,7 @@ export async function runGoogleAgent({
           toolEvents,
         },
       )
-      const activeSystemPrompt = appendRuntimeToolEvidenceToSystemPrompt(
+      const activeSystemPrompt = appendRuntimeExecutionContextToSystemPrompt(
         systemPrompt,
         hooks?.workMemoryContext,
       )
@@ -5076,7 +5076,7 @@ export async function runGoogleAgent({
     return await finalizeGoogleTranscriptAfterStepLimit({
       settings,
       apiBase,
-      systemPrompt: appendRuntimeToolEvidenceToSystemPrompt(
+      systemPrompt: appendRuntimeExecutionContextToSystemPrompt(
         systemPrompt,
         hooks?.workMemoryContext,
       ),

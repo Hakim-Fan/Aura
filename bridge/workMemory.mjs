@@ -24,7 +24,91 @@ function normalizeStatus(value) {
   return VALID_WORK_MEMORY_STATUSES.has(normalized) ? normalized : 'draft'
 }
 
-function normalizeContent(value) {
+function normalizeToolEvidenceInput(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return {}
+  }
+  return Object.fromEntries(
+    Object.entries(input)
+      .filter(([key, entry]) =>
+        [
+          'path',
+          'filePath',
+          'startLine',
+          'endLine',
+          'mode',
+          'query',
+          'pattern',
+          'command',
+          'cwd',
+          'skillId',
+        ].includes(key) &&
+        (typeof entry === 'string' || typeof entry === 'number' || typeof entry === 'boolean'),
+      )
+      .map(([key, entry]) => [
+        key,
+        typeof entry === 'string' ? clipText(entry, 360) : entry,
+      ])
+      .filter(([, entry]) => entry !== '' && entry !== undefined && entry !== null),
+  )
+}
+
+function normalizeToolEvidenceFile(file = {}) {
+  if (!file || typeof file !== 'object' || Array.isArray(file)) {
+    return undefined
+  }
+  const normalized = Object.fromEntries(
+    Object.entries(file)
+      .filter(([key, entry]) =>
+        [
+          'path',
+          'size',
+          'mtimeMs',
+          'outputSha256',
+          'lineCount',
+          'byteCount',
+        ].includes(key) &&
+        (typeof entry === 'string' || typeof entry === 'number'),
+      )
+      .map(([key, entry]) => [
+        key,
+        typeof entry === 'string' ? clipText(entry, 360) : entry,
+      ])
+      .filter(([, entry]) => entry !== '' && entry !== undefined && entry !== null),
+  )
+  return Object.keys(normalized).length > 0 ? normalized : undefined
+}
+
+function normalizeToolEvidenceEntry(entry = {}) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return null
+  }
+  const normalized = {
+    tool: clipText(entry.tool, 120),
+    input: normalizeToolEvidenceInput(entry.input),
+    file: normalizeToolEvidenceFile(entry.file),
+    recordedAt: typeof entry.recordedAt === 'number' ? entry.recordedAt : undefined,
+    restoredFromWorkMemory: entry.restoredFromWorkMemory === true || undefined,
+    workMemoryId: clipText(entry.workMemoryId, 160) || undefined,
+  }
+  return normalized.tool ? normalized : null
+}
+
+function normalizeToolEvidenceContent(content, serialized) {
+  const recentSuccesses = Array.isArray(content?.recentSuccesses)
+    ? content.recentSuccesses
+      .map(normalizeToolEvidenceEntry)
+      .filter(Boolean)
+      .slice(-12)
+    : []
+  return {
+    truncated: true,
+    preview: clipText(serialized, MAX_CONTENT_JSON_CHARS),
+    recentSuccesses,
+  }
+}
+
+function normalizeContent(value, options = {}) {
   const content =
     value && typeof value === 'object' && !Array.isArray(value)
       ? value
@@ -35,6 +119,10 @@ function normalizeContent(value) {
   const serialized = JSON.stringify(content)
   if (serialized.length <= MAX_CONTENT_JSON_CHARS) {
     return content
+  }
+
+  if (options.kind === 'tool_evidence' && Array.isArray(content.recentSuccesses)) {
+    return normalizeToolEvidenceContent(content, serialized)
   }
 
   return {
@@ -93,7 +181,7 @@ export function normalizeWorkMemoryInput(args = {}, defaults = {}) {
     title: title || kind,
     summary,
     status: normalizeStatus(args.status),
-    content: normalizeContent(args.content),
+    content: normalizeContent(args.content, { kind }),
     sourceRefs: normalizeSourceRefs(args.sourceRefs || args.sources),
     nextUse: clipText(args.nextUse, MAX_NEXT_USE_CHARS) || undefined,
   }

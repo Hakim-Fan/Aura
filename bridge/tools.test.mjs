@@ -4,9 +4,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  appendRuntimeToolEvidenceToSystemPrompt,
-  buildRuntimeArtifactPrompt,
-  buildRuntimeToolEvidencePrompt,
+  appendRuntimeExecutionContextToSystemPrompt,
+  buildRuntimeExecutionContextPrompt,
   createBuiltinTools,
   invokeTool,
   spillRuntimeArtifact,
@@ -415,6 +414,11 @@ test('todo_write records a reusable task progress checkpoint', async () => {
 
   assert.equal(context.workMemories.length, 1)
   assert.match(context.workMemories[0].summary, /2\/2 steps completed/)
+  const executionContext = buildRuntimeExecutionContextPrompt(context)
+  assert.match(executionContext, /Runtime execution context for continuing this task/)
+  assert.match(executionContext, /Recent task progress/)
+  assert.match(executionContext, /Completed: .*生成数据实体表/)
+  assert.match(executionContext, /Continuation rules/)
 })
 
 test('todo_write emits normalized execution todos with hidden verification metadata', async () => {
@@ -511,16 +515,16 @@ test('successful context-gathering tools record a tool evidence checkpoint', asy
   assert.equal(context.workMemories.length, 1)
   assert.equal(context.workMemories[0].content.recentSuccesses.length, 1)
   assert.match(
-    buildRuntimeToolEvidencePrompt(context),
+    buildRuntimeExecutionContextPrompt(context),
     /read_file\(requirements\.md\) succeeded/,
   )
   assert.match(
-    buildRuntimeToolEvidencePrompt(context),
+    buildRuntimeExecutionContextPrompt(context),
     /Output recall: # Title Reusable facts/,
   )
   assert.match(
-    appendRuntimeToolEvidenceToSystemPrompt('base prompt', context),
-    /base prompt[\s\S]*Runtime tool evidence from this ongoing task/,
+    appendRuntimeExecutionContextToSystemPrompt('base prompt', context),
+    /base prompt[\s\S]*Runtime execution context for continuing this task/,
   )
 })
 
@@ -588,11 +592,11 @@ test('runtime spillover artifacts can be summarized and read in bounded slices',
   })
   const artifactId = spilled.artifact.id
 
-  assert.match(buildRuntimeArtifactPrompt(context), /Document table/)
-  assert.match(buildRuntimeArtifactPrompt(context), /Rows for headings 1-5/)
+  assert.match(buildRuntimeExecutionContextPrompt(context), /Document table/)
+  assert.match(buildRuntimeExecutionContextPrompt(context), /Rows for headings 1-5/)
   assert.match(
-    appendRuntimeToolEvidenceToSystemPrompt('base prompt', context),
-    /Runtime artifact index from this ongoing task/,
+    appendRuntimeExecutionContextToSystemPrompt('base prompt', context),
+    /Available content artifacts/,
   )
 
   const summary = parseToolResultJson(await invokeTool(summarizeArtifact, { artifactId }, [], {}))
