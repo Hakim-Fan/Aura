@@ -3210,23 +3210,30 @@ function ExecutionNarrativeCard({
   narrative,
   extraNarratives,
   isActive,
+  onCopyText,
 }: {
   narrative: ExecutionTraceNarrative
   extraNarratives: ExecutionTraceNarrative[]
   isActive: boolean
+  onCopyText: CopyTextHandler
 }) {
   const [expanded, setExpanded] = useState(false)
   const hasRawDetails =
     Boolean(narrative.rawContent) &&
     normalizeComparableText(narrative.rawContent) !== normalizeComparableText(narrative.summary)
   const canExpand = hasRawDetails || extraNarratives.length > 0
+  const copyText = [
+    narrative.rawContent || narrative.summary,
+    ...extraNarratives.map(extra => extra.rawContent || extra.summary),
+  ]
+    .map(value => value.trim())
+    .filter(Boolean)
+    .join('\n\n')
 
   return (
     <article className="stream-reveal-item">
-      <button
+      <div
         className="flex w-full items-start justify-between gap-3 text-left"
-        onClick={() => canExpand && setExpanded(current => !current)}
-        type="button"
       >
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -3264,14 +3271,31 @@ function ExecutionNarrativeCard({
             </div>
           ) : null}
         </div>
-        {canExpand ? (
-          expanded ? (
-            <ChevronUp size={14} className="mt-0.5 shrink-0 text-[var(--text-secondary)] opacity-60" />
-          ) : (
-            <ChevronDown size={14} className="mt-0.5 shrink-0 text-[var(--text-secondary)] opacity-60" />
-          )
-        ) : null}
-      </button>
+        <div className="mt-0.5 flex shrink-0 items-center gap-1">
+          {copyText ? (
+            <button
+              className="rounded-md p-1 text-[var(--text-secondary)] opacity-55 hover:bg-white hover:opacity-100"
+              title="复制思考内容"
+              aria-label="复制思考内容"
+              onClick={() => onCopyText(copyText)}
+              type="button"
+            >
+              <Copy size={13} />
+            </button>
+          ) : null}
+          {canExpand ? (
+            <button
+              className="rounded-md p-1 text-[var(--text-secondary)] opacity-55 hover:bg-white hover:opacity-100"
+              title={expanded ? '收起原始片段' : '展开原始片段'}
+              aria-label={expanded ? '收起原始片段' : '展开原始片段'}
+              onClick={() => setExpanded(current => !current)}
+              type="button"
+            >
+              {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+          ) : null}
+        </div>
+      </div>
       {expanded && hasRawDetails ? (
         <details className="mt-2 rounded-lg border border-[rgba(15,23,42,0.06)] bg-[rgba(15,23,42,0.02)]">
           <summary className="cursor-pointer px-3 py-2 text-11px font-600 text-[var(--text-secondary)] opacity-70">
@@ -3290,20 +3314,37 @@ function ExecutionNarrativeCard({
 function PhaseOutputCard({
   content,
   label = '阶段输出',
+  onCopyText,
 }: {
   content: string
   label?: string
+  onCopyText: CopyTextHandler
 }) {
+  const copyText = content.trim()
+
   return (
     <article className="stream-reveal-item rounded-lg border border-[rgba(15,23,42,0.07)] bg-white px-3 py-2.5 shadow-[0_1px_0_rgba(15,23,42,0.02)]">
-      <div className="mb-1 flex items-center gap-2">
-        <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded bg-[rgba(15,23,42,0.04)] text-[var(--text-secondary)]">
-          输出
-        </span>
-        <strong className="text-13px text-[var(--text-primary)]">{label}</strong>
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="min-w-0 flex items-center gap-2">
+          <span className="text-9px font-700 tracking-wider uppercase px-1.5 py-0.5 rounded bg-[rgba(15,23,42,0.04)] text-[var(--text-secondary)]">
+            输出
+          </span>
+          <strong className="truncate text-13px text-[var(--text-primary)]">{label}</strong>
+        </div>
+        {copyText ? (
+          <button
+            className="shrink-0 rounded-md p-1 text-[var(--text-secondary)] opacity-55 hover:bg-[rgba(15,23,42,0.04)] hover:opacity-100"
+            title="复制阶段输出"
+            aria-label="复制阶段输出"
+            onClick={() => onCopyText(copyText)}
+            type="button"
+          >
+            <Copy size={13} />
+          </button>
+        ) : null}
       </div>
       <RevealTextSegments
-        text={content.trim()}
+        text={copyText}
         className="whitespace-pre-wrap text-12px leading-relaxed text-[var(--text-secondary)]"
       />
     </article>
@@ -5941,6 +5982,7 @@ function AssistantMessageCard({
                           narrative={primaryNarrative}
                           extraNarratives={extraNarratives}
                           isActive={isGroupActive}
+                          onCopyText={onCopyText}
                         />
                       ) : null}
                       {group.items.length > 0 ? (
@@ -5951,6 +5993,7 @@ function AssistantMessageCard({
                                 key={item.key}
                                 content={item.output.content}
                                 label={phaseOutputLabel(item.output)}
+                                onCopyText={onCopyText}
                               />
                             ) : item.kind === 'event' ? (
                               <MessageEventCard

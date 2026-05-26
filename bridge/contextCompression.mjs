@@ -3,8 +3,6 @@ import { countTextTokens } from './tokenizer.mjs'
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
 const DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS = 32_000
 export const DEFAULT_CONTEXT_COMPRESSION_THRESHOLD_TOKENS = 256_000
-const DEFAULT_MAX_OUTPUT_TOKENS = 16_000
-const MAX_DEFAULT_OUTPUT_TOKENS = 32_000
 const MIN_TOOL_BUFFER_TOKENS = 4_000
 const MAX_TOOL_BUFFER_TOKENS = 20_000
 const DEFAULT_KEEP_RECENT_MESSAGE_COUNT = 6
@@ -12,6 +10,20 @@ export const DEFAULT_RECENT_USER_MESSAGE_TOKEN_BUDGET = 20_000
 const DEFAULT_COMPACTION_INPUT_BATCH_RATIO = 0.45
 const IMAGE_PART_TOKEN_COST = 1_200
 const FILE_PART_TOKEN_COST = 80
+
+function resolveReasoningOutputBudgetTokens(settings = {}) {
+  switch (settings.reasoningEffort) {
+    case 'off':
+      return 16_000
+    case 'low':
+      return 32_000
+    case 'high':
+    case 'max':
+    case 'medium':
+    default:
+      return 64_000
+  }
+}
 
 export function estimateTextTokens(value = '', options = {}) {
   return countTextTokens(value, options)
@@ -174,17 +186,14 @@ export function resolveMaxOutputTokens(
 ) {
   const modelMetadata = findModelMetadata(settings)
   const configured = Number(modelMetadata?.maxOutputTokens)
+  const reasoningBudget = resolveReasoningOutputBudgetTokens(settings)
   if (Number.isFinite(configured) && configured > 0) {
-    return Math.round(configured)
+    return Math.round(Math.min(configured, reasoningBudget))
   }
   return Math.round(
     Math.max(
       2_000,
-      Math.min(
-        MAX_DEFAULT_OUTPUT_TOKENS,
-        contextWindowTokens * 0.125,
-        DEFAULT_MAX_OUTPUT_TOKENS,
-      ),
+      Math.min(reasoningBudget, Math.max(2_000, contextWindowTokens * 0.5)),
     ),
   )
 }

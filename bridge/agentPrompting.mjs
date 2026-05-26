@@ -78,8 +78,8 @@ function buildReasoningInstruction(settings) {
     off: 'Reasoning intensity: off. Prefer fast, concise answers and avoid extended internal exploration unless the task clearly requires it.',
     low: 'Reasoning intensity: low. Optimize for speed and keep reasoning lightweight.',
     medium: 'Reasoning intensity: medium. Balance speed and reasoning depth.',
-    high: 'Reasoning intensity: high. Spend more effort on analysis before acting, especially for complex tasks.',
-    max: 'Reasoning intensity: maximum. Use your deepest available reasoning for difficult tasks, while still avoiding unnecessary repetition.',
+    high: 'Reasoning intensity: high. Spend more effort on analysis for complex tasks, but produce observable progress early instead of staying in analysis.',
+    max: 'Reasoning intensity: maximum. Use your deepest available reasoning for difficult tasks, while still producing observable progress early and avoiding unnecessary repetition.',
   }
 
   return reasoningInstructions[settings.reasoningEffort] || reasoningInstructions.medium

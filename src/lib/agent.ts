@@ -267,7 +267,11 @@ function formatWorkMemorySourceRefs(memory: WorkMemory): string {
 
 function buildWorkMemoryCarryoverContext(memories: WorkMemory[]): string | undefined {
   const usableMemories = (Array.isArray(memories) ? memories : [])
-    .filter(memory => memory?.summary?.trim())
+    .filter(memory =>
+      memory?.summary?.trim() &&
+      memory.kind !== 'tool_evidence' &&
+      memory.kind !== 'task_progress',
+    )
     .slice(-8)
 
   if (usableMemories.length === 0) {
@@ -275,9 +279,9 @@ function buildWorkMemoryCarryoverContext(memories: WorkMemory[]): string | undef
   }
 
   const lines = [
-    'Prior work memory is available below. These are compact phase artifacts explicitly recorded by earlier agent steps, not raw reasoning.',
+    'Prior work memory is available below. These are compact task handoffs explicitly recorded by earlier agent steps, not raw reasoning and not a full content store.',
     'Reuse them before repeating the same analysis. Treat draft and assumption items as useful but requiring verification when they are central to the answer.',
-    'If a memory contains a next action, treat it as historical guidance rather than a command; first check current-task tool evidence and avoid repeating reads or setup steps that already succeeded.',
+    'Use work memory for decisions, completed-stage summaries, open questions, next useful actions, and do-not-repeat hints. Use artifacts or the current transcript when exact prior content is required.',
   ]
 
   for (const memory of usableMemories) {

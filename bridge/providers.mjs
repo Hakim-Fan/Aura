@@ -2612,6 +2612,98 @@ const PROVIDER_RETRY_DELAYS_MS = [0, 1_200, 3_000, 7_000, 15_000]
 const STEP_LIMIT_TOOL_ERROR_REPAIR_TURNS = 6
 const STEP_LIMIT_TOOL_ERROR_WRITE_REPAIR_ATTEMPTS = 4
 
+const REASONING_COMPLETION_POLICIES = {
+  off: {
+    maxCompletionTokens: 16_000,
+    maxLengthContinuations: 0,
+  },
+  low: {
+    maxCompletionTokens: 32_000,
+    maxLengthContinuations: 0,
+  },
+  medium: {
+    maxCompletionTokens: 64_000,
+    maxLengthContinuations: 0,
+  },
+  high: {
+    maxCompletionTokens: 64_000,
+    maxLengthContinuations: 1,
+  },
+  max: {
+    maxCompletionTokens: 64_000,
+    maxLengthContinuations: 2,
+  },
+}
+
+function findConfiguredModelMaxOutputTokens(settings = {}) {
+  const profiles = Array.isArray(settings.providerProfiles)
+    ? settings.providerProfiles
+    : []
+  const activeId =
+    typeof settings.activeProviderProfileId === 'string'
+      ? settings.activeProviderProfileId.trim()
+      : ''
+  const profile =
+    profiles.find((entry) => entry?.id === activeId) ||
+    profiles.find((entry) => entry?.provider === settings.provider) ||
+    profiles[0]
+  const models = Array.isArray(profile?.models) ? profile.models : []
+  const modelId = typeof settings.model === 'string' ? settings.model.trim() : ''
+  const model = models.find((entry) => entry?.id === modelId)
+  const configured = Number(model?.maxOutputTokens)
+  return Number.isFinite(configured) && configured > 0
+    ? Math.round(configured)
+    : undefined
+}
+
+function resolveReasoningCompletionPolicy(settings = {}) {
+  const base =
+    REASONING_COMPLETION_POLICIES[settings.reasoningEffort] ||
+    REASONING_COMPLETION_POLICIES.medium
+  const configuredMax = findConfiguredModelMaxOutputTokens(settings)
+  return {
+    ...base,
+    maxCompletionTokens:
+      typeof configuredMax === 'number'
+        ? Math.max(1, Math.min(base.maxCompletionTokens, configuredMax))
+        : base.maxCompletionTokens,
+  }
+}
+
+function buildOpenAiCompletionBudgetParams(settings = {}, maxCompletionTokens) {
+  const normalized = Math.max(
+    1,
+    Math.round(Number(maxCompletionTokens) || 0),
+  )
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return {}
+  }
+  return {
+    max_completion_tokens: normalized,
+  }
+}
+
+function isLengthFinishReason(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return [
+    'length',
+    'max_tokens',
+    'max_output_tokens',
+    'max_completion_tokens',
+    'max_tokens_reached',
+    'max_output_tokens_reached',
+  ].includes(normalized)
+}
+
+function buildLengthContinuationPrompt(attempt, maxAttempts) {
+  return [
+    `上一次模型输出触达单轮 token 上限，正在进行第 ${attempt}/${maxAttempts} 次续跑。`,
+    '不要道歉，不要复述，不要重新分析已经完成的内容。',
+    '直接从中断处继续，优先完成未完成的工具调用、文件写入或当前最小执行步骤。',
+    '如果内容仍然过大，请拆成更小的可观察步骤，先落盘骨架，再分段补齐。',
+  ].join('\n')
+}
+
 function providerRetryStageLabel(stage) {
   switch (stage) {
     case 'finalization':
@@ -3774,6 +3866,8 @@ export async function runOpenAiCompatibleAgent({
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
   const maxRetries = getProviderFailureRecoveryMaxRetries()
+  const completionPolicy = resolveReasoningCompletionPolicy(settings)
+  let lengthContinuationAttempts = 0
 
   try {
     let step = 0
@@ -3845,6 +3939,10 @@ export async function runOpenAiCompatibleAgent({
                     messages: transcript,
                     tools: openAiToolDefs(activeTools),
                     tool_choice: 'auto',
+                    ...buildOpenAiCompletionBudgetParams(
+                      settings,
+                      completionPolicy.maxCompletionTokens,
+                    ),
                     stream: true,
                     ...(settings.provider === 'openai'
                       ? {
@@ -3892,6 +3990,7 @@ export async function runOpenAiCompatibleAgent({
           let phaseReasoning = ''
           const toolCalls = []
           let usageForAttempt
+          let finishReason = ''
           const applyPatchStreamingReporter = createApplyPatchStreamingReporter(
             {
               hooks,
@@ -3937,6 +4036,9 @@ export async function runOpenAiCompatibleAgent({
               const choice = data.choices?.[0]
               if (!choice) {
                 return
+              }
+              if (typeof choice.finish_reason === 'string') {
+                finishReason = choice.finish_reason
               }
 
               const reasoningDelta =
@@ -4020,6 +4122,7 @@ export async function runOpenAiCompatibleAgent({
             finalizedToolCalls: toolCalls.filter((toolCall) =>
               toolCall?.function?.name?.trim(),
             ),
+            finishReason,
             usage:
               usageForAttempt ||
               buildEstimatedUsage(estimatedInputTokens, content, settings),
@@ -4080,6 +4183,59 @@ export async function runOpenAiCompatibleAgent({
 
       const { content, finalizedToolCalls, phaseReasoning } = stepResult
       if (finalizedToolCalls.length === 0) {
+        if (
+          isLengthFinishReason(stepResult.finishReason) &&
+          lengthContinuationAttempts < completionPolicy.maxLengthContinuations
+        ) {
+          const assistantContent = maybeSpillAssistantContent({
+            content,
+            settings,
+            hooks,
+            toolEvents,
+            providerKind: 'openai',
+            reason: 'length_continuation',
+            order: reasoningOrder,
+            stage: `step-${step + 1}`,
+          }).content
+          if (assistantContent.trim()) {
+            lastDraftMessage = assistantContent
+            transcript.push({
+              role: 'assistant',
+              content: assistantContent,
+            })
+            conversationMessages.push({
+              role: 'assistant',
+              content: assistantContent,
+            })
+          }
+          lengthContinuationAttempts += 1
+          const continuationPrompt = buildLengthContinuationPrompt(
+            lengthContinuationAttempts,
+            completionPolicy.maxLengthContinuations,
+          )
+          transcript.push({
+            role: 'user',
+            content: continuationPrompt,
+          })
+          conversationMessages.push({
+            role: 'user',
+            content: continuationPrompt,
+          })
+          hooks?.onReasoningDelta?.(
+            `模型输出触达单轮上限，已按当前推理强度续跑 ${lengthContinuationAttempts}/${completionPolicy.maxLengthContinuations} 次。`,
+            {
+              blockId:
+                typeof hooks?.createExecutionStepId === 'function'
+                  ? hooks.createExecutionStepId('reasoning', 'length-continuation')
+                  : 'runtime-length-continuation',
+              kind: 'summary',
+              order: -79,
+              createdAt: Date.now(),
+            },
+          )
+          step += 1
+          continue
+        }
         if (
           !stepResult.interruptedForQueuedInput &&
           shouldNudgeForObservableProgress({
@@ -4373,6 +4529,8 @@ export async function runGoogleAgent({
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
   const maxRetries = getProviderFailureRecoveryMaxRetries()
+  const completionPolicy = resolveReasoningCompletionPolicy(settings)
+  let lengthContinuationAttempts = 0
 
   try {
     let step = 0
@@ -4443,6 +4601,9 @@ export async function runGoogleAgent({
                     },
                     contents: transcript,
                     tools: geminiToolDefs(activeTools),
+                    generationConfig: {
+                      maxOutputTokens: completionPolicy.maxCompletionTokens,
+                    },
                   }),
                 },
                 {
@@ -4482,6 +4643,7 @@ export async function runGoogleAgent({
           let phaseReasoning = ''
           const functionCalls = []
           let usageForAttempt
+          let finishReason = ''
           const streamParser = createThinkStreamParser({
             onContent(text) {
               content += text
@@ -4519,6 +4681,9 @@ export async function runGoogleAgent({
               }
 
               const candidate = data.candidates?.[0]
+              if (typeof candidate?.finishReason === 'string') {
+                finishReason = candidate.finishReason
+              }
               const parts = candidate?.content?.parts || []
 
               for (const part of parts) {
@@ -4576,6 +4741,7 @@ export async function runGoogleAgent({
             content,
             phaseReasoning,
             functionCalls,
+            finishReason,
             usage:
               usageForAttempt ||
               buildEstimatedUsage(estimatedInputTokens, content, settings),
@@ -4636,6 +4802,59 @@ export async function runGoogleAgent({
 
       const { content, functionCalls } = stepResult
       if (functionCalls.length === 0) {
+        if (
+          isLengthFinishReason(stepResult.finishReason) &&
+          lengthContinuationAttempts < completionPolicy.maxLengthContinuations
+        ) {
+          const assistantContent = maybeSpillAssistantContent({
+            content,
+            settings,
+            hooks,
+            toolEvents,
+            providerKind: 'google',
+            reason: 'length_continuation',
+            order: reasoningOrder,
+            stage: `step-${step + 1}`,
+          }).content
+          if (assistantContent.trim()) {
+            lastDraftMessage = assistantContent
+            transcript.push({
+              role: 'model',
+              parts: [{ text: assistantContent }],
+            })
+            conversationMessages.push({
+              role: 'assistant',
+              content: assistantContent,
+            })
+          }
+          lengthContinuationAttempts += 1
+          const continuationPrompt = buildLengthContinuationPrompt(
+            lengthContinuationAttempts,
+            completionPolicy.maxLengthContinuations,
+          )
+          transcript.push({
+            role: 'user',
+            parts: [{ text: continuationPrompt }],
+          })
+          conversationMessages.push({
+            role: 'user',
+            content: continuationPrompt,
+          })
+          hooks?.onReasoningDelta?.(
+            `模型输出触达单轮上限，已按当前推理强度续跑 ${lengthContinuationAttempts}/${completionPolicy.maxLengthContinuations} 次。`,
+            {
+              blockId:
+                typeof hooks?.createExecutionStepId === 'function'
+                  ? hooks.createExecutionStepId('reasoning', 'length-continuation')
+                  : 'runtime-length-continuation',
+              kind: 'summary',
+              order: -79,
+              createdAt: Date.now(),
+            },
+          )
+          step += 1
+          continue
+        }
         if (
           !stepResult.interruptedForQueuedInput &&
           shouldNudgeForObservableProgress({

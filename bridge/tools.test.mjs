@@ -592,7 +592,7 @@ test('runtime spillover artifacts can be summarized and read in bounded slices',
   assert.match(buildRuntimeArtifactPrompt(context), /Rows for headings 1-5/)
   assert.match(
     appendRuntimeToolEvidenceToSystemPrompt('base prompt', context),
-    /Runtime artifact summaries from this ongoing task/,
+    /Runtime artifact index from this ongoing task/,
   )
 
   const summary = parseToolResultJson(await invokeTool(summarizeArtifact, { artifactId }, [], {}))
