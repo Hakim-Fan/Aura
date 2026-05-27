@@ -306,6 +306,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
         ),
     [draftSettings.providerProfiles],
   )
+  const modelRouteOptionsSignature = modelRouteOptions
+    .map(option => `${option.value}:${option.label}`)
+    .join('\u001f')
 
   const titleModelRouteStoredValue =
     draftSettings.titleProviderProfileId && draftSettings.titleModel
@@ -382,6 +385,26 @@ export function SettingsWindowApp({ initialTab }: Props) {
     const timer = window.setTimeout(() => setSaveState('idle'), 1800)
     return () => window.clearTimeout(timer)
   }, [saveState])
+
+  useEffect(() => {
+    if (!titleModelRouteStoredValue) {
+      return
+    }
+    if (modelRouteOptions.some(option => option.value === titleModelRouteStoredValue)) {
+      return
+    }
+    setDraftSettings(current => {
+      if (!current.titleProviderProfileId && !current.titleModel) {
+        return current
+      }
+      return {
+        ...current,
+        titleProviderProfileId: '',
+        titleModel: '',
+      }
+    })
+    setSaveState('idle')
+  }, [modelRouteOptions, titleModelRouteStoredValue])
 
   useEffect(() => {
     if (browserStatus?.tone !== 'success') {
@@ -1863,6 +1886,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   </div>
                   <div className="model-route-control">
                     <select
+                      key={modelRouteOptionsSignature}
                       aria-label="聊天标题 AI 总结模型"
                       className="model-route-select"
                       value={titleModelRouteValue}

@@ -4,6 +4,14 @@ import { guardedFetch } from './web/net/guardedFetch.mjs'
 const PROXY_CONNECTIVITY_TEST_URL = 'https://api.ipify.org?format=json'
 const TITLE_GENERATION_MAX_TOKENS = 256
 
+class ProviderActionHttpError extends Error {
+  constructor(message, data) {
+    super(message)
+    this.name = 'ProviderActionHttpError'
+    this.data = data
+  }
+}
+
 async function parseJsonResponse(response) {
   const text = await response.text()
   try {
@@ -97,6 +105,51 @@ function openAiCompatibleHeaders(settings = {}) {
     headers.authorization = `Bearer ${apiKey}`
   }
   return headers
+}
+
+function buildOpenAiTitleBaseBody(settings, prompts) {
+  return {
+    model: settings.model,
+    messages: [
+      { role: 'system', content: prompts.systemPrompt },
+      { role: 'user', content: prompts.userPrompt },
+    ],
+    max_tokens: TITLE_GENERATION_MAX_TOKENS,
+    temperature: 0.2,
+    stream: false,
+  }
+}
+
+function buildOpenAiTitleBodies(settings, prompts) {
+  const base = buildOpenAiTitleBaseBody(settings, prompts)
+  if (settings.provider === 'openai') {
+    return [
+      {
+        ...base,
+        reasoning_effort: 'none',
+      },
+    ]
+  }
+  if (settings.provider === 'custom') {
+    return [
+      {
+        ...base,
+        thinking: {
+          type: 'disabled'
+        },
+      },
+    ]
+  }
+  return [base]
+}
+
+function shouldTryNextTitleThinkingBody(error) {
+  const message = String(error?.message || '')
+  return /(?:unknown|unsupported|unrecognized|invalid|extra|forbidden|not permitted|not supported|unexpected).*(?:reasoning|thinking|reasoning_effort|enable_thinking)|(?:reasoning|thinking|reasoning_effort|enable_thinking).*(?:unknown|unsupported|unrecognized|invalid|extra|forbidden|not permitted|not supported|unexpected)/iu.test(message)
+}
+
+function supportsGoogleTitleThinkingConfig(model = '') {
+  return /(?:gemini-(?:2\.5|3)|thinking)/iu.test(String(model || ''))
 }
 
 function flattenTextValue(value) {
@@ -270,36 +323,55 @@ function resolveTitleGenerationSettings(settings = {}) {
 async function generateOpenAiTitle(settings, titleContext) {
   const apiBase = normalizeBaseUrl(settings.baseUrl, 'https://api.openai.com/v1')
   const { systemPrompt, userPrompt } = buildTitleGenerationPrompts(titleContext)
-  const response = await guardedFetch(
-    `${apiBase}/chat/completions`,
-    {
-      method: 'POST',
-      headers: {
-        ...openAiCompatibleHeaders(settings),
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: settings.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        max_tokens: TITLE_GENERATION_MAX_TOKENS,
-        temperature: 0.2,
-        stream: false,
-      }),
-    },
-    {
-      settings,
-      proxyMode: 'provider-explicit',
-      allowLocal: true,
-      timeoutMs: 60_000,
-      timeoutMessage: 'Timed out while generating session title.',
-    },
-  )
-  const data = await parseJsonResponse(response)
-  if (!response.ok) {
-    throw new Error(data.error?.message || 'OpenAI-compatible title generation failed')
+  const requestBodies = buildOpenAiTitleBodies(settings, {
+    systemPrompt,
+    userPrompt,
+  })
+  let data
+  let lastError
+  for (let index = 0; index < requestBodies.length; index += 1) {
+    try {
+      const response = await guardedFetch(
+        `${apiBase}/chat/completions`,
+        {
+          method: 'POST',
+          headers: {
+            ...openAiCompatibleHeaders(settings),
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(requestBodies[index]),
+        },
+        {
+          settings,
+          proxyMode: 'provider-explicit',
+          allowLocal: true,
+          timeoutMs: 60_000,
+          timeoutMessage: 'Timed out while generating session title.',
+        },
+      )
+      const parsed = await parseJsonResponse(response)
+      if (!response.ok) {
+        throw new ProviderActionHttpError(
+          parsed.error?.message || 'OpenAI-compatible title generation failed',
+          parsed,
+        )
+      }
+      data = parsed
+      break
+    } catch (error) {
+      lastError = error
+      if (
+        settings.provider === 'custom' &&
+        index < requestBodies.length - 1 &&
+        shouldTryNextTitleThinkingBody(error)
+      ) {
+        continue
+      }
+      throw error
+    }
+  }
+  if (!data) {
+    throw lastError || new Error('OpenAI-compatible title generation failed')
   }
   const title = normalizeGeneratedTitle(flattenOpenAiCompatibleTextResponse(data))
   if (!title) {
@@ -319,6 +391,17 @@ async function generateGoogleTitle(settings, titleContext) {
     'https://generativelanguage.googleapis.com/v1beta',
   )
   const { systemPrompt, userPrompt } = buildTitleGenerationPrompts(titleContext)
+  const generationConfig = {
+    maxOutputTokens: TITLE_GENERATION_MAX_TOKENS,
+    temperature: 0.2,
+    ...(supportsGoogleTitleThinkingConfig(settings.model)
+      ? {
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
+        }
+      : {}),
+  }
   const response = await guardedFetch(
     `${apiBase}/models/${settings.model}:generateContent`,
     {
@@ -337,10 +420,7 @@ async function generateGoogleTitle(settings, titleContext) {
             parts: [{ text: userPrompt }],
           },
         ],
-        generationConfig: {
-          maxOutputTokens: TITLE_GENERATION_MAX_TOKENS,
-          temperature: 0.2,
-        },
+        generationConfig,
       }),
     },
     {
