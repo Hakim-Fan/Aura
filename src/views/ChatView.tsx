@@ -142,7 +142,7 @@ type Props = {
     id: string,
     mode: CapabilityOverrideMode,
   ) => void
-  onSubmit: () => void
+  onSubmit: (draftOverride?: string) => void
   onOpenProviders: () => void
   onHandleApproval: (decision: ApprovalDecision) => void
   onOpenWorkspaceExplorer: () => void
@@ -2368,23 +2368,7 @@ function JsonBlock({
   const jsonSource = parsed.ok ? JSON.stringify(parsed.value, null, 2) : source
 
   if (!parsed.ok) {
-    return (
-      <div className="markdown-data-block">
-        <div className="markdown-data-head">
-          <span>JSON 预览失败</span>
-          <div className="markdown-data-actions">
-            <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="复制 JSON" aria-label="复制 JSON" onClick={() => onCopyText(jsonSource)}>
-              <Copy size={12} />
-            </button>
-            <button className="p-1 rounded hover:bg-[rgba(0,0,0,0.05)] text-[var(--text-secondary)]" title="下载 JSON" aria-label="下载 JSON" onClick={() => downloadTextFile(timestampedFilename('json-preview', 'json'), jsonSource, 'application/json;charset=utf-8')}>
-              <Download size={12} />
-            </button>
-          </div>
-        </div>
-        <div className="markdown-render-error">{parsed.message}</div>
-        <MarkdownCodeBlock language="json" source={source} onCopyText={onCopyText} />
-      </div>
-    )
+    return <MarkdownCodeBlock language="json" source={source} onCopyText={onCopyText} />
   }
 
   return (
@@ -5197,10 +5181,12 @@ function MessageVersionSwitcher({
 
 function MessageOverflowMenu({
   messageId,
+  deleteLabel = '删除消息',
   onDeleteMessage,
   extraActions = [],
 }: {
   messageId: string
+  deleteLabel?: string
   onDeleteMessage: (messageId: string) => void
   extraActions?: Array<{
     key: string
@@ -5354,7 +5340,7 @@ function MessageOverflowMenu({
               type="button"
             >
               <Trash2 size={16} />
-              <span>删除消息</span>
+              <span>{deleteLabel}</span>
             </button>
           </div>
           {activePanelKey ? (
@@ -6302,6 +6288,7 @@ function AssistantMessageCard({
                 </button>
                 <MessageOverflowMenu
                   messageId={message.id}
+                  deleteLabel={(message.versions?.length || 1) > 1 ? '删除当前版本' : '删除消息'}
                   onDeleteMessage={onDeleteMessage}
                   extraActions={[
                     ...answerExportActions,
@@ -6402,7 +6389,7 @@ function UserMessageCard({
           ))}
         </div>
       ) : null}
-      <div className="max-w-[78%] bg-[var(--bg-user-bubble)] text-[var(--text-user-bubble)] px-5 py-3 rounded-2xl rounded-tr-8px shadow-[0_10px_30px_rgba(60,87,78,0.10)] text-15px leading-relaxed">
+      <div className="max-w-[78%] whitespace-pre-wrap break-words bg-[var(--bg-user-bubble)] text-[var(--text-user-bubble)] px-5 py-3 rounded-2xl rounded-tr-8px shadow-[0_10px_30px_rgba(60,87,78,0.10)] text-15px leading-relaxed">
         {message.content}
       </div>
       <div className="flex items-center gap-2">
@@ -6423,6 +6410,7 @@ function UserMessageCard({
           </button>
           <MessageOverflowMenu
             messageId={message.id}
+            deleteLabel={(message.versions?.length || 1) > 1 ? '删除当前版本' : '删除消息'}
             onDeleteMessage={onDeleteMessage}
             extraActions={identifierActions}
           />
@@ -6515,11 +6503,75 @@ export function ChatView({
     preview: string
   } | null>(null)
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true)
+  const [hasLocalDraftText, setHasLocalDraftText] = useState(() => draft.trim().length > 0)
 
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const reasoningMenuRef = useRef<HTMLDivElement>(null)
   const capabilityMenuRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const draftSyncTimerRef = useRef<number | null>(null)
+  const latestDraftRef = useRef(draft)
+
+  function clearDraftSyncTimer() {
+    if (draftSyncTimerRef.current !== null) {
+      window.clearTimeout(draftSyncTimerRef.current)
+      draftSyncTimerRef.current = null
+    }
+  }
+
+  function readComposerDraft() {
+    return composerTextareaRef.current?.value ?? latestDraftRef.current
+  }
+
+  function syncComposerDraftNow() {
+    clearDraftSyncTimer()
+    const value = readComposerDraft()
+    latestDraftRef.current = value
+    onDraftChange(value)
+    return value
+  }
+
+  function scheduleComposerDraftSync(value: string) {
+    latestDraftRef.current = value
+    const nextHasDraftText = value.trim().length > 0
+    setHasLocalDraftText(current => current === nextHasDraftText ? current : nextHasDraftText)
+    clearDraftSyncTimer()
+    draftSyncTimerRef.current = window.setTimeout(() => {
+      draftSyncTimerRef.current = null
+      onDraftChange(latestDraftRef.current)
+    }, 300)
+  }
+
+  useEffect(() => {
+    latestDraftRef.current = draft
+    setHasLocalDraftText(current => {
+      const next = draft.trim().length > 0
+      return current === next ? current : next
+    })
+    const textarea = composerTextareaRef.current
+    if (!textarea) {
+      return
+    }
+    if (textarea.value !== draft && (document.activeElement !== textarea || draft === '')) {
+      textarea.value = draft
+    }
+  }, [draft])
+
+  useEffect(() => {
+    const textarea = composerTextareaRef.current
+    if (textarea && textarea.value !== draft) {
+      textarea.value = draft
+    }
+    latestDraftRef.current = draft
+    setHasLocalDraftText(draft.trim().length > 0)
+    return () => {
+      clearDraftSyncTimer()
+      const value = composerTextareaRef.current?.value ?? latestDraftRef.current
+      latestDraftRef.current = value
+      onDraftChange(value)
+    }
+  }, [sessionId])
 
   const scrollFollowKey = useMemo(() => {
     const lastMessage = messages.at(-1)
@@ -6607,7 +6659,7 @@ export function ChatView({
       ? `⌘/Ctrl + Enter ${isRunning ? '补充当前任务' : '发送'}`
       : `Enter ${isRunning ? '补充当前任务' : '发送'}，Shift + Enter 换行`
     : '请设置工作区'
-  const canSubmitComposer = Boolean(draft.trim() || attachments.length > 0)
+  const canSubmitComposer = Boolean(hasLocalDraftText || draft.trim() || attachments.length > 0)
 
   const hasInspectorContent = true
 
@@ -6705,16 +6757,20 @@ export function ChatView({
             ? persistedPromptTokensFromUsage
             : localCurrentPromptContextTokens
 
+  function handleComposerSubmit() {
+    onSubmit(syncComposerDraftNow())
+  }
+
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isMetaEnter) {
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
         event.preventDefault()
-        onSubmit()
+        handleComposerSubmit()
       }
     } else {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault()
-        onSubmit()
+        handleComposerSubmit()
       }
     }
   }
@@ -6915,9 +6971,10 @@ export function ChatView({
 
               <div className="w-full pointer-events-auto bg-white border border-solid border-[#4f7b7466] rounded-2xl shadow-lg shadow-[rgba(15,23,42,0.05)] transition-all ring-4 ring-offset-0 ring-[rgba(79,123,116,0.08)] !outline-none relative">
                 <textarea
+                  ref={composerTextareaRef}
                   className="w-full h-120px p-4 text-15px leading-relaxed resize-none !border-none bg-transparent !outline-none !ring-0 !shadow-none"
-                  value={draft}
-                  onChange={event => onDraftChange(event.target.value)}
+                  defaultValue={draft}
+                  onChange={event => scheduleComposerDraftSync(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
                   onPaste={handleComposerPaste}
                   placeholder="在这里输入你的需求或问题..."
@@ -7227,7 +7284,7 @@ export function ChatView({
                         }`}
                       title={isRunning ? '补充当前任务' : '发送'}
                       disabled={!canSubmitComposer}
-                      onClick={onSubmit}
+                      onClick={handleComposerSubmit}
                       type="button"
                     >
                       <SendHorizontal size={18} />

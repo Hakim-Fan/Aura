@@ -499,12 +499,12 @@ function buildUserMessageParts(
   content: string,
   attachments: MessageAttachment[],
 ): ChatContentPart[] {
-  const normalizedContent = content.trim()
+  const hasContent = content.trim().length > 0
   const imageAttachments = attachments.filter(attachment => isImageAttachment(attachment))
   const fileAttachments = attachments.filter(attachment => !isImageAttachment(attachment))
-  const promptText =
-    normalizedContent ||
-    `请分析这${attachments.length > 1 ? '些' : '个'}附件。`
+  const promptText = hasContent
+    ? content
+    : `请分析这${attachments.length > 1 ? '些' : '个'}附件。`
   const attachmentContextParts = []
 
   if (imageAttachments.length > 0) {
@@ -1784,6 +1784,21 @@ function updateMessageVariantAtIndex(
   const nextVariants = [...variants]
   nextVariants[safeTargetIndex] = updater(nextVariants[safeTargetIndex] || toMessageVariant(message))
   return applyMessageVariant(message, nextVariants, activeIndex)
+}
+
+function deleteActiveMessageVariant(message: ChatMessage): ChatMessage | null {
+  const variants = ensureMessageVariants(message)
+  if (variants.length <= 1) {
+    return null
+  }
+
+  const activeIndex =
+    typeof message.activeVersionIndex === 'number'
+      ? Math.max(0, Math.min(message.activeVersionIndex, variants.length - 1))
+      : variants.length - 1
+  const nextVariants = variants.filter((_, index) => index !== activeIndex)
+  const nextActiveIndex = Math.min(activeIndex, nextVariants.length - 1)
+  return applyMessageVariant(message, nextVariants, nextActiveIndex)
 }
 
 const SIDEBAR_WIDTH_KEY = 'desk-agent-main-sidebar-width'
@@ -3290,7 +3305,7 @@ export function MainWindowApp() {
     updateComposerState(activeSession.id, current => ({
       ...current,
       draft: current.draft.trim()
-        ? `${current.draft.trim()}\n\n请重点查看文件：${path}`
+        ? `${current.draft}\n\n请重点查看文件：${path}`
         : `请重点查看文件：${path}`,
     }))
   }
@@ -3326,14 +3341,15 @@ export function MainWindowApp() {
       return
     }
 
-    const content = rawContent.trim()
+    const content = rawContent
+    const trimmedContent = rawContent.trim()
     const effectiveAttachmentCount =
       options?.attachmentsOverride?.length ?? draftAttachments.length
-    if (!content && effectiveAttachmentCount === 0) {
+    if (!trimmedContent && effectiveAttachmentCount === 0) {
       return
     }
 
-    const workspaceHint = content || draftAttachments[0]?.name || activeSession.title
+    const workspaceHint = trimmedContent || draftAttachments[0]?.name || activeSession.title
     const workspacePath = await ensureSessionWorkspace(
       activeSession,
       workspaceHint,
@@ -3358,9 +3374,9 @@ export function MainWindowApp() {
       return
     }
 
-    const contentForDisplay =
-      content ||
-      `已补充 ${materializedAttachments.length} 个附件：${materializedAttachments
+    const contentForDisplay = trimmedContent
+      ? content
+      : `已补充 ${materializedAttachments.length} 个附件：${materializedAttachments
         .map(attachment => attachment.name)
         .join('、')}`
     const runtimeInputParts = buildUserMessageParts(content, materializedAttachments)
@@ -3562,9 +3578,10 @@ export function MainWindowApp() {
       researchModeOverride?: ResearchMode
     },
   ) {
-    const content = rawContent.trim()
+    const content = rawContent
+    const trimmedContent = rawContent.trim()
     const effectiveAttachmentCount = options?.attachmentsOverride?.length ?? draftAttachments.length
-    if ((!content && effectiveAttachmentCount === 0) || !activeSession) {
+    if ((!trimmedContent && effectiveAttachmentCount === 0) || !activeSession) {
       return
     }
 
@@ -3613,7 +3630,7 @@ export function MainWindowApp() {
     }
 
     const workspaceHint =
-      content || draftAttachments[0]?.name || activeSession.title
+      trimmedContent || draftAttachments[0]?.name || activeSession.title
     const workspacePath = await ensureSessionWorkspace(
       activeSession,
       workspaceHint,
@@ -3638,9 +3655,9 @@ export function MainWindowApp() {
       return
     }
 
-    const contentForDisplay =
-      content ||
-      `已附加 ${materializedAttachments.length} 个附件：${materializedAttachments
+    const contentForDisplay = trimmedContent
+      ? content
+      : `已附加 ${materializedAttachments.length} 个附件：${materializedAttachments
         .map(attachment => attachment.name)
         .join('、')}`
     const userMessageParts = buildUserMessageParts(content, materializedAttachments)
@@ -3914,8 +3931,8 @@ export function MainWindowApp() {
     }
   }
 
-  async function submit() {
-    await submitPrompt(draft)
+  async function submit(draftOverride?: string) {
+    await submitPrompt(typeof draftOverride === 'string' ? draftOverride : draft)
   }
 
   async function handleApproval(decision: ApprovalDecision) {
@@ -4105,24 +4122,34 @@ export function MainWindowApp() {
       return
     }
 
-    updateSession(activeSession.id, session => ({
-      ...session,
-      contextCompression:
-        shouldInvalidateContextCompressionForMessage(session, messageId)
-          ? undefined
-          : session.contextCompression,
-      messages: session.messages
-        .filter(message => message.id !== messageId)
-        .map(message =>
-          message.linkedMessageId === messageId
-            ? {
-              ...message,
-              linkedMessageId: undefined,
-            }
-            : message,
-        ),
-      updatedAt: Date.now(),
-    }))
+    updateSession(activeSession.id, session => {
+      const targetMessage = session.messages.find(message => message.id === messageId)
+      const targetWillRemain = targetMessage
+        ? ensureMessageVariants(targetMessage).length > 1
+        : false
+
+      return {
+        ...session,
+        contextCompression:
+          shouldInvalidateContextCompressionForMessage(session, messageId)
+            ? undefined
+            : session.contextCompression,
+        messages: session.messages
+          .map(message =>
+            message.id === messageId ? deleteActiveMessageVariant(message) : message,
+          )
+          .filter((message): message is ChatMessage => Boolean(message))
+          .map(message =>
+            message.linkedMessageId === messageId && !targetWillRemain
+              ? {
+                ...message,
+                linkedMessageId: undefined,
+              }
+              : message,
+          ),
+        updatedAt: Date.now(),
+      }
+    })
   }
 
   function selectMessageVersion(messageId: string, nextIndex: number) {
@@ -4455,7 +4482,7 @@ export function MainWindowApp() {
                   }))
                 }}
                 onSetCapabilityOverride={setProjectCapabilityOverride}
-                onSubmit={() => void submit()}
+                onSubmit={value => void submit(value)}
                 onOpenProviders={() =>
                   void openSettingsWindow('providers').catch(caught => {
                     setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')

@@ -383,10 +383,34 @@ function attachmentLookupKeys(value: { path?: string; name?: string }) {
   return keys
 }
 
+function describeImageInputForText(part: {
+  name?: string
+  path?: string
+  mimeType?: string
+}): ChatContentPart {
+  const details = [
+    part.name ? `name: ${part.name}` : '',
+    part.path ? `path: ${part.path}` : '',
+    part.mimeType ? `mime type: ${part.mimeType}` : '',
+  ].filter(Boolean)
+  return {
+    type: 'text',
+    text: details.length > 0
+      ? `[Earlier image input omitted from runtime vision payload; ${details.join(', ')}.]`
+      : '[Earlier image input omitted from runtime vision payload.]',
+  }
+}
+
+type BuildAgentRuntimeMessageOptions = {
+  includeImageData?: boolean
+}
+
 async function buildAgentRuntimeMessage(
   message: ChatMessage,
   imageDataUrlCache: Map<string, Promise<string | undefined>>,
+  options: BuildAgentRuntimeMessageOptions = {},
 ) {
+  const includeImageData = options.includeImageData ?? true
   const attachments = Array.isArray(message.attachments) ? message.attachments : []
   const imageAttachments = attachments.filter(isImageAttachment)
   const imageAttachmentsByKey = new Map<string, MessageAttachment>()
@@ -415,6 +439,9 @@ async function buildAgentRuntimeMessage(
   const nextParts = await Promise.all(
     (message.parts || []).map(async part => {
       if (part.type === 'image') {
+        if (!includeImageData) {
+          return describeImageInputForText(part)
+        }
         if (part.dataUrl?.trim()) {
           return part
         }
@@ -428,6 +455,13 @@ async function buildAgentRuntimeMessage(
           .find(Boolean)
         if (!matchingAttachment) {
           return part
+        }
+        if (!includeImageData) {
+          return describeImageInputForText({
+            name: matchingAttachment.name || part.name,
+            path: matchingAttachment.path || part.path,
+            mimeType: resolveAttachmentMimeType(matchingAttachment) || part.mimeType,
+          })
         }
         const dataUrl = await loadImageDataUrl(matchingAttachment.path || part.path)
         return {
@@ -447,6 +481,11 @@ async function buildAgentRuntimeMessage(
     }),
   )
 
+  const originalAttachmentPartKeys = new Set(
+    (message.parts || []).flatMap(part =>
+      part.type === 'image' || part.type === 'file' ? attachmentLookupKeys(part) : [],
+    ),
+  )
   const existingAttachmentPartKeys = new Set(
     nextParts.flatMap(part =>
       part.type === 'image' || part.type === 'file' ? attachmentLookupKeys(part) : [],
@@ -459,6 +498,12 @@ async function buildAgentRuntimeMessage(
       continue
     }
     if (isImageAttachment(attachment)) {
+      if (!includeImageData) {
+        if (!keys.some(key => originalAttachmentPartKeys.has(key))) {
+          nextParts.push(describeImageInputForText(attachment))
+        }
+        continue
+      }
       const dataUrl = await loadImageDataUrl(attachment.path)
       nextParts.push({
         type: 'image',
@@ -503,7 +548,20 @@ async function buildAgentRuntimeMessage(
 
 async function buildAgentRuntimeMessages(messages: ChatMessage[]) {
   const imageDataUrlCache = new Map<string, Promise<string | undefined>>()
-  return Promise.all(messages.map(message => buildAgentRuntimeMessage(message, imageDataUrlCache)))
+  let currentUserMessageIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      currentUserMessageIndex = index
+      break
+    }
+  }
+  return Promise.all(
+    messages.map((message, index) =>
+      buildAgentRuntimeMessage(message, imageDataUrlCache, {
+        includeImageData: index === currentUserMessageIndex,
+      }),
+    ),
+  )
 }
 
 function stripInlineImageDataFromPart(part: NonNullable<ChatMessage['parts']>[number]) {

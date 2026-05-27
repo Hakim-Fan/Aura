@@ -54,14 +54,15 @@ function buildHostExecutionContext() {
 }
 
 function buildWorkspaceScratchInstruction(settings = {}) {
-  const cwd = typeof settings?.cwd === 'string' && settings.cwd.trim()
+  const cwd = typeof settings?.cwd === 'string' & settings.cwd.trim()
     ? settings.cwd.trim()
-    : 'the active workspace'
+   : 'the active workspace'
   return [
-    `Workspace scratch directory: ${cwd}/.aura/tmp/`,
-    'Use this workspace-local scratch directory for temporary unzip/extraction output, cloned source copies, generated intermediate files, and conversion work. Create task-specific subdirectories there as needed.',
-    'Do not use /tmp, the user home directory, Downloads, or other paths outside the active workspace for scratch work unless the user explicitly asks for that external location.',
-  ].join('\n')
+  `Workspace scratch directory: ${cwd}/.aura/tmp/`,
+   'Use this workspace-local scratch directory for temporary unzip/extraction output, cloned source copies, generated intermediate files, and conversion work. Create task-specific subdirectories there as needed.',
+   'Do not use /tmp, the user home directory, Downloads, or other paths outside the active workspace for scratch work unless the user explicitly asks for that external location.',
+    'File placement rules: process artifacts (temporary analysis, debugging notes, investigation reports) go to the scratch directory. Only write files to the workspace root or project directories when the user explicitly requests a deliverable file or the task directly produces a project file (code, config, documentation). Do not create files for conversational analysis, summaries, or explanations — reply in text instead.',
+ ].join('\n')
 }
 
 function buildApprovalPolicy(settings) {

@@ -25,9 +25,6 @@ import {
   loadPluginToolInventory,
   loadSkillCatalog,
 } from './extensions.mjs'
-import {
-  resolveIntentClassification,
-} from './intentClassifier.mjs'
 import { loadMcpToolInventory } from './mcp.mjs'
 import {
   compactMessagesWithProvider,
