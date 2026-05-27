@@ -19,6 +19,7 @@ function arrayLimitForKey(key: string) {
   switch (key) {
     case 'preview':
     case 'files':
+    case 'fileChanges':
       return 12
     case 'lines':
       return 80
@@ -85,6 +86,28 @@ function shouldKeepCompactStructuredOutput(value: unknown) {
   )
 }
 
+function parseStructuredOutput(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'string' || !value.trim()) {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function compactKeepableStructuredOutput(value: unknown) {
+  const record =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : parseStructuredOutput(value)
+  return shouldKeepCompactStructuredOutput(record) ? compactStructuredOutput(record) : undefined
+}
+
 export function compactMessageEvent(event: MessageEvent): MessageEvent {
   return {
     ...event,
@@ -119,13 +142,14 @@ export function stripMessageEventDetail(event: MessageEvent): MessageEvent {
   if (!detail) {
     return compactMessageEvent(event)
   }
+  const compactStructuredDetail =
+    compactKeepableStructuredOutput(event.structuredOutput) ||
+    compactKeepableStructuredOutput(event.output)
   return {
     ...event,
     input: undefined,
     output: undefined,
-    structuredOutput: shouldKeepCompactStructuredOutput(event.structuredOutput)
-      ? compactStructuredOutput(event.structuredOutput)
-      : undefined,
+    structuredOutput: compactStructuredDetail,
     error: undefined,
     detailAvailable: true,
     detailRef: event.detailRef || event.id,
@@ -136,10 +160,13 @@ export function compactToolEventPayload(event: ToolEvent): Pick<
   ToolEvent,
   'input' | 'output' | 'structuredOutput' | 'error'
 > {
+  const compactStructuredOutputValue =
+    compactStructuredOutput(event.structuredOutput) ||
+    compactKeepableStructuredOutput(event.output)
   return {
     input: truncateText(event.input, MAX_EVENT_INPUT_CHARS) as string | undefined,
     output: truncateText(event.output, MAX_EVENT_OUTPUT_CHARS) as string | undefined,
-    structuredOutput: compactStructuredOutput(event.structuredOutput),
+    structuredOutput: compactStructuredOutputValue,
     error: truncateText(event.error, MAX_EVENT_OUTPUT_CHARS) as string | undefined,
   }
 }

@@ -293,7 +293,7 @@ async function generateOpenAiTitle(settings, titleContext) {
       settings,
       proxyMode: 'provider-explicit',
       allowLocal: true,
-      timeoutMs: 30_000,
+      timeoutMs: 60_000,
       timeoutMessage: 'Timed out while generating session title.',
     },
   )

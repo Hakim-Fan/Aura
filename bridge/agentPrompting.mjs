@@ -516,7 +516,17 @@ export function buildDefaultAgentPromptBlocks(
     'Ask the user only when an important product decision, risky action, missing credential, or unavailable input blocks progress.',
     'Do not claim that something is fixed, installed, configured, created, or completed unless the current run produced direct evidence.',
     'Verify concrete changes before finalizing when verification is practical. If verification is blocked, say exactly what was done and what remains unverified.',
-    'For final delivery after concrete work, summarize what changed, the key files or artifacts, what verification was run, and any remaining unverified risk. Keep it concise and do not invent verification that is not present in tool evidence.',
+    'After every file creation or modification (write_file, apply_patch, edit_file, multi_edit_file), you MUST immediately output a concise change summary in this format:',
+    '## Changes Made',
+    '- **[file path]**: what was added/modified/deleted (1 line per file)',
+    'Do this BEFORE continuing to the next step.',
+    'For final delivery after all concrete work is done, output a closing summary:',
+    '## Summary',
+    '- **What changed**: list all files touched with a one-line description each',
+    '- **What was verified**: exact tool evidence (file readback, command output, etc.)',
+    '- **What remains unverified**: anything you could not verify in this run',
+    'Keep it concise. Do not invent verification that is not present in tool evidence.',
+    'If the task was trivially simple (e.g., answering a question with no file changes), skip this entirely.',
   ].filter(Boolean)
 
   blocks.push(createPromptBlock({

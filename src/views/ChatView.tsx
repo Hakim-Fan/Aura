@@ -3582,7 +3582,11 @@ function hasPatchPreviewOutput(output: Record<string, unknown> | null) {
   if (!output) {
     return false
   }
-  if (Array.isArray(output.preview) || Array.isArray(output.files)) {
+  if (
+    Array.isArray(output.preview) ||
+    Array.isArray(output.files) ||
+    Array.isArray(output.fileChanges)
+  ) {
     return true
   }
   return (
@@ -3626,7 +3630,9 @@ function readPatchPreviewFiles(output: Record<string, unknown>) {
     ? output.preview
     : Array.isArray(output.files)
       ? output.files
-      : []
+      : Array.isArray(output.fileChanges)
+        ? output.fileChanges
+        : []
   return rawFiles.filter(isRecord).slice(0, 8)
 }
 
@@ -3725,7 +3731,9 @@ function readFinalChangeFilesFromOutput(output: Record<string, unknown>) {
     ? output.preview
     : Array.isArray(output.files)
       ? output.files
-      : []
+      : Array.isArray(output.fileChanges)
+        ? output.fileChanges
+        : []
 
   return rawFiles.filter(isRecord)
 }
@@ -5851,6 +5859,10 @@ function AssistantMessageCard({
 }) {
   const [modelDialogOpen, setModelDialogOpen] = useState(false)
   const [executionTraceExpanded, setExecutionTraceExpanded] = useState(false)
+  const [finalChangeEventDetails, setFinalChangeEventDetails] = useState<Record<
+    string,
+    MessageEventDetailPayload
+  >>({})
   const answerBodyRef = useRef<HTMLDivElement>(null)
   const messageTimeLabel = formatConversationTimestamp(message.createdAt)
   const activity = message.activity
@@ -5886,7 +5898,72 @@ function AssistantMessageCard({
   const activeVariantId = getActiveMessageVariant(message).id || message.id
   useEffect(() => {
     setExecutionTraceExpanded(false)
+    setFinalChangeEventDetails({})
   }, [activeVariantId])
+  useEffect(() => {
+    if (isStreaming || !onLoadMessageEventDetail) {
+      return
+    }
+    const versionIndex = message.activeVersionIndex || 0
+    const candidates = messageEvents.filter(event => (
+      event.detailAvailable === true &&
+      event.status === 'success' &&
+      event.kind !== 'approval' &&
+      EDITING_PREVIEW_TOOL_NAMES.has(event.toolName || '') &&
+      !readEventStructuredOutput(event) &&
+      !finalChangeEventDetails[event.id]
+    ))
+    if (candidates.length === 0) {
+      return
+    }
+    let cancelled = false
+    void Promise.all(
+      candidates.map(async event => {
+        const detail = await onLoadMessageEventDetail(
+          message.id,
+          versionIndex,
+          event.detailRef || event.id,
+        )
+        return { eventId: event.id, detail }
+      }),
+    ).then(results => {
+      if (cancelled) {
+        return
+      }
+      setFinalChangeEventDetails(current => {
+        let changed = false
+        const next = { ...current }
+        for (const result of results) {
+          if (next[result.eventId]) {
+            continue
+          }
+          next[result.eventId] = result.detail || {}
+          changed = true
+        }
+        return changed ? next : current
+      })
+    }).catch(() => {
+      // The detailed execution timeline still exposes lazy detail loading errors on demand.
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    finalChangeEventDetails,
+    isStreaming,
+    message.activeVersionIndex,
+    message.id,
+    messageEvents,
+    onLoadMessageEventDetail,
+  ])
+  const finalChangeEvents = useMemo(
+    () => messageEvents.map(event => (
+      finalChangeEventDetails[event.id]
+        ? { ...event, ...finalChangeEventDetails[event.id] }
+        : event
+    )),
+    [finalChangeEventDetails, messageEvents],
+  )
   const isRetryInProgress = isStreaming && message.retryInfo?.inProgress === true
   const messageHasToolFailure = hasToolFailure(message)
   const messageFailureSummary =
@@ -5934,8 +6011,8 @@ function AssistantMessageCard({
     messageEvents,
   )
   const finalChangeSummary = useMemo(
-    () => collectFinalChangeSummary(messageEvents),
-    [messageEvents],
+    () => collectFinalChangeSummary(finalChangeEvents),
+    [finalChangeEvents],
   )
   const nonApprovalTimeline = executionTimeline.filter(
     item => !(isExecutionEventItem(item) && isAwaitingUserResponseEvent(item.event)),

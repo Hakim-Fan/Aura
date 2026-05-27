@@ -26,6 +26,7 @@ open-claw/
 codex-main/
 
 .kilo/
+.aura/
 
 workany-dev/
 open-agent-sdk-typescript-main/
