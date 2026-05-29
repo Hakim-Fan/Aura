@@ -183,6 +183,7 @@ function terminateProcess(session, signal = 'SIGTERM', reason = `signal:${signal
         }
       }
     }, 1_500)
+    session.forceKillTimer.unref?.()
   }
 
   return true
@@ -201,6 +202,7 @@ function scheduleIdleTermination(session, disposeSession) {
 
     terminateProcess(session, 'SIGTERM', 'idle_timeout')
   }, IDLE_TERMINATION_MS)
+  session.idleTimer.unref?.()
 }
 
 function scheduleCommandTimeout(session) {
@@ -220,6 +222,7 @@ function scheduleCommandTimeout(session) {
     session.timedOut = true
     terminateProcess(session, 'SIGTERM', 'timeout')
   }, session.commandTimeoutMs)
+  session.commandTimeoutTimer.unref?.()
 }
 
 export function createUnifiedExecRuntime({ shell } = {}) {
@@ -302,17 +305,19 @@ export function createUnifiedExecRuntime({ shell } = {}) {
     ])
   }
 
-  async function buildStructuredResult(session, maxOutputChars) {
+  async function buildStructuredResult(session, maxOutputChars, { advanceCursors = true } = {}) {
     const slice = collectOutputSlice(
       session,
       session.stdoutCursor,
       session.stderrCursor,
       maxOutputChars,
     )
-    session.stdoutCursor = slice.nextStdoutCursor
-    session.stderrCursor = slice.nextStderrCursor
-    touchSession(session)
-    scheduleIdleTermination(session, disposeSession)
+    if (advanceCursors) {
+      session.stdoutCursor = slice.nextStdoutCursor
+      session.stderrCursor = slice.nextStderrCursor
+      touchSession(session)
+      scheduleIdleTermination(session, disposeSession)
+    }
 
     let result = {
       sessionId: session.id,
@@ -351,6 +356,21 @@ export function createUnifiedExecRuntime({ shell } = {}) {
 
     result = attachWorkspaceFileMutations(result, session.mutationSummary)
     return result
+  }
+
+  function observeBackgroundCompletion(session, runtime, maxOutputChars) {
+    if (typeof runtime.onCompletion !== 'function' || !session.running) {
+      return
+    }
+
+    const onExit = () => {
+      void buildStructuredResult(session, maxOutputChars, { advanceCursors: false })
+        .then(result => runtime.onCompletion(result))
+        .catch(() => {
+          // Completion notifications are best-effort UI state updates; polling still works.
+        })
+    }
+    session.exitListeners.add(onExit)
   }
 
   async function execCommand(
@@ -460,6 +480,7 @@ export function createUnifiedExecRuntime({ shell } = {}) {
       throw session.spawnError
     }
 
+    observeBackgroundCompletion(session, runtime, maxOutputChars)
     return await buildStructuredResult(session, maxOutputChars)
   }
 

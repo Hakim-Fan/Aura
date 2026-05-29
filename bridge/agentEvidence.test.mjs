@@ -183,6 +183,41 @@ test('nonzero command exit is always an execution failure', () => {
   )
 })
 
+test('later successful command clears an earlier command failure of the same effect type', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'exec_command',
+      source: 'builtin',
+      status: 'error',
+      input: '$ find / -name python3.9',
+      output: JSON.stringify({
+        status: 'exited',
+        running: false,
+        exitCode: 1,
+        output: 'zsh: no matches found',
+      }),
+    },
+    {
+      name: 'exec_command',
+      source: 'builtin',
+      status: 'success',
+      input: '$ /usr/bin/python3 --version',
+      output: JSON.stringify({
+        status: 'exited',
+        running: false,
+        exitCode: 0,
+        output: 'Python 3.9.6',
+      }),
+    },
+  ])
+
+  assert.equal(evidence.hasExecutionFailure, false)
+  assert.equal(
+    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    'executed_verified',
+  )
+})
+
 test('failed command execution is not hidden by advise route mode', () => {
   const evidence = collectEvidenceFromToolEvents([
     {

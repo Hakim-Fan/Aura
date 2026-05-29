@@ -414,11 +414,7 @@ export function collectEvidenceFromToolEvents(toolEvents = []) {
     })
   }
 
-  const hasExecutionFailure =
-    hasUnresolvedExecutionFailure(records) ||
-    records.some(record =>
-      record.producedEvidence.includes('command_exit_nonzero'),
-    )
+  const hasExecutionFailure = hasUnresolvedExecutionFailure(records)
   const hasArtifactEvidence = artifactPaths.size > 0 || verifiedArtifactCount > 0
   const hasContextEvidence = records.some(record =>
     record.status === 'success' &&

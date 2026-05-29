@@ -205,6 +205,30 @@ function commandExitFailureForTool(toolName, output) {
   return null
 }
 
+function commandStillRunningForTool(toolName, output) {
+  return Boolean(
+    COMMAND_EXIT_STATUS_TOOLS.has(toolName) &&
+      output &&
+      typeof output === 'object' &&
+      output.running === true,
+  )
+}
+
+function buildCommandExitError(toolName, exitCode) {
+  if (exitCode === null) {
+    return null
+  }
+  return createStructuredError(`命令退出码为 ${exitCode}。`, {
+    source: 'tool',
+    category: 'execution_failed',
+    code: 'COMMAND_EXIT_NONZERO',
+    detail: `Command "${toolName}" exited with code ${exitCode}.`,
+    suggestedAction:
+      '请查看命令输出中的错误信息，修复后重新执行；不要在非零退出码后宣称任务已完成。',
+    retryable: true,
+  })
+}
+
 async function walkDirectory(dirPath, maxDepth, currentDepth = 0) {
   const entries = await fs.readdir(dirPath, { withFileTypes: true })
   const lines = []
@@ -774,6 +798,7 @@ function buildRuntimeWorkMemorySection(context) {
       memory.kind !== 'tool_evidence' &&
       memory.kind !== 'task_progress',
     )
+    .sort((a, b) => (Number(a?.createdAt) || 0) - (Number(b?.createdAt) || 0))
     .slice(-6)
   if (relevant.length === 0) {
     return ''
@@ -796,6 +821,7 @@ function buildRuntimeTaskProgressSection(context) {
     : []
   const relevant = memories
     .filter(memory => memory && typeof memory === 'object' && memory.kind === 'task_progress')
+    .sort((a, b) => (Number(a?.createdAt) || 0) - (Number(b?.createdAt) || 0))
     .slice(-2)
   if (relevant.length === 0) {
     return ''
@@ -3335,6 +3361,26 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
               structuredOutput,
             })
           },
+          onCompletion(nextOutput) {
+            const structuredOutput = structuredEventOutputForTool(
+              effectiveTool.name,
+              nextOutput,
+            )
+            const finalSummary = editingProgressSummary(effectiveTool.name, nextOutput)
+            const commandExitError = buildCommandExitError(
+              effectiveTool.name,
+              commandExitFailureForTool(effectiveTool.name, nextOutput),
+            )
+            updateEvent({
+              status: commandExitError ? 'error' : 'success',
+              summary: finalSummary || eventSummary,
+              ...completeEventTiming(),
+              output: stringifyOutput(nextOutput),
+              structuredOutput,
+              error: commandExitError?.rawMessage,
+              errorInfo: commandExitError?.errorInfo,
+            })
+          },
           registerTools(nextTools) {
             hooks.registerDynamicTools?.(nextTools)
           },
@@ -3361,23 +3407,15 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     )
     const structuredOutput = structuredEventOutputForTool(effectiveTool.name, output)
     const finalSummary = editingProgressSummary(effectiveTool.name, output)
-    const nonzeroExitCode = commandExitFailureForTool(effectiveTool.name, output)
-    const commandExitError =
-      nonzeroExitCode === null
-        ? null
-        : createStructuredError(`命令退出码为 ${nonzeroExitCode}。`, {
-          source: 'tool',
-          category: 'execution_failed',
-          code: 'COMMAND_EXIT_NONZERO',
-          detail: `Command "${effectiveTool.name}" exited with code ${nonzeroExitCode}.`,
-          suggestedAction:
-            '请查看命令输出中的错误信息，修复后重新执行；不要在非零退出码后宣称任务已完成。',
-          retryable: true,
-        })
+    const commandStillRunning = commandStillRunningForTool(effectiveTool.name, output)
+    const commandExitError = buildCommandExitError(
+      effectiveTool.name,
+      commandExitFailureForTool(effectiveTool.name, output),
+    )
     updateEvent({
-      status: commandExitError ? 'error' : 'success',
+      status: commandExitError ? 'error' : commandStillRunning ? 'running' : 'success',
       summary: finalSummary || eventSummary,
-      ...completeEventTiming(),
+      ...(commandStillRunning ? {} : completeEventTiming()),
       output: stringifyOutput(output),
       structuredOutput,
       error: commandExitError?.rawMessage,

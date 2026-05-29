@@ -265,16 +265,108 @@ function formatWorkMemorySourceRefs(memory: WorkMemory): string {
     .join(' | ')
 }
 
+function readMemoryStringArray(content: WorkMemory['content'], key: string, limit = 6): string[] {
+  const value = content?.[key]
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value
+    .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    .slice(0, limit)
+}
+
+function workMemoryCreatedAt(memory: WorkMemory): number {
+  return typeof memory?.createdAt === 'number' && Number.isFinite(memory.createdAt)
+    ? memory.createdAt
+    : 0
+}
+
+function taskProgressScore(memory: WorkMemory): number {
+  const completed = readMemoryStringArray(memory.content, 'completed', 24).length
+  const inProgress = readMemoryStringArray(memory.content, 'inProgress', 8).length
+  return completed * 100 + inProgress
+}
+
+function selectTaskProgressCarryovers(memories: WorkMemory[]): WorkMemory[] {
+  const ordered = [...memories].sort((a, b) => workMemoryCreatedAt(a) - workMemoryCreatedAt(b))
+  const latest = ordered.at(-1)
+  const mostAdvanced = [...ordered].sort((a, b) => {
+    const scoreDiff = taskProgressScore(a) - taskProgressScore(b)
+    return scoreDiff || workMemoryCreatedAt(a) - workMemoryCreatedAt(b)
+  }).at(-1)
+  return [mostAdvanced, latest]
+    .filter((memory): memory is WorkMemory => Boolean(memory))
+    .filter((memory, index, list) =>
+      list.findIndex(entry => entry.id === memory.id) === index,
+    )
+}
+
+function formatTaskProgressCarryover(memory: WorkMemory): string[] {
+  const lines = [
+    `- ${clipText(`[${memory.status || 'draft'}] ${memory.title || 'Task progress'}`, 220)}`,
+    memory.summary ? `  Summary: ${clipText(memory.summary, 620)}` : '',
+  ].filter(Boolean)
+  const completed = readMemoryStringArray(memory.content, 'completed', 8)
+  const inProgress = readMemoryStringArray(memory.content, 'inProgress', 4)
+  const pending = readMemoryStringArray(memory.content, 'pending', 6)
+  if (completed.length > 0) {
+    lines.push(`  Completed: ${clipText(completed.join('; '), 520)}`)
+  }
+  if (inProgress.length > 0) {
+    lines.push(`  In progress: ${clipText(inProgress.join('; '), 360)}`)
+  }
+  if (pending.length > 0) {
+    lines.push(`  Pending: ${clipText(pending.join('; '), 420)}`)
+  }
+  if (memory.nextUse?.trim()) {
+    lines.push(`  Next use: ${clipText(memory.nextUse, 320)}`)
+  }
+  return lines
+}
+
+function collectInvokedSkillIdsFromToolEvidence(memories: WorkMemory[]): string[] {
+  const ids = new Set<string>()
+  for (const memory of memories) {
+    if (memory.kind !== 'tool_evidence') {
+      continue
+    }
+    const recentSuccesses = memory.content?.recentSuccesses
+    if (!Array.isArray(recentSuccesses)) {
+      continue
+    }
+    for (const entry of recentSuccesses) {
+      if (!isRecord(entry) || entry.tool !== 'aura_read_skill') {
+        continue
+      }
+      const input = isRecord(entry.input) ? entry.input : null
+      const skillId = readString(input?.skillId)
+      if (skillId) {
+        ids.add(skillId)
+      }
+    }
+  }
+  return [...ids].slice(-8)
+}
+
 function buildWorkMemoryCarryoverContext(memories: WorkMemory[]): string | undefined {
-  const usableMemories = (Array.isArray(memories) ? memories : [])
+  const sourceMemories = Array.isArray(memories) ? memories : []
+  const taskProgressMemories = sourceMemories
+    .filter(memory => memory?.summary?.trim() && memory.kind === 'task_progress')
+  const selectedTaskProgressMemories = selectTaskProgressCarryovers(taskProgressMemories)
+  const usableMemories = sourceMemories
     .filter(memory =>
       memory?.summary?.trim() &&
       memory.kind !== 'tool_evidence' &&
       memory.kind !== 'task_progress',
     )
-    .slice(-8)
+    .slice(-6)
+  const invokedSkillIds = collectInvokedSkillIdsFromToolEvidence(sourceMemories)
 
-  if (usableMemories.length === 0) {
+  if (
+    selectedTaskProgressMemories.length === 0 &&
+    usableMemories.length === 0 &&
+    invokedSkillIds.length === 0
+  ) {
     return undefined
   }
 
@@ -283,6 +375,26 @@ function buildWorkMemoryCarryoverContext(memories: WorkMemory[]): string | undef
     'Reuse them before repeating the same analysis. Treat draft and assumption items as useful but requiring verification when they are central to the answer.',
     'Use work memory for decisions, completed-stage summaries, open questions, next useful actions, and do-not-repeat hints. Use artifacts or the current transcript when exact prior content is required.',
   ]
+
+  if (selectedTaskProgressMemories.length > 0) {
+    lines.push('Task continuation progress from earlier turns:')
+    lines.push('This is continuation context, not a fresh task. Keep completed steps completed, continue from the latest in-progress step, and do not reset the plan unless the user explicitly changes the goal.')
+    if (selectedTaskProgressMemories.length > 1) {
+      const scores = selectedTaskProgressMemories.map(taskProgressScore)
+      if (scores.at(-1)! < scores[0]!) {
+        lines.push('If a newer progress note appears less advanced than an older one, treat it as a possible restarted plan and preserve the older completed steps unless the user changed the task goal.')
+      }
+    }
+    for (const memory of selectedTaskProgressMemories) {
+      lines.push(...formatTaskProgressCarryover(memory))
+    }
+  }
+
+  if (invokedSkillIds.length > 0) {
+    lines.push(
+      `Already invoked skill(s): ${invokedSkillIds.join(', ')}. Do not reread the same skill on a continuation unless the skill source changed, the active transcript lacks the instructions needed for the next step, or the user explicitly asks to reload it.`,
+    )
+  }
 
   for (const memory of usableMemories) {
     const header = [
@@ -305,7 +417,7 @@ function buildWorkMemoryCarryoverContext(memories: WorkMemory[]): string | undef
     }
   }
 
-  return clipText(lines.join('\n'), 5_200)
+  return clipText(lines.join('\n'), 6_400)
 }
 
 function mergeCarryoverContext(...sections: Array<string | undefined>): string | undefined {
@@ -648,7 +760,7 @@ export async function startAgentTask(
   const [runtimeMessages, persistedWorkMemories] = await Promise.all([
     buildAgentRuntimeMessages(messages),
     logContext?.sessionId
-      ? loadPersistedWorkMemories(logContext.sessionId, 8).catch(() => [])
+      ? loadPersistedWorkMemories(logContext.sessionId, 16).catch(() => [])
       : Promise.resolve([]),
   ])
   const workMemoryCarryoverContext = buildWorkMemoryCarryoverContext(persistedWorkMemories)
@@ -658,6 +770,7 @@ export async function startAgentTask(
     logContext,
     runtime: {
       persistedWorkMemories,
+      workMemories: persistedWorkMemories,
     },
     carryoverContext: mergeCarryoverContext(
       workMemoryCarryoverContext,

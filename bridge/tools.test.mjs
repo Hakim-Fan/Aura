@@ -99,6 +99,18 @@ function parseToolResultJson(value) {
   return JSON.parse(toolResultText(value))
 }
 
+async function waitFor(predicate, timeoutMs = 1_000) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = predicate()
+    if (value) {
+      return value
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('Timed out waiting for condition.')
+}
+
 test('invokeTool uses live settings for approval checks before falling back to task snapshot', async () => {
   let approvalRequested = false
 
@@ -1105,6 +1117,47 @@ test('builtin run_shell marks nonzero exit as tool error', async () => {
   assert.equal(parsed.exitCode, 7)
   assert.equal(events.at(-1)?.status, 'error')
   assert.equal(events.at(-1)?.errorInfo?.code, 'COMMAND_EXIT_NONZERO')
+})
+
+test('exec_command updates the original tool event when a background session exits', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-exec-session-complete-'))
+  const execTool = createBuiltinTools({ cwd: workspace }).find(tool => tool.name === 'exec_command')
+  const events = []
+
+  const output = await invokeTool(
+    execTool,
+    {
+      cmd: "node -e \"setTimeout(() => { console.log('done') }, 80)\"",
+      yieldTimeMs: 20,
+    },
+    [],
+    {
+      settings: {
+        autoApproveFileWrite: true,
+        autoApproveShell: true,
+        autoApproveComputerUse: false,
+      },
+      onToolEvent(event) {
+        events.push({ ...event })
+      },
+    },
+  )
+  const parsed = parseToolResultJson(output)
+  const runningEvent = events.at(-1)
+
+  assert.equal(parsed.running, true)
+  assert.equal(runningEvent?.status, 'running')
+
+  const completedEvent = await waitFor(() =>
+    events.find(event =>
+      event.id === runningEvent.id &&
+      event.status === 'success' &&
+      /done/.test(String(event.output || '')),
+    ),
+  )
+
+  assert.equal(completedEvent.id, runningEvent.id)
+  assert.match(completedEvent.output, /done/)
 })
 
 test('read_file can return a line-numbered range without shell awk', async () => {

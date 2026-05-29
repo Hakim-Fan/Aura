@@ -51,6 +51,23 @@ function summarizeRecentFailedEvents(toolEvents = []) {
     }))
 }
 
+function summarizeRecentSuccessfulEvents(toolEvents = []) {
+  return safeArray(toolEvents)
+    .filter(event => event?.status === 'success')
+    .slice(-5)
+    .map(event => ({
+      toolName: event?.name,
+      input: compactString(event?.input, 240),
+      output: compactString(
+        event?.structuredOutput
+          ? JSON.stringify(event.structuredOutput)
+          : event?.output,
+        360,
+      ),
+      summary: compactString(event?.summary, 240),
+    }))
+}
+
 function summarizeAvailableTools(tools = [], maxTools = 18) {
   return safeArray(tools)
     .map(tool => tool?.name)
@@ -102,6 +119,7 @@ export function shouldContinueAfterToolFailure({
       reason: 'continuation_budget_exhausted',
       failedRecords: summarizeFailedRecords(evidenceSummary),
       failedEvents: summarizeRecentFailedEvents(toolEvents),
+      successfulEvents: summarizeRecentSuccessfulEvents(toolEvents),
     }
   }
 
@@ -111,6 +129,7 @@ export function shouldContinueAfterToolFailure({
     nextAction: 'repair_with_available_tools',
     failedRecords: summarizeFailedRecords(evidenceSummary),
     failedEvents: summarizeRecentFailedEvents(toolEvents),
+    successfulEvents: summarizeRecentSuccessfulEvents(toolEvents),
     continuationAttempt: continuationAttempts + 1,
     maxContinuationAttempts,
   }
@@ -121,6 +140,7 @@ export function buildToolFailureContinuationNote({
   tools = [],
 } = {}) {
   const failedEvents = safeArray(decision?.failedEvents)
+  const successfulEvents = safeArray(decision?.successfulEvents)
   const availableTools = summarizeAvailableTools(tools)
   const failureLines = failedEvents.length > 0
     ? failedEvents.map((event, index) => {
@@ -134,15 +154,30 @@ export function buildToolFailureContinuationNote({
         return bits.join(' | ')
       })
     : ['1. An execution tool failed and the failure is still unresolved.']
+  const successLines = successfulEvents.length > 0
+    ? successfulEvents.map((event, index) => {
+        const bits = [
+          `${index + 1}. ${event.toolName || 'unknown_tool'}`,
+          event.summary ? `summary=${event.summary}` : null,
+          event.input ? `input=${event.input}` : null,
+          event.output ? `output=${event.output}` : null,
+        ].filter(Boolean)
+        return bits.join(' | ')
+      })
+    : []
 
   return [
     'Runtime continuation gate: an execution tool failed and the task is not complete.',
     `Repair attempt ${decision?.continuationAttempt || 1}/${decision?.maxContinuationAttempts || 1}.`,
+    'This is a continuation, not a fresh task. Preserve completed work and continue from the latest unresolved blocker.',
+    successLines.length > 0 ? 'Reusable successful tool results:' : null,
+    ...successLines,
     'Recent unresolved failures:',
     ...failureLines,
     availableTools.length > 0
       ? `Currently available tool names include: ${availableTools.join(', ')}.`
       : null,
+    'Do not repeat successful environment discovery, dependency installation, file generation, or verification steps unless a later tool result proves they are invalid.',
     'Continue by using the available tools to repair, retry with a safer method, or verify an alternate path.',
     'Do not provide a final success answer until a later tool result resolves the failed execution evidence.',
     'If no safe repair is possible, return a clear blocker summary instead of claiming completion.',
