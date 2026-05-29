@@ -1,174 +1,193 @@
 # Aura
 
-Aura 是一个桌面优先、工作区感知、本地优先的通用 Agent 应用。
+**中文** | [English](./README.en.md)
 
-它不是把一个聊天框套进桌面壳里，而是把真正能做事的 Agent 运行时、Provider 配置、MCP、技能、插件、浏览器自动化、桌面操作和本地持久化完整地做进了一款桌面软件。
+Aura 是一个桌面优先、本地优先、面向真实工作区的通用 Agent 应用。
 
-如果你想要的是：
+它不是把聊天框套进桌面壳里，而是把模型 Provider、MCP、Skills、Plugins、文件与 Shell 工具、Web 检索、桌面自动化、权限审批、会话持久化和运行时观测放进同一个可日用的桌面工作台。
 
-- 能配置自己的 `OpenAI / Google / Custom API`
-- 能自动调用 `MCP / Skills / Plugins`
-- 能在本地项目里读写文件、运行命令、分析仓库
-- 能做浏览器自动化、桌面操作、多 Agent 委派
-- 能把所有数据留在本机，而不是依赖云端产品逻辑
+如果你想要一个可以连接自己 API、理解本地仓库、调用外部能力、并把数据留在本机的 Agent，Aura 就是为这个方向做的。
 
-那 Aura 就是为这个方向设计的。
+## 为什么值得关注
 
-## 为什么 Aura 值得用
+- **桌面产品，而不是终端包装**：基于 `Tauri + React` 构建 UI，以 `Rust + Node.js` 承载本地系统能力和 Agent Runtime。
+- **工作区感知**：每个会话可以绑定真实目录，读取文件树、预览文件、导入附件、写入产物、运行命令。
+- **模型不锁厂商**：支持 `OpenAI`、`Google Gemini` 和 OpenAI-compatible `Custom` Provider，可维护多个 Provider Profile。
+- **扩展能力是一等公民**：MCP Server、Aura Skills、Aura Plugins 会进入统一工具池，并支持全局启停与项目级覆盖。
+- **Web 与桌面能力并存**：内置 `web_search`、`web_fetch`、`web_research`，可选 Lightpanda 页面读取；显式交互任务可打开系统浏览器，macOS 下可使用 Computer Use。
+- **本地持久化**：设置、会话、消息版本、工具事件详情、工作记忆和能力覆盖规则落在本地 SQLite 与 `~/.aura`。
+- **为执行而设计**：权限审批、任务树、工具事件、失败重试、上下文压缩、证据校验和运行日志都围绕真实任务闭环。
 
-### 1. 真正的桌面 Agent，不是终端壳
+## 能做什么
 
-Aura 用 `Tauri + React` 做桌面应用，用 `Rust + Node` 承载运行时，目标从一开始就不是 CLI，而是一个可以长期日用的桌面 Agent 工作台。
+Aura 当前适合这些场景：
 
-### 2. 本地优先，能力完整
+- 分析、修改和验证本地代码仓库
+- 排查复杂工程问题，保留可追踪的执行轨迹
+- 连接 OpenAI、Gemini 或自建 OpenAI-compatible API
+- 接入 MCP 工具，例如数据库、内部系统、知识库或自动化服务
+- 通过 Skills / Plugins 扩展本地 Agent 能力
+- 做带引用证据的 Web 调研、网页抓取和资料整理
+- 在 macOS 上执行截图、输入、快捷键、应用切换等桌面辅助操作
+- 将会话、产物、日志和配置长期保存在本机
 
-Aura 当前已经具备这些核心能力：
-
-- 多 Provider Profile
-  支持 `OpenAI`、`Google Gemini` 和 `OpenAI-compatible Custom Provider`
-- 模型连通性检测与模型抓取
-  可直接验证 `API Key / Base URL / Model`
-- 工作区感知会话
-  每个会话都有自己的工作目录与会话产物目录
-- 本地代码与文件工具
-  读写文件、代码搜索、目录树读取、Shell 执行
-- MCP Server 接入
-  支持 `stdio MCP`
-- Skills / Plugins 机制
-  可组合本地能力，不把工具都硬编码进主程序
-- 多 Agent 委派
-  支持主 Agent 拆任务给子 Agent
-- 浏览器自动化
-  支持 Aura 专属浏览器运行时、托管浏览器、系统 Chrome 备用模式、站点登录态导入
-- 桌面自动化
-  支持 macOS 下的应用切换、输入、快捷键、截图等 Computer Use 能力
-- 权限审批与执行轨迹
-  高风险动作支持审批与事件记录
-- 本地持久化
-  设置、会话、消息版本、能力覆盖规则都保存在本地
-
-### 3. 比很多“套壳 AI 工具”更强的地方
-
-Aura 的优势不是“界面换皮”，而是运行时架构更完整：
-
-- 不绑定单一模型厂商
-- 不绑定单一工具协议
-- 不依赖云端托管 Agent 才能工作
-- 不把本地项目能力外包给远程沙箱
-- MCP、技能、插件、浏览器、桌面能力都在同一运行时里协同
-- 可以围绕真实工作区做持续任务，而不是只做一次性回答
-
-### 4. 比很多同类工具更适合工程场景
-
-Aura 特别适合这些场景：
-
-- 本地代码仓库分析与修改
-- 复杂项目排障与修复
-- MCP 驱动的数据/系统操作
-- 需要浏览器登录态与自动化的网站任务
-- 需要本地桌面协作的半自动流程
-- 需要自主可控 Provider 与 API 成本的团队或个人
-
-## 核心能力一览
+## 核心能力
 
 ### Agent Runtime
 
-- 多轮对话
-- 后台任务执行
-- 多 Agent 委派
-- 追加输入继续运行
-- 中断 / 取消 / 审批
-- Provider 故障恢复与重试
+- 多轮对话与后台任务执行
+- 任务中断、取消、审批和追加输入
+- Provider 故障恢复、重试和最终答案整理
+- 上下文压缩与长对话摘要
+- 工具执行证据、完成状态校验和运行日志
+- 实验性多 Agent 委派能力（开发中）
 
-### 工作区能力
+### 本地工作区
 
-- 工作目录绑定
-- 会话级产物目录
-- 文件树与文本预览
-- 文件导入与附件写入
-- 本地路径打开
-- 工作区删除与清理
+- 会话绑定工作目录
+- 文件树读取、代码搜索、文件分段读取
+- `apply_patch`、精确文本编辑、多文件编辑和写文件
+- Shell / 长运行命令 / stdin 交互
+- 附件导入、图片预览、会话产物目录
+- 文件写入审批、变更预览和写入校验
 
-### 扩展能力
+### Provider
 
-- `MCP`
-- `Skills`
-- `Plugins`
-- 项目级能力开关覆盖
-- 全局启停与工作区级覆盖并存
+- OpenAI
+- Google Gemini
+- OpenAI-compatible Custom Provider
+- 多 Provider Profile
+- 模型列表抓取、连通性检测、默认模型选择
+- 可为分析压缩、标题生成等任务选择独立模型路由
 
-### 浏览器能力
+### MCP / Skills / Plugins
 
-- Aura 浏览器运行时
-- `system-chrome / managed-chrome / custom-executable`
-- 搜索偏好与浏览器行为偏好
-- Chrome 登录态按站点导入
-- 可见接管与恢复
-- 浏览器 Profile 管理
+- `stdio` MCP Server 接入
+- MCP 工具发现、预览与调用
+- 内置 Skills：浏览器操作策略、修复规划、仓库审查、桌面操作、Web Research
+- 支持从本地、URL、GitHub、npm/npx 来源安装或导入 Aura Skill
+- 插件工具接入统一工具路由
+- 全局能力开关与工作区级覆盖
 
-### 桌面能力
+### Web 与浏览器
 
-- Computer Use
-- Chrome Automation 备用模式
-- macOS 原生桌面操作桥接
+- `web_search`：快速检索，支持 Tavily、Brave、DuckDuckGo 等后端
+- `web_fetch`：HTTP 抓取、Readability 提取、元数据/正文读取
+- `web_research`：搜索与抓取组合的多来源研究工具
+- Jina Reader fallback
+- 可选 Lightpanda 页面读取
+- 显式交互任务可通过 `system_browser_open` 打开系统浏览器
 
-## 技术亮点
+### 桌面自动化
 
-Aura 不是单层应用，而是分成了 5 层：
+macOS 下可挂载 Computer Use 工具：
 
-1. `React UI`
-   负责桌面工作台、设置窗口、会话页、资产管理页
-2. `前端应用编排层`
-   负责状态、持久化同步、窗口管理、会话生命周期
-3. `Rust / Tauri 原生层`
-   负责窗口、SQLite、本地文件、OS 能力、任务桥接
-4. `Node Agent Runtime`
-   负责模型调用、工具编排、MCP、技能、插件、多 Agent
-5. `本地能力与数据层`
-   负责工作区、Aura Home、浏览器 Profile、配置与会话存储
+- 列出可见应用
+- 获取前台应用
+- 打开或聚焦应用
+- 截图并保存到工作区
+- 向前台应用输入文本
+- 发送快捷键
 
-## 当前平台支持
+Windows / Linux 会跳过 macOS-only 的桌面自动化工具，但基础 Agent、Provider、MCP、Web、本地文件和 Shell 能力仍可使用。
 
-Aura 的桌面基础框架是跨平台的，但当前最佳支持平台是 `macOS`。
+## 技术架构
 
-现阶段能力分布大致如下：
+Aura 当前分为五层：
 
-- 跨平台通用：
-  Provider、MCP、会话、设置、文件树、消息持久化、基础本地工具、Shell/命令执行、Aura skill 安装
-- macOS 增强：
-  Computer Use、系统 Chrome 备用自动化、Chrome 登录态导入、部分浏览器运行时管理
+1. **React UI**：主窗口、设置窗口、MCP 编辑窗口、会话视图、工具事件与任务树。
+2. **前端应用编排层**：会话生命周期、窗口通信、设置同步、工作区绑定与任务轮询。
+3. **Tauri / Rust 原生层**：桌面窗口、本地文件、SQLite、Aura Home、系统命令和 Node sidecar 桥接。
+4. **Node Agent Runtime**：模型调用、工具编排、能力选择、MCP / Skills / Plugins、多 Agent、错误恢复。
+5. **本地数据与扩展层**：`~/.aura`、SQLite、工作区产物、日志、Skills、Plugins、MCP 配置。
 
-Windows / Linux 上不会挂载 macOS-only 的 `computer_*` 桌面自动化工具；基础 Agent 能力仍应使用宿主系统 shell 正常运行，例如在 Windows 上通过 PowerShell/cmd 辅助安装软件、配置 Node、运行项目命令。
+更多细节见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
 
-Aura 内置 `aura_install_skill`，可以从本地路径、粘贴的 `SKILL.md`、raw URL、GitHub 来源、npm 包或第三方文档里的 `npx` 安装命令解析并安装 skill。安装 Aura skill 时不会直接执行 Claude / Codex / 第三方 npx installer；这些命令只作为来源线索。
+## 项目结构
 
-Windows 打包时，Node sidecar 必须和 Rust/Tauri target 架构一致。例如在 ARM64 Windows 虚拟机里打 `x86_64-pc-windows-msvc` 包时，需要通过 `AURA_NODE_BINARY` 指向 x64 版 `node.exe`，否则不要把 ARM64 Node 拷进 x64 安装包。构建脚本会校验 Windows PE machine，发现架构不匹配会直接失败，避免安装后出现 `os error 216`。
+```text
+.
+├── src/                 # React desktop UI and frontend orchestration
+├── src-tauri/           # Tauri/Rust host, commands, SQLite, sidecar wiring
+├── bridge/              # Node Agent Runtime, providers, tools, MCP, web retrieval
+├── skills/              # Built-in Aura skills
+├── docs/                # Architecture and design notes
+├── scripts/             # Build helpers
+└── .github/workflows/   # Multi-platform release builds
+```
 
-## 适合谁
+## 快速开始
 
-- 希望拥有可控本地 Agent 的开发者
-- 想把自己的 API Key / Base URL 接进桌面 Agent 的用户
-- 需要 MCP、插件、技能体系的高级用户
-- 需要浏览器自动化与桌面自动化协同的团队
-- 不想被封闭商业产品锁死的个人和团队
+### 前置依赖
 
-## 路线方向
+- Node.js 18+，推荐 Node.js 22
+- pnpm 9.x
+- Rust stable
+- Tauri v2 所需系统依赖
 
-当前版本已经完成第一阶段 MVP。后续优先方向包括：
+Linux 需要安装 WebKitGTK 等 Tauri 依赖；Windows / macOS 按 Tauri v2 官方要求准备系统工具链。
 
-- 更成熟的聊天工作台与 Composer 交互
-- 更细粒度的权限与审批策略
-- 更强的模型路由与失败恢复
-- 更完整的插件/技能资产管理体验
-- 更强的浏览器与桌面协作能力
+### 安装依赖
 
-## 贡献
+```bash
+pnpm install
+```
+
+### 启动桌面应用
+
+```bash
+pnpm dev
+```
+
+### 只启动前端 Web 调试
+
+```bash
+pnpm dev:web
+```
+
+### 类型检查
+
+```bash
+pnpm typecheck
+```
+
+### 构建桌面应用
+
+```bash
+pnpm tauri:build
+```
+
+构建时会通过 `src-tauri/build.rs` 自动把当前目标平台匹配的 Node runtime staged 为 Tauri sidecar。跨架构构建时，可通过 `AURA_NODE_BINARY` 指向目标架构的 Node 可执行文件。
+
+## 本地数据
+
+Aura 会在用户目录创建 `~/.aura`，用于保存：
+
+- SQLite 配置与会话数据
+- Skills / Plugins / MCP 配置
+- 工作区与会话产物
+- 浏览器相关资源
+- 日志文件
+
+这意味着 Aura 的核心工作状态默认保存在本机，而不是依赖云端托管的产品状态。
+
+## 开源状态
+
+Aura 仍在快速迭代中。当前仓库已经包含桌面应用、Agent Runtime、MCP、Skills、Web Retrieval、本地执行工具、持久化和多平台打包基础设施。
 
 欢迎通过 Issue / PR 参与：
 
-- Bug 修复
-- 新 Provider
-- 新 MCP 集成
-- 新技能 / 插件
-- 浏览器与桌面能力增强
-- UI / 交互优化
+- Bug 修复和稳定性改进
+- 新 Provider 或 Provider 兼容性修复
+- MCP 集成与示例
+- Aura Skills / Plugins
+- Web 检索与抓取后端
+- 权限、审批和安全策略
+- UI / UX 与桌面体验
+- Windows / Linux 适配
+
+## 许可证
+
+Aura 使用 [MIT License](./LICENSE) 开源。
+
+如果仓库中有从第三方开源项目复制或改写的代码，请保留对应项目的版权声明与许可证文本；相关记录可补充到 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。

@@ -2,7 +2,7 @@
  * @Author: Haki fanhuaze_1114@126.com
  * @Date: 2026-04-12 15:11:57
  * @LastEditors: huaze.fan huaze.fan@huifu.com
- * @LastEditTime: 2026-05-27 09:31:10
+ * @LastEditTime: 2026-05-29 10:33:22
  * @FilePath: /desk-agent/bridge/mcp.mjs
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -277,7 +277,7 @@ function createMcpSession(server, commandSpec, env) {
       const nextClient = new Client(
         {
           name: 'aura-desktop',
-          version: '1.2.4',
+          version: '2.0.0',
         },
         {
           capabilities: {},
