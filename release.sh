@@ -11,7 +11,7 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 CURRENT_BRANCH=$(git -C "$SCRIPT_DIR" branch --show-current 2>/dev/null || echo "")
-RELEASE_BRANCH="${RELEASE_BRANCH:-${CURRENT_BRANCH:-master}}"
+RELEASE_BRANCH="${RELEASE_BRANCH:-master}"
 RELEASE_REMOTE="${RELEASE_REMOTE:-git@github.com:Hakim-Fan/Aura.git}"
 
 # 从 tauri.conf.json 读取当前版本号
@@ -61,6 +61,7 @@ update_version() {
 
 echo -e "${GREEN}🚀 Aura Release Script${NC}"
 echo -e "   当前版本: ${CYAN}${CURRENT_VERSION}${NC}"
+echo -e "   当前分支: ${CYAN}${CURRENT_BRANCH:-unknown}${NC}"
 echo -e "   发布仓库: ${CYAN}${RELEASE_REMOTE}${NC}"
 echo -e "   发布分支: ${CYAN}${RELEASE_BRANCH}${NC}"
 echo ""
