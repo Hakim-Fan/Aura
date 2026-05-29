@@ -10,6 +10,10 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+CURRENT_BRANCH=$(git -C "$SCRIPT_DIR" branch --show-current 2>/dev/null || echo "")
+RELEASE_BRANCH="${RELEASE_BRANCH:-${CURRENT_BRANCH:-master}}"
+RELEASE_REMOTE="${RELEASE_REMOTE:-git@github.com:Hakim-Fan/Aura.git}"
+
 # 从 tauri.conf.json 读取当前版本号
 CURRENT_VERSION=$(grep '"version"' "$SCRIPT_DIR/src-tauri/tauri.conf.json" | head -1 | sed 's/.*"version": *"\(.*\)".*/\1/')
 
@@ -57,6 +61,8 @@ update_version() {
 
 echo -e "${GREEN}🚀 Aura Release Script${NC}"
 echo -e "   当前版本: ${CYAN}${CURRENT_VERSION}${NC}"
+echo -e "   发布仓库: ${CYAN}${RELEASE_REMOTE}${NC}"
+echo -e "   发布分支: ${CYAN}${RELEASE_BRANCH}${NC}"
 echo ""
 
 # 选择操作
@@ -126,7 +132,7 @@ if git -C "$SCRIPT_DIR" tag -l "$TAG" | grep -q "$TAG"; then
   read -r CONFIRM
   if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
     git -C "$SCRIPT_DIR" tag -d "$TAG"
-    git -C "$SCRIPT_DIR" push github --delete "$TAG" 2>/dev/null || true
+    git -C "$SCRIPT_DIR" push "$RELEASE_REMOTE" --delete "$TAG" 2>/dev/null || true
     echo -e "${GREEN}✓ 已删除旧 tag${NC}"
   else
     echo "已取消"
@@ -136,14 +142,14 @@ fi
 
 # 推送代码到 GitHub
 echo -e "${YELLOW}→ 推送代码到 GitHub...${NC}"
-git -C "$SCRIPT_DIR" push github HEAD:master --force
+git -C "$SCRIPT_DIR" push "$RELEASE_REMOTE" "HEAD:${RELEASE_BRANCH}"
 
 # 创建并推送 tag
 echo -e "${YELLOW}→ 创建 tag ${TAG}...${NC}"
 git -C "$SCRIPT_DIR" tag "$TAG"
 
 echo -e "${YELLOW}→ 推送 tag 到 GitHub 触发打包...${NC}"
-git -C "$SCRIPT_DIR" push github "$TAG"
+git -C "$SCRIPT_DIR" push "$RELEASE_REMOTE" "$TAG"
 
 echo ""
 echo -e "${GREEN}✅ 完成！版本 ${TAG} 打包流程已触发${NC}"
