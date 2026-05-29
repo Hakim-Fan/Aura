@@ -17,7 +17,7 @@ import {
   respondToApproval,
   startAgentTask,
 } from './lib/agent'
-import { type AuraHomeState } from './lib/aura'
+import { ensureAuraHome, type AuraHomeState } from './lib/aura'
 import { builtinPlugins, builtinSkills } from './catalog'
 import {
   hydrateStorageFromAuraHome,
@@ -1872,6 +1872,7 @@ function buildCapabilityPanelItems(
     path: skill.path || undefined,
     entryPath: skill.entryPath || undefined,
     readonly: skill.readonly,
+    scope: skill.scope || (skill.external ? 'external' : 'global'),
     globalEnabled: settings.enabledSkillIds.includes(skill.id),
     sessionOverride: capabilityOverrides.skills[skill.id] || 'inherit',
     effectiveEnabled:
@@ -1882,7 +1883,7 @@ function buildCapabilityPanelItems(
           : settings.enabledSkillIds.includes(skill.id),
   }))
     .filter(skill => !builtinSkillIds.has(skill.id))
-    .filter(skill => skill.globalEnabled)
+    .filter(skill => skill.globalEnabled || skill.sessionOverride !== 'inherit')
 
   const pluginItems = (aura?.plugins || []).map(plugin => ({
     id: plugin.id,
@@ -1896,6 +1897,7 @@ function buildCapabilityPanelItems(
     path: plugin.path || undefined,
     entryPath: plugin.entryPath || undefined,
     readonly: plugin.readonly,
+    scope: plugin.scope || 'global',
     globalEnabled: settings.enabledPluginIds.includes(plugin.id),
     sessionOverride: capabilityOverrides.plugins[plugin.id] || 'inherit',
     effectiveEnabled:
@@ -1904,7 +1906,7 @@ function buildCapabilityPanelItems(
         : capabilityOverrides.plugins[plugin.id] === 'off'
           ? false
           : settings.enabledPluginIds.includes(plugin.id),
-  })).filter(plugin => plugin.globalEnabled)
+  })).filter(plugin => plugin.globalEnabled || plugin.sessionOverride !== 'inherit')
 
   const mcpItems = settings.mcpServers.map(server => ({
     id: server.id,
@@ -2275,6 +2277,83 @@ export function MainWindowApp() {
       sessionOverrides: activeSession?.capabilityOverrides,
     }).usage
   }, [activeProjectWorkspaceRoot, activeSession?.capabilityOverrides, auraHome, settings])
+
+  useEffect(() => {
+    const capabilityScanRoot = activeWorkspacePath || activeProjectWorkspaceRoot
+    if (!storageReady || !capabilityScanRoot.trim()) {
+      return
+    }
+    let cancelled = false
+
+    void ensureAuraHome(capabilityScanRoot)
+      .then(nextAura => {
+        if (!cancelled) {
+          setAuraHome(nextAura)
+        }
+      })
+      .catch(() => {
+        // Keep the cached Aura state if workspace-local capability scanning is temporarily unavailable.
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeProjectWorkspaceRoot, activeWorkspacePath, storageReady])
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+
+    void (async () => {
+      unlisten = await listen('aura:session-capability-override', event => {
+        const payload = event.payload as {
+          sessionId?: string
+          kind?: string
+          id?: string
+          mode?: string
+          workspaceRoot?: string
+        }
+        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+        const kind = payload?.kind
+        const id = typeof payload?.id === 'string' ? payload.id : ''
+        const mode = payload?.mode
+        if (
+          !sessionId ||
+          !id ||
+          (kind !== 'skills' && kind !== 'plugins' && kind !== 'mcp') ||
+          (mode !== 'on' && mode !== 'off' && mode !== 'inherit')
+        ) {
+          return
+        }
+
+        updateSession(sessionId, session => ({
+          ...session,
+          capabilityOverrides: updateCapabilityOverride(
+            session.capabilityOverrides,
+            kind,
+            id,
+            mode,
+          ),
+          updatedAt: Date.now(),
+        }))
+
+        const workspaceRoot =
+          typeof payload.workspaceRoot === 'string' && payload.workspaceRoot.trim()
+            ? payload.workspaceRoot.trim()
+            : activeProjectWorkspaceRoot
+        if (workspaceRoot) {
+          void ensureAuraHome(workspaceRoot)
+            .then(setAuraHome)
+            .catch(() => {
+              // Session override is still applied; Aura state will refresh on the next hydration.
+            })
+        }
+      })
+    })()
+
+    return () => {
+      unlisten?.()
+    }
+  }, [activeProjectWorkspaceRoot])
 
   useEffect(() => {
     if (!storageReady) {
@@ -3644,6 +3723,15 @@ export function MainWindowApp() {
       return
     }
 
+    const projectWorkspaceRoot =
+      activeSession.workspaceRoot || latestSettings.cwd || workspacePath
+    try {
+      latestAuraHome = await ensureAuraHome(workspacePath)
+      setAuraHome(latestAuraHome)
+    } catch {
+      // Keep using the hydrated global Aura state if workspace-local scanning fails.
+    }
+
     const materializedAttachments = options?.attachmentsOverride
       ? options.attachmentsOverride
       : await materializeDraftAttachments(workspacePath, draftAttachments).catch(caught => {
@@ -3691,8 +3779,6 @@ export function MainWindowApp() {
       researchMode: options?.researchModeOverride || draftResearchMode,
       attachments: storedUserMessageAttachments,
     }
-    const projectWorkspaceRoot =
-      activeSession.workspaceRoot || latestSettings.cwd || workspacePath
     const resolvedCapabilities = latestAuraHome
       ? resolveCapabilitiesForWorkspace({
         workspaceRoot: projectWorkspaceRoot,

@@ -1440,11 +1440,12 @@ test('invokeTool includes structured repair hints in tool error output', async (
   assert.match(toolResultText(output), /"nextTool": "replace_line_range"/)
 })
 
-test('aura_install_skill installs inline content into Aura skills and enables it', async () => {
+test('aura_install_skill installs inline content into workspace skills and enables it for the session by default', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-install-skill-workspace-'))
   const auraRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-install-skill-home-'))
   const skillsDir = path.join(auraRoot, 'skills')
   const pluginsDir = path.join(auraRoot, 'plugins')
+  const workspaceSkillsDir = path.join(workspace, '.aura', 'skills')
   await fs.mkdir(skillsDir, { recursive: true })
   await fs.mkdir(pluginsDir, { recursive: true })
 
@@ -1453,25 +1454,35 @@ test('aura_install_skill installs inline content into Aura skills and enables it
     enabledPluginIds: [],
     mcpServers: [],
   }
+  const sessionOverrides = []
 
   async function scanAura() {
     const skills = []
-    for (const entry of await fs.readdir(skillsDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith('.md')) {
+    for (const root of [skillsDir, workspaceSkillsDir]) {
+      let entries = []
+      try {
+        entries = await fs.readdir(root, { withFileTypes: true })
+      } catch {
         continue
       }
-      const id = path.basename(entry.name, '.md')
-      const entryPath = path.join(skillsDir, entry.name)
-      skills.push({
-        id,
-        name: id,
-        description: '',
-        path: entryPath,
-        entryPath,
-        supported: true,
-        supportMessage: '',
-        readonly: false,
-      })
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.md')) {
+          continue
+        }
+        const id = path.basename(entry.name, '.md')
+        const entryPath = path.join(root, entry.name)
+        skills.push({
+          id,
+          name: id,
+          description: '',
+          path: entryPath,
+          entryPath,
+          supported: true,
+          supportMessage: '',
+          readonly: false,
+          scope: root === workspaceSkillsDir ? 'workspace' : 'global',
+        })
+      }
     }
 
     return {
@@ -1485,8 +1496,10 @@ test('aura_install_skill installs inline content into Aura skills and enables it
 
   const installSkill = createBuiltinTools({
     cwd: workspace,
+    logContext: { sessionId: 'session-1' },
     async appControl(action, payload) {
       if (action === 'ensure_aura_home') {
+        assert.equal(payload.workspaceRoot, workspace)
         return scanAura()
       }
       if (action === 'get_settings') {
@@ -1495,6 +1508,10 @@ test('aura_install_skill installs inline content into Aura skills and enables it
       if (action === 'set_settings') {
         settings = payload.settings
         return settings
+      }
+      if (action === 'set_session_capability_override') {
+        sessionOverrides.push(payload)
+        return payload
       }
       throw new Error(`Unexpected app action: ${action}`)
     },
@@ -1514,13 +1531,156 @@ test('aura_install_skill installs inline content into Aura skills and enables it
   )
 
   assert.equal(output.skillId, 'demo-skill')
+  assert.equal(output.scope, 'workspace')
   assert.equal(output.enabled, true)
+  assert.equal(output.enabledForCurrentSession, true)
   assert.match(output.usageHint, /aura_read_skill with skillId "demo-skill"/)
-  assert.deepEqual(settings.enabledSkillIds, ['demo-skill'])
+  assert.deepEqual(settings.enabledSkillIds, [])
+  assert.deepEqual(sessionOverrides, [
+    {
+      sessionId: 'session-1',
+      kind: 'skills',
+      id: 'demo-skill',
+      mode: 'on',
+      workspaceRoot: workspace,
+    },
+  ])
   assert.match(
-    await fs.readFile(path.join(skillsDir, 'demo-skill.md'), 'utf8'),
+    await fs.readFile(path.join(workspaceSkillsDir, 'demo-skill.md'), 'utf8'),
     /Installed from inline content/,
   )
+})
+
+test('aura_import_plugin description exposes the Aura plugin contract', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-plugin-description-'))
+  const importPlugin = createBuiltinTools({
+    cwd: workspace,
+  }).find(tool => tool.name === 'aura_import_plugin')
+
+  assert.ok(importPlugin)
+  assert.match(importPlugin.description, /Node ESM \.mjs\/\.js module/)
+  assert.match(importPlugin.description, /current workspace/)
+  assert.match(importPlugin.description, /scope "global"/)
+  assert.match(importPlugin.description, /exports `plugin` or `default`/)
+  assert.match(importPlugin.description, /inputSchema/)
+  assert.match(importPlugin.description, /handler\(\{ args, context, signal, throwIfAborted \}\)/)
+  assert.match(importPlugin.description, /`parameters` and `execute` are not/)
+})
+
+test('aura_import_plugin loads imported workspace plugin tools into the current run', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-plugin-hotload-'))
+  const auraRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-plugin-hotload-home-'))
+  const skillsDir = path.join(auraRoot, 'skills')
+  const pluginsDir = path.join(auraRoot, 'plugins')
+  const workspacePluginsDir = path.join(workspace, '.aura', 'plugins')
+  const sourcePluginsDir = path.join(workspace, 'plugins')
+  await fs.mkdir(skillsDir, { recursive: true })
+  await fs.mkdir(pluginsDir, { recursive: true })
+  await fs.mkdir(sourcePluginsDir, { recursive: true })
+  await fs.writeFile(
+    path.join(sourcePluginsDir, 'hello-world.mjs'),
+    [
+      'export const plugin = {',
+      '  id: "hello-world",',
+      '  name: "Hello World",',
+      '  description: "Greets users.",',
+      '  tools: [{',
+      '    name: "hello_greet",',
+      '    description: "Say hello.",',
+      '    inputSchema: { type: "object", properties: {} },',
+      '    async handler() { return "hello"; }',
+      '  }]',
+      '}',
+      'export default plugin',
+    ].join('\n'),
+    'utf8',
+  )
+
+  const registeredTools = []
+  const toolContext = {
+    cwd: workspace,
+    appRoot: path.resolve('.'),
+    logContext: { sessionId: 'session-1' },
+    async appControl(action, payload) {
+      if (action === 'ensure_aura_home') {
+        assert.equal(payload.workspaceRoot, workspace)
+        const plugins = []
+        try {
+          for (const entry of await fs.readdir(workspacePluginsDir, { withFileTypes: true })) {
+            if (!entry.isFile() || !entry.name.endsWith('.mjs')) {
+              continue
+            }
+            const id = path.basename(entry.name, '.mjs')
+            const entryPath = path.join(workspacePluginsDir, entry.name)
+            plugins.push({
+              id,
+              name: id,
+              description: '',
+              path: entryPath,
+              entryPath,
+              supported: true,
+              supportMessage: '',
+              readonly: false,
+              scope: 'workspace',
+            })
+          }
+        } catch {
+          // The import has not created the workspace plugin directory yet.
+        }
+        return {
+          homeDir: auraRoot,
+          skillsDir,
+          pluginsDir,
+          skills: [],
+          plugins,
+        }
+      }
+      if (action === 'get_settings') {
+        return { enabledSkillIds: [], enabledPluginIds: [], mcpServers: [] }
+      }
+      if (action === 'set_session_capability_override') {
+        return payload
+      }
+      throw new Error(`Unexpected app action: ${action}`)
+    },
+  }
+  const tools = createBuiltinTools(toolContext)
+  const importPlugin = tools.find(tool => tool.name === 'aura_import_plugin')
+  const listCapabilities = tools.find(tool => tool.name === 'aura_list_capabilities')
+
+  const output = parseToolResultJson(
+    await importPlugin.run(
+      {
+        sourcePath: 'plugins/hello-world.mjs',
+        enable: true,
+      },
+      {
+        registerTools(nextTools) {
+          registeredTools.push(...nextTools)
+        },
+      },
+    ),
+  )
+
+  assert.equal(output.pluginId, 'hello-world')
+  assert.deepEqual(output.registeredToolNames, ['plugin__hello-world__hello_greet'])
+  assert.deepEqual(
+    registeredTools.map(tool => tool.name),
+    ['plugin__hello-world__hello_greet'],
+  )
+  assert.match(output.usageHint, /Use those tool names directly/)
+
+  const capabilities = parseToolResultJson(await listCapabilities.run({}))
+  assert.deepEqual(capabilities.plugins, [
+    {
+      id: 'hello-world',
+      name: 'hello-world',
+      enabled: true,
+      readonly: false,
+      scope: 'workspace',
+      supported: true,
+    },
+  ])
 })
 
 test('aura_read_skill resolves a unique close skill id before reading', async () => {

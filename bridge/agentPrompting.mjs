@@ -54,7 +54,7 @@ function buildHostExecutionContext() {
 }
 
 function buildWorkspaceScratchInstruction(settings = {}) {
-  const cwd = typeof settings?.cwd === 'string' & settings.cwd.trim()
+  const cwd = typeof settings?.cwd === 'string' && settings.cwd.trim()
     ? settings.cwd.trim()
    : 'the active workspace'
   return [
@@ -84,6 +84,17 @@ function buildReasoningInstruction(settings) {
   }
 
   return reasoningInstructions[settings.reasoningEffort] || reasoningInstructions.medium
+}
+
+function buildAuraPluginAuthoringInstruction() {
+  return [
+    'When the user asks to create, fix, or install an Aura plugin, author it as a Node ESM .mjs/.js module using the Aura plugin contract before calling aura_import_plugin.',
+    'The module must export a plugin object via `export const plugin = {...}` or `export default {...}`.',
+    'Required plugin shape: `{ id, name, description, tools: [{ name, description, inputSchema, approvalCategory?, async handler({ args, context, signal, throwIfAborted }) { ... } }] }`.',
+    '`inputSchema` is the JSON Schema used for model tool arguments. Use `handler`, not `execute`; use `inputSchema`, not `parameters`.',
+    'Set `approvalCategory` to `file_write`, `shell`, or `computer_use` when the plugin tool can write files, run commands, or operate the computer.',
+    'After writing the plugin file or directory in the workspace, call aura_import_plugin with sourcePath and enable=true. By default it installs to the current workspace and enables only this session; pass scope="global" only when the user explicitly asks for global installation. The installed tool will be exposed as `plugin__<pluginId>__<toolName>` on later tool catalogs.',
+  ].join('\n')
 }
 
 function normalizeCustomInstructionText(value, maxLength = 6000) {
@@ -340,11 +351,11 @@ export function buildRuntimeSystemPrompt(
       'If you truly need the user to confirm a risky change or provide a missing local decision, call request_user_input. Do not hide the question only inside reasoning text.',
     )
     sections.push(
-      'For skill installation requests, first identify the target application. If the user wants to install a skill for Aura, use aura_install_skill or aura_import_skill and do not execute third-party npx/Claude/Codex installer commands through shell directly. Treat those commands as sources for the audited Aura installer, which may run npx only inside an isolated temporary home before importing the produced skill. If the user appears to be installing a skill for another application, ask for confirmation before running that app-specific installer.',
+      'For skill installation requests, first identify the target application. If the user wants to install a skill for Aura, use aura_install_skill or aura_import_skill and do not execute third-party npx/Claude/Codex installer commands through shell directly. Aura skill/plugin installers default to the current workspace and current session; pass scope="global" only when the user explicitly asks for global installation. Treat third-party commands as sources for the audited Aura installer, which may run npx only inside an isolated temporary home before importing the produced skill. If the user appears to be installing a skill for another application, ask for confirmation before running that app-specific installer.',
     )
     if (capabilityProfile.hasCapabilityAdminTools) {
       sections.push(
-        'Capability management tools are mounted. For Aura skill installation from a URL, GitHub path, npm package, npx command, local path, or pasted SKILL.md, call aura_install_skill directly with that source; use aura_import_skill only when you already have a local skill file/directory. Do not pre-download, git clone, mkdir, cp, or mv into ~/.aura/skills by shell.',
+        'Capability management tools are mounted. For Aura skill installation from a URL, GitHub path, npm package, npx command, local path, or pasted SKILL.md, call aura_install_skill directly with that source; use aura_import_skill only when you already have a local skill file/directory. Do not pre-download, git clone, mkdir, cp, or mv into ~/.aura/skills by shell. Use default workspace scope unless the user explicitly says global.',
       )
     }
     sections.push(
@@ -620,6 +631,7 @@ export function buildDefaultAgentPromptBlocks(
 
   if (capabilityProfile.hasCapabilityAdminTools) {
     capabilitySections.push('For Aura skill/plugin/MCP management, use the dedicated aura_* tools. Do not install third-party capability commands through shell when an Aura capability tool fits.')
+    capabilitySections.push(buildAuraPluginAuthoringInstruction())
   }
 
   if (skillPrompt.trim()) {

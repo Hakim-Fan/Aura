@@ -56,6 +56,7 @@ import {
   invokeAgentHook,
 } from './agent/hookBus.mjs'
 import { createToolCatalogEntry } from './tools/catalog.mjs'
+import { loadPluginToolsForEntries } from './extensions.mjs'
 
 const ALWAYS_ON_SKILL_IDS = new Set([
   'aura-browser-operator',
@@ -1539,7 +1540,7 @@ function ensureAppControl(context) {
 
 async function getAuraState(context) {
   const appControl = ensureAppControl(context)
-  return appControl('ensure_aura_home', {})
+  return appControl('ensure_aura_home', { workspaceRoot: context?.cwd || '' })
 }
 
 async function getLiveSettings(context) {
@@ -1562,11 +1563,139 @@ async function refreshAuraState(context) {
   return getAuraState(context)
 }
 
-function buildSkillImmediateUseHint(skillId, enabled) {
+function normalizeInstallScope(scope) {
+  return scope === 'global' ? 'global' : 'workspace'
+}
+
+function resolveCapabilityTargetRoot(context, aura, kind, scope) {
+  if (scope === 'global') {
+    return kind === 'skills' ? aura.skillsDir : aura.pluginsDir
+  }
+  const workspaceRoot = typeof context.cwd === 'string' && context.cwd.trim()
+    ? context.cwd.trim()
+    : ''
+  if (!workspaceRoot) {
+    throw new Error('Workspace-local Aura capability installation requires a current workspace.')
+  }
+  return path.join(workspaceRoot, '.aura', kind)
+}
+
+async function setSessionCapabilityOverride(context, kind, capabilityId, enabled) {
+  const appControl = ensureAppControl(context)
+  const sessionId =
+    typeof context?.logContext?.sessionId === 'string'
+      ? context.logContext.sessionId.trim()
+      : ''
+  if (!sessionId) {
+    return false
+  }
+  await appControl('set_session_capability_override', {
+    sessionId,
+    kind: kind === 'skill' ? 'skills' : 'plugins',
+    id: capabilityId,
+    mode: enabled ? 'on' : 'off',
+    workspaceRoot: context.cwd || '',
+  })
+  const overrideKind = kind === 'skill' ? 'skills' : 'plugins'
+  if (!context.sessionCapabilityOverrides || typeof context.sessionCapabilityOverrides !== 'object') {
+    context.sessionCapabilityOverrides = { skills: {}, plugins: {}, mcp: {} }
+  }
+  if (!context.sessionCapabilityOverrides[overrideKind]) {
+    context.sessionCapabilityOverrides[overrideKind] = {}
+  }
+  context.sessionCapabilityOverrides[overrideKind][capabilityId] = enabled ? 'on' : 'off'
+  const activeKind = kind === 'skill' ? 'skills' : 'plugins'
+  if (!context.activeCapabilityIds || typeof context.activeCapabilityIds !== 'object') {
+    context.activeCapabilityIds = { skills: new Set(), plugins: new Set(), mcp: new Set() }
+  }
+  if (!(context.activeCapabilityIds[activeKind] instanceof Set)) {
+    context.activeCapabilityIds[activeKind] = new Set()
+  }
+  if (enabled) {
+    context.activeCapabilityIds[activeKind].add(capabilityId)
+  } else {
+    context.activeCapabilityIds[activeKind].delete(capabilityId)
+  }
+  return true
+}
+
+async function updateCapabilityEnabledForScope(context, kind, capabilityId, enabled, scope) {
+  if (scope === 'global') {
+    await updateCapabilityEnabled(context, kind, capabilityId, enabled)
+    return {
+      enabled,
+      scope,
+      enabledForCurrentSession: enabled,
+    }
+  }
+  const enabledForCurrentSession = await setSessionCapabilityOverride(
+    context,
+    kind,
+    capabilityId,
+    enabled,
+  )
+  return {
+    enabled,
+    scope,
+    enabledForCurrentSession,
+  }
+}
+
+async function registerImportedPluginTools(context, runtime, imported, enabled) {
+  if (enabled === false || typeof runtime?.registerTools !== 'function') {
+    return []
+  }
+  const appRoot =
+    typeof context?.appRoot === 'string' && context.appRoot.trim()
+      ? context.appRoot.trim()
+      : ''
+  if (!appRoot || !imported?.id || !imported?.destinationPath) {
+    return []
+  }
+
+  const tools = await loadPluginToolsForEntries(
+    appRoot,
+    [
+      {
+        id: imported.id,
+        name: imported.id,
+        path: imported.destinationPath,
+        entryPath: imported.destinationPath,
+      },
+    ],
+    context,
+    {
+      exposure: 'direct',
+    },
+  )
+  runtime.registerTools(tools)
+  return tools.map(tool => tool.name).filter(Boolean)
+}
+
+function buildSkillImmediateUseHint(skillId, enabled, scope = 'global') {
   if (!enabled) {
     return 'This skill is installed but not enabled, so it will not be included in future task prompts unless enabled later.'
   }
+  if (scope === 'workspace') {
+    return `This skill is installed in the current workspace and enabled for this session. On the next user turn, decide whether it matches the request; if it does, call aura_read_skill with skillId "${skillId}" before continuing and follow the skill instructions.`
+  }
   return `This skill is enabled immediately. For the current task, decide whether it matches the user request now; if it does, call aura_read_skill with skillId "${skillId}" before continuing and follow the skill instructions. Do not wait for the user to mention the skill.`
+}
+
+function resolveCapabilityListEnabled(context, kind, capabilityId, globalEnabled) {
+  const overrideKind = kind === 'skill' ? 'skills' : kind === 'plugin' ? 'plugins' : 'mcp'
+  const override = context?.sessionCapabilityOverrides?.[overrideKind]?.[capabilityId]
+  if (override === 'on') {
+    return true
+  }
+  if (override === 'off') {
+    return false
+  }
+  const activeSet = context?.activeCapabilityIds?.[overrideKind]
+  if (activeSet instanceof Set && activeSet.has(capabilityId)) {
+    return true
+  }
+  return globalEnabled
 }
 
 function normalizeSkillLookupValue(value = '') {
@@ -2366,18 +2495,29 @@ export function createBuiltinTools(context) {
           skills: (aura.skills || []).map(skill => ({
             id: skill.id,
             name: skill.name,
-            enabled:
+            enabled: resolveCapabilityListEnabled(
+              context,
+              'skill',
+              skill.id,
               ALWAYS_ON_SKILL_IDS.has(skill.id) ||
-              normalizeStringArray(settings.enabledSkillIds).includes(skill.id),
+                normalizeStringArray(settings.enabledSkillIds).includes(skill.id),
+            ),
             readonly: skill.readonly === true,
+            scope: skill.scope || (skill.external ? 'external' : 'global'),
             supported: skill.supported !== false,
             supportMessage: skill.supportMessage || '',
           })),
           plugins: (aura.plugins || []).map(plugin => ({
             id: plugin.id,
             name: plugin.name,
-            enabled: normalizeStringArray(settings.enabledPluginIds).includes(plugin.id),
+            enabled: resolveCapabilityListEnabled(
+              context,
+              'plugin',
+              plugin.id,
+              normalizeStringArray(settings.enabledPluginIds).includes(plugin.id),
+            ),
             readonly: plugin.readonly === true,
+            scope: plugin.scope || 'global',
             supported: plugin.supported !== false,
           })),
           mcpServers: normalizeMcpServerEntries(settings.mcpServers).map(server => ({
@@ -2450,7 +2590,7 @@ export function createBuiltinTools(context) {
       aliases: ['enableskill', 'disableskill'],
       approvalCategory: 'file_write',
       description:
-        'Enable or disable an installed Aura skill in the desktop app settings.',
+        'Enable or disable an installed Aura skill. Defaults to the current session/workspace; use scope "global" only when the user explicitly asks for a global default.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2462,6 +2602,11 @@ export function createBuiltinTools(context) {
             type: 'boolean',
             description: 'Set true to enable the skill, false to disable it.',
           },
+          scope: {
+            type: 'string',
+            enum: ['workspace', 'global'],
+            description: 'Toggle scope. Defaults to workspace/current session; choose global only when explicitly requested.',
+          },
         },
         required: ['skillId', 'enabled'],
       },
@@ -2471,17 +2616,20 @@ export function createBuiltinTools(context) {
         if (!(aura.skills || []).some(skill => skill.id === args.skillId)) {
           throw new Error(`Skill not found: ${args.skillId}`)
         }
-        const nextSettings = await updateCapabilityEnabled(
+        const scope = normalizeInstallScope(args.scope)
+        const enableResult = await updateCapabilityEnabledForScope(
           context,
           'skill',
           args.skillId,
           args.enabled !== false,
+          scope,
         )
-        const enabled = normalizeStringArray(nextSettings.enabledSkillIds).includes(args.skillId)
         return stringifyOutput({
           skillId: args.skillId,
-          enabled,
-          usageHint: buildSkillImmediateUseHint(args.skillId, enabled),
+          scope,
+          enabled: enableResult.enabled,
+          enabledForCurrentSession: enableResult.enabledForCurrentSession,
+          usageHint: buildSkillImmediateUseHint(args.skillId, enableResult.enabled, scope),
         })
       },
     },
@@ -2491,7 +2639,7 @@ export function createBuiltinTools(context) {
       aliases: ['enableplugin', 'disableplugin'],
       approvalCategory: 'file_write',
       description:
-        'Enable or disable an installed Aura plugin in the desktop app settings.',
+        'Enable or disable an installed Aura plugin. Defaults to the current session/workspace; use scope "global" only when the user explicitly asks for a global default.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2503,6 +2651,11 @@ export function createBuiltinTools(context) {
             type: 'boolean',
             description: 'Set true to enable the plugin, false to disable it.',
           },
+          scope: {
+            type: 'string',
+            enum: ['workspace', 'global'],
+            description: 'Toggle scope. Defaults to workspace/current session; choose global only when explicitly requested.',
+          },
         },
         required: ['pluginId', 'enabled'],
       },
@@ -2512,15 +2665,19 @@ export function createBuiltinTools(context) {
         if (!(aura.plugins || []).some(plugin => plugin.id === args.pluginId)) {
           throw new Error(`Plugin not found: ${args.pluginId}`)
         }
-        const nextSettings = await updateCapabilityEnabled(
+        const scope = normalizeInstallScope(args.scope)
+        const enableResult = await updateCapabilityEnabledForScope(
           context,
           'plugin',
           args.pluginId,
           args.enabled !== false,
+          scope,
         )
         return stringifyOutput({
           pluginId: args.pluginId,
-          enabled: normalizeStringArray(nextSettings.enabledPluginIds).includes(args.pluginId),
+          scope,
+          enabled: enableResult.enabled,
+          enabledForCurrentSession: enableResult.enabledForCurrentSession,
         })
       },
     },
@@ -2530,7 +2687,7 @@ export function createBuiltinTools(context) {
       aliases: ['installauraskill', 'install_skill', 'skill_install'],
       approvalCategory: 'file_write',
       description:
-        'Install and enable a skill into Aura global skills from a local path, pasted SKILL.md content, raw URL, GitHub source such as https://github.com/owner/repo/tree/ref/path, npm package, or npx command. For npx commands, the installer first tries safe package extraction and only falls back to executing npx inside an isolated temporary home before importing the produced skill. Use this directly whenever the user wants to install a skill for Aura; do not pre-download or shell-copy into ~/.aura/skills.',
+        'Install and enable a skill into Aura from a local path, pasted SKILL.md content, raw URL, GitHub source such as https://github.com/owner/repo/tree/ref/path, npm package, or npx command. Defaults to the current workspace at .aura/skills and enables only this session; use scope "global" only when the user explicitly asks for global installation. For npx commands, the installer first tries safe package extraction and only falls back to executing npx inside an isolated temporary home before importing the produced skill. Use this directly whenever the user wants to install a skill for Aura; do not pre-download or shell-copy into ~/.aura/skills.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2556,11 +2713,17 @@ export function createBuiltinTools(context) {
             type: 'boolean',
             description: 'Enable the installed skill after copying it.',
           },
+          scope: {
+            type: 'string',
+            enum: ['workspace', 'global'],
+            description: 'Installation scope. Defaults to workspace/current session; choose global only when explicitly requested.',
+          },
         },
       },
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const aura = await getAuraState(context)
+        const scope = normalizeInstallScope(args.scope)
         const staged = await resolveAuraSkillInstallSource({
           cwd: context.cwd,
           source: args.source || '',
@@ -2576,10 +2739,15 @@ export function createBuiltinTools(context) {
             kind: 'skills',
             sourcePath: staged.stagedPath,
             targetId: args.skillId || staged.inferredSkillId || '',
-            targetRoot: aura.skillsDir,
+            targetRoot: resolveCapabilityTargetRoot(context, aura, 'skills', scope),
           })
+          let enableResult = {
+            enabled: args.enable !== false,
+            scope,
+            enabledForCurrentSession: args.enable !== false,
+          }
           if (args.enable !== false) {
-            await updateCapabilityEnabled(context, 'skill', imported.id, true)
+            enableResult = await updateCapabilityEnabledForScope(context, 'skill', imported.id, true, scope)
           } else {
             await refreshAuraState(context)
           }
@@ -2589,11 +2757,13 @@ export function createBuiltinTools(context) {
             installedFrom: staged.sourceDescription || args.source || 'inline content',
             installedTo: imported.destinationPath,
             skillId: imported.id,
+            scope,
             name: staged.name,
             description: staged.description,
-            enabled: args.enable !== false,
+            enabled: enableResult.enabled,
+            enabledForCurrentSession: enableResult.enabledForCurrentSession,
             note: staged.note || '',
-            usageHint: buildSkillImmediateUseHint(imported.id, args.enable !== false),
+            usageHint: buildSkillImmediateUseHint(imported.id, enableResult.enabled, scope),
             skill: installedSkill || null,
           })
         } finally {
@@ -2607,7 +2777,7 @@ export function createBuiltinTools(context) {
       aliases: ['importskill', 'installskill'],
       approvalCategory: 'file_write',
       description:
-        'Copy a skill file or skill directory into Aura and optionally enable it immediately.',
+        'Copy a skill file or skill directory into Aura. Defaults to the current workspace at .aura/skills and enables only this session; use scope "global" only when the user explicitly asks for global installation.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2623,21 +2793,32 @@ export function createBuiltinTools(context) {
             type: 'boolean',
             description: 'Enable the imported skill after copying it.',
           },
+          scope: {
+            type: 'string',
+            enum: ['workspace', 'global'],
+            description: 'Installation scope. Defaults to workspace/current session; choose global only when explicitly requested.',
+          },
         },
         required: ['sourcePath'],
       },
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const aura = await getAuraState(context)
+        const scope = normalizeInstallScope(args.scope)
         const imported = await copyIntoAuraDirectory({
           cwd: context.cwd,
           kind: 'skills',
           sourcePath: args.sourcePath,
           targetId: args.skillId || '',
-          targetRoot: aura.skillsDir,
+          targetRoot: resolveCapabilityTargetRoot(context, aura, 'skills', scope),
         })
+        let enableResult = {
+          enabled: args.enable !== false,
+          scope,
+          enabledForCurrentSession: args.enable !== false,
+        }
         if (args.enable !== false) {
-          await updateCapabilityEnabled(context, 'skill', imported.id, true)
+          enableResult = await updateCapabilityEnabledForScope(context, 'skill', imported.id, true, scope)
         } else {
           await refreshAuraState(context)
         }
@@ -2647,8 +2828,10 @@ export function createBuiltinTools(context) {
           importedFrom: imported.sourcePath,
           installedTo: imported.destinationPath,
           skillId: imported.id,
-          enabled: args.enable !== false,
-          usageHint: buildSkillImmediateUseHint(imported.id, args.enable !== false),
+          scope,
+          enabled: enableResult.enabled,
+          enabledForCurrentSession: enableResult.enabledForCurrentSession,
+          usageHint: buildSkillImmediateUseHint(imported.id, enableResult.enabled, scope),
           skill: installedSkill || null,
         })
       },
@@ -2659,7 +2842,7 @@ export function createBuiltinTools(context) {
       aliases: ['importplugin', 'installplugin'],
       approvalCategory: 'file_write',
       description:
-        'Copy a plugin file or plugin directory into Aura and optionally enable it immediately.',
+        'Copy a plugin file or plugin directory into Aura. Defaults to the current workspace at .aura/plugins and enables only this session; use scope "global" only when the user explicitly asks for global installation. Before calling this, create an Aura plugin as a Node ESM .mjs/.js module that exports `plugin` or `default` with shape `{ id, name, description, tools: [{ name, description, inputSchema, approvalCategory?, async handler({ args, context, signal, throwIfAborted }) { ... } }] }`. Use `inputSchema` and `handler`; `parameters` and `execute` are not the Aura plugin contract.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2675,31 +2858,55 @@ export function createBuiltinTools(context) {
             type: 'boolean',
             description: 'Enable the imported plugin after copying it.',
           },
+          scope: {
+            type: 'string',
+            enum: ['workspace', 'global'],
+            description: 'Installation scope. Defaults to workspace/current session; choose global only when explicitly requested.',
+          },
         },
         required: ['sourcePath'],
       },
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const aura = await getAuraState(context)
+        const scope = normalizeInstallScope(args.scope)
         const imported = await copyIntoAuraDirectory({
           cwd: context.cwd,
           kind: 'plugins',
           sourcePath: args.sourcePath,
           targetId: args.pluginId || '',
-          targetRoot: aura.pluginsDir,
+          targetRoot: resolveCapabilityTargetRoot(context, aura, 'plugins', scope),
         })
+        let enableResult = {
+          enabled: args.enable !== false,
+          scope,
+          enabledForCurrentSession: args.enable !== false,
+        }
         if (args.enable !== false) {
-          await updateCapabilityEnabled(context, 'plugin', imported.id, true)
+          enableResult = await updateCapabilityEnabledForScope(context, 'plugin', imported.id, true, scope)
         } else {
           await refreshAuraState(context)
         }
+        const registeredToolNames = await registerImportedPluginTools(
+          context,
+          runtime,
+          imported,
+          enableResult.enabled,
+        )
         const refreshedAura = await getAuraState(context)
         const installedPlugin = (refreshedAura.plugins || []).find(plugin => plugin.id === imported.id)
         return stringifyOutput({
           importedFrom: imported.sourcePath,
           installedTo: imported.destinationPath,
           pluginId: imported.id,
-          enabled: args.enable !== false,
+          scope,
+          enabled: enableResult.enabled,
+          enabledForCurrentSession: enableResult.enabledForCurrentSession,
+          registeredToolNames,
+          usageHint:
+            registeredToolNames.length > 0
+              ? `The plugin tools were loaded into the current run: ${registeredToolNames.join(', ')}. Use those tool names directly instead of inspecting global plugin paths.`
+              : 'The plugin was installed, but no tools were loaded into the current run. Use tool_search on the next turn or start a new run after enabling it.',
           plugin: installedPlugin || null,
         })
       },

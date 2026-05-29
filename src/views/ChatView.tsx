@@ -5582,6 +5582,9 @@ function CapabilityPanel({
 
   function resolveNextOverrideMode(item: CapabilityPanelItem) {
     const nextEffectiveEnabled = !item.effectiveEnabled
+    if (item.scope === 'workspace') {
+      return nextEffectiveEnabled ? ('on' as const) : ('off' as const)
+    }
     if (nextEffectiveEnabled === item.globalEnabled) {
       return 'inherit' as const
     }
@@ -5604,11 +5607,15 @@ function CapabilityPanel({
             ? 'plugins'
             : 'mcp'
       const nextMode =
-        enabled === item.globalEnabled
-          ? ('inherit' as const)
-          : enabled
+        item.scope === 'workspace'
+          ? enabled
             ? ('on' as const)
             : ('off' as const)
+          : enabled === item.globalEnabled
+            ? ('inherit' as const)
+            : enabled
+              ? ('on' as const)
+              : ('off' as const)
       onSetCapabilityOverride(settingKey, item.id, nextMode)
     }
   }
@@ -5691,7 +5698,11 @@ function CapabilityPanel({
                                 {clampToTwoLines(item.name, 42)}
                               </strong>
                               <span className="rounded-full bg-white px-2 py-0.5 text-10px text-[var(--text-secondary)]">
-                                {item.source === 'builtin' ? '内置' : '用户安装'}
+                                {item.scope === 'workspace'
+                                  ? '当前项目'
+                                  : item.source === 'builtin'
+                                    ? '内置'
+                                    : '全局'}
                               </span>
                               <span
                                 className={`rounded-full px-2 py-0.5 text-10px ${item.effectiveEnabled

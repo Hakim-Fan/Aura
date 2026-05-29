@@ -115,6 +115,28 @@ test('default-agent prompt frames skills as enabled options', () => {
   assert.match(prompt, /aura_read_skill with the exact skill id/i)
 })
 
+test('default-agent prompt teaches Aura plugin authoring format for capability admin turns', () => {
+  const prompt = buildDefaultAgentSystemPrompt(
+    baseSettings,
+    '',
+    '',
+    {
+      ...modelDirectedState,
+      isCapabilityAdminTask: true,
+    },
+    {
+      hasCapabilityAdminTools: true,
+    },
+  )
+
+  assert.match(prompt, /Aura plugin contract/i)
+  assert.match(prompt, /export const plugin/i)
+  assert.match(prompt, /inputSchema/i)
+  assert.match(prompt, /handler\(\{ args, context, signal, throwIfAborted \}\)/i)
+  assert.match(prompt, /plugin__<pluginId>__<toolName>/i)
+  assert.doesNotMatch(prompt, /Use `parameters` and `execute`/i)
+})
+
 test('default-agent prompt carries the configured locale policy', () => {
   const prompt = buildDefaultAgentSystemPrompt(
     {

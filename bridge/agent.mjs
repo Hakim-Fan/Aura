@@ -2378,8 +2378,19 @@ export async function runDefaultAgent(request) {
   const toolEvents = []
   const context = {
     cwd: settings.cwd,
+    appRoot,
     appControl: hooks.appControl,
     logContext: request.logContext || {},
+    activeCapabilityIds: {
+      skills: new Set((capabilities?.skills || []).map(entry => entry?.id || entry).filter(Boolean)),
+      plugins: new Set((capabilities?.plugins || []).map(entry => entry?.id || entry).filter(Boolean)),
+      mcp: new Set((capabilities?.mcpServers || []).map(entry => entry?.id || entry).filter(Boolean)),
+    },
+    sessionCapabilityOverrides: {
+      skills: {},
+      plugins: {},
+      mcp: {},
+    },
     todoState: runtime.todoState || { items: [] },
     workMemories: runtime.workMemories || [],
     autoToolEvidence: normalizePersistedToolEvidence(runtime.persistedWorkMemories),

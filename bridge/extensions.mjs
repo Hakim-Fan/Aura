@@ -35,7 +35,7 @@ async function getAuraState(context) {
   }
 
   try {
-    return await appControl('ensure_aura_home', {})
+    return await appControl('ensure_aura_home', { workspaceRoot: context?.cwd || '' })
   } catch {
     return null
   }
@@ -777,7 +777,7 @@ export function buildSkillPrompt(skillEntries) {
     .join('\n')
 }
 
-async function loadPluginToolsForEntries(
+export async function loadPluginToolsForEntries(
   appRoot,
   pluginEntries,
   context,

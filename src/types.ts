@@ -412,6 +412,7 @@ export type CapabilityPanelItem = {
   path?: string
   entryPath?: string
   readonly: boolean
+  scope?: 'global' | 'workspace' | 'external'
   globalEnabled: boolean
   sessionOverride: CapabilityOverrideMode
   effectiveEnabled: boolean

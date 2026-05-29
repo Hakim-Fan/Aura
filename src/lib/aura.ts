@@ -10,6 +10,7 @@ export type AuraAsset = {
   supportMessage?: string | null
   readonly: boolean
   external?: boolean
+  scope?: 'global' | 'workspace' | 'external'
 }
 
 export async function deleteAuraAsset(relativePath: string): Promise<void> {
@@ -33,8 +34,10 @@ export type AuraHomeState = {
   plugins: AuraAsset[]
 }
 
-export async function ensureAuraHome(): Promise<AuraHomeState> {
-  return invoke<AuraHomeState>('ensure_aura_home')
+export async function ensureAuraHome(workspaceRoot?: string): Promise<AuraHomeState> {
+  return invoke<AuraHomeState>('ensure_aura_home', {
+    workspaceRoot: workspaceRoot?.trim() || null,
+  })
 }
 
 export async function readAuraFile(relativePath: string): Promise<string | null> {

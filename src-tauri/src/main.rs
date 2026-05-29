@@ -143,6 +143,7 @@ struct AuraAssetMetadata {
     support_message: Option<String>,
     readonly: bool,
     external: bool,
+    scope: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -583,6 +584,7 @@ fn scan_aura_assets<R: Runtime>(
     app: &tauri::AppHandle<R>,
     dir: &Path,
     kind: &str,
+    scope: &str,
 ) -> Result<Vec<AuraAssetMetadata>, String> {
     let mut assets = Vec::new();
     let bundled_dir = resolve_default_asset_dir(app, kind).ok();
@@ -777,6 +779,7 @@ fn scan_aura_assets<R: Runtime>(
             support_message,
             readonly,
             external: false,
+            scope: scope.to_string(),
         });
     }
 
@@ -840,7 +843,7 @@ fn scan_skill_roots<R: Runtime>(
     skills_dir: &Path,
     external_skill_dirs: &[PathBuf],
 ) -> Result<Vec<AuraAssetMetadata>, String> {
-    let mut skills = scan_aura_assets(app, skills_dir, "skills")?;
+    let mut skills = scan_aura_assets(app, skills_dir, "skills", "global")?;
     let mut seen_ids: HashSet<String> = skills.iter().map(|skill| skill.id.clone()).collect();
     let canonical_builtin = skills_dir.canonicalize().ok();
 
@@ -858,13 +861,14 @@ fn scan_skill_roots<R: Runtime>(
             continue;
         }
 
-        let Ok(mut external_skills) = scan_aura_assets(app, external_dir, "skills") else {
+        let Ok(mut external_skills) = scan_aura_assets(app, external_dir, "skills", "external") else {
             continue;
         };
         for skill in external_skills.iter_mut() {
             if seen_ids.insert(skill.id.clone()) {
                 skill.readonly = true;
                 skill.external = true;
+                skill.scope = "external".into();
                 skills.push(skill.clone());
             }
         }
@@ -872,6 +876,43 @@ fn scan_skill_roots<R: Runtime>(
 
     skills.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
     Ok(skills)
+}
+
+fn merge_workspace_assets(
+    assets: &mut Vec<AuraAssetMetadata>,
+    workspace_assets: Vec<AuraAssetMetadata>,
+) {
+    for asset in workspace_assets {
+        if let Some(index) = assets.iter().position(|entry| entry.id == asset.id) {
+            assets[index] = asset;
+        } else {
+            assets.push(asset);
+        }
+    }
+    assets.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+}
+
+fn scan_workspace_assets<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    workspace_root: Option<&str>,
+    kind: &str,
+) -> Vec<AuraAssetMetadata> {
+    let Some(workspace_root) = workspace_root.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Vec::new();
+    };
+    let dir = PathBuf::from(workspace_root).join(".aura").join(kind);
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let Ok(mut assets) = scan_aura_assets(app, &dir, kind, "workspace") else {
+        return Vec::new();
+    };
+    for asset in assets.iter_mut() {
+        asset.readonly = false;
+        asset.external = false;
+        asset.scope = "workspace".into();
+    }
+    assets
 }
 
 fn resolve_default_asset_dir<R: Runtime>(
@@ -977,7 +1018,10 @@ fn seed_directory_from_defaults<R: Runtime>(
     Ok(())
 }
 
-fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeState, String> {
+fn ensure_aura_layout<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    workspace_root: Option<&str>,
+) -> Result<AuraHomeState, String> {
     let home_dir = resolve_aura_home()?;
     let config_dir = home_dir.join("config");
     let skills_dir = home_dir.join("skills");
@@ -1012,6 +1056,17 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
     let sessions_path = config_dir.join("sessions.json");
     let mcp_servers_path = mcp_dir.join("servers.json");
 
+    let mut skills = scan_skill_roots(app, &skills_dir, &external_skill_dirs)?;
+    let mut plugins = scan_aura_assets(app, &plugins_dir, "plugins", "global")?;
+    merge_workspace_assets(
+        &mut skills,
+        scan_workspace_assets(app, workspace_root, "skills"),
+    );
+    merge_workspace_assets(
+        &mut plugins,
+        scan_workspace_assets(app, workspace_root, "plugins"),
+    );
+
     Ok(AuraHomeState {
         home_dir: home_dir.display().to_string(),
         config_dir: config_dir.display().to_string(),
@@ -1025,8 +1080,8 @@ fn ensure_aura_layout<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<AuraHomeS
         settings_path: settings_path.display().to_string(),
         sessions_path: sessions_path.display().to_string(),
         mcp_servers_path: mcp_servers_path.display().to_string(),
-        skills: scan_skill_roots(app, &skills_dir, &external_skill_dirs)?,
-        plugins: scan_aura_assets(app, &plugins_dir, "plugins")?,
+        skills,
+        plugins,
     })
 }
 
@@ -1794,7 +1849,7 @@ fn read_lightpanda_version(executable_path: &Path) -> Option<String> {
 }
 
 fn resolve_app_db_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
-    let aura = ensure_aura_layout(app)?;
+    let aura = ensure_aura_layout(app, None)?;
     Ok(PathBuf::from(aura.config_dir).join("app.db"))
 }
 
@@ -2800,9 +2855,19 @@ fn handle_bridge_app_action<R: Runtime>(
             store_work_memory(app, memory_payload)
         }
         "ensure_aura_home" => {
-            let aura = ensure_aura_layout(app)?;
+            let workspace_root = payload
+                .get("workspaceRoot")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let aura = ensure_aura_layout(app, workspace_root)?;
             serde_json::to_value(aura)
                 .map_err(|error| format!("Failed to serialize Aura state: {error}"))
+        }
+        "set_session_capability_override" => {
+            app.emit("aura:session-capability-override", payload.clone())
+                .map_err(|error| format!("Failed to emit session capability override: {error}"))?;
+            Ok(payload.clone())
         }
         _ => Err(format!("Unsupported app action: {action}")),
     }
@@ -2817,7 +2882,7 @@ fn resolve_aura_relative_path<R: Runtime>(
         return Err("Aura relative path must not be empty.".into());
     }
 
-    let candidate = ensure_aura_layout(app)?.home_dir;
+    let candidate = ensure_aura_layout(app, None)?.home_dir;
     let candidate = PathBuf::from(candidate).join(sanitized);
     let aura_home = resolve_aura_home()?;
 
@@ -2876,7 +2941,7 @@ fn read_workspace_node(path: &PathBuf, depth: usize) -> Result<WorkspaceNode, St
                 .and_then(|value| value.to_str())
                 .unwrap_or_default()
                 .to_string();
-            if child_name.starts_with('.') || ignored_name(&child_name) {
+            if ignored_name(&child_name) {
                 continue;
             }
             if let Ok(child_node) = read_workspace_node(&child_path, depth + 1) {
@@ -6082,8 +6147,11 @@ fn toggle_edit_transaction_snapshots<R: Runtime>(
 }
 
 #[tauri::command]
-fn ensure_aura_home<R: Runtime>(app: tauri::AppHandle<R>) -> Result<AuraHomeState, String> {
-    ensure_aura_layout(&app)
+fn ensure_aura_home<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    workspace_root: Option<String>,
+) -> Result<AuraHomeState, String> {
+    ensure_aura_layout(&app, workspace_root.as_deref())
 }
 
 fn system_time_to_timestamp_ms(value: SystemTime) -> Option<u64> {
@@ -6108,7 +6176,7 @@ fn is_valid_app_log_date(value: &str) -> bool {
 
 #[tauri::command]
 fn list_app_log_files<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<AppLogFile>, String> {
-    let logs_dir = PathBuf::from(ensure_aura_layout(&app)?.logs_dir);
+    let logs_dir = PathBuf::from(ensure_aura_layout(&app, None)?.logs_dir);
     let mut files = Vec::new();
     let Ok(entries) = fs::read_dir(&logs_dir) else {
         return Ok(files);
@@ -6153,7 +6221,7 @@ fn read_app_log_file<R: Runtime>(
     if !is_valid_app_log_date(date) {
         return Err("Invalid log date.".into());
     }
-    let logs_dir = PathBuf::from(ensure_aura_layout(&app)?.logs_dir);
+    let logs_dir = PathBuf::from(ensure_aura_layout(&app, None)?.logs_dir);
     let path = logs_dir.join(format!("app-{date}.jsonl"));
     if !path.exists() {
         return Ok(Vec::new());
@@ -6186,7 +6254,7 @@ fn detect_lightpanda_runtime<R: Runtime>(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let install_dir = ensure_aura_layout(&app)?.browser_dir;
+    let install_dir = ensure_aura_layout(&app, None)?.browser_dir;
     let resolved_path = match requested_path {
         Some(path) => resolve_executable_path(Path::new(path)),
         None => {
@@ -6473,7 +6541,7 @@ fn create_session_workspace<R: Runtime>(
     hint: String,
 ) -> Result<String, String> {
     let root = if root_path.trim().is_empty() {
-        PathBuf::from(ensure_aura_layout(&app)?.workspace_dir)
+        PathBuf::from(ensure_aura_layout(&app, None)?.workspace_dir)
     } else {
         PathBuf::from(root_path)
     };
@@ -6568,7 +6636,7 @@ fn delete_workspace_directory<R: Runtime>(
         ));
     }
 
-    let aura_workspace_root = PathBuf::from(ensure_aura_layout(&app)?.workspace_dir);
+    let aura_workspace_root = PathBuf::from(ensure_aura_layout(&app, None)?.workspace_dir);
     let canonical_root = canonicalize_existing_path(&aura_workspace_root)?;
     let canonical_target = canonicalize_existing_path(&target)?;
     if canonical_target == canonical_root || !canonical_target.starts_with(&canonical_root) {
