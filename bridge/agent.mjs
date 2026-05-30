@@ -642,6 +642,56 @@ function buildCompletionContext(routeState, toolEvents, runtimeBlocks = {}) {
   }
 }
 
+const EXPLORER_READ_ONLY_TOOL_NAMES = new Set([
+  'list_files',
+  'glob_files',
+  'read_file',
+  'read_block',
+  'search_code',
+  'read_artifact_slice',
+  'summarize_artifact',
+  'todo_write',
+  'aura_list_capabilities',
+  'aura_read_skill',
+  'web_search',
+  'web_fetch',
+  'web_research',
+])
+
+const VERIFICATION_TOOL_NAMES = new Set([
+  'list_files',
+  'glob_files',
+  'read_file',
+  'read_block',
+  'search_code',
+  'verify_artifact',
+  'exec_command',
+  'write_stdin',
+  'run_shell',
+])
+
+export function filterToolsForSubagentRole(tools = [], runtime = {}) {
+  const role = String(runtime?.subagentRole || '').trim().toLowerCase()
+  if (role !== 'explorer' && role !== 'verification') {
+    return Array.isArray(tools) ? tools : []
+  }
+
+  const allowedNames =
+    role === 'verification'
+      ? VERIFICATION_TOOL_NAMES
+      : EXPLORER_READ_ONLY_TOOL_NAMES
+
+  return (Array.isArray(tools) ? tools : []).filter(tool => {
+    if (!tool?.name || tool.approvalCategory) {
+      return role === 'verification' && allowedNames.has(tool?.name)
+    }
+    if (tool.source && tool.source !== 'builtin') {
+      return false
+    }
+    return allowedNames.has(tool.name)
+  })
+}
+
 function isCompletionStateIncompleteForExecution(result = {}, routeState = {}, taskFrame = {}) {
   if (
     result?.completionState === 'failed_after_execution' ||
@@ -1059,6 +1109,8 @@ function summarizeMountedToolAvailability(tools = []) {
       [...names].some(name => name.startsWith('computer_')),
     hasCapabilityAdminTools:
       [...names].some(name => name.startsWith('aura_')),
+    hasMultiAgentTools:
+      names.has('spawn_agent'),
   }
 }
 
@@ -2613,8 +2665,12 @@ export async function runDefaultAgent(request) {
         classification: normalizedClassification,
         routeState,
       })
-      const mountedToolAvailability = summarizeMountedToolAvailability(
+      const roleFilteredTools = filterToolsForSubagentRole(
         selectedCapabilities.selectedTools,
+        runtime,
+      )
+      const mountedToolAvailability = summarizeMountedToolAvailability(
+        roleFilteredTools,
       )
       lastSelectedCapabilities = selectedCapabilities
       const skillPrompt = buildSkillPrompt(selectedCapabilities.selectedSkills)
@@ -2652,7 +2708,7 @@ export async function runDefaultAgent(request) {
         lastSystemPrompt,
         context,
       )
-      const allTools = selectedCapabilities.selectedTools
+      const allTools = roleFilteredTools
       lastAllTools = allTools
       const toolSchemaTokens = estimateMountedToolSchemaTokens(allTools, effectiveRunSettings)
       const runtimeCompression = await maybeCompressMessagesForContext({
@@ -2675,7 +2731,7 @@ export async function runDefaultAgent(request) {
       lastRouteDecision = buildRouteDecisionSnapshot({
         routeState: promptRouteState,
         selectedCapabilities,
-        selectedTools: selectedCapabilities.selectedTools,
+        selectedTools: allTools,
         contextEstimate: promptContextSnapshot,
         promptBlocks,
         promptBlockDiff,
@@ -2758,7 +2814,7 @@ export async function runDefaultAgent(request) {
       )
       const capabilityContract = evaluateRuntimeCapabilityContract({
         routeState: promptRouteState,
-        selectedTools: selectedCapabilities.selectedTools,
+        selectedTools: allTools,
         toolEvents,
         message: result.message,
       })
@@ -2809,12 +2865,15 @@ export async function runDefaultAgent(request) {
       result = enforceEvidencePolicy(result, toolEvents, promptRouteState, runtimeBlocks)
       result = applyCompletionGate(result, promptRouteState)
 
-      const stopVerifierResult = runStopVerifier({
-        result,
-        routeState: promptRouteState,
-        attempt: stopVerifierAttempts,
-        maxAttempts: maxStopVerifierAttempts,
-      })
+      const stopVerifierResult =
+        runtime?.subagentRole === 'verification'
+          ? { ok: true, reason: 'verification_self_stop' }
+          : runStopVerifier({
+              result,
+              routeState: promptRouteState,
+              attempt: stopVerifierAttempts,
+              maxAttempts: maxStopVerifierAttempts,
+            })
       if (!stopVerifierResult.ok && !routeStopReason) {
         stopVerifierAttempts += 1
         routeNotes.push(`stop_verifier_blocked:${stopVerifierResult.reason}`)
@@ -2867,7 +2926,7 @@ export async function runDefaultAgent(request) {
       lastRouteDecision = buildRouteDecisionSnapshot({
         routeState: promptRouteState,
         selectedCapabilities,
-        selectedTools: selectedCapabilities.selectedTools,
+        selectedTools: allTools,
         contextEstimate: latestPromptContextSnapshot,
         promptBlocks,
         promptBlockDiff,

@@ -203,7 +203,7 @@ function scoreToolOrdering(tool, context, originalIndex) {
     }
   }
 
-  if (context.signals.isComplexTask && tool.name === 'spawn_subagent') {
+  if (context.signals.isComplexTask && tool.name === 'spawn_agent') {
     score += 40
   }
 

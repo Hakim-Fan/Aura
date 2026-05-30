@@ -98,9 +98,26 @@ const MAX_PROGRESS_LIST_ITEMS = 12
 const MAX_ARTIFACT_CHUNKS = 500
 const MAX_ARTIFACT_SLICE_LIMIT = 20
 const MAX_SPILLED_ARTIFACT_TEXT_CHARS = 8_000
+const CLAUDE_STYLE_VERIFICATION_NUDGE =
+  'NOTE: You just closed out 3+ tasks and none of them was a verification step. Before writing your final summary, spawn the verification agent with agent_type="verification". You cannot self-assign PARTIAL by listing caveats in your summary; only the verification agent issues a verdict.'
 
 function sha256String(value = '') {
   return createHash('sha256').update(String(value), 'utf8').digest('hex')
+}
+
+function needsVerificationTodoNudge(items = []) {
+  const normalized = Array.isArray(items) ? items : []
+  if (normalized.length < 3) {
+    return false
+  }
+  if (!normalized.every(item => item?.status === 'completed')) {
+    return false
+  }
+  return !normalized.some(item =>
+    /(verif|verify|verification|验证|校验|验收|测试)/iu.test(
+      `${item?.step || ''} ${item?.content || ''} ${item?.activeForm || ''}`,
+    ),
+  )
 }
 
 function structuredEventOutputForTool(toolName, value) {
@@ -2185,7 +2202,10 @@ export function createBuiltinTools(context) {
         if (todoMemory) {
           await recordContextWorkMemory(context, todoMemory, runtime)
         }
-        return formatTodoList(nextItems)
+        const formatted = formatTodoList(nextItems)
+        return needsVerificationTodoNudge(nextItems)
+          ? `${formatted}\n\n${CLAUDE_STYLE_VERIFICATION_NUDGE}`
+          : formatted
       },
     },
     {

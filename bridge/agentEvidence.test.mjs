@@ -99,6 +99,84 @@ test('artifact verification can verify shell-produced office outputs', () => {
   )
 })
 
+test('spawn_agent verification pass counts as independent verified evidence', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'spawn_agent',
+      source: 'subagent',
+      status: 'success',
+      structuredOutput: {
+        agent_type: 'verification',
+        agent_status: 'completed',
+        response: 'PASS: pnpm typecheck passed and changed files were inspected.',
+      },
+    },
+  ])
+
+  assert.equal(evidence.hasVerifiedEvidence, true)
+  assert.equal(evidence.hasExecutionFailure, false)
+})
+
+test('spawn_agent verification failure is treated as unresolved execution failure', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'spawn_agent',
+      source: 'subagent',
+      status: 'success',
+      structuredOutput: {
+        agent_type: 'verification',
+        agent_status: 'completed',
+        response: 'FAIL: relevant behavior was not verified.',
+      },
+    },
+  ])
+
+  assert.equal(evidence.hasExecutionFailure, true)
+  assert.equal(
+    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    'failed_after_execution',
+  )
+})
+
+test('spawn_agent verification not-ok response is not treated as pass', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'spawn_agent',
+      source: 'subagent',
+      status: 'success',
+      structuredOutput: {
+        agent_type: 'verification',
+        agent_status: 'completed',
+        response: 'NOT OK: expected file was not present.',
+      },
+    },
+  ])
+
+  assert.equal(evidence.hasVerifiedEvidence, false)
+  assert.equal(evidence.hasExecutionFailure, true)
+})
+
+test('failed spawn_agent status is treated as unresolved execution failure', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'spawn_agent',
+      source: 'subagent',
+      status: 'success',
+      structuredOutput: {
+        agent_type: 'worker',
+        agent_status: 'failed',
+        response: 'Could not complete the implementation.',
+      },
+    },
+  ])
+
+  assert.equal(evidence.hasExecutionFailure, true)
+  assert.equal(
+    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    'failed_after_execution',
+  )
+})
+
 test('successful read-only shell command is verified by exit code', () => {
   const evidence = collectEvidenceFromToolEvents([
     {

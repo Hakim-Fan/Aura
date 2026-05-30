@@ -97,6 +97,14 @@ function buildAuraPluginAuthoringInstruction() {
   ].join('\n')
 }
 
+function buildClaudeStyleVerificationAgentInstruction() {
+  return [
+    'Claude-style verification contract: when non-trivial implementation happens in this turn, independent adversarial verification must happen before reporting completion. Non-trivial means 3+ file edits, backend/API changes, infrastructure changes, or a long-task implementation.',
+    'Use spawn_agent with agent_type="verification" and pass a self-contained message containing the original user request, all files changed, the implementation approach, the plan path if any, and any known concerns. Your own checks, caveats, and a worker self-check do not substitute for the verification agent verdict.',
+    'If the verification agent returns FAIL, fix the issue and run the verification agent again with its findings plus your fix. If it returns PARTIAL, report exactly what passed and what could not be verified. If it returns PASS, include the verification evidence in the final summary.',
+  ].join('\n')
+}
+
 function normalizeCustomInstructionText(value, maxLength = 6000) {
   const normalized = String(value || '').replace(/\r\n/g, '\n').trim()
   if (!normalized) {
@@ -150,6 +158,7 @@ function deriveCapabilityProfile(routeState, toolAvailability = {}) {
   const mountedAdmin =
     toolAvailability.hasCapabilityAdminTools === true ||
     isCapabilityAdminTask
+  const mountedMultiAgent = toolAvailability.hasMultiAgentTools === true
 
   return {
     hasReadonlyWorkspaceTools: mountedReadonly,
@@ -157,6 +166,7 @@ function deriveCapabilityProfile(routeState, toolAvailability = {}) {
     hasWebRetrievalTools: mountedWeb,
     hasInteractiveBrowserTools: mountedBrowser,
     hasCapabilityAdminTools: mountedAdmin,
+    hasMultiAgentTools: mountedMultiAgent,
     mixedRetrievalAndWorkspaceExecution:
       mountedWeb === true &&
       needsExternalFacts === true &&
@@ -178,6 +188,7 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
       capabilityProfile.hasWebRetrievalTools ? 'web retrieval' : null,
       capabilityProfile.hasInteractiveBrowserTools ? 'interactive browser handoff' : null,
       capabilityProfile.hasCapabilityAdminTools ? 'capability management' : null,
+      capabilityProfile.hasMultiAgentTools ? 'multi-agent delegation' : null,
     ]
       .filter(Boolean)
       .join(', ')
@@ -357,6 +368,12 @@ export function buildRuntimeSystemPrompt(
       sections.push(
         'Capability management tools are mounted. For Aura skill installation from a URL, GitHub path, npm package, npx command, local path, or pasted SKILL.md, call aura_install_skill directly with that source; use aura_import_skill only when you already have a local skill file/directory. Do not pre-download, git clone, mkdir, cp, or mv into ~/.aura/skills by shell. Use default workspace scope unless the user explicitly says global.',
       )
+    }
+    if (capabilityProfile.hasMultiAgentTools) {
+      sections.push(
+        'Multi-agent delegation is mounted through spawn_agent. Use it only for meaningfully parallel or independent work. Use agent_type="explorer" for read-only codebase investigation, agent_type="worker" for a bounded implementation chunk, agent_type="verification" for independent adversarial verification, and agent_type="default" for general delegated work. Do not spawn an agent for trivial single-step tasks, and include all needed context in the message.',
+      )
+      sections.push(buildClaudeStyleVerificationAgentInstruction())
     }
     sections.push(
       'Shell commands run under an execution policy. Do not use shell as a workaround for workspace file-tool boundaries: if read_file cannot access an external path, import or copy the file into the workspace, or use the dedicated Aura capability tool. Accessing /tmp, the user home directory, ~/.aura, elevated commands, package installers, and system automation may require explicit approval or be blocked.',
@@ -606,6 +623,7 @@ export function buildDefaultAgentPromptBlocks(
     capabilityProfile.hasWebRetrievalTools ? 'web retrieval' : null,
     capabilityProfile.hasInteractiveBrowserTools ? 'interactive browser handoff' : null,
     capabilityProfile.hasCapabilityAdminTools ? 'capability management' : null,
+    capabilityProfile.hasMultiAgentTools ? 'multi-agent delegation' : null,
   ]
     .filter(Boolean)
     .join(', ')
@@ -632,6 +650,11 @@ export function buildDefaultAgentPromptBlocks(
   if (capabilityProfile.hasCapabilityAdminTools) {
     capabilitySections.push('For Aura skill/plugin/MCP management, use the dedicated aura_* tools. Do not install third-party capability commands through shell when an Aura capability tool fits.')
     capabilitySections.push(buildAuraPluginAuthoringInstruction())
+  }
+
+  if (capabilityProfile.hasMultiAgentTools) {
+    capabilitySections.push('For multi-agent work, call spawn_agent only when the task has a genuinely independent subproblem. Use agent_type="explorer" for read-only codebase investigation, agent_type="worker" for a bounded implementation chunk, agent_type="verification" for independent adversarial verification, and agent_type="default" for general delegated work. Simple tasks should stay in the main agent.')
+    capabilitySections.push(buildClaudeStyleVerificationAgentInstruction())
   }
 
   if (skillPrompt.trim()) {

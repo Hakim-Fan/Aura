@@ -281,6 +281,27 @@ function collectProducedEvidence(event, effectTypes) {
       }
     }
 
+    if (
+      name === 'spawn_agent' &&
+      String(structuredOutput?.agent_type || structuredOutput?.agentType || '').toLowerCase() === 'verification'
+    ) {
+      const verificationResponse = structuredOutput?.response || structuredOutput?.result || structuredOutput?.message || ''
+      if (String(structuredOutput?.agent_status || '').toLowerCase() === 'failed') {
+        producedEvidence.push('independent_verification_failed')
+      } else if (isPositiveVerificationResponse(verificationResponse)) {
+        producedEvidence.push('independent_verification')
+      } else if (isNegativeVerificationResponse(verificationResponse)) {
+        producedEvidence.push('independent_verification_failed')
+      }
+    }
+
+    if (
+      name === 'spawn_agent' &&
+      String(structuredOutput?.agent_status || '').toLowerCase() === 'failed'
+    ) {
+      producedEvidence.push('subagent_failed')
+    }
+
     if (COMMAND_SESSION_TOOLS.has(name)) {
       const commandText = String(event?.input || event?.summary || '')
       if (hasShellFileMutationEvidence(structuredOutput)) {
@@ -355,6 +376,10 @@ function collectProducedEvidence(event, effectTypes) {
 }
 
 function inferVerificationLevel(event, effectTypes, producedEvidence) {
+  if (producedEvidence.includes('independent_verification')) {
+    return 'verified'
+  }
+
   if (producedEvidence.includes('file_verified')) {
     return 'verified'
   }
@@ -380,6 +405,18 @@ function inferVerificationLevel(event, effectTypes, producedEvidence) {
   }
 
   return 'none'
+}
+
+function isPositiveVerificationResponse(value = '') {
+  const text = String(value || '')
+  return /\b(pass|passed|verified|ok|通过|已验证)\b/iu.test(text) &&
+    !/\b(fail|failed|partial|incomplete|unverified|not\s+ok|失败|未通过|部分|未验证)\b/iu.test(text)
+}
+
+function isNegativeVerificationResponse(value = '') {
+  return /\b(fail|failed|partial|incomplete|unverified|not\s+ok|失败|未通过|部分|未验证)\b/iu.test(
+    String(value || ''),
+  )
 }
 
 export function collectEvidenceFromToolEvents(toolEvents = []) {
@@ -574,7 +611,9 @@ function hasUnresolvedExecutionFailure(records) {
         )
       ) ||
       record.producedEvidence.includes('command_timeout') ||
-      record.producedEvidence.includes('command_exit_nonzero')
+      record.producedEvidence.includes('command_exit_nonzero') ||
+      record.producedEvidence.includes('independent_verification_failed') ||
+      record.producedEvidence.includes('subagent_failed')
 
     if (failed) {
       if (record.effectTypes.includes('write')) {

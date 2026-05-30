@@ -471,6 +471,47 @@ test('todo_write emits display-only plan items with active form', async () => {
   assert.match(emittedItems[0].id, /^todo-1-/)
 })
 
+test('todo_write nudges Claude-style verification when 3+ tasks close without verification', async () => {
+  const context = { cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-todo-verify-')) }
+  const todoWrite = createBuiltinTools(context).find(tool => tool.name === 'todo_write')
+
+  const output = await invokeTool(
+    todoWrite,
+    {
+      plan: [
+        { step: '修改 API', status: 'completed' },
+        { step: '更新前端调用', status: 'completed' },
+        { step: '调整类型定义', status: 'completed' },
+      ],
+    },
+    [],
+    {},
+  )
+
+  assert.match(toolResultText(output), /spawn the verification agent/)
+  assert.match(toolResultText(output), /agent_type="verification"/)
+})
+
+test('todo_write does not nudge verification when verification step exists', async () => {
+  const context = { cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-todo-verify-skip-')) }
+  const todoWrite = createBuiltinTools(context).find(tool => tool.name === 'todo_write')
+
+  const output = await invokeTool(
+    todoWrite,
+    {
+      plan: [
+        { step: '修改 API', status: 'completed' },
+        { step: '更新前端调用', status: 'completed' },
+        { step: '验证接口行为', status: 'completed' },
+      ],
+    },
+    [],
+    {},
+  )
+
+  assert.doesNotMatch(toolResultText(output), /spawn the verification agent/)
+})
+
 test('successful context-gathering tools record a tool evidence checkpoint', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-tool-memory-'))
   await fs.writeFile(path.join(workspace, 'requirements.md'), '# Title\nReusable facts\n', 'utf8')

@@ -7,6 +7,117 @@ import { resolveWorkspacePath, stringifyOutput, truncate } from './utils.mjs'
 
 const execFileAsync = promisify(execFile)
 
+const CODEX_AGENT_ROLES = {
+  default: {
+    name: 'default',
+    title: 'Default agent',
+    summary: 'Default agent.',
+    prompt: [
+      'You are a default Aura subagent.',
+      'Complete the assigned task directly using the tools available to you.',
+      'Return a concise result with the concrete outcome, files touched when relevant, and any blocker.',
+    ],
+  },
+  explorer: {
+    name: 'explorer',
+    title: 'Explorer agent',
+    summary: [
+      'Use `explorer` for specific codebase questions.',
+      'Explorers are fast and authoritative.',
+      'They must answer well-scoped questions about the codebase and should avoid changing files.',
+    ].join(' '),
+    prompt: [
+      'You are an explorer subagent.',
+      'Your job is to answer specific, well-scoped questions about the codebase.',
+      'Inspect files and project structure, then return concise findings with file paths and evidence.',
+      'Do not write, edit, patch, install, run mutating commands, or delegate to another subagent.',
+      'If the task requires mutation, report that it should be assigned to a worker instead.',
+    ],
+  },
+  worker: {
+    name: 'worker',
+    title: 'Worker agent',
+    summary: [
+      'Use for execution and production work.',
+      'Typical tasks: implement part of a feature, fix tests or bugs, or handle an independent refactor chunk.',
+    ].join(' '),
+    prompt: [
+      'You are a worker subagent.',
+      'You own the assigned implementation task. Make concrete changes when needed and verify them with available tools.',
+      'Do not revert unrelated user or peer changes. Work only within the responsibility described by the parent agent.',
+      'Do not delegate to another subagent.',
+    ],
+  },
+  verification: {
+    name: 'verification',
+    title: 'Verification agent',
+    summary: [
+      'Use for independent adversarial verification before reporting non-trivial implementation complete.',
+      'Typical tasks: inspect changed files, run targeted tests or artifact checks, and issue pass/fail/partial evidence.',
+    ].join(' '),
+    prompt: [
+      'You are a verification subagent.',
+      'Your job is independent adversarial verification. Prove whether the assigned work is actually complete.',
+      'Inspect relevant files and run targeted checks with available tools. Do not modify files.',
+      'Return a clear PASS, FAIL, or PARTIAL verdict with concrete evidence and required follow-up.',
+      'Do not delegate to another subagent.',
+    ],
+  },
+}
+
+function formatCodexAgentRoleDescription() {
+  return [
+    'Optional type name for the new agent. If omitted, `default` is used.',
+    'Available roles:',
+    ...Object.values(CODEX_AGENT_ROLES).map(role => `${role.name}: {\n${role.summary}\n}`),
+  ].join('\n')
+}
+
+function normalizeAgentType(value) {
+  const normalized = String(value || 'default').trim().toLowerCase()
+  return normalized || 'default'
+}
+
+function resolveAgentRole(agentType) {
+  const normalized = normalizeAgentType(agentType)
+  const role = CODEX_AGENT_ROLES[normalized]
+  if (!role) {
+    throw createStructuredError(`未知 agent_type "${agentType}"。`, {
+      source: 'tool',
+      category: 'invalid_input',
+      code: 'UNKNOWN_AGENT_TYPE',
+      detail: `Available agent types: ${Object.keys(CODEX_AGENT_ROLES).join(', ')}`,
+      suggestedAction: '请使用 default、explorer、worker 或 verification。',
+    })
+  }
+  return role
+}
+
+function buildSpawnAgentPrompt(role, args = {}) {
+  const message = String(args.message || args.task || '').trim()
+  const taskName = String(args.task_name || args.taskName || '').trim()
+  const deliverable = String(args.deliverable || '').trim()
+  return [
+    ...role.prompt,
+    taskName ? `Canonical task name: ${taskName}` : '',
+    `Task:\n${message}`,
+    deliverable
+      ? `Expected return:\n${deliverable}`
+      : 'Return only the distilled result, important evidence, files changed if any, and blockers.',
+  ].filter(Boolean).join('\n\n')
+}
+
+function summarizeSubagentToolEvents(toolEvents = []) {
+  return (Array.isArray(toolEvents) ? toolEvents : []).slice(-20).map(event => ({
+    id: event?.id,
+    name: event?.name,
+    source: event?.source,
+    status: event?.status,
+    summary: event?.summary,
+    error: event?.error,
+  }))
+}
+
 function ensureMacOs(featureName) {
   if (process.platform !== 'darwin') {
     throw new Error(`${featureName} is currently implemented for macOS only.`)
@@ -316,7 +427,6 @@ function buildMultiAgentTools({
 }) {
   if (
     !settings.enableMultiAgent ||
-    !settings.experimentalSubagentEnabled ||
     (runtimeMeta.subagentDepth || 0) >= 1
   ) {
     return []
@@ -325,15 +435,33 @@ function buildMultiAgentTools({
   return [
     {
       source: 'subagent',
-      name: 'spawn_subagent',
+      name: 'spawn_agent',
       description:
-        'Delegate a focused subtask to a worker agent and receive its distilled result.',
+        [
+          'Spawns a Codex-style agent to work on the specified task and returns its distilled result.',
+          'Spawned agents inherit the current model by default. Omit model unless the user explicitly asks for a different model.',
+          formatCodexAgentRoleDescription(),
+          'Use explorer for codebase investigation, worker for implementation, verification for independent verification, and default for general delegated work.',
+        ].join('\n\n'),
       inputSchema: {
         type: 'object',
         properties: {
+          message: {
+            type: 'string',
+            description: 'Initial plain-text task for the new agent.',
+          },
+          task_name: {
+            type: 'string',
+            description:
+              'Task name for the new agent. Use lowercase letters, digits, and underscores.',
+          },
+          agent_type: {
+            type: 'string',
+            description: formatCodexAgentRoleDescription(),
+          },
           task: {
             type: 'string',
-            description: 'Precise subtask for the worker agent.',
+            description: 'Compatibility alias for message.',
           },
           deliverable: {
             type: 'string',
@@ -348,25 +476,28 @@ function buildMultiAgentTools({
             description: 'Optional model override for the worker.',
           },
         },
-        required: ['task'],
+        required: ['task_name', 'message'],
       },
       async run(args) {
+        const role = resolveAgentRole(args.agent_type)
+        const message = String(args.message || args.task || '').trim()
+        if (!message) {
+          throw createStructuredError('spawn_agent 缺少 message。', {
+            source: 'tool',
+            category: 'invalid_input',
+            code: 'SPAWN_AGENT_MISSING_MESSAGE',
+            suggestedAction: '请提供要交给子 agent 的明确任务。',
+          })
+        }
         const workerCwd = args.cwd
           ? resolveWorkspacePath(context.cwd, args.cwd)
           : context.cwd
         const taskNode = taskTracker?.createChildTask({
           parentId: runtimeMeta.currentTaskId,
-          title: args.task,
-          summary: args.deliverable || 'Focused subagent task',
+          title: args.task_name || message,
+          summary: `${role.title}: ${args.deliverable || message}`,
         })
-        const workerPrompt = [
-          'You are a focused worker subagent.',
-          `Task: ${args.task}`,
-          args.deliverable
-            ? `Return format: ${args.deliverable}`
-            : 'Return only the concrete result and any important caveats.',
-          'Do not delegate to another subagent.',
-        ].join('\n\n')
+        const workerPrompt = buildSpawnAgentPrompt(role, args)
 
         try {
           const result = await runNestedAgent({
@@ -384,6 +515,8 @@ function buildMultiAgentTools({
             ],
             runtime: {
               subagentDepth: (runtimeMeta.subagentDepth || 0) + 1,
+              subagentRole: role.name,
+              subagentTaskName: args.task_name || taskNode?.id,
               currentTaskId: taskNode?.id,
               taskTracker,
               executionStepIds: runtimeMeta.executionStepIds,
@@ -398,9 +531,13 @@ function buildMultiAgentTools({
           )
 
           return stringifyOutput({
+            agent_id: taskNode?.id,
+            task_name: args.task_name || taskNode?.id || message,
+            agent_type: role.name,
+            agent_status: result.status === 'failed' ? 'failed' : 'completed',
             worker_cwd: workerCwd,
             response: result.message,
-            toolEvents: result.toolEvents,
+            toolEvents: summarizeSubagentToolEvents(result.toolEvents),
           })
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error)

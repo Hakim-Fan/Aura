@@ -171,6 +171,41 @@ test('selectTurnCapabilities prioritizes Aura skill tools for capability admin t
   )
 })
 
+test('selectTurnCapabilities boosts spawn_agent for complex tasks', () => {
+  const result = selectTurnCapabilities({
+    messages: [
+      {
+        content: '分析这个大型代码库并并行处理几个独立问题',
+      },
+    ],
+    runtimeCapabilities: { workspaceRoot: '/tmp/workspace' },
+    skillEntries: [],
+    tools: [
+      buildTool('read_file', ['read']),
+      buildTool('spawn_agent', ['agent']),
+      buildTool('web_search', ['search']),
+    ],
+    classification: {
+      answerMode: 'advise',
+      workspaceRelated: true,
+      needsExternalFacts: false,
+      webInteractionRequired: false,
+      systemBrowserRequested: false,
+      taskComplexity: 'high',
+      planDepth: 'multi_step',
+    },
+    routeState: {
+      answerMode: 'advise',
+      workspaceRelated: true,
+    },
+  })
+
+  assert.ok(
+    result.selectedTools.findIndex(tool => tool.name === 'spawn_agent') <
+      result.selectedTools.findIndex(tool => tool.name === 'web_search'),
+  )
+})
+
 test('selectTurnCapabilities exposes all enabled skills instead of prefiltering by text match', () => {
   const result = selectTurnCapabilities({
     messages: [

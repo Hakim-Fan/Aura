@@ -72,6 +72,27 @@ test('default-agent prompt keeps mounted write tools available', () => {
   assert.match(prompt, /exec_command/i)
 })
 
+test('default-agent prompt explains Codex-style spawn_agent roles when mounted', () => {
+  const prompt = buildDefaultAgentSystemPrompt(
+    baseSettings,
+    '',
+    '',
+    modelDirectedState,
+    {
+      hasMultiAgentTools: true,
+    },
+  )
+
+  assert.match(prompt, /spawn_agent/i)
+  assert.match(prompt, /agent_type="explorer"/i)
+  assert.match(prompt, /agent_type="worker"/i)
+  assert.match(prompt, /agent_type="verification"/i)
+  assert.match(prompt, /Claude-style verification contract/i)
+  assert.match(prompt, /3\+ file edits/i)
+  assert.match(prompt, /original user request/i)
+  assert.match(prompt, /Simple tasks should stay in the main agent/i)
+})
+
 test('default-agent prompt makes execution mode evidence-led', () => {
   const prompt = buildDefaultAgentSystemPrompt(
     baseSettings,
