@@ -1267,7 +1267,7 @@ function sourcePrefix(source?: MessageEvent['source']) {
     case 'plugin':
       return 'Plugin'
     case 'subagent':
-      return 'Subagent'
+      return 'Multi-Agent'
     default:
       return ''
   }
@@ -1476,7 +1476,7 @@ function eventKindLabel(event: MessageEvent) {
     case 'user_input':
       return '确认'
     case 'subagent':
-      return '子 Agent'
+      return 'Multi-Agent'
     default:
       return '工具'
   }
@@ -1531,7 +1531,7 @@ function eventSourceLabel(source?: MessageEvent['source']) {
     case 'mcp':
       return 'MCP'
     case 'subagent':
-      return '子 Agent'
+      return 'Multi-Agent'
     case 'builtin':
       return '内置'
     default:
@@ -6271,7 +6271,7 @@ function AssistantMessageCard({
                         {executionHoverSummary.subagents.length > 0 ? (
                           <div className="flex flex-col gap-1 border-t border-[rgba(15,23,42,0.06)] pt-2">
                             <div className="text-[10px] font-700 uppercase tracking-widest text-[var(--text-secondary)] opacity-70">
-                              子 Agent
+                              Multi-Agent
                             </div>
                             <div className="flex min-w-[18rem] flex-col gap-1">
                               {executionHoverSummary.subagents.slice(0, 6).map(agent => (

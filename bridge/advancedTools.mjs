@@ -548,7 +548,7 @@ function buildMultiAgentTools({
             source: 'tool',
             category: 'invalid_input',
             code: 'SPAWN_AGENT_MISSING_MESSAGE',
-            suggestedAction: '请提供要交给子 agent 的明确任务。',
+            suggestedAction: '请提供明确的 Multi-Agent 任务内容。',
           })
         }
         const workerCwd = args.cwd

@@ -81,9 +81,35 @@ function shouldKeepCompactStructuredOutput(value: unknown) {
     Array.isArray(record.preview) ||
     Array.isArray(record.files) ||
     Array.isArray(record.fileChanges) ||
+    (
+      typeof record.agent_type === 'string' &&
+      typeof record.agent_status === 'string' &&
+      typeof record.task_name === 'string'
+    ) ||
     record.operation === 'shell_file_mutation' ||
     record.stage === 'shell_file_mutation'
   )
+}
+
+function compactSubagentStructuredOutput(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined
+  }
+  const record = value as Record<string, unknown>
+  if (
+    typeof record.agent_type !== 'string' ||
+    typeof record.agent_status !== 'string' ||
+    typeof record.task_name !== 'string'
+  ) {
+    return undefined
+  }
+  return {
+    agent_id: truncateText(record.agent_id, 240),
+    task_name: truncateText(record.task_name, 160),
+    agent_type: truncateText(record.agent_type, 80),
+    agent_status: truncateText(record.agent_status, 80),
+    worker_cwd: truncateText(record.worker_cwd, 260),
+  }
 }
 
 function parseStructuredOutput(value: unknown): Record<string, unknown> | undefined {
@@ -105,6 +131,10 @@ function compactKeepableStructuredOutput(value: unknown) {
     value && typeof value === 'object' && !Array.isArray(value)
       ? value as Record<string, unknown>
       : parseStructuredOutput(value)
+  const subagentOutput = compactSubagentStructuredOutput(record)
+  if (subagentOutput) {
+    return subagentOutput
+  }
   return shouldKeepCompactStructuredOutput(record) ? compactStructuredOutput(record) : undefined
 }
 

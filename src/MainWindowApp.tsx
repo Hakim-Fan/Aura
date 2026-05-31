@@ -852,7 +852,7 @@ function presentToolEventTitle(event: ToolEvent) {
     return prettifyIdentifier(tail)
   }
   if (event.source === 'subagent') {
-    return rawName || '子 Agent'
+    return rawName || 'Multi-Agent'
   }
   if (rawName.toLowerCase().includes('shell')) {
     return 'Shell 命令'
