@@ -1267,7 +1267,7 @@ function sourcePrefix(source?: MessageEvent['source']) {
     case 'plugin':
       return 'Plugin'
     case 'subagent':
-      return 'Multi-Agent'
+      return ''
     default:
       return ''
   }
