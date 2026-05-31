@@ -4225,67 +4225,74 @@ export async function runOpenAiCompatibleAgent({
             },
           })
 
-          await readSseStream(
-            response,
-            async (payload) => {
-              const data = JSON.parse(payload)
-              const usage = attachEstimatedInputTokens(
-                normalizeOpenAiUsage(data.usage),
-                estimatedInputTokens,
-              )
-              if (usage) {
-                usageForAttempt = usage
-              }
+          try {
+            await readSseStream(
+              response,
+              async (payload) => {
+                const data = JSON.parse(payload)
+                const usage = attachEstimatedInputTokens(
+                  normalizeOpenAiUsage(data.usage),
+                  estimatedInputTokens,
+                )
+                if (usage) {
+                  usageForAttempt = usage
+                }
 
-              const choice = data.choices?.[0]
-              if (!choice) {
-                return
-              }
-              if (typeof choice.finish_reason === 'string') {
-                finishReason = choice.finish_reason
-              }
+                const choice = data.choices?.[0]
+                if (!choice) {
+                  return
+                }
+                if (typeof choice.finish_reason === 'string') {
+                  finishReason = choice.finish_reason
+                }
 
-              const reasoningDelta =
-                choice.delta?.reasoning ||
-                choice.delta?.reasoning_content ||
-                choice.delta?.thinking
-              if (typeof reasoningDelta === 'string' && reasoningDelta) {
-                streamParser.consume(`<think>${reasoningDelta}</think>`)
-              }
+                const reasoningDelta =
+                  choice.delta?.reasoning ||
+                  choice.delta?.reasoning_content ||
+                  choice.delta?.thinking
+                if (typeof reasoningDelta === 'string' && reasoningDelta) {
+                  streamParser.consume(`<think>${reasoningDelta}</think>`)
+                }
 
-              if (
-                typeof choice.delta?.content === 'string' &&
-                choice.delta.content
-              ) {
-                streamParser.consume(choice.delta.content)
-              }
+                if (
+                  typeof choice.delta?.content === 'string' &&
+                  choice.delta.content
+                ) {
+                  streamParser.consume(choice.delta.content)
+                }
 
-              if (
-                Array.isArray(choice.delta?.tool_calls) &&
-                choice.delta.tool_calls.length > 0
-              ) {
-                attemptState.receivedOutput = true
-                mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
-                attemptState.partialToolCalls = summarizePartialToolCalls(toolCalls)
-                applyPatchStreamingReporter.inspect(toolCalls)
-                writeFileStreamingReporter.inspect(toolCalls)
-              }
-            },
-            {
-              messages: conversationMessages,
-              firstChunkTimeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
-              idleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
-              onChunk() {
-                attemptState.receivedOutput = true
-                hooks?.onProgress?.()
+                if (
+                  Array.isArray(choice.delta?.tool_calls) &&
+                  choice.delta.tool_calls.length > 0
+                ) {
+                  attemptState.receivedOutput = true
+                  mergeOpenAiToolCalls(toolCalls, choice.delta.tool_calls)
+                  attemptState.partialToolCalls = summarizePartialToolCalls(toolCalls)
+                  applyPatchStreamingReporter.inspect(toolCalls)
+                  writeFileStreamingReporter.inspect(toolCalls)
+                }
               },
-              signal: abortController?.signal,
-              returnOnAbort: () =>
-                shouldReturnForQueuedInputAbort(hooks, abortController?.signal),
-              requireCompletionSignal: true,
-              isComplete: () => Boolean(finishReason),
-            },
-          )
+              {
+                messages: conversationMessages,
+                firstChunkTimeoutMs: PROVIDER_CONNECT_TIMEOUT_MS,
+                idleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+                onChunk() {
+                  attemptState.receivedOutput = true
+                  hooks?.onProgress?.()
+                },
+                signal: abortController?.signal,
+                returnOnAbort: () =>
+                  shouldReturnForQueuedInputAbort(hooks, abortController?.signal),
+                requireCompletionSignal: true,
+                isComplete: () => Boolean(finishReason),
+              },
+            )
+          } catch (streamError) {
+            writeFileStreamingReporter.abortOpen(
+              'write_file 参数流中断，未完成写入。',
+            )
+            throw streamError
+          }
           if (shouldReturnForQueuedInputAbort(hooks, abortController?.signal)) {
             streamParser.flush()
             return {

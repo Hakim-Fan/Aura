@@ -59,7 +59,9 @@ const CODEX_AGENT_ROLES = {
       'You are a verification subagent.',
       'Your job is independent adversarial verification. Prove whether the assigned work is actually complete.',
       'Inspect relevant files and run targeted checks with available tools. Do not modify files.',
-      'Return a clear PASS, FAIL, or PARTIAL verdict with concrete evidence and required follow-up.',
+      'A check without an actual command/tool run is not a PASS. Reading or reasoning about code is context, not verification.',
+      'For every important check, report the command/tool run, observed output, and PASS/FAIL result. Use PARTIAL only for environment/tool limitations.',
+      'End with exactly one final line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.',
       'Do not delegate to another subagent.',
     ],
   },
@@ -122,6 +124,47 @@ function summarizeSubagentToolEvents(toolEvents = []) {
     summary: event?.summary,
     error: event?.error,
   }))
+}
+
+function containsUnexecutedToolMarkup(value = '') {
+  const text = String(value || '')
+  return /<(?:tool_call|invoke)\b|<\/(?:tool_call|invoke)>|<\/?minimax:tool_call\b|<(?:arg_key|arg_value|parameter)\b/iu.test(text)
+}
+
+function resolveSubagentStatus(result = {}) {
+  if (result?.status === 'failed') {
+    return 'failed'
+  }
+
+  if (
+    result?.completionState === 'failed_after_execution' ||
+    result?.completionState === 'blocked_by_capability' ||
+    result?.completionState === 'blocked_by_approval'
+  ) {
+    return 'failed'
+  }
+
+  if (containsUnexecutedToolMarkup(result?.message)) {
+    return 'failed'
+  }
+
+  return 'completed'
+}
+
+function buildSubagentCompletionSummary(result = {}, status = 'completed') {
+  const message = truncate(result?.message || '', 1_200)
+
+  if (status === 'failed') {
+    if (containsUnexecutedToolMarkup(result?.message)) {
+      return [
+        'Subagent did not complete: it returned tool-call markup as assistant text instead of producing a native tool result.',
+        message,
+      ].filter(Boolean).join('\n\n')
+    }
+    return message || 'Subagent did not complete successfully.'
+  }
+
+  return message || 'Subagent completed successfully.'
 }
 
 function ensureMacOs(featureName) {
@@ -542,20 +585,22 @@ function buildMultiAgentTools({
             },
           })
 
+          const agentStatus = resolveSubagentStatus(result)
+          const completionSummary = buildSubagentCompletionSummary(result, agentStatus)
+
           taskTracker?.completeTask(
             taskNode?.id,
-            result.message || 'Subagent completed successfully.',
-            result.status === 'failed' ? 'failed' : 'completed',
-            result.taskTree || [],
+            completionSummary,
+            agentStatus,
           )
 
           return stringifyOutput({
             agent_id: taskNode?.id,
             task_name: args.task_name || args.description || taskNode?.id || message,
             agent_type: role.name,
-            agent_status: result.status === 'failed' ? 'failed' : 'completed',
+            agent_status: agentStatus,
             worker_cwd: workerCwd,
-            response: result.message,
+            response: completionSummary,
             toolEvents: summarizeSubagentToolEvents(result.toolEvents),
           })
         } catch (error) {

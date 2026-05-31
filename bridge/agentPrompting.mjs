@@ -101,7 +101,7 @@ function buildClaudeStyleVerificationAgentInstruction() {
   return [
     'Claude-style verification contract: when non-trivial implementation happens in this turn, independent adversarial verification must happen before reporting completion. Non-trivial means 3+ file edits, backend/API changes, infrastructure changes, or a long-task implementation.',
     'Use spawn_agent with agent_type="verification" and pass a self-contained message containing the original user request, all files changed, the implementation approach, the plan path if any, and any known concerns. Your own checks, caveats, and a worker self-check do not substitute for the verification agent verdict.',
-    'If the verification agent returns FAIL, fix the issue and run the verification agent again with its findings plus your fix. If it returns PARTIAL, report exactly what passed and what could not be verified. If it returns PASS, include the verification evidence in the final summary.',
+    'The verification agent verdict is the exact final line `VERDICT: PASS`, `VERDICT: FAIL`, or `VERDICT: PARTIAL`. If it returns FAIL, fix the issue and run the verification agent again with its findings plus your fix. If it returns PARTIAL, report exactly what passed and what could not be verified. If it returns PASS, include the verification evidence in the final summary.',
   ].join('\n')
 }
 
@@ -286,6 +286,7 @@ export function buildRuntimeSystemPrompt(
     'Use only the currently mounted tools when they materially reduce uncertainty or let you act directly on the user request.',
     'Treat the mounted tool list as the source of truth for what you can do in this turn. Do not describe yourself as local-only when web or browser tools are mounted.',
     'If tool_search is mounted, use it to inspect the available tool catalog before claiming a needed capability does not exist.',
+    'When using a mounted tool, call it only through the runtime/provider native tool-call channel. Do not write tool calls in assistant text, XML, Markdown, JSON examples, <tool_call>, <invoke>, minimax:tool_call, or <arg_key>/<arg_value> blocks. If native tool calling is unavailable, say the tool call is unavailable instead of pretending it ran.',
     'Do not claim that something is fixed, installed, configured, created, or completed unless the current run produced direct evidence.',
     'Do not access paths outside the configured workspace root.',
     'If the user includes image attachments, treat them as already provided visual input. Do not read PNG/JPG/WebP files as plain text unless the user explicitly asks for raw file inspection or metadata.',
@@ -541,6 +542,7 @@ export function buildDefaultAgentPromptBlocks(
     'Use tools when they materially reduce uncertainty or let you complete the user request. The mounted tool list is the source of truth for this turn.',
     'If a needed capability is not obvious and tool_search is mounted, inspect the current tool catalog before claiming the capability is unavailable.',
     'If the user request needs files, commands, web retrieval, browser interaction, or capability management and the matching tool is mounted, use the tool directly instead of asking the user to do the work.',
+    'When using a mounted tool, call it only through the runtime/provider native tool-call channel. Do not write tool calls in assistant text, XML, Markdown, JSON examples, <tool_call>, <invoke>, minimax:tool_call, or <arg_key>/<arg_value> blocks. If native tool calling is unavailable, say the tool call is unavailable instead of pretending it ran.',
     'Ask the user only when an important product decision, risky action, missing credential, or unavailable input blocks progress.',
     'Do not claim that something is fixed, installed, configured, created, or completed unless the current run produced direct evidence.',
     'Verify concrete changes before finalizing when verification is practical. If verification is blocked, say exactly what was done and what remains unverified.',

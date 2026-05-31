@@ -108,7 +108,7 @@ test('spawn_agent verification pass counts as independent verified evidence', ()
       structuredOutput: {
         agent_type: 'verification',
         agent_status: 'completed',
-        response: 'PASS: pnpm typecheck passed and changed files were inspected.',
+        response: 'pnpm typecheck passed and changed files were inspected.\n\nVERDICT: PASS',
       },
     },
   ])
@@ -126,7 +126,7 @@ test('spawn_agent verification failure is treated as unresolved execution failur
       structuredOutput: {
         agent_type: 'verification',
         agent_status: 'completed',
-        response: 'FAIL: relevant behavior was not verified.',
+        response: 'relevant behavior was not verified.\n\nVERDICT: FAIL',
       },
     },
   ])
@@ -138,7 +138,7 @@ test('spawn_agent verification failure is treated as unresolved execution failur
   )
 })
 
-test('spawn_agent verification not-ok response is not treated as pass', () => {
+test('spawn_agent verification without explicit verdict is not treated as pass or fail', () => {
   const evidence = collectEvidenceFromToolEvents([
     {
       name: 'spawn_agent',
@@ -153,7 +153,26 @@ test('spawn_agent verification not-ok response is not treated as pass', () => {
   ])
 
   assert.equal(evidence.hasVerifiedEvidence, false)
-  assert.equal(evidence.hasExecutionFailure, true)
+  assert.equal(evidence.hasExecutionFailure, false)
+})
+
+test('spawn_agent verification partial verdict is partial evidence, not pass or failure', () => {
+  const evidence = collectEvidenceFromToolEvents([
+    {
+      name: 'spawn_agent',
+      source: 'subagent',
+      status: 'success',
+      structuredOutput: {
+        agent_type: 'verification',
+        agent_status: 'completed',
+        response: 'Could not start the browser in this environment.\n\nVERDICT: PARTIAL',
+      },
+    },
+  ])
+
+  assert.equal(evidence.hasVerifiedEvidence, false)
+  assert.equal(evidence.hasExecutionFailure, false)
+  assert.equal(evidence.records[0].verificationLevel, 'partial')
 })
 
 test('failed spawn_agent status is treated as unresolved execution failure', () => {

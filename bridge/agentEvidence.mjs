@@ -292,6 +292,8 @@ function collectProducedEvidence(event, effectTypes) {
         producedEvidence.push('independent_verification')
       } else if (isNegativeVerificationResponse(verificationResponse)) {
         producedEvidence.push('independent_verification_failed')
+      } else if (isPartialVerificationResponse(verificationResponse)) {
+        producedEvidence.push('independent_verification_partial')
       }
     }
 
@@ -392,7 +394,8 @@ function inferVerificationLevel(event, effectTypes, producedEvidence) {
     producedEvidence.includes('web_search_result') ||
     producedEvidence.includes('web_research_result') ||
     producedEvidence.includes('web_fetch_content') ||
-    producedEvidence.includes('web_fetch_summary')
+    producedEvidence.includes('web_fetch_summary') ||
+    producedEvidence.includes('independent_verification_partial')
   ) {
     return 'partial'
   }
@@ -408,15 +411,20 @@ function inferVerificationLevel(event, effectTypes, producedEvidence) {
 }
 
 function isPositiveVerificationResponse(value = '') {
-  const text = String(value || '')
-  return /\b(pass|passed|verified|ok|通过|已验证)\b/iu.test(text) &&
-    !/\b(fail|failed|partial|incomplete|unverified|not\s+ok|失败|未通过|部分|未验证)\b/iu.test(text)
+  return extractVerificationVerdict(value) === 'pass'
 }
 
 function isNegativeVerificationResponse(value = '') {
-  return /\b(fail|failed|partial|incomplete|unverified|not\s+ok|失败|未通过|部分|未验证)\b/iu.test(
-    String(value || ''),
-  )
+  return extractVerificationVerdict(value) === 'fail'
+}
+
+function isPartialVerificationResponse(value = '') {
+  return extractVerificationVerdict(value) === 'partial'
+}
+
+function extractVerificationVerdict(value = '') {
+  const match = String(value || '').match(/(?:^|\n)\s*VERDICT:\s*(PASS|FAIL|PARTIAL)\b/iu)
+  return match ? match[1].toLowerCase() : ''
 }
 
 export function collectEvidenceFromToolEvents(toolEvents = []) {

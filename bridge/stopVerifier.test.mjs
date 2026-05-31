@@ -47,6 +47,112 @@ test('stop verifier allows verified and terminal blocker states', () => {
   )
 })
 
+test('stop verifier requires verification agent for multi-subagent execute work', () => {
+  const result = runStopVerifier({
+    routeState: { answerMode: 'execute' },
+    result: {
+      completionState: 'executed_verified',
+      evidenceSummary: {
+        records: [
+          {
+            toolName: 'spawn_agent',
+            status: 'success',
+            effectTypes: ['execute'],
+            producedEvidence: ['structured_output'],
+            verificationLevel: 'none',
+          },
+          {
+            toolName: 'spawn_agent',
+            status: 'success',
+            effectTypes: ['execute'],
+            producedEvidence: ['structured_output'],
+            verificationLevel: 'none',
+          },
+          {
+            toolName: 'run_shell',
+            status: 'success',
+            effectTypes: ['execute'],
+            producedEvidence: ['command_exit_0'],
+            verificationLevel: 'verified',
+          },
+        ],
+      },
+    },
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'verification_agent_required')
+  assert.match(result.feedback, /agent_type="verification"/)
+  assert.match(result.feedback, /VERDICT: PASS/)
+})
+
+test('stop verifier requires verification agent for multi-subagent model-directed work', () => {
+  const result = runStopVerifier({
+    routeState: { answerMode: 'advise', capabilityTier: 'default-agent' },
+    result: {
+      completionState: 'executed_verified',
+      evidenceSummary: {
+        records: [
+          {
+            toolName: 'spawn_agent',
+            status: 'success',
+            effectTypes: ['execute'],
+            producedEvidence: ['structured_output'],
+            verificationLevel: 'none',
+          },
+          {
+            toolName: 'spawn_agent',
+            status: 'success',
+            effectTypes: ['execute'],
+            producedEvidence: ['structured_output'],
+            verificationLevel: 'none',
+          },
+        ],
+      },
+    },
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'verification_agent_required')
+})
+
+test('stop verifier allows multi-subagent work after verification verdict', () => {
+  const result = runStopVerifier({
+    routeState: { answerMode: 'execute' },
+    result: {
+      completionState: 'executed_verified',
+      evidenceSummary: {
+        records: [
+          {
+            toolName: 'spawn_agent',
+            status: 'success',
+            effectTypes: ['execute'],
+            producedEvidence: ['structured_output'],
+            verificationLevel: 'none',
+          },
+          {
+            toolName: 'spawn_agent',
+            status: 'success',
+            effectTypes: ['execute'],
+            producedEvidence: ['structured_output'],
+            verificationLevel: 'none',
+          },
+          {
+            toolName: 'spawn_agent',
+            status: 'success',
+            effectTypes: ['execute'],
+            producedEvidence: ['independent_verification'],
+            verificationLevel: 'verified',
+          },
+        ],
+      },
+    },
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.reason, 'verified_evidence_present')
+})
+
 test('stop verifier continuation preserves draft and adds blocking feedback', () => {
   const messages = buildStopVerifierContinuationMessages({
     messages: [{ role: 'user', content: 'create a file' }],

@@ -32,6 +32,51 @@ function summarizeEvidence(evidenceSummary = {}) {
   ].filter(Boolean).join('\n\n')
 }
 
+function hasProducedEvidence(record = {}, evidenceName = '') {
+  return safeArray(record.producedEvidence).includes(evidenceName)
+}
+
+function analyzeClaudeStyleVerificationRequirement(evidenceSummary = {}, routeState = {}) {
+  const records = safeArray(evidenceSummary.records)
+  const hasIndependentVerification = records.some(record =>
+    hasProducedEvidence(record, 'independent_verification'),
+  )
+  const hasPartialVerification = records.some(record =>
+    hasProducedEvidence(record, 'independent_verification_partial'),
+  )
+  const nonVerificationSubagentCount = records.filter(record =>
+    record?.toolName === 'spawn_agent' &&
+    !hasProducedEvidence(record, 'independent_verification') &&
+    !hasProducedEvidence(record, 'independent_verification_partial') &&
+    !hasProducedEvidence(record, 'independent_verification_failed'),
+  ).length
+  const fileMutationCount = records.filter(record =>
+    hasProducedEvidence(record, 'file_mutation'),
+  ).length
+  const longTaskImplementation =
+    routeState?.executionMode === 'long-task' ||
+    routeState?.taskKind === 'long-task' ||
+    routeState?.complexity === 'long-task'
+
+  const reasons = []
+  if (nonVerificationSubagentCount >= 2) {
+    reasons.push(`multiple_subagents:${nonVerificationSubagentCount}`)
+  }
+  if (fileMutationCount >= 3) {
+    reasons.push(`multiple_file_mutations:${fileMutationCount}`)
+  }
+  if (longTaskImplementation) {
+    reasons.push('long_task_implementation')
+  }
+
+  return {
+    required: reasons.length > 0,
+    reasons,
+    hasIndependentVerification,
+    hasPartialVerification,
+  }
+}
+
 export function runStopVerifier({
   result = {},
   routeState = {},
@@ -39,14 +84,55 @@ export function runStopVerifier({
   maxAttempts = 2,
 } = {}) {
   const completionState = result?.completionState || 'not_executed'
-  if (routeState?.answerMode !== 'execute') {
+  const evidenceSummary = result?.evidenceSummary || {}
+  const verificationRequirement = analyzeClaudeStyleVerificationRequirement(
+    evidenceSummary,
+    routeState,
+  )
+  if (
+    routeState?.answerMode !== 'execute' &&
+    !verificationRequirement.required
+  ) {
     return { ok: true, reason: 'non_execute_route' }
-  }
-  if (completionState === 'executed_verified') {
-    return { ok: true, reason: 'verified_evidence_present' }
   }
   if (TERMINAL_BLOCK_STATES.has(completionState)) {
     return { ok: true, reason: completionState }
+  }
+
+  if (
+    verificationRequirement.required &&
+    !verificationRequirement.hasIndependentVerification &&
+    !verificationRequirement.hasPartialVerification
+  ) {
+    if (attempt >= maxAttempts) {
+      return {
+        ok: true,
+        reason: 'max_stop_verifier_attempts_reached',
+        exhausted: true,
+      }
+    }
+    const reason = 'verification_agent_required'
+    return {
+      ok: false,
+      reason,
+      feedback: [
+        'Stop verifier blocked the final answer.',
+        `Reason: ${reason}.`,
+        `Claude-style verification required because: ${verificationRequirement.reasons.join(', ')}.`,
+        `Completion state: ${completionState}.`,
+        summarizeEvidence(evidenceSummary),
+        'Before finalizing, call spawn_agent with agent_type="verification". Pass a self-contained message containing the original user request, changed/generated files, commands already run, subagent findings, and known concerns. The verification agent must end with exactly one line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL.',
+      ].filter(Boolean).join('\n\n'),
+    }
+  }
+  if (
+    verificationRequirement.required &&
+    verificationRequirement.hasPartialVerification
+  ) {
+    return { ok: true, reason: 'verification_agent_partial' }
+  }
+  if (completionState === 'executed_verified') {
+    return { ok: true, reason: 'verified_evidence_present' }
   }
   if (!BLOCKING_COMPLETION_STATES.has(completionState)) {
     return { ok: true, reason: 'non_blocking_completion_state' }
@@ -59,7 +145,6 @@ export function runStopVerifier({
     }
   }
 
-  const evidenceSummary = result?.evidenceSummary || {}
   const reason =
     completionState === 'not_executed'
       ? 'final_answer_without_execution_evidence'

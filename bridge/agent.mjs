@@ -2181,8 +2181,8 @@ function createTaskTracker(hooks, rootTitle) {
     }
   }
 
-  function todoNodeId(todo, index) {
-    return `${root.id}-todo-${sanitizeTaskIdPart(todo?.id || index + 1)}`
+  function todoNodeId(todo, index, parentId = root.id) {
+    return `${parentId}-todo-${sanitizeTaskIdPart(todo?.id || index + 1)}`
   }
 
   function emit() {
@@ -2199,6 +2199,32 @@ function createTaskTracker(hooks, rootTitle) {
       }
     }
     return null
+  }
+
+  function markInterruptedDescendants(node, summary, status) {
+    if (!node?.children?.length) {
+      return 0
+    }
+    let changed = 0
+    for (const child of node.children) {
+      if (
+        ['queued', 'running', 'awaiting_approval', 'awaiting_user_input'].includes(
+          child.status,
+        )
+      ) {
+        child.status = status
+        child.summary = summary || child.summary
+        if (!child.errors) child.errors = []
+        child.errors.push({
+          timestamp: Date.now(),
+          message: summary || 'Task interrupted before completion.',
+          code: 'TASK_INTERRUPTED',
+        })
+        changed += 1
+      }
+      changed += markInterruptedDescendants(child, summary, status)
+    }
+    return changed
   }
 
   return {
@@ -2277,13 +2303,14 @@ function createTaskTracker(hooks, rootTitle) {
       emit()
       return child
     },
-    syncTodoItems(items = [], explanation = '') {
-      const previousById = new Map(root.children.map(child => [child.id, child]))
+    syncTodoItems(items = [], explanation = '', parentId = root.id) {
+      const parent = findNode(root, parentId) || root
+      const previousById = new Map(parent.children.map(child => [child.id, child]))
       const visibleItems = Array.isArray(items)
         ? items
         : []
-      root.children = visibleItems.map((item, index) => {
-        const id = todoNodeId(item, index)
+      parent.children = visibleItems.map((item, index) => {
+        const id = todoNodeId(item, index, parent.id)
         const previous = previousById.get(id)
         const step = item.step || item.content
         const activeTitle =
@@ -2332,10 +2359,16 @@ function createTaskTracker(hooks, rootTitle) {
       if (summary) {
         node.summary = summary
       }
-      if (Array.isArray(nestedChildren) && nestedChildren.length > 0) {
-        node.children.push(...nestedChildren.flatMap(entry => entry.children || []))
-      }
       emit()
+    },
+    interruptRunningDescendants(id, summary, status = 'failed') {
+      const node = findNode(root, id || root.id)
+      if (!node) return 0
+      const changed = markInterruptedDescendants(node, summary, status)
+      if (changed > 0) {
+        emit()
+      }
+      return changed
     },
     failRoot(message, errorInfo = {}) {
       root.status = 'failed'
@@ -2762,7 +2795,7 @@ export async function runDefaultAgent(request) {
               return taskTracker.getActivePlanStep?.()
             },
             onTodoWrite(items, explanation) {
-              taskTracker.syncTodoItems?.(items, explanation)
+              taskTracker.syncTodoItems?.(items, explanation, currentTaskId)
             },
             rethrowToolError(error) {
               return extractRouteEscalationRequest(error) !== null
@@ -3028,6 +3061,15 @@ export async function runDefaultAgent(request) {
       partialMessage.length > 0 ||
       partialReasoning.length > 0 ||
       partialToolCalls.length > 0
+    const interruptedSubtaskSummary =
+      normalized.source === 'provider'
+        ? `父任务被模型流中断：${normalized.message}`
+        : `父任务中断：${normalized.message}`
+    taskTracker.interruptRunningDescendants?.(
+      currentTaskId,
+      interruptedSubtaskSummary,
+      'failed',
+    )
 
     if (hasRecoveryContext) {
       createCheckpointForRecoverableProgress('interrupted_with_progress', 0, {
@@ -3110,7 +3152,7 @@ export async function runDefaultAgent(request) {
                 return taskTracker.getActivePlanStep?.()
               },
               onTodoWrite(items, explanation) {
-                taskTracker.syncTodoItems?.(items, explanation)
+                taskTracker.syncTodoItems?.(items, explanation, currentTaskId)
               },
               rethrowToolError(error) {
                 return extractRouteEscalationRequest(error) !== null

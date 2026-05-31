@@ -74,6 +74,62 @@ test('createWriteFileStreamingReporter emits by file and content size bucket', (
   assert.equal(JSON.parse(events[1].output).contentBytes, 5000)
 })
 
+test('createWriteFileStreamingReporter marks complete write_file arguments successful', () => {
+  const events = []
+  const reporter = createWriteFileStreamingReporter({
+    hooks: {
+      onToolEvent(event) {
+        events.push(event)
+      },
+    },
+  })
+
+  reporter.inspect([
+    {
+      id: 'call-write',
+      index: 0,
+      function: {
+        name: 'write_file',
+        arguments: '{"path":"src/a.html","content":"done"}',
+      },
+    },
+  ])
+
+  assert.equal(events.length, 1)
+  assert.equal(events[0].status, 'success')
+  assert.equal(events[0].finishedAt > 0, true)
+  assert.equal(JSON.parse(events[0].output).complete, true)
+})
+
+test('createWriteFileStreamingReporter can fail open previews on stream interruption', () => {
+  const events = []
+  const reporter = createWriteFileStreamingReporter({
+    hooks: {
+      onToolEvent(event) {
+        events.push(event)
+      },
+    },
+  })
+
+  reporter.inspect([
+    {
+      id: 'call-write',
+      index: 0,
+      function: {
+        name: 'write_file',
+        arguments: '{"path":"src/a.html","content":"partial',
+      },
+    },
+  ])
+  reporter.abortOpen('stream stopped')
+
+  assert.equal(events.length, 2)
+  assert.equal(events[0].status, 'running')
+  assert.equal(events[1].id, events[0].id)
+  assert.equal(events[1].status, 'error')
+  assert.equal(events[1].summary, 'stream stopped')
+})
+
 test('createWriteFileStreamingReporter emits an early placeholder before arguments stream', () => {
   const events = []
   const reporter = createWriteFileStreamingReporter({

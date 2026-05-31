@@ -1213,6 +1213,11 @@ type ToolCallSummaryRow = {
   waiting: number
 }
 
+type SubagentSummaryRow = ToolCallSummaryRow & {
+  agentType: string
+  taskNames: string[]
+}
+
 function createEmptyToolCallSummaryRow(label: string): ToolCallSummaryRow {
   return {
     label,
@@ -1243,6 +1248,11 @@ function toolCallStatusText(row: ToolCallSummaryRow) {
 
 function toolCallTotal(row: ToolCallSummaryRow) {
   return row.success + row.error + row.running + row.waiting
+}
+
+function readSingleStringField(record: Record<string, unknown> | null | undefined, key: string) {
+  const value = record?.[key]
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 function cleanToolDisplayName(value?: string) {
@@ -1325,6 +1335,63 @@ function summarizeEventActions(events?: MessageEvent[]) {
     .sort((left, right) => toolCallTotal(right) - toolCallTotal(left) || left.label.localeCompare(right.label))
 }
 
+function subagentStatusFromEvent(event: MessageEvent, output: Record<string, unknown> | null): 'success' | 'error' | 'running' | 'waiting' {
+  const agentStatus = readSingleStringField(output, 'agent_status').toLowerCase()
+  if (['failed', 'error', 'cancelled', 'canceled', 'killed'].includes(agentStatus)) {
+    return 'error'
+  }
+  if (['running', 'queued'].includes(agentStatus)) {
+    return 'running'
+  }
+  if (['completed', 'success', 'succeeded', 'passed'].includes(agentStatus)) {
+    return 'success'
+  }
+  if (event.status === 'error') {
+    return 'error'
+  }
+  if (event.status === 'running') {
+    return 'running'
+  }
+  if (event.status === 'awaiting_approval' || event.status === 'awaiting_user_input') {
+    return 'waiting'
+  }
+  return 'success'
+}
+
+function summarizeSubagentActions(events?: MessageEvent[]) {
+  const rows = new Map<string, SubagentSummaryRow>()
+  for (const event of events || []) {
+    if (event.toolName !== 'spawn_agent' && event.source !== 'subagent' && event.kind !== 'subagent') {
+      continue
+    }
+    const input = parseJsonOutput(event.input)
+    const output = readEventStructuredOutput(event)
+    const agentType =
+      readSingleStringField(output, 'agent_type') ||
+      readSingleStringField(input, 'agent_type') ||
+      readSingleStringField(input, 'subagent_type') ||
+      'default'
+    const normalizedType = agentType.toLowerCase()
+    const label = `${normalizedType} agent`
+    const row = rows.get(normalizedType) || {
+      ...createEmptyToolCallSummaryRow(label),
+      agentType: normalizedType,
+      taskNames: [],
+    }
+    incrementToolCallSummaryRow(row, subagentStatusFromEvent(event, output))
+    const taskName =
+      readSingleStringField(output, 'task_name') ||
+      readSingleStringField(input, 'task_name') ||
+      readSingleStringField(input, 'description')
+    if (taskName && !row.taskNames.includes(taskName)) {
+      row.taskNames.push(taskName)
+    }
+    rows.set(normalizedType, row)
+  }
+  return Array.from(rows.values())
+    .sort((left, right) => toolCallTotal(right) - toolCallTotal(left) || left.agentType.localeCompare(right.agentType))
+}
+
 function collectStringPathsFromValue(value: unknown, paths: Set<string>, depth = 0) {
   if (depth > 4 || value == null) {
     return
@@ -1374,6 +1441,7 @@ function buildExecutionHoverSummary(message: ChatMessage) {
   const evidenceSummary = message.evidenceSummary
   const evidenceActions = summarizeEvidenceActions(evidenceSummary)
   const eventActions = summarizeEventActions(message.events)
+  const subagents = summarizeSubagentActions(message.events)
   const actions = evidenceActions.length > 0 ? evidenceActions : eventActions
   const artifactPaths = (evidenceSummary?.artifactPaths || []).filter(Boolean)
   const fallbackArtifactPaths = artifactPaths.length > 0
@@ -1383,13 +1451,14 @@ function buildExecutionHoverSummary(message: ChatMessage) {
     completionStateLabel(message.completionState) ||
     (message.activity ? activityStatusLabel(message.activity.status) : '')
 
-  if (!statusLabel && actions.length === 0 && fallbackArtifactPaths.length === 0) {
+  if (!statusLabel && actions.length === 0 && subagents.length === 0 && fallbackArtifactPaths.length === 0) {
     return null
   }
 
   return {
     statusLabel,
     actions,
+    subagents,
     artifactPaths: fallbackArtifactPaths,
   }
 }
@@ -6193,6 +6262,32 @@ function AssistantMessageCard({
                                   </span>
                                   <span className={`text-right font-700 ${action.error > 0 ? 'text-red-500' : action.running > 0 || action.waiting > 0 ? 'text-amber-600' : 'text-[var(--accent-soft-strong)]'}`}>
                                     {toolCallStatusText(action)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {executionHoverSummary.subagents.length > 0 ? (
+                          <div className="flex flex-col gap-1 border-t border-[rgba(15,23,42,0.06)] pt-2">
+                            <div className="text-[10px] font-700 uppercase tracking-widest text-[var(--text-secondary)] opacity-70">
+                              子 Agent
+                            </div>
+                            <div className="flex min-w-[18rem] flex-col gap-1">
+                              {executionHoverSummary.subagents.slice(0, 6).map(agent => (
+                                <div
+                                  key={agent.agentType}
+                                  title={agent.taskNames.join(' / ')}
+                                  className="grid grid-cols-[minmax(5rem,1fr)_3.75rem_minmax(4.5rem,auto)] items-center gap-3 rounded-lg bg-[rgba(79,123,116,0.045)] px-2.5 py-1.5 text-[11px]"
+                                >
+                                  <span className="truncate font-700 text-[var(--text-primary)]">
+                                    {agent.label}
+                                  </span>
+                                  <span className="text-right font-700 text-[var(--text-secondary)] opacity-70">
+                                    {toolCallTotal(agent)} 次
+                                  </span>
+                                  <span className={`text-right font-700 ${agent.error > 0 ? 'text-red-500' : agent.running > 0 || agent.waiting > 0 ? 'text-amber-600' : 'text-[var(--accent-soft-strong)]'}`}>
+                                    {toolCallStatusText(agent)}
                                   </span>
                                 </div>
                               ))}

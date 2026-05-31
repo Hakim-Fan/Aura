@@ -171,6 +171,58 @@ test('spawn_agent accepts Claude AgentTool aliases', async () => {
   assert.match(calls[0].messages[0].content, /Inspect how the runtime loop delegates tools/)
 })
 
+test('spawn_agent marks text tool-call markup as incomplete instead of completed', async () => {
+  const calls = []
+  const tools = createAdvancedTools({
+    platform: 'darwin',
+    settings: {
+      enableMultiAgent: true,
+    },
+    context: {
+      cwd: process.cwd(),
+    },
+    runtimeMeta: {
+      currentTaskId: 'parent-task',
+    },
+    taskTracker: {
+      createChildTask() {
+        return { id: 'child-task' }
+      },
+      completeTask(id, summary, status) {
+        calls.push({ id, summary, status })
+      },
+    },
+    runNestedAgent: async () => ({
+      status: 'completed',
+      message: '<invoke name="exec_command"><parameter name="command">echo hi</parameter></invoke>',
+      taskTree: [
+        {
+          id: 'foreign-root',
+          children: [{ id: 'foreign-child' }],
+        },
+      ],
+    }),
+  })
+
+  const spawnAgent = tools.find(tool => tool.name === 'spawn_agent')
+  assert.ok(spawnAgent)
+
+  const output = await spawnAgent.run({
+    message: 'Search one PDF chunk.',
+    task_name: 'search_part01',
+    agent_type: 'explorer',
+  })
+  const parsed = JSON.parse(output)
+
+  assert.equal(parsed.agent_status, 'failed')
+  assert.match(parsed.response, /tool-call markup/i)
+  assert.deepEqual(calls[0], {
+    id: 'child-task',
+    summary: parsed.response,
+    status: 'failed',
+  })
+})
+
 test('spawn_agent rejects legacy verifier agent type', async () => {
   const tools = createAdvancedTools({
     platform: 'darwin',

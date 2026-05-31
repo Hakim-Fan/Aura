@@ -162,6 +162,7 @@ export function createWriteFileStreamingReporter({ hooks = {}, order } = {}) {
   }
 
   function emit(toolCall, progress) {
+    const now = Date.now()
     const toolCallId =
       typeof toolCall?.id === 'string' && toolCall.id.trim()
         ? toolCall.id.trim()
@@ -187,6 +188,8 @@ export function createWriteFileStreamingReporter({ hooks = {}, order } = {}) {
     eventsByToolCall.set(toolCallId, {
       eventId,
       fingerprint,
+      startedAt: existing?.startedAt || now,
+      complete: Boolean(progress.complete),
     })
 
     hooks.onToolEvent?.({
@@ -195,7 +198,10 @@ export function createWriteFileStreamingReporter({ hooks = {}, order } = {}) {
       name: 'write_file',
       summary: progress.summary,
       order,
-      status: 'running',
+      status: progress.complete ? 'success' : 'running',
+      startedAt: existing?.startedAt || now,
+      finishedAt: progress.complete ? now : undefined,
+      durationMs: progress.complete ? now - (existing?.startedAt || now) : undefined,
       input: 'Streaming write_file arguments',
       output: JSON.stringify(progress, null, 2),
     })
@@ -209,6 +215,49 @@ export function createWriteFileStreamingReporter({ hooks = {}, order } = {}) {
         }
         const progress = summarizeWriteFileProgress(toolCall.function.arguments || '')
         emit(toolCall, progress || emptyProgress())
+      }
+    },
+    abortOpen(reason = 'write_file argument stream interrupted') {
+      const now = Date.now()
+      for (const [toolCallId, existing] of eventsByToolCall.entries()) {
+        if (!existing || existing.complete) {
+          continue
+        }
+        const fingerprint = JSON.stringify({
+          phase: 'streaming_aborted',
+          reason,
+        })
+        if (existing.fingerprint === fingerprint) {
+          continue
+        }
+        eventsByToolCall.set(toolCallId, {
+          ...existing,
+          fingerprint,
+          complete: true,
+        })
+        hooks.onToolEvent?.({
+          id: existing.eventId,
+          source: 'builtin',
+          name: 'write_file',
+          summary: reason,
+          order,
+          status: 'error',
+          startedAt: existing.startedAt || now,
+          finishedAt: now,
+          durationMs: now - (existing.startedAt || now),
+          input: 'Streaming write_file arguments',
+          output: JSON.stringify(
+            {
+              stage: 'edit_transaction_preview',
+              phase: 'streaming_aborted',
+              operation: 'write_file_streaming',
+              complete: false,
+              summary: reason,
+            },
+            null,
+            2,
+          ),
+        })
       }
     },
   }
