@@ -1352,6 +1352,13 @@ fn agent_log_context_details(task_id: &str, payload: &serde_json::Value) -> serd
             .get("userMessageId")
             .and_then(|value| value.as_str()),
     );
+    insert_log_string(
+        &mut fields,
+        "messageGroupId",
+        log_context
+            .get("messageGroupId")
+            .and_then(|value| value.as_str()),
+    );
     insert_log_string(&mut fields, "assistantMessageId", assistant_message_id);
     insert_log_string(&mut fields, "messageId", assistant_message_id);
     serde_json::Value::Object(fields)
@@ -1960,6 +1967,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
 
             CREATE TABLE IF NOT EXISTS messages (
               id TEXT PRIMARY KEY,
+              group_id TEXT,
               session_id TEXT NOT NULL,
               role TEXT NOT NULL,
               linked_message_id TEXT,
@@ -1973,6 +1981,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
 
             CREATE TABLE IF NOT EXISTS message_versions (
               id TEXT PRIMARY KEY,
+              group_id TEXT,
               message_id TEXT NOT NULL,
               version_index INTEGER NOT NULL,
               content TEXT NOT NULL,
@@ -2001,6 +2010,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
             );
 
             CREATE TABLE IF NOT EXISTS message_event_details (
+              group_id TEXT,
               message_id TEXT NOT NULL,
               version_index INTEGER NOT NULL,
               event_id TEXT NOT NULL,
@@ -2039,6 +2049,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               run_id TEXT PRIMARY KEY,
               session_id TEXT,
               task_id TEXT,
+              message_group_id TEXT,
               assistant_message_id TEXT,
               user_message_id TEXT,
               status TEXT NOT NULL,
@@ -2135,6 +2146,94 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
             ));
         }
     }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE messages ADD COLUMN group_id TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite messages group_id column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_versions ADD COLUMN group_id TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_versions group_id column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE message_event_details ADD COLUMN group_id TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite message_event_details group_id column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE agent_runs ADD COLUMN message_group_id TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite agent_runs message_group_id column: {error}"
+            ));
+        }
+    }
+
+    connection
+        .execute_batch(
+            r#"
+            UPDATE messages
+               SET group_id = id
+             WHERE group_id IS NULL OR trim(group_id) = '';
+            UPDATE message_versions
+               SET group_id = message_id
+             WHERE group_id IS NULL OR trim(group_id) = '';
+            UPDATE message_event_details
+               SET group_id = message_id
+             WHERE group_id IS NULL OR trim(group_id) = '';
+            UPDATE agent_runs
+               SET message_group_id = COALESCE(
+                    (SELECT group_id
+                       FROM message_versions
+                      WHERE id = agent_runs.assistant_message_id
+                      LIMIT 1),
+                    assistant_message_id
+                 )
+             WHERE (message_group_id IS NULL OR trim(message_group_id) = '')
+               AND assistant_message_id IS NOT NULL
+               AND trim(assistant_message_id) != '';
+            UPDATE agent_runs
+               SET message_group_id = COALESCE(
+                    (SELECT group_id
+                       FROM message_versions
+                      WHERE id = agent_runs.message_group_id
+                      LIMIT 1),
+                    (SELECT group_id
+                       FROM message_versions
+                      WHERE id = agent_runs.assistant_message_id
+                      LIMIT 1),
+                    message_group_id
+                 )
+             WHERE message_group_id LIKE 'msg-%';
+            "#,
+        )
+        .map_err(|error| format!("Failed to backfill SQLite message group ids: {error}"))?;
 
     if let Err(error) = connection.execute(
         "ALTER TABLE sessions ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0",
@@ -2239,6 +2338,10 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               ON messages(session_id, deleted_at, sort_index);
             CREATE INDEX IF NOT EXISTS idx_message_versions_message_deleted_version
               ON message_versions(message_id, deleted_at, version_index);
+            CREATE INDEX IF NOT EXISTS idx_message_versions_group_deleted_version
+              ON message_versions(group_id, deleted_at, version_index);
+            CREATE INDEX IF NOT EXISTS idx_agent_runs_message_group_updated
+              ON agent_runs(message_group_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_message_event_details_event
               ON message_event_details(event_id);
             "#,
@@ -2515,15 +2618,16 @@ fn persist_agent_runtime_log<R: Runtime>(
     connection
         .execute(
             "INSERT INTO agent_runs (
-                run_id, session_id, task_id, assistant_message_id, user_message_id, status,
+                run_id, session_id, task_id, message_group_id, assistant_message_id, user_message_id, status,
                 architecture_mode, requested_architecture_mode, path_mode, provider, model, cwd,
                 started_at, finished_at, updated_at, termination_reason, completion_state, graph_state,
                 checkpoint_count, recovery_count, tool_count, input_tokens, output_tokens, duration_ms,
                 error_code, error_category, summary_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)
              ON CONFLICT(run_id) DO UPDATE SET
                 session_id = COALESCE(excluded.session_id, agent_runs.session_id),
                 task_id = COALESCE(excluded.task_id, agent_runs.task_id),
+                message_group_id = COALESCE(excluded.message_group_id, agent_runs.message_group_id),
                 assistant_message_id = COALESCE(excluded.assistant_message_id, agent_runs.assistant_message_id),
                 user_message_id = COALESCE(excluded.user_message_id, agent_runs.user_message_id),
                 status = COALESCE(excluded.status, agent_runs.status),
@@ -2555,6 +2659,7 @@ fn persist_agent_runtime_log<R: Runtime>(
                 &run_id,
                 get_optional_json_string(details, "sessionId"),
                 get_optional_json_string(details, "taskId"),
+                get_optional_json_string(details, "messageGroupId"),
                 get_optional_json_string(details, "assistantMessageId"),
                 get_optional_json_string(details, "userMessageId"),
                 status.unwrap_or_else(|| "observed".to_string()),
@@ -5239,7 +5344,7 @@ fn load_session_messages_from_db(
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut messages_statement = connection
         .prepare(
-            "SELECT id, role, linked_message_id, sort_index, active_version_index, created_at, updated_at
+            "SELECT id, COALESCE(NULLIF(trim(group_id), ''), id), role, linked_message_id, sort_index, active_version_index, created_at, updated_at
              FROM messages
              WHERE session_id = ?1 AND deleted_at = 0
              ORDER BY sort_index ASC",
@@ -5251,18 +5356,19 @@ fn load_session_messages_from_db(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
             ))
         })
         .map_err(|error| format!("Failed to read messages from SQLite: {error}"))?;
 
     let mut versions_statement = connection
         .prepare(
-            "SELECT id, version_index, content, parts_json, status, created_at, attachments_json, reasoning_json, usage_json,
+            "SELECT id, COALESCE(NULLIF(trim(group_id), ''), message_id), version_index, content, parts_json, status, created_at, attachments_json, reasoning_json, usage_json,
                     capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json, appended_inputs_json,
                     agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json
              FROM message_versions
@@ -5276,6 +5382,7 @@ fn load_session_messages_from_db(
     for message_row in message_rows {
         let (
             message_id,
+            group_id,
             role,
             linked_message_id,
             _sort_index,
@@ -5288,26 +5395,27 @@ fn load_session_messages_from_db(
             .query_map(params![message_id.clone()], |row| {
                 Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?,
-                    "content": row.get::<_, String>(2)?,
-                    "parts": parse_json_array_column(row.get::<_, String>(3)?),
-                    "status": row.get::<_, Option<String>>(4)?,
-                    "createdAt": row.get::<_, i64>(5)?,
-                    "attachments": parse_json_array_column(row.get::<_, String>(6)?),
-                    "reasoning": parse_json_array_column(row.get::<_, String>(7)?),
-                    "usage": parse_json_column(row.get::<_, Option<String>>(8)?),
-                    "capabilitySnapshot": parse_json_object_column(row.get::<_, Option<String>>(9)?),
-                    "activity": parse_json_object_column(row.get::<_, Option<String>>(10)?),
-                    "events": parse_json_array_column(row.get::<_, String>(11)?),
-                    "steps": parse_json_array_column(row.get::<_, String>(12)?),
-                    "error": row.get::<_, Option<String>>(13)?,
-                    "errorInfo": parse_json_object_column(row.get::<_, Option<String>>(14)?),
-                    "appendedInputs": parse_json_array_column(row.get::<_, String>(15)?),
-                    "agentMode": row.get::<_, Option<String>>(16)?,
-                    "routeDecision": parse_json_object_column(row.get::<_, Option<String>>(17)?),
-                    "completionState": row.get::<_, Option<String>>(18)?,
-                    "evidenceSummary": parse_json_object_column(row.get::<_, Option<String>>(19)?),
-                    "deliveryNote": row.get::<_, Option<String>>(20)?,
-                    "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(21)?),
+                    "groupId": row.get::<_, String>(1)?,
+                    "content": row.get::<_, String>(3)?,
+                    "parts": parse_json_array_column(row.get::<_, String>(4)?),
+                    "status": row.get::<_, Option<String>>(5)?,
+                    "createdAt": row.get::<_, i64>(6)?,
+                    "attachments": parse_json_array_column(row.get::<_, String>(7)?),
+                    "reasoning": parse_json_array_column(row.get::<_, String>(8)?),
+                    "usage": parse_json_column(row.get::<_, Option<String>>(9)?),
+                    "capabilitySnapshot": parse_json_object_column(row.get::<_, Option<String>>(10)?),
+                    "activity": parse_json_object_column(row.get::<_, Option<String>>(11)?),
+                    "events": parse_json_array_column(row.get::<_, String>(12)?),
+                    "steps": parse_json_array_column(row.get::<_, String>(13)?),
+                    "error": row.get::<_, Option<String>>(14)?,
+                    "errorInfo": parse_json_object_column(row.get::<_, Option<String>>(15)?),
+                    "appendedInputs": parse_json_array_column(row.get::<_, String>(16)?),
+                    "agentMode": row.get::<_, Option<String>>(17)?,
+                    "routeDecision": parse_json_object_column(row.get::<_, Option<String>>(18)?),
+                    "completionState": row.get::<_, Option<String>>(19)?,
+                    "evidenceSummary": parse_json_object_column(row.get::<_, Option<String>>(20)?),
+                    "deliveryNote": row.get::<_, Option<String>>(21)?,
+                    "modelInfo": parse_json_object_column(row.get::<_, Option<String>>(22)?),
                 }))
             })
             .map_err(|error| format!("Failed to read message versions from SQLite: {error}"))?;
@@ -5322,6 +5430,7 @@ fn load_session_messages_from_db(
 
         messages.push(serde_json::json!({
             "id": message_id,
+            "groupId": group_id,
             "role": role,
             "linkedMessageId": linked_message_id,
             "createdAt": created_at,
@@ -5492,30 +5601,31 @@ fn list_agent_runs_sqlite<R: Runtime>(
             "runId": row.get::<_, String>(0)?,
             "sessionId": row.get::<_, Option<String>>(1)?,
             "taskId": row.get::<_, Option<String>>(2)?,
-            "assistantMessageId": row.get::<_, Option<String>>(3)?,
-            "userMessageId": row.get::<_, Option<String>>(4)?,
-            "status": row.get::<_, String>(5)?,
-            "architectureMode": row.get::<_, Option<String>>(6)?,
-            "requestedArchitectureMode": row.get::<_, Option<String>>(7)?,
-            "pathMode": row.get::<_, Option<String>>(8)?,
-            "provider": row.get::<_, Option<String>>(9)?,
-            "model": row.get::<_, Option<String>>(10)?,
-            "cwd": row.get::<_, Option<String>>(11)?,
-            "startedAt": row.get::<_, i64>(12)?,
-            "finishedAt": row.get::<_, Option<i64>>(13)?,
-            "updatedAt": row.get::<_, i64>(14)?,
-            "terminationReason": row.get::<_, Option<String>>(15)?,
-            "completionState": row.get::<_, Option<String>>(16)?,
-            "graphState": row.get::<_, Option<String>>(17)?,
-            "checkpointCount": row.get::<_, Option<i64>>(18)?,
-            "recoveryCount": row.get::<_, Option<i64>>(19)?,
-            "toolCount": row.get::<_, Option<i64>>(20)?,
-            "inputTokens": row.get::<_, Option<i64>>(21)?,
-            "outputTokens": row.get::<_, Option<i64>>(22)?,
-            "durationMs": row.get::<_, Option<i64>>(23)?,
-            "errorCode": row.get::<_, Option<String>>(24)?,
-            "errorCategory": row.get::<_, Option<String>>(25)?,
-            "summary": parse_json_object_column(row.get::<_, Option<String>>(26)?),
+            "messageGroupId": row.get::<_, Option<String>>(3)?,
+            "assistantMessageId": row.get::<_, Option<String>>(4)?,
+            "userMessageId": row.get::<_, Option<String>>(5)?,
+            "status": row.get::<_, String>(6)?,
+            "architectureMode": row.get::<_, Option<String>>(7)?,
+            "requestedArchitectureMode": row.get::<_, Option<String>>(8)?,
+            "pathMode": row.get::<_, Option<String>>(9)?,
+            "provider": row.get::<_, Option<String>>(10)?,
+            "model": row.get::<_, Option<String>>(11)?,
+            "cwd": row.get::<_, Option<String>>(12)?,
+            "startedAt": row.get::<_, i64>(13)?,
+            "finishedAt": row.get::<_, Option<i64>>(14)?,
+            "updatedAt": row.get::<_, i64>(15)?,
+            "terminationReason": row.get::<_, Option<String>>(16)?,
+            "completionState": row.get::<_, Option<String>>(17)?,
+            "graphState": row.get::<_, Option<String>>(18)?,
+            "checkpointCount": row.get::<_, Option<i64>>(19)?,
+            "recoveryCount": row.get::<_, Option<i64>>(20)?,
+            "toolCount": row.get::<_, Option<i64>>(21)?,
+            "inputTokens": row.get::<_, Option<i64>>(22)?,
+            "outputTokens": row.get::<_, Option<i64>>(23)?,
+            "durationMs": row.get::<_, Option<i64>>(24)?,
+            "errorCode": row.get::<_, Option<String>>(25)?,
+            "errorCategory": row.get::<_, Option<String>>(26)?,
+            "summary": parse_json_object_column(row.get::<_, Option<String>>(27)?),
         }))
     };
 
@@ -5523,7 +5633,7 @@ fn list_agent_runs_sqlite<R: Runtime>(
     if let Some(session_id) = normalized_session_id {
         let mut statement = connection
             .prepare(
-                "SELECT run_id, session_id, task_id, assistant_message_id, user_message_id, status,
+                "SELECT run_id, session_id, task_id, message_group_id, assistant_message_id, user_message_id, status,
                         architecture_mode, requested_architecture_mode, path_mode, provider, model, cwd,
                         started_at, finished_at, updated_at, termination_reason, completion_state, graph_state,
                         checkpoint_count, recovery_count, tool_count, input_tokens, output_tokens, duration_ms,
@@ -5543,7 +5653,7 @@ fn list_agent_runs_sqlite<R: Runtime>(
     } else {
         let mut statement = connection
             .prepare(
-                "SELECT run_id, session_id, task_id, assistant_message_id, user_message_id, status,
+                "SELECT run_id, session_id, task_id, message_group_id, assistant_message_id, user_message_id, status,
                         architecture_mode, requested_architecture_mode, path_mode, provider, model, cwd,
                         started_at, finished_at, updated_at, termination_reason, completion_state, graph_state,
                         checkpoint_count, recovery_count, tool_count, input_tokens, output_tokens, duration_ms,
@@ -5575,7 +5685,7 @@ fn load_agent_run_sqlite<R: Runtime>(
     let connection = open_app_db(&app)?;
     let run: Option<serde_json::Value> = connection
         .query_row(
-            "SELECT run_id, session_id, task_id, assistant_message_id, user_message_id, status,
+            "SELECT run_id, session_id, task_id, message_group_id, assistant_message_id, user_message_id, status,
                     architecture_mode, requested_architecture_mode, path_mode, provider, model, cwd,
                     started_at, finished_at, updated_at, termination_reason, completion_state, graph_state,
                     checkpoint_count, recovery_count, tool_count, input_tokens, output_tokens, duration_ms,
@@ -5588,30 +5698,31 @@ fn load_agent_run_sqlite<R: Runtime>(
                     "runId": row.get::<_, String>(0)?,
                     "sessionId": row.get::<_, Option<String>>(1)?,
                     "taskId": row.get::<_, Option<String>>(2)?,
-                    "assistantMessageId": row.get::<_, Option<String>>(3)?,
-                    "userMessageId": row.get::<_, Option<String>>(4)?,
-                    "status": row.get::<_, String>(5)?,
-                    "architectureMode": row.get::<_, Option<String>>(6)?,
-                    "requestedArchitectureMode": row.get::<_, Option<String>>(7)?,
-                    "pathMode": row.get::<_, Option<String>>(8)?,
-                    "provider": row.get::<_, Option<String>>(9)?,
-                    "model": row.get::<_, Option<String>>(10)?,
-                    "cwd": row.get::<_, Option<String>>(11)?,
-                    "startedAt": row.get::<_, i64>(12)?,
-                    "finishedAt": row.get::<_, Option<i64>>(13)?,
-                    "updatedAt": row.get::<_, i64>(14)?,
-                    "terminationReason": row.get::<_, Option<String>>(15)?,
-                    "completionState": row.get::<_, Option<String>>(16)?,
-                    "graphState": row.get::<_, Option<String>>(17)?,
-                    "checkpointCount": row.get::<_, Option<i64>>(18)?,
-                    "recoveryCount": row.get::<_, Option<i64>>(19)?,
-                    "toolCount": row.get::<_, Option<i64>>(20)?,
-                    "inputTokens": row.get::<_, Option<i64>>(21)?,
-                    "outputTokens": row.get::<_, Option<i64>>(22)?,
-                    "durationMs": row.get::<_, Option<i64>>(23)?,
-                    "errorCode": row.get::<_, Option<String>>(24)?,
-                    "errorCategory": row.get::<_, Option<String>>(25)?,
-                    "summary": parse_json_object_column(row.get::<_, Option<String>>(26)?),
+                    "messageGroupId": row.get::<_, Option<String>>(3)?,
+                    "assistantMessageId": row.get::<_, Option<String>>(4)?,
+                    "userMessageId": row.get::<_, Option<String>>(5)?,
+                    "status": row.get::<_, String>(6)?,
+                    "architectureMode": row.get::<_, Option<String>>(7)?,
+                    "requestedArchitectureMode": row.get::<_, Option<String>>(8)?,
+                    "pathMode": row.get::<_, Option<String>>(9)?,
+                    "provider": row.get::<_, Option<String>>(10)?,
+                    "model": row.get::<_, Option<String>>(11)?,
+                    "cwd": row.get::<_, Option<String>>(12)?,
+                    "startedAt": row.get::<_, i64>(13)?,
+                    "finishedAt": row.get::<_, Option<i64>>(14)?,
+                    "updatedAt": row.get::<_, i64>(15)?,
+                    "terminationReason": row.get::<_, Option<String>>(16)?,
+                    "completionState": row.get::<_, Option<String>>(17)?,
+                    "graphState": row.get::<_, Option<String>>(18)?,
+                    "checkpointCount": row.get::<_, Option<i64>>(19)?,
+                    "recoveryCount": row.get::<_, Option<i64>>(20)?,
+                    "toolCount": row.get::<_, Option<i64>>(21)?,
+                    "inputTokens": row.get::<_, Option<i64>>(22)?,
+                    "outputTokens": row.get::<_, Option<i64>>(23)?,
+                    "durationMs": row.get::<_, Option<i64>>(24)?,
+                    "errorCode": row.get::<_, Option<String>>(25)?,
+                    "errorCategory": row.get::<_, Option<String>>(26)?,
+                    "summary": parse_json_object_column(row.get::<_, Option<String>>(27)?),
                 }))
             },
         )
@@ -5805,12 +5916,15 @@ fn upsert_message_sqlite<R: Runtime>(
     sort_index: i64,
 ) -> Result<(), String> {
     let connection = open_app_db(&app)?;
+    let message_id = get_json_string_field(&message, "id", "");
+    let group_id = get_json_string_field(&message, "groupId", &message_id);
     connection
         .execute(
             "INSERT INTO messages (
-                id, session_id, role, linked_message_id, sort_index, active_version_index, created_at, deleted_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
+                id, group_id, session_id, role, linked_message_id, sort_index, active_version_index, created_at, deleted_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
              ON CONFLICT(id) DO UPDATE SET
+                group_id = excluded.group_id,
                 session_id = excluded.session_id,
                 role = excluded.role,
                 linked_message_id = excluded.linked_message_id,
@@ -5820,7 +5934,8 @@ fn upsert_message_sqlite<R: Runtime>(
                 deleted_at = 0,
                 updated_at = excluded.updated_at",
             params![
-                get_json_string_field(&message, "id", ""),
+                message_id,
+                group_id,
                 session_id,
                 get_json_string_field(&message, "role", "assistant"),
                 message.get("linkedMessageId").and_then(|value| value.as_str()),
@@ -5878,6 +5993,7 @@ fn upsert_message_version_sqlite<R: Runtime>(
     let connection = open_app_db(&app)?;
     let fallback_version_id = format!("{message_id}:v{version_index}");
     let version_id = get_json_string_field(&version, "id", &fallback_version_id);
+    let group_id = get_json_string_field(&version, "groupId", &message_id);
     let persisted_version_id = connection
         .query_row(
             "SELECT id
@@ -5894,11 +6010,12 @@ fn upsert_message_version_sqlite<R: Runtime>(
     connection
         .execute(
             "INSERT INTO message_versions (
-                id, message_id, version_index, content, parts_json, status, created_at, attachments_json, reasoning_json,
+                id, group_id, message_id, version_index, content, parts_json, status, created_at, attachments_json, reasoning_json,
                 usage_json, capability_snapshot_json, activity_json, events_json, steps_json, error, error_info_json,
                 appended_inputs_json, agent_mode, route_decision_json, completion_state, evidence_summary_json, delivery_note, model_info_json, deleted_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, 0)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, 0)
              ON CONFLICT(id) DO UPDATE SET
+                group_id = excluded.group_id,
                 message_id = excluded.message_id,
                 version_index = excluded.version_index,
                 content = excluded.content,
@@ -5925,6 +6042,7 @@ fn upsert_message_version_sqlite<R: Runtime>(
                 deleted_at = 0",
             params![
                 persisted_version_id,
+                group_id,
                 message_id,
                 version_index,
                 get_json_string_field(&version, "content", ""),
@@ -6043,15 +6161,18 @@ fn upsert_message_event_details_sqlite<R: Runtime>(
         if detail.is_null() {
             continue;
         }
+        let group_id = get_json_string_field(record, "groupId", &message_id);
         connection
             .execute(
                 "INSERT INTO message_event_details (
-                    message_id, version_index, event_id, detail_json, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)
+                    group_id, message_id, version_index, event_id, detail_json, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(message_id, version_index, event_id) DO UPDATE SET
+                    group_id = excluded.group_id,
                     detail_json = excluded.detail_json,
                     updated_at = excluded.updated_at",
                 params![
+                    group_id,
                     &message_id,
                     version_index,
                     event_id,

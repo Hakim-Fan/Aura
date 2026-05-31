@@ -428,6 +428,7 @@ export type MessageModelInfo = {
 
 export type ChatMessageVariant = {
   id?: string
+  groupId?: string
   content: string
   parts?: ChatContentPart[]
   status?: MessageStatus
@@ -455,6 +456,7 @@ export type ChatMessageVariant = {
 
 export type ChatMessage = {
   id: string
+  groupId?: string
   role: ChatRole
   linkedMessageId?: string
   content: string

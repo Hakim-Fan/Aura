@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process'
 import {
   formatToolError,
   parseCommandSpec,
+  parseArgString,
   parseLooseJson,
   resolveWorkspacePath,
   stringifyOutput,
@@ -247,6 +248,37 @@ function buildCommandExitError(toolName, exitCode) {
   })
 }
 
+function buildCommandOutputError(toolName, output) {
+  if (!COMMAND_EXIT_STATUS_TOOLS.has(toolName) || !output || typeof output !== 'object') {
+    return null
+  }
+  const stderr = typeof output.stderr === 'string' ? output.stderr.trim() : ''
+  if (!stderr) {
+    return null
+  }
+  const commandNotFoundMatch = stderr.match(/(?:^|\n)(?:[^:\n]+:\d+:\s*)?command not found:\s*([^\s\n]+)/i)
+  if (commandNotFoundMatch) {
+    const commandName = commandNotFoundMatch[1] || 'unknown'
+    return createStructuredError(`命令不可用：${commandName}。`, {
+      source: 'tool',
+      category: 'missing_dependency',
+      code: 'COMMAND_NOT_FOUND',
+      detail: `Shell reported command not found: ${commandName}.`,
+      suggestedAction:
+        '请改用当前环境已安装的工具，或先检查可用依赖；不要把带有 command not found 的输出当成成功结果。',
+      retryable: false,
+    })
+  }
+  return null
+}
+
+function buildCommandFailureError(toolName, output) {
+  return (
+    buildCommandExitError(toolName, commandExitFailureForTool(toolName, output)) ||
+    buildCommandOutputError(toolName, output)
+  )
+}
+
 async function walkDirectory(dirPath, maxDepth, currentDepth = 0) {
   const entries = await fs.readdir(dirPath, { withFileTypes: true })
   const lines = []
@@ -394,6 +426,199 @@ function resolveShellFileMutationInterception(tool, args, hooks = {}) {
     summary:
       'Blocked shell-based source editing; use apply_patch, replace_line_range, or write_file instead.',
   }
+}
+
+function shellCommandForTool(toolName, args = {}) {
+  if (toolName === 'run_shell' && typeof args.command === 'string') {
+    return args.command
+  }
+  if (toolName === 'exec_command' && typeof args.cmd === 'string') {
+    return args.cmd
+  }
+  return ''
+}
+
+function normalizeShellCommandForGuard(command) {
+  return String(command || '').replace(/\s+/g, ' ').trim()
+}
+
+function auraWorkspaceRootFromPath(value) {
+  const normalized = path.normalize(String(value || ''))
+  const marker = `${path.sep}.aura${path.sep}workspace${path.sep}`
+  const markerIndex = normalized.indexOf(marker)
+  if (markerIndex < 0) {
+    return ''
+  }
+  const afterMarker = normalized.slice(markerIndex + marker.length)
+  const workspaceId = afterMarker.split(path.sep).filter(Boolean)[0]
+  if (!workspaceId) {
+    return ''
+  }
+  return normalized.slice(0, markerIndex + marker.length + workspaceId.length)
+}
+
+function collectAuraWorkspaceRootsFromCommand(command) {
+  const roots = new Set()
+  const pattern = /(?:^|[\s"'`])((?:\/[^\s"'`$|;&<>]+)*\/\.aura\/workspace\/[^/\s"'`$|;&<>]+)/g
+  let match
+  while ((match = pattern.exec(command))) {
+    const root = auraWorkspaceRootFromPath(match[1])
+    if (root) {
+      roots.add(root)
+    }
+  }
+  return [...roots]
+}
+
+function cleanShellPathToken(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^[<([{]+/, '')
+    .replace(/[>),;\]]+$/, '')
+}
+
+function shellPathTokens(command) {
+  try {
+    return parseArgString(command).map(cleanShellPathToken).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function isAttachmentPathToken(token) {
+  return (
+    token === 'attachments' ||
+    token.startsWith('attachments/') ||
+    token.startsWith('./attachments/') ||
+    token.includes('/attachments/')
+  )
+}
+
+async function buildMissingAttachmentPathGuardError(toolName, args, hooks = {}) {
+  const command = shellCommandForTool(toolName, args)
+  if (!command) {
+    return null
+  }
+  const cwd =
+    typeof hooks.settings?.cwd === 'string' && hooks.settings.cwd.trim()
+      ? hooks.settings.cwd.trim()
+      : ''
+  if (!cwd) {
+    return null
+  }
+
+  for (const token of shellPathTokens(command)) {
+    if (!isAttachmentPathToken(token)) {
+      continue
+    }
+    const tokenWithoutDot = token.startsWith('./') ? token.slice(2) : token
+    const candidate = path.isAbsolute(tokenWithoutDot)
+      ? tokenWithoutDot
+      : path.resolve(cwd, tokenWithoutDot)
+    try {
+      await fs.access(candidate)
+      continue
+    } catch {
+      // Build a precise repair hint from the current attachments directory.
+    }
+
+    const attachmentsDir = path.resolve(cwd, 'attachments')
+    let available = []
+    try {
+      available = (await fs.readdir(attachmentsDir)).slice(0, 20)
+    } catch {
+      available = []
+    }
+    const availableText = available.length > 0
+      ? `当前 attachments 目录可用文件：${available.join(', ')}。`
+      : '当前 attachments 目录不可读取或为空。'
+    return createStructuredError('命令引用的附件路径不存在。', {
+      source: 'tool',
+      category: 'invalid_input',
+      code: 'MISSING_REFERENCED_ATTACHMENT',
+      detail: `Command referenced missing attachment path "${token}". ${availableText}`,
+      suggestedAction:
+        `请使用用户消息里的附件真实路径，或先用 list_files/read_file 确认。当前工作区是：${cwd}`,
+      retryable: false,
+    })
+  }
+  return null
+}
+
+function buildRepeatedFailedShellCommandGuardError(toolName, args, toolEvents = []) {
+  const command = normalizeShellCommandForGuard(shellCommandForTool(toolName, args))
+  if (!command) {
+    return null
+  }
+  const repeatedFailure = [...toolEvents]
+    .reverse()
+    .slice(0, 8)
+    .some(event => {
+      if (event?.name !== toolName || event?.status !== 'error') {
+        return false
+      }
+      const eventCommand = normalizeShellCommandForGuard(
+        typeof event.input === 'string' && event.input.startsWith('$ ')
+          ? event.input.slice(2)
+          : event.input,
+      )
+      return eventCommand === command
+    })
+
+  if (!repeatedFailure) {
+    return null
+  }
+
+  return createStructuredError('已阻止重复执行相同的失败命令。', {
+    source: 'tool',
+    category: 'invalid_input',
+    code: 'REPEATED_FAILED_COMMAND',
+    detail:
+      'The same shell command already failed in this run. Repeating it without changing the path, arguments, or approach is not useful.',
+    suggestedAction:
+      '请先根据上一次错误修正路径或命令。若是文件路径问题，优先使用当前工作目录 cwd、list_files 或 read_file 确认真实路径。',
+    retryable: false,
+  })
+}
+
+async function buildStaleAuraWorkspacePathGuardError(toolName, args, hooks = {}) {
+  const command = shellCommandForTool(toolName, args)
+  if (!command) {
+    return null
+  }
+  const cwd =
+    typeof hooks.settings?.cwd === 'string' && hooks.settings.cwd.trim()
+      ? hooks.settings.cwd.trim()
+      : ''
+  const currentWorkspaceRoot = auraWorkspaceRootFromPath(cwd)
+  if (!currentWorkspaceRoot) {
+    return null
+  }
+
+  const referencedRoots = collectAuraWorkspaceRootsFromCommand(command)
+  const staleRoots = referencedRoots.filter(root => path.normalize(root) !== currentWorkspaceRoot)
+  if (staleRoots.length === 0) {
+    return null
+  }
+
+  const missingRoots = []
+  for (const root of staleRoots) {
+    try {
+      await fs.access(root)
+    } catch {
+      missingRoots.push(root)
+    }
+  }
+  const blockedRoot = missingRoots[0] || staleRoots[0]
+  return createStructuredError('命令引用了非当前会话的 Aura 工作区路径。', {
+    source: 'tool',
+    category: 'invalid_input',
+    code: 'STALE_AURA_WORKSPACE_PATH',
+    detail: `Command referenced "${blockedRoot}", but the current workspace is "${currentWorkspaceRoot}".`,
+    suggestedAction:
+      `请改用当前 cwd 或当前工作区路径：${cwd}。不要凭记忆手写 .aura/workspace 路径；先用 list_files/read_file 确认文件。`,
+    retryable: false,
+  })
 }
 
 function buildStepCancelledError(tool) {
@@ -3372,6 +3597,53 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     })
   }
 
+  const shellCommandGuardError =
+    buildRepeatedFailedShellCommandGuardError(effectiveTool.name, effectiveArgs, toolEvents) ||
+    await buildStaleAuraWorkspacePathGuardError(effectiveTool.name, effectiveArgs, hooks) ||
+    await buildMissingAttachmentPathGuardError(effectiveTool.name, effectiveArgs, hooks)
+  if (shellCommandGuardError) {
+    const normalizedGuardError = normalizeRuntimeError(shellCommandGuardError, {
+      source: 'tool',
+      operationLabel: effectiveTool.description || effectiveTool.name,
+    })
+    const toolError = ToolExecutionError.fromNormalizedError(
+      normalizedGuardError,
+      effectiveTool.name,
+    )
+    const toolErrorInfo = toolError.toStructuredReport()
+    updateEvent({
+      summary: shellCommandGuardError.errorInfo?.detail || eventSummary,
+      status: 'error',
+      ...completeEventTiming(),
+      error: shellCommandGuardError.rawMessage,
+      errorInfo: toolErrorInfo,
+    })
+    await invokeAgentHook(
+      hooks,
+      AgentHookEvent.PostToolUseFailure,
+      {
+        toolEventId: eventId,
+        tool: catalogEntry,
+        errorInfo: toolErrorInfo,
+      },
+    )
+    emitToolAuditEvent(hooks, {
+      ...auditBase,
+      status: 'blocked',
+      errorCode: toolErrorInfo?.code,
+      errorCategory: toolErrorInfo?.category,
+    })
+    return new ToolResult({
+      success: false,
+      output: null,
+      error: toolError,
+      toolName: effectiveTool.name,
+      toolCallId: hooks.toolCallId,
+      eventId,
+      ...activePlanStep,
+    })
+  }
+
   const requiresPolicyApproval = executionPolicy.action === 'prompt'
   const approvalCategory = requiresPolicyApproval
     ? (executionPolicy.approvalCategory || effectiveTool.approvalCategory)
@@ -3594,10 +3866,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
               nextOutput,
             )
             const finalSummary = editingProgressSummary(effectiveTool.name, nextOutput)
-            const commandExitError = buildCommandExitError(
-              effectiveTool.name,
-              commandExitFailureForTool(effectiveTool.name, nextOutput),
-            )
+            const commandExitError = buildCommandFailureError(effectiveTool.name, nextOutput)
             updateEvent({
               status: commandExitError ? 'error' : 'success',
               summary: finalSummary || eventSummary,
@@ -3635,10 +3904,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
     const structuredOutput = structuredEventOutputForTool(effectiveTool.name, output)
     const finalSummary = editingProgressSummary(effectiveTool.name, output)
     const commandStillRunning = commandStillRunningForTool(effectiveTool.name, output)
-    const commandExitError = buildCommandExitError(
-      effectiveTool.name,
-      commandExitFailureForTool(effectiveTool.name, output),
-    )
+    const commandExitError = buildCommandFailureError(effectiveTool.name, output)
     updateEvent({
       status: commandExitError ? 'error' : commandStillRunning ? 'running' : 'success',
       summary: finalSummary || eventSummary,

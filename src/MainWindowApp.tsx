@@ -127,12 +127,16 @@ function createSessionId() {
   return `${timestampIdPart()}-${randomIdPart()}`
 }
 
-function sessionRandomPart(sessionId: string) {
-  return sessionId.split('-').filter(Boolean).at(-1) || randomIdPart()
+function createMessageGroupId(sessionId: string) {
+  return `${sessionId}-grp_${randomIdPart(6)}`
 }
 
-function createMessageId(sessionId: string) {
-  return `${sessionRandomPart(sessionId)}-${timestampIdPart(true)}-${randomIdPart()}`
+function createVersionMessageId(groupId: string) {
+  return `${groupId}-msg_${randomIdPart(6)}`
+}
+
+function getMessageGroupId(message: Pick<ChatMessage, 'id' | 'groupId'>) {
+  return message.groupId || message.id
 }
 
 const MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
@@ -1359,6 +1363,7 @@ function buildAppendedInputPhaseOutput(input: AppendedInput, order?: number): Me
 function toMessageVariant(message: ChatMessage): ChatMessageVariant {
   return {
     id: message.versions?.[message.activeVersionIndex || 0]?.id || message.id,
+    groupId: getMessageGroupId(message),
     content: message.content,
     parts: message.parts,
     status: message.status,
@@ -1675,11 +1680,17 @@ function applyMessageVariant(
   variants: ChatMessageVariant[],
   activeIndex: number,
 ): ChatMessage {
-  const safeIndex = Math.max(0, Math.min(activeIndex, variants.length - 1))
-  const activeVariant = variants[safeIndex]
+  const groupId = getMessageGroupId(message)
+  const normalizedVariants = variants.map(variant => ({
+    ...variant,
+    groupId: variant.groupId || groupId,
+  }))
+  const safeIndex = Math.max(0, Math.min(activeIndex, normalizedVariants.length - 1))
+  const activeVariant = normalizedVariants[safeIndex]
 
   return {
     ...message,
+    groupId,
     content: activeVariant.content,
     parts: activeVariant.parts,
     status: activeVariant.status,
@@ -1703,7 +1714,7 @@ function applyMessageVariant(
     completionState: activeVariant.completionState,
     evidenceSummary: activeVariant.evidenceSummary,
     deliveryNote: activeVariant.deliveryNote,
-    versions: variants,
+    versions: normalizedVariants,
     activeVersionIndex: safeIndex,
   }
 }
@@ -3759,19 +3770,22 @@ export function MainWindowApp() {
     const targetAssistantMessage = options?.targetAssistantMessageId
       ? activeSession.messages.find(message => message.id === options.targetAssistantMessageId)
       : null
-    const pendingUserMessageId = targetUserMessage?.id || createMessageId(sessionId)
-    let pendingAssistantMessageId =
-      targetAssistantMessage?.id || createMessageId(sessionId)
-    const pendingAssistantVersionId = targetAssistantMessage
-      ? createMessageId(sessionId)
-      : pendingAssistantMessageId
+    const pendingUserMessageId = targetUserMessage
+      ? getMessageGroupId(targetUserMessage)
+      : createMessageGroupId(sessionId)
+    const pendingAssistantMessageId = targetAssistantMessage
+      ? getMessageGroupId(targetAssistantMessage)
+      : createMessageGroupId(sessionId)
+    const pendingUserVersionId =
+      targetUserMessage && options?.appendUserVersion === false
+        ? getMessageVariantId(targetUserMessage)
+        : createVersionMessageId(pendingUserMessageId)
+    const pendingAssistantVersionId = createVersionMessageId(pendingAssistantMessageId)
 
     const messageCreatedAt = Date.now()
     const userMessageVariant: ChatMessageVariant = {
-      id:
-        targetUserMessage && options?.appendUserVersion === false
-          ? getMessageVariantId(targetUserMessage)
-          : pendingUserMessageId,
+      id: pendingUserVersionId,
+      groupId: pendingUserMessageId,
       content: contentForDisplay,
       parts: storedUserMessageParts,
       status: 'completed',
@@ -3818,6 +3832,7 @@ export function MainWindowApp() {
     const pendingAssistantVariant: ChatMessageVariant = {
       ...toMessageVariant(createPendingAssistantMessage()),
       id: pendingAssistantVersionId,
+      groupId: pendingAssistantMessageId,
       capabilitySnapshot: resolvedCapabilities.usage,
       modelInfo: buildMessageModelInfo(latestProviderProfile, latestEffectiveModel),
     }
@@ -3829,6 +3844,7 @@ export function MainWindowApp() {
           {
             ...createPendingAssistantMessage(),
             id: pendingAssistantMessageId,
+            groupId: pendingAssistantMessageId,
             linkedMessageId: '',
           },
           [pendingAssistantVariant],
@@ -3837,6 +3853,7 @@ export function MainWindowApp() {
         const userMessage = applyMessageVariant(
           {
             id: pendingUserMessageId,
+            groupId: pendingUserMessageId,
             role: 'user',
             linkedMessageId: assistantMessage.id,
             content: userMessageVariant.content,
@@ -3864,6 +3881,7 @@ export function MainWindowApp() {
         options?.appendUserVersion === false
           ? {
             ...targetUserMessage,
+            groupId: pendingUserMessageId,
             linkedMessageId: targetAssistantMessage?.id || pendingAssistantMessageId,
           }
           : appendMessageVariant(targetUserMessage, userMessageVariant)
@@ -3876,6 +3894,7 @@ export function MainWindowApp() {
             updateActiveMessageVariant(
               {
                 ...targetAssistantMessage,
+                groupId: pendingAssistantMessageId,
                 linkedMessageId: updatedUserMessage.id,
               },
               currentVariant =>
@@ -3902,6 +3921,7 @@ export function MainWindowApp() {
           {
             ...createPendingAssistantMessage(),
             id: pendingAssistantMessageId,
+            groupId: pendingAssistantMessageId,
             linkedMessageId: updatedUserMessage.id,
           },
           [pendingAssistantVariant],
@@ -3966,8 +3986,9 @@ export function MainWindowApp() {
         undefined,
         {
           sessionId,
-          userMessageId: pendingUserMessageId,
+          userMessageId: pendingUserVersionId,
           assistantMessageId: pendingAssistantVersionId,
+          messageGroupId: pendingAssistantMessageId,
         },
       )
       setRunningTasksBySession(current => ({

@@ -251,6 +251,10 @@ export class ToolResult {
       ...this.baseToolEventFields(),
       name: this.toolName,
       status: 'error',
+      output:
+        this.output == null
+          ? undefined
+          : typeof this.output === 'string' ? this.output : JSON.stringify(this.output),
       error: this.error instanceof ToolExecutionError ? this.error.message : String(this.error),
       errorInfo: this.error instanceof ToolExecutionError ? this.error.toStructuredReport() : undefined,
     }

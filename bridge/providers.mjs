@@ -60,6 +60,60 @@ function nextProviderTimelineOrders(hooks, step) {
   }
 }
 
+function shouldRunSpawnAgentCallsInParallel(toolNames = []) {
+  return (
+    toolNames.length > 1 &&
+    toolNames.every(name => String(name || '') === 'spawn_agent')
+  )
+}
+
+async function invokeRegisteredToolCall({
+  toolName,
+  args = {},
+  toolCallId,
+  registry,
+  toolEvents,
+  hooks,
+  toolOrder,
+  activeTools,
+}) {
+  const tool = registry.get(toolName)
+  if (!tool) {
+    return new ToolResult({
+      success: false,
+      output: null,
+      error: new ToolExecutionError({
+        toolName,
+        category: 'not_found',
+        severity: 'permanent',
+        detail: `Tool not found: ${toolName}`,
+        suggestedAction: '请确认工具名称拼写正确，或检查该工具是否已正确加载。',
+        retryable: false,
+      }),
+      toolName,
+      toolCallId,
+    })
+  }
+
+  return await invokeToolWithRetry(tool, args, toolEvents, {
+    ...hooks,
+    timelineOrder: toolOrder,
+    ...(toolCallId ? { toolCallId } : {}),
+    registerDynamicTools(nextTools) {
+      if (!Array.isArray(activeTools)) {
+        return
+      }
+      for (const nextTool of Array.isArray(nextTools) ? nextTools : []) {
+        if (!nextTool?.name || registry.has(nextTool.name)) {
+          continue
+        }
+        registry.set(nextTool.name, nextTool)
+        activeTools.push(nextTool)
+      }
+    },
+  })
+}
+
 const ASSISTANT_SPILLOVER_TRIGGER_TOKENS = 6_000
 const ASSISTANT_SPILLOVER_SUMMARY_CHARS = 1_200
 const TOOL_OUTPUT_SPILLOVER_PREVIEW_TOKENS = 400
@@ -193,13 +247,17 @@ function maybeSpillToolOutputForTranscript({
   ].filter(Boolean).join('\n')
 }
 
-function formatToolErrorForTranscript(error, toolName, errorReport = {}) {
+function formatToolErrorForTranscript(error, toolName, errorReport = {}, toolOutput = '') {
+  const outputText = String(toolOutput || '').trim()
   const lines = [
     `Tool ${toolName} execution failed.`,
     errorReport.category ? `Error category: ${errorReport.category}` : null,
     errorReport.suggestedAction ? `Suggested action: ${errorReport.suggestedAction}` : null,
     errorReport.repairHint ? `Repair hint: ${JSON.stringify(errorReport.repairHint)}` : null,
     errorReport.detail ? `Detail: ${errorReport.detail}` : null,
+    outputText
+      ? `Tool output:\n${truncate(outputText, 6000)}`
+      : null,
   ].filter(Boolean)
   return lines.join('\n')
 }
@@ -220,6 +278,22 @@ function summarizeSpilloverText(content = '') {
       ? normalized.slice(-Math.floor(ASSISTANT_SPILLOVER_SUMMARY_CHARS * 0.25))
       : ''
   return tail ? `${head} ... ${tail}` : head
+}
+
+function upsertToolEventEntry(toolEvents = [], entry = {}) {
+  if (!entry?.id) {
+    toolEvents.push(entry)
+    return
+  }
+  const index = toolEvents.findIndex(existing => existing?.id === entry.id)
+  if (index >= 0) {
+    toolEvents[index] = {
+      ...toolEvents[index],
+      ...entry,
+    }
+    return
+  }
+  toolEvents.push(entry)
 }
 
 function maybeSpillAssistantContent({
@@ -2052,6 +2126,89 @@ function extractCompleteApplyPatchText(rawArgs) {
   return text.slice(begin, end + endMarker.length).trim()
 }
 
+const SHELL_ARGUMENT_TOOL_NAMES = new Set(['exec_command', 'run_shell'])
+
+function decodeLooseJsonString(value = '') {
+  return String(value || '')
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\')
+}
+
+function findLooseJsonStringEnd(tail = '') {
+  const quotePattern = /"/gu
+  let match
+  while ((match = quotePattern.exec(tail)) !== null) {
+    const afterQuote = tail.slice(match.index + 1)
+    if (/^\s*(?:,\s*"[A-Za-z0-9_]+"\s*:|\}\s*$)/u.test(afterQuote)) {
+      return match.index
+    }
+  }
+  return -1
+}
+
+function parseLooseShellToolArguments(rawArgs, toolName = '') {
+  if (!SHELL_ARGUMENT_TOOL_NAMES.has(toolName)) {
+    return null
+  }
+
+  const text = String(rawArgs || '').trim()
+  if (!text.startsWith('{') || !text.endsWith('}')) {
+    return null
+  }
+
+  const sourceFields = toolName === 'exec_command'
+    ? ['cmd', 'command']
+    : ['command', 'cmd']
+  const targetField = toolName === 'exec_command' ? 'cmd' : 'command'
+
+  for (const fieldName of sourceFields) {
+    const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const startMatch = new RegExp(`"${escaped}"\\s*:\\s*"`, 'u').exec(text)
+    if (!startMatch) {
+      continue
+    }
+
+    const valueStart = startMatch.index + startMatch[0].length
+    const tail = text.slice(valueStart)
+    const valueEnd = findLooseJsonStringEnd(tail)
+    if (valueEnd < 0) {
+      continue
+    }
+
+    const value = decodeLooseJsonString(tail.slice(0, valueEnd))
+    if (!value.trim()) {
+      continue
+    }
+
+    let trailingArgs = {}
+    const trailing = tail.slice(valueEnd + 1).trim()
+    if (trailing.startsWith(',')) {
+      try {
+        const parsedTrailing = JSON.parse(`{${trailing.slice(1)}`)
+        if (
+          parsedTrailing &&
+          typeof parsedTrailing === 'object' &&
+          !Array.isArray(parsedTrailing)
+        ) {
+          trailingArgs = parsedTrailing
+        }
+      } catch {
+        trailingArgs = {}
+      }
+    }
+
+    return {
+      ...trailingArgs,
+      [targetField]: value,
+    }
+  }
+
+  return null
+}
+
 function parseToolArguments(rawArgs, toolName = '') {
   if (!rawArgs?.trim()) {
     return {}
@@ -2072,6 +2229,10 @@ function parseToolArguments(rawArgs, toolName = '') {
       return {
         patch: rawApplyPatchText,
       }
+    }
+    const looseShellArgs = parseLooseShellToolArguments(rawArgs, toolName)
+    if (looseShellArgs) {
+      return looseShellArgs
     }
 
     const detail = error instanceof Error ? error.message : String(error)
@@ -2425,6 +2586,7 @@ export const __testInternals = {
   compactMessagesWithProvider,
   dedupeInlineToolCalls,
   extractInlineToolCalls,
+  formatToolErrorForTranscript,
   getProviderFailureRecoveryMaxRetries,
   getProviderRetryDelayMs,
   hasWriteRepairAttemptSince,
@@ -2439,9 +2601,11 @@ export const __testInternals = {
   resolveCompactionOutputTokens,
   resolveCompactionSettings,
   runProviderOperationWithRetry,
+  shouldRunSpawnAgentCallsInParallel,
   shouldNudgeForObservableProgress,
   shouldInjectObservableProgressReplan,
   summarizePartialToolCalls,
+  upsertToolEventEntry,
   OBSERVABLE_PROGRESS_REPLAN_PROMPT,
   updateUnresolvedToolErrorForRepair,
 }
@@ -4418,49 +4582,53 @@ export async function runOpenAiCompatibleAgent({
 
       hooks?.onPhaseChange?.('tool_running')
       const toolEventStartIndex = toolEvents.length
-      for (const toolCall of finalizedToolCalls) {
-        const tool = registry.get(toolCall.function.name)
-        const args = parseToolArguments(
+      const preparedToolCalls = finalizedToolCalls.map((toolCall) => ({
+        toolCall,
+        toolName: toolCall.function.name,
+        args: parseToolArguments(
           toolCall.function.arguments || '{}',
           toolCall.function.name,
-        )
-        let result
-        if (!tool) {
-          result = new ToolResult({
-            success: false,
-            output: null,
-            error: new ToolExecutionError({
-              toolName: toolCall.function.name,
-              category: 'not_found',
-              severity: 'permanent',
-              detail: `Tool not found: ${toolCall.function.name}`,
-              suggestedAction: '请确认工具名称拼写正确，或检查该工具是否已正确加载。',
-              retryable: false,
-            }),
-            toolName: toolCall.function.name,
+        ),
+      }))
+      const runPreparedToolCall = async (entry) => ({
+        ...entry,
+        result: await invokeRegisteredToolCall({
+          toolName: entry.toolName,
+          args: entry.args,
+          toolCallId: entry.toolCall.id,
+          registry,
+          toolEvents,
+          hooks,
+          toolOrder,
+          activeTools,
+        }),
+      })
+      const handledToolCalls = shouldRunSpawnAgentCallsInParallel(
+        preparedToolCalls.map(entry => entry.toolName),
+      )
+        ? await Promise.all(preparedToolCalls.map(runPreparedToolCall))
+        : []
+
+      for (const handledEntry of handledToolCalls.length > 0
+        ? handledToolCalls
+        : preparedToolCalls) {
+        const { toolCall, toolName } = handledEntry
+        let result = handledEntry.result
+        if (!result) {
+          result = await invokeRegisteredToolCall({
+            toolName,
+            args: handledEntry.args,
             toolCallId: toolCall.id,
-          })
-        } else {
-          result = await invokeToolWithRetry(tool, args, toolEvents, {
-            ...hooks,
-            timelineOrder: toolOrder,
-            toolCallId: toolCall.id,
-            registerDynamicTools(nextTools) {
-              for (const nextTool of Array.isArray(nextTools)
-                ? nextTools
-                : []) {
-                if (!nextTool?.name || registry.has(nextTool.name)) {
-                  continue
-                }
-                registry.set(nextTool.name, nextTool)
-                activeTools.push(nextTool)
-              }
-            },
+            registry,
+            toolEvents,
+            hooks,
+            toolOrder,
+            activeTools,
           })
         }
 
         const toolEventEntry = result.toToolEventEntry()
-        toolEvents.push(toolEventEntry)
+        upsertToolEventEntry(toolEvents, toolEventEntry)
 
         if (result instanceof ToolResult && result.success) {
           transcript.push({
@@ -4470,7 +4638,7 @@ export async function runOpenAiCompatibleAgent({
               toolOutput: result.output,
               settings,
               hooks,
-              toolName: toolCall.function.name,
+              toolName,
               toolCallId: toolCall.id,
               providerKind: 'openai',
               stage: `step-${step + 1}`,
@@ -4480,7 +4648,12 @@ export async function runOpenAiCompatibleAgent({
           const errorReport = result.error instanceof ToolExecutionError
             ? result.error.toStructuredReport()
             : { message: String(result.error) }
-          const errorMessage = formatToolErrorForTranscript(result.error, toolCall.function.name, errorReport)
+          const errorMessage = formatToolErrorForTranscript(
+            result.error,
+            toolName,
+            errorReport,
+            result.output,
+          )
           transcript.push({
             role: 'tool',
             tool_call_id: toolCall.id,
@@ -5052,33 +5225,41 @@ export async function runGoogleAgent({
       hooks?.onPhaseChange?.('tool_running')
       const toolResponses = []
       const toolEventStartIndex = toolEvents.length
-      for (const entry of functionCalls) {
-        const tool = registry.get(entry.name)
-        let result
-        if (!tool) {
-          const toolError = new ToolExecutionError({
+      const runFunctionCall = async (entry) => ({
+        entry,
+        result: await invokeRegisteredToolCall({
+          toolName: entry.name,
+          args: entry.args || {},
+          registry,
+          toolEvents,
+          hooks,
+          toolOrder,
+        }),
+      })
+      const handledFunctionCalls = shouldRunSpawnAgentCallsInParallel(
+        functionCalls.map(entry => entry.name),
+      )
+        ? await Promise.all(functionCalls.map(runFunctionCall))
+        : []
+
+      for (const handledEntry of handledFunctionCalls.length > 0
+        ? handledFunctionCalls
+        : functionCalls.map(entry => ({ entry }))) {
+        const { entry } = handledEntry
+        let result = handledEntry.result
+        if (!result) {
+          result = await invokeRegisteredToolCall({
             toolName: entry.name,
-            category: 'not_found',
-            severity: 'permanent',
-            detail: `Tool not found: ${entry.name}`,
-            suggestedAction: '请确认工具名称拼写正确，或检查该工具是否已正确加载。',
-            retryable: false,
-          })
-          result = new ToolResult({
-            success: false,
-            output: null,
-            error: toolError,
-            toolName: entry.name,
-          })
-        } else {
-          result = await invokeToolWithRetry(tool, entry.args || {}, toolEvents, {
-            ...hooks,
-            timelineOrder: toolOrder,
+            args: entry.args || {},
+            registry,
+            toolEvents,
+            hooks,
+            toolOrder,
           })
         }
 
         const toolEventEntry = result.toToolEventEntry()
-        toolEvents.push(toolEventEntry)
+        upsertToolEventEntry(toolEvents, toolEventEntry)
 
         const outputContent = result.success
           ? maybeSpillToolOutputForTranscript({
@@ -5089,8 +5270,12 @@ export async function runGoogleAgent({
               providerKind: 'google',
               stage: `step-${step + 1}`,
             })
-          : formatToolErrorForTranscript(result.error, entry.name,
-              result.error instanceof ToolExecutionError ? result.error.toStructuredReport() : {})
+          : formatToolErrorForTranscript(
+              result.error,
+              entry.name,
+              result.error instanceof ToolExecutionError ? result.error.toStructuredReport() : {},
+              result.output,
+            )
 
         toolResponses.push({
           functionResponse: {

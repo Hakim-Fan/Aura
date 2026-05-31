@@ -20,6 +20,7 @@ type AgentTaskLogContext = {
   sessionId?: string
   userMessageId?: string
   assistantMessageId?: string
+  messageGroupId?: string
   compressedThroughMessageId?: string
   compressionId?: string
 }

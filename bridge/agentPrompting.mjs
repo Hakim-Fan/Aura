@@ -371,7 +371,7 @@ export function buildRuntimeSystemPrompt(
     }
     if (capabilityProfile.hasMultiAgentTools) {
       sections.push(
-        'Multi-agent delegation is mounted through spawn_agent. Use it only for meaningfully parallel or independent work. Use agent_type="explorer" for read-only codebase investigation, agent_type="worker" for a bounded implementation chunk, agent_type="verification" for independent adversarial verification, and agent_type="default" for general delegated work. Do not spawn an agent for trivial single-step tasks, and include all needed context in the message.',
+        'Multi-agent delegation is mounted through spawn_agent, following Claude AgentTool semantics. Use it only for meaningfully parallel or independent work. When there are multiple independent subproblems, call multiple spawn_agent tools in the same model turn so they can run concurrently. Use agent_type="explorer" for read-only codebase investigation, agent_type="worker" for a bounded implementation chunk, agent_type="verification" for independent adversarial verification, and agent_type="default" for general delegated work. Claude-compatible aliases also work: description, prompt, subagent_type. Do not spawn an agent for trivial single-step tasks, do not re-delegate from inside a subagent, and include all needed context in the message.',
       )
       sections.push(buildClaudeStyleVerificationAgentInstruction())
     }
@@ -653,7 +653,7 @@ export function buildDefaultAgentPromptBlocks(
   }
 
   if (capabilityProfile.hasMultiAgentTools) {
-    capabilitySections.push('For multi-agent work, call spawn_agent only when the task has a genuinely independent subproblem. Use agent_type="explorer" for read-only codebase investigation, agent_type="worker" for a bounded implementation chunk, agent_type="verification" for independent adversarial verification, and agent_type="default" for general delegated work. Simple tasks should stay in the main agent.')
+    capabilitySections.push('For multi-agent work, call spawn_agent only when the task has a genuinely independent subproblem. When several subproblems are independent, call multiple spawn_agent tools in the same model turn so they can run concurrently. Use agent_type="explorer" for read-only codebase investigation, agent_type="worker" for a bounded implementation chunk, agent_type="verification" for independent adversarial verification, and agent_type="default" for general delegated work. Claude-compatible aliases also work: description, prompt, subagent_type. Simple tasks should stay in the main agent.')
     capabilitySections.push(buildClaudeStyleVerificationAgentInstruction())
   }
 

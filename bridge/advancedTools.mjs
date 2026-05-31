@@ -75,6 +75,12 @@ function formatCodexAgentRoleDescription() {
 
 function normalizeAgentType(value) {
   const normalized = String(value || 'default').trim().toLowerCase()
+  if (normalized === 'general-purpose' || normalized === 'general_purpose') {
+    return 'default'
+  }
+  if (normalized === 'explore') {
+    return 'explorer'
+  }
   return normalized || 'default'
 }
 
@@ -94,8 +100,8 @@ function resolveAgentRole(agentType) {
 }
 
 function buildSpawnAgentPrompt(role, args = {}) {
-  const message = String(args.message || args.task || '').trim()
-  const taskName = String(args.task_name || args.taskName || '').trim()
+  const message = String(args.message || args.prompt || args.task || '').trim()
+  const taskName = String(args.task_name || args.description || args.taskName || '').trim()
   const deliverable = String(args.deliverable || '').trim()
   return [
     ...role.prompt,
@@ -438,9 +444,10 @@ function buildMultiAgentTools({
       name: 'spawn_agent',
       description:
         [
-          'Spawns a Codex-style agent to work on the specified task and returns its distilled result.',
+          'Spawns a Claude-style subagent to work on the specified task and returns its distilled result.',
           'Spawned agents inherit the current model by default. Omit model unless the user explicitly asks for a different model.',
           formatCodexAgentRoleDescription(),
+          'Claude-compatible aliases are supported: description maps to task_name, prompt maps to message, and subagent_type maps to agent_type.',
           'Use explorer for codebase investigation, worker for implementation, verification for independent verification, and default for general delegated work.',
         ].join('\n\n'),
       inputSchema: {
@@ -459,6 +466,18 @@ function buildMultiAgentTools({
             type: 'string',
             description: formatCodexAgentRoleDescription(),
           },
+          description: {
+            type: 'string',
+            description: 'Claude-compatible alias for task_name. A concise task label.',
+          },
+          prompt: {
+            type: 'string',
+            description: 'Claude-compatible alias for message. The full task prompt for the subagent.',
+          },
+          subagent_type: {
+            type: 'string',
+            description: 'Claude-compatible alias for agent_type.',
+          },
           task: {
             type: 'string',
             description: 'Compatibility alias for message.',
@@ -476,11 +495,11 @@ function buildMultiAgentTools({
             description: 'Optional model override for the worker.',
           },
         },
-        required: ['task_name', 'message'],
+        required: [],
       },
       async run(args) {
-        const role = resolveAgentRole(args.agent_type)
-        const message = String(args.message || args.task || '').trim()
+        const role = resolveAgentRole(args.agent_type || args.subagent_type)
+        const message = String(args.message || args.prompt || args.task || '').trim()
         if (!message) {
           throw createStructuredError('spawn_agent 缺少 message。', {
             source: 'tool',
@@ -494,7 +513,7 @@ function buildMultiAgentTools({
           : context.cwd
         const taskNode = taskTracker?.createChildTask({
           parentId: runtimeMeta.currentTaskId,
-          title: args.task_name || message,
+          title: args.task_name || args.description || message,
           summary: `${role.title}: ${args.deliverable || message}`,
         })
         const workerPrompt = buildSpawnAgentPrompt(role, args)
@@ -516,7 +535,7 @@ function buildMultiAgentTools({
             runtime: {
               subagentDepth: (runtimeMeta.subagentDepth || 0) + 1,
               subagentRole: role.name,
-              subagentTaskName: args.task_name || taskNode?.id,
+              subagentTaskName: args.task_name || args.description || taskNode?.id,
               currentTaskId: taskNode?.id,
               taskTracker,
               executionStepIds: runtimeMeta.executionStepIds,
@@ -532,7 +551,7 @@ function buildMultiAgentTools({
 
           return stringifyOutput({
             agent_id: taskNode?.id,
-            task_name: args.task_name || taskNode?.id || message,
+            task_name: args.task_name || args.description || taskNode?.id || message,
             agent_type: role.name,
             agent_status: result.status === 'failed' ? 'failed' : 'completed',
             worker_cwd: workerCwd,

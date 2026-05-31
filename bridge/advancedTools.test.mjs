@@ -24,7 +24,7 @@ test('createAdvancedTools omits macOS-only computer tools on Windows', () => {
   assert.equal(tools.some(tool => tool.name === 'system_browser_open'), true)
 })
 
-test('createAdvancedTools exposes Codex-style spawn_agent when multi-agent is enabled', () => {
+test('createAdvancedTools exposes Claude-style spawn_agent when multi-agent is enabled', () => {
   const baseOptions = {
     platform: 'darwin',
     context: {
@@ -131,6 +131,44 @@ test('spawn_agent runs a role-scoped nested agent', async () => {
     nestedCall.input.messages[0].content.includes('Do not write, edit, patch'),
     true,
   )
+})
+
+test('spawn_agent accepts Claude AgentTool aliases', async () => {
+  const calls = []
+  const tools = createAdvancedTools({
+    platform: 'darwin',
+    settings: {
+      enableMultiAgent: true,
+      model: 'parent-model',
+    },
+    context: {
+      cwd: process.cwd(),
+    },
+    runtimeMeta: {},
+    runNestedAgent: async input => {
+      calls.push(input)
+      return {
+        status: 'completed',
+        message: 'Inspected the requested area.',
+      }
+    },
+  })
+
+  const spawnAgent = tools.find(tool => tool.name === 'spawn_agent')
+  assert.ok(spawnAgent)
+
+  const output = await spawnAgent.run({
+    description: 'inspect_runtime_loop',
+    prompt: 'Inspect how the runtime loop delegates tools.',
+    subagent_type: 'Explore',
+  })
+  const parsed = JSON.parse(output)
+
+  assert.equal(parsed.task_name, 'inspect_runtime_loop')
+  assert.equal(parsed.agent_type, 'explorer')
+  assert.equal(calls[0].runtime.subagentRole, 'explorer')
+  assert.match(calls[0].messages[0].content, /Canonical task name: inspect_runtime_loop/)
+  assert.match(calls[0].messages[0].content, /Inspect how the runtime loop delegates tools/)
 })
 
 test('spawn_agent rejects legacy verifier agent type', async () => {

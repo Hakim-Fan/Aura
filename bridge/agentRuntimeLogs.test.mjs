@@ -48,6 +48,7 @@ test('createAgentRuntimeLogger emits stable base fields and never throws through
     logContext: {
       sessionId: 'session-1',
       taskId: 'task-1',
+      messageGroupId: 'group-1',
       assistantMessageId: 'assistant-1',
     },
     now: () => 1_700_000_000_000,
@@ -62,6 +63,7 @@ test('createAgentRuntimeLogger emits stable base fields and never throws through
   assert.equal(events[0].details.runId, logger.runId)
   assert.equal(events[0].details.sessionId, 'session-1')
   assert.equal(events[0].details.taskId, 'task-1')
+  assert.equal(events[0].details.messageGroupId, 'group-1')
   assert.equal(events[0].details.assistantMessageId, 'assistant-1')
   assert.equal(events[0].details.architectureMode, 'default-agent')
   assert.equal(events[0].details.requestedArchitectureMode, 'default-agent')

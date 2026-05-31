@@ -8,6 +8,7 @@ const {
   buildProviderRetryInfo,
   compactMessagesWithProvider,
   extractInlineToolCalls,
+  formatToolErrorForTranscript,
   getProviderFailureRecoveryMaxRetries,
   getProviderRetryDelayMs,
   hasWriteRepairAttemptSince,
@@ -21,9 +22,11 @@ const {
   resolveCompactionOutputTokens,
   resolveCompactionSettings,
   runProviderOperationWithRetry,
+  shouldRunSpawnAgentCallsInParallel,
   shouldNudgeForObservableProgress,
   shouldInjectObservableProgressReplan,
   summarizePartialToolCalls,
+  upsertToolEventEntry,
   OBSERVABLE_PROGRESS_REPLAN_PROMPT,
   updateUnresolvedToolErrorForRepair,
 } = __testInternals
@@ -55,6 +58,21 @@ test('provider usage preserves cached input token counters', () => {
       outputTokens: 256,
       cachedInputTokens: 3072,
     },
+  )
+})
+
+test('provider only parallelizes same-turn spawn_agent batches', () => {
+  assert.equal(
+    shouldRunSpawnAgentCallsInParallel(['spawn_agent', 'spawn_agent']),
+    true,
+  )
+  assert.equal(
+    shouldRunSpawnAgentCallsInParallel(['spawn_agent']),
+    false,
+  )
+  assert.equal(
+    shouldRunSpawnAgentCallsInParallel(['spawn_agent', 'read_file']),
+    false,
   )
 })
 
@@ -168,6 +186,82 @@ test('parseToolArguments surfaces a structured provider error for malformed JSON
       error?.errorInfo?.category === 'invalid_input' &&
       /无法解析的工具参数/.test(error?.message || ''),
   )
+})
+
+test('parseToolArguments repairs shell command strings with unescaped nested quotes', () => {
+  const rawArgs = `{"cmd": "cd /tmp/example & python3 -c "
+import subprocess
+result = subprocess.run(['python3', '-m', 'pymupdf', '--help'], capture_output=True, text=True)
+print(result.stdout[:500] if result.stdout else result.stderr[:50])
+"}`
+
+  assert.deepEqual(parseToolArguments(rawArgs, 'exec_command'), {
+    cmd: `cd /tmp/example & python3 -c "
+import subprocess
+result = subprocess.run(['python3', '-m', 'pymupdf', '--help'], capture_output=True, text=True)
+print(result.stdout[:500] if result.stdout else result.stderr[:50])
+`,
+  })
+})
+
+test('parseToolArguments preserves trailing shell options when repairing command string', () => {
+  const rawArgs = `{"cmd": "python3 -c "print('ok')"", "yield_time_ms": 1000, "max_output_tokens": 2000}`
+
+  assert.deepEqual(parseToolArguments(rawArgs, 'exec_command'), {
+    cmd: `python3 -c "print('ok')"`,
+    yield_time_ms: 1000,
+    max_output_tokens: 2000,
+  })
+})
+
+test('parseToolArguments keeps non-shell malformed JSON strict', () => {
+  assert.throws(
+    () => parseToolArguments(`{"path": "bad " quote"}`, 'read_file'),
+    error => error?.errorInfo?.code === 'INVALID_TOOL_ARGUMENTS_JSON',
+  )
+})
+
+test('formatToolErrorForTranscript includes failed command output for repair', () => {
+  const message = formatToolErrorForTranscript(
+    new Error('Command failed.'),
+    'run_shell',
+    {
+      category: 'execution_failed',
+      detail: 'Command "run_shell" exited with code 1.',
+    },
+    JSON.stringify({
+      exitCode: 1,
+      stderr: 'FileNotFoundError: missing.pdf',
+      command: 'python3 parse_pdf.py',
+    }),
+  )
+
+  assert.match(message, /Tool output:/)
+  assert.match(message, /FileNotFoundError: missing\.pdf/)
+  assert.match(message, /python3 parse_pdf\.py/)
+})
+
+test('upsertToolEventEntry updates existing live tool event instead of duplicating it', () => {
+  const events = [
+    {
+      id: 'tool-1',
+      name: 'run_shell',
+      status: 'running',
+      input: '$ node fail.js',
+    },
+  ]
+
+  upsertToolEventEntry(events, {
+    id: 'tool-1',
+    name: 'run_shell',
+    status: 'error',
+    output: '{"exitCode":1}',
+  })
+
+  assert.equal(events.length, 1)
+  assert.equal(events[0].status, 'error')
+  assert.equal(events[0].input, '$ node fail.js')
+  assert.equal(events[0].output, '{"exitCode":1}')
 })
 
 test('shouldNudgeForObservableProgress asks execution tasks for visible progress once', () => {

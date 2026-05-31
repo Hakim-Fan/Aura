@@ -1005,6 +1005,10 @@ function normalizeMessageVariant(
       : undefined
   return {
     id: typeof variant.id === 'string' && variant.id.trim() ? variant.id : undefined,
+    groupId:
+      typeof variant.groupId === 'string' && variant.groupId.trim()
+        ? variant.groupId
+        : undefined,
     content: typeof variant.content === 'string' ? variant.content : '',
     parts: normalizeMessageParts(variant.parts),
     status:
@@ -1873,7 +1877,14 @@ function parseSessionMessages(
         ? (rawMessage as Partial<Session['messages'][number]>)
         : ({} as Partial<Session['messages'][number]>)
     const createdAt = message.createdAt || sessionUpdatedAt || Date.now()
+    const messageId = message.id || Math.random().toString(36).slice(2, 10)
+    const groupId =
+      typeof message.groupId === 'string' && message.groupId.trim()
+        ? message.groupId
+        : messageId
     const baseVariant = normalizeMessageVariant(message, createdAt) || {
+      id: messageId,
+      groupId,
       content: message.content || '',
       parts: [],
       status: message.status || 'completed',
@@ -1926,7 +1937,10 @@ function parseSessionMessages(
         .filter((variant): variant is NonNullable<typeof variant> => Boolean(variant))
       : []
     const versions =
-      normalizedVersions.length > 0 ? normalizedVersions : [baseVariant]
+      (normalizedVersions.length > 0 ? normalizedVersions : [baseVariant]).map(variant => ({
+        ...variant,
+        groupId: variant.groupId || groupId,
+      }))
     const safeIndex =
       typeof message.activeVersionIndex === 'number' &&
         message.activeVersionIndex >= 0 &&
@@ -1936,7 +1950,8 @@ function parseSessionMessages(
     const activeVariant = versions[safeIndex] || baseVariant
 
     return {
-      id: message.id || Math.random().toString(36).slice(2, 10),
+      id: messageId,
+      groupId,
       role: message.role || 'assistant',
       linkedMessageId:
         typeof message.linkedMessageId === 'string' ? message.linkedMessageId : undefined,
@@ -2212,13 +2227,18 @@ function sessionHasPendingPersistence(session: PersistedSessionRecord) {
 }
 
 function persistedMessageVersions(message: PersistedSessionRecord['messages'][number]) {
+  const groupId = message.groupId || message.id
   if (Array.isArray(message.versions) && message.versions.length > 0) {
-    return message.versions
+    return message.versions.map(version => ({
+      ...version,
+      groupId: version.groupId || groupId,
+    }))
   }
 
   return [
     {
       id: message.id,
+      groupId,
       content: message.content || '',
       parts: message.parts || [],
       status: message.status || 'completed',
@@ -2262,6 +2282,7 @@ function messageShellSignature(
   return hashSignaturePayload(
     JSON.stringify({
       id: message.id,
+      groupId: message.groupId || message.id,
       role: message.role,
       linkedMessageId: message.linkedMessageId || null,
       sortIndex,

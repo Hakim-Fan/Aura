@@ -67,6 +67,7 @@ export function createAgentRuntimeLogger(options = {}) {
     runId,
     sessionId: safeString(logContext.sessionId) || undefined,
     taskId: safeString(logContext.taskId) || undefined,
+    messageGroupId: safeString(logContext.messageGroupId) || undefined,
     assistantMessageId: safeString(logContext.assistantMessageId) || undefined,
     userMessageId: safeString(logContext.userMessageId) || undefined,
     architectureMode: mode.architectureMode,

@@ -820,6 +820,160 @@ test('invokeTool blocks shell scripts that write source files', async () => {
   assert.equal(events.at(-1)?.errorInfo?.code, 'SHELL_FILE_MUTATION_BLOCKED')
 })
 
+test('invokeTool blocks shell commands that reference a stale Aura workspace path', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-workspace-path-'))
+  const currentWorkspace = path.join(root, '.aura', 'workspace', '2605311047-r7uio7oz')
+  const staleWorkspace = path.join(root, '.aura', 'workspace', '260531047-r7uio7oz')
+  await fs.mkdir(currentWorkspace, { recursive: true })
+  const events = []
+  let shellRan = false
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'run_shell',
+      approvalCategory: 'shell',
+      description: 'Run a shell command.',
+      async run() {
+        shellRan = true
+        return { ok: true }
+      },
+    },
+    {
+      command: `ls -la ${staleWorkspace}/attachments`,
+    },
+    events,
+    {
+      settings: {
+        cwd: currentWorkspace,
+        autoApproveShell: true,
+      },
+      onToolEvent(event) {
+        events.push(event)
+      },
+    },
+  )
+
+  assert.equal(shellRan, false)
+  assert.equal(output.success, false)
+  assert.equal(events.at(-1)?.status, 'error')
+  assert.equal(events.at(-1)?.errorInfo?.code, 'STALE_AURA_WORKSPACE_PATH')
+  assert.match(toolResultText(output), /当前会话的 Aura 工作区路径/)
+})
+
+test('invokeTool blocks repeated identical failed shell commands', async () => {
+  const events = [
+    {
+      name: 'run_shell',
+      status: 'error',
+      input: '$ ls -la missing-dir',
+    },
+  ]
+  let shellRan = false
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'run_shell',
+      approvalCategory: 'shell',
+      description: 'Run a shell command.',
+      async run() {
+        shellRan = true
+        return { ok: true }
+      },
+    },
+    {
+      command: 'ls -la missing-dir',
+    },
+    events,
+    {
+      settings: {
+        autoApproveShell: true,
+      },
+      onToolEvent(event) {
+        events.push(event)
+      },
+    },
+  )
+
+  assert.equal(shellRan, false)
+  assert.equal(output.success, false)
+  assert.equal(events.at(-1)?.status, 'error')
+  assert.equal(events.at(-1)?.errorInfo?.code, 'REPEATED_FAILED_COMMAND')
+  assert.match(toolResultText(output), /已阻止重复执行相同的失败命令/)
+})
+
+test('invokeTool blocks shell commands that reference a missing attachment filename', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-attachment-guard-'))
+  await fs.mkdir(path.join(workspace, 'attachments'), { recursive: true })
+  await fs.writeFile(
+    path.join(workspace, 'attachments', '比亚迪-2025年年度报告.pdf'),
+    'pdf',
+    'utf8',
+  )
+  const events = []
+  let shellRan = false
+
+  const output = await invokeTool(
+    {
+      source: 'builtin',
+      name: 'run_shell',
+      approvalCategory: 'shell',
+      description: 'Run a shell command.',
+      async run() {
+        shellRan = true
+        return { ok: true }
+      },
+    },
+    {
+      command: 'pdftotext attachments/比亚迪-2025年度报告.pdf - | head -n 20',
+    },
+    events,
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveShell: true,
+      },
+      onToolEvent(event) {
+        events.push(event)
+      },
+    },
+  )
+
+  assert.equal(shellRan, false)
+  assert.equal(output.success, false)
+  assert.equal(events.at(-1)?.status, 'error')
+  assert.equal(events.at(-1)?.errorInfo?.code, 'MISSING_REFERENCED_ATTACHMENT')
+  assert.match(toolResultText(output), /比亚迪-2025年年度报告\.pdf/)
+})
+
+test('builtin run_shell treats command-not-found stderr as failure even when a pipeline exits zero', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-command-not-found-'))
+  const runShell = createBuiltinTools({ cwd: workspace }).find(tool => tool.name === 'run_shell')
+  const events = []
+
+  const output = await invokeTool(
+    runShell,
+    {
+      command: 'definitely_missing_aura_command | head -n 1',
+    },
+    events,
+    {
+      settings: {
+        cwd: workspace,
+        autoApproveShell: true,
+      },
+      onToolEvent(event) {
+        events.push(event)
+      },
+    },
+  )
+
+  assert.equal(output.success, false)
+  assert.equal(events.at(-1)?.status, 'error')
+  assert.equal(events.at(-1)?.errorInfo?.code, 'COMMAND_NOT_FOUND')
+})
+
 test('invokeTool asks approval for write_file outside the workspace', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-external-write-workspace-'))
   const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-external-write-target-'))
@@ -1158,6 +1312,8 @@ test('builtin run_shell marks nonzero exit as tool error', async () => {
   assert.equal(parsed.exitCode, 7)
   assert.equal(events.at(-1)?.status, 'error')
   assert.equal(events.at(-1)?.errorInfo?.code, 'COMMAND_EXIT_NONZERO')
+  assert.match(events.at(-1)?.output || '', /"exitCode": 7/)
+  assert.match(output.toToolEventEntry().output || '', /"exitCode": 7/)
 })
 
 test('exec_command updates the original tool event when a background session exits', async () => {
