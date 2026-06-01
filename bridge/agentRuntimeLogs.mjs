@@ -200,7 +200,6 @@ export function wrapAgentRuntimeHooks(hooks = {}, logger) {
       const escalationCount = safeNumber(routeDecision?.escalationCount) || 0
       logger.emit('agent.route.decision', {
         capabilityTier: routeDecision?.capabilityTier,
-        answerMode: routeDecision?.answerMode,
         availableEscalations: compactArray(routeDecision?.availableEscalations),
         mountedTools: compactArray(routeDecision?.mountedCapabilities?.tools),
         budgets: routeDecision?.budgets,

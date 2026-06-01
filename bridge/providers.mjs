@@ -26,6 +26,7 @@ import {
   estimateTextTokens,
   estimateMessagesTokens,
   selectRecentUserMessagesForCompactionSummary,
+  shouldCompressMessages,
   splitMessagesIntoTokenBatches,
 } from './contextCompression.mjs'
 
@@ -503,6 +504,14 @@ function buildEstimatedUsage(
     outputTokens: estimateTextTokens(outputText || '', settings),
     estimatedInputTokens: inputTokens,
   }
+}
+
+function activeContextTokensFromUsage(usage) {
+  return Math.max(
+    0,
+    Math.round(Number(usage?.inputTokens) || 0) +
+      Math.round(Number(usage?.outputTokens) || 0),
+  )
 }
 
 function estimateSerializedInputTokens(value, settings = {}) {
@@ -1406,20 +1415,29 @@ async function compactRuntimeTranscript({
   settings,
   transcript,
   estimateTokens,
+  estimateActivePromptTokens,
   formatEntry,
   buildSummaryEntry,
   chooseRecentStart,
   systemPrompt = '',
   toolSchemaTokens = 0,
+  activeContextTokens = 0,
   hooks,
   providerKind,
 }) {
   const estimatedTokens = estimateTokens(transcript, settings)
-  const budget = buildContextCompressionBudget(settings, {
+  const transcriptMessages = transcriptEntriesToMessages(transcript, formatEntry)
+  const compressionState = shouldCompressMessages(transcriptMessages, settings, {
     systemPrompt,
     toolSchemaTokens,
+    latestInputTokens: activeContextTokens,
   })
-  if (estimatedTokens <= budget.effectiveThresholdTokens) {
+  const budget = compressionState.budget
+  if (
+    activeContextTokens <= 0 ||
+    activeContextTokens <= compressionState.activePromptLimit ||
+    !compressionState.shouldCompress
+  ) {
     return transcript
   }
 
@@ -1461,19 +1479,32 @@ async function compactRuntimeTranscript({
     ...recentEntries,
   ]
   const afterTokens = estimateTokens(compactedTranscript, settings)
+  const afterActiveTokens =
+    typeof estimateActivePromptTokens === 'function'
+      ? Math.max(0, Math.round(Number(estimateActivePromptTokens(compactedTranscript)) || 0))
+      : Math.max(
+          0,
+          Math.round(
+            Number(
+              budget.systemPromptTokens + budget.toolSchemaTokens + afterTokens,
+            ) || 0,
+          ),
+        )
   hooks?.onContextCompression?.({
     id: compressionStepId,
-    kind: 'provider_runtime_transcript',
+    kind: 'agent_runtime',
     summary: summaryText,
     compressedThroughMessageId: '',
     originalMessageCount: Array.isArray(transcript) ? transcript.length : 0,
     originalTokenEstimate: Math.max(
       0,
-      Math.round(Number(estimatedTokens) || 0),
+      Math.round(Number(activeContextTokens) || 0),
     ),
-    compressedTokenEstimate: Math.max(0, Math.round(Number(afterTokens) || 0)),
+    compressedTokenEstimate: afterActiveTokens,
     createdAt: Date.now(),
-    trigger: 'provider_runtime_transcript',
+    trigger: 'provider_usage',
+    activePromptTokens: Math.max(0, Math.round(Number(activeContextTokens) || 0)),
+    activePromptLimit: compressionState.activePromptLimit,
     contextWindowTokens: budget.contextWindowTokens,
     configuredContextWindowTokens: budget.configuredContextWindowTokens,
     configuredThresholdTokens: budget.configuredThresholdTokens,
@@ -1497,13 +1528,13 @@ async function compactRuntimeTranscript({
     model: typeof settings?.model === 'string' ? settings.model : undefined,
   })
   hooks?.onActiveContextEstimate?.({
-    latestInputTokens: afterTokens,
+    latestInputTokens: afterActiveTokens,
     contextWindow: budget.contextWindowTokens,
     allowDecrease: true,
-    reason: 'provider_runtime_transcript_compression',
+    reason: 'context_compression',
   })
   hooks?.onReasoningDelta?.(
-    `Runtime transcript compression: ${estimatedTokens} estimated tokens -> ${afterTokens} estimated tokens.`,
+    `Context compression (${providerKind} runtime): ${Math.max(0, Math.round(Number(activeContextTokens) || 0))} active tokens -> ${afterActiveTokens} active tokens.`,
     {
       blockId: compressionStepId,
       kind: 'summary',
@@ -1519,6 +1550,7 @@ function compactOpenAiRuntimeTranscript({
   systemPrompt,
   hooks,
   tools = [],
+  activeContextTokens = 0,
 }) {
   const toolSchemaTokens = estimateTextTokens(
     JSON.stringify(openAiToolDefs(tools)),
@@ -1528,6 +1560,9 @@ function compactOpenAiRuntimeTranscript({
     settings,
     transcript,
     estimateTokens: estimateOpenAiTranscriptTokens,
+    estimateActivePromptTokens(compactedTranscript) {
+      return estimateOpenAiRequestInputTokens(compactedTranscript, tools, settings)
+    },
     formatEntry: openAiTranscriptEntryText,
     buildSummaryEntry(summary) {
       return {
@@ -1538,6 +1573,7 @@ function compactOpenAiRuntimeTranscript({
     chooseRecentStart: chooseOpenAiRecentTranscriptStart,
     systemPrompt,
     toolSchemaTokens,
+    activeContextTokens,
     hooks,
     providerKind: 'openai',
   })
@@ -1549,6 +1585,7 @@ function compactGeminiRuntimeTranscript({
   systemPrompt,
   hooks,
   tools = [],
+  activeContextTokens = 0,
 }) {
   const toolSchemaTokens = estimateTextTokens(
     JSON.stringify(geminiToolDefs(tools)),
@@ -1558,6 +1595,14 @@ function compactGeminiRuntimeTranscript({
     settings,
     transcript,
     estimateTokens: estimateGeminiTranscriptTokens,
+    estimateActivePromptTokens(compactedTranscript) {
+      return estimateGoogleRequestInputTokens(
+        systemPrompt,
+        compactedTranscript,
+        tools,
+        settings,
+      )
+    },
     formatEntry: geminiTranscriptEntryText,
     buildSummaryEntry(summary) {
       return {
@@ -1570,6 +1615,7 @@ function compactGeminiRuntimeTranscript({
     chooseRecentStart: chooseGeminiRecentTranscriptStart,
     systemPrompt,
     toolSchemaTokens,
+    activeContextTokens,
     hooks,
     providerKind: 'gemini',
   })
@@ -3801,12 +3847,7 @@ function shouldNudgeForObservableProgress({
   if (nudgeCount > 0 || toolEvents.length > 0) {
     return false
   }
-  const routeState = hooks?.routeState || {}
-  const requiresExecution =
-    settings.executionMode === 'long-task' ||
-    routeState.answerMode === 'execute' ||
-    routeState.completionPolicy?.requiresEvidenceForDone === true
-  if (!requiresExecution) {
+  if (settings.executionMode !== 'long-task') {
     return false
   }
   return String(content || '').trim().length >= 80
@@ -3814,7 +3855,7 @@ function shouldNudgeForObservableProgress({
 
 function buildObservableProgressPrompt() {
   return [
-    '当前请求是执行型任务，但上一轮没有产生任何可观察的工具进展。',
+    '当前请求处于长任务执行窗口，但上一轮没有产生任何可观察的工具进展。',
     '请继续执行，而不是直接给最终回答：调用合适的工具读取、修改、生成产物、验证结果，或在确实无法继续时说明具体阻塞点。',
     '如果已经有足够信息可以落地一部分，请优先产生一个可观察结果，例如文件变更、命令输出、artifact、progress 更新或验证证据。',
   ].join('\n')
@@ -4102,13 +4143,6 @@ export async function runOpenAiCompatibleAgent({
           content: activeSystemPrompt,
         }
       }
-      transcript = await compactOpenAiRuntimeTranscript({
-        settings,
-        transcript,
-        systemPrompt: activeSystemPrompt,
-        hooks,
-        tools: activeTools,
-      })
       const reasoningBlockId = createProviderReasoningBlockId(hooks, 'openai', step)
       const reasoningStartedAt = Date.now()
       const { reasoningOrder, toolOrder } = nextProviderTimelineOrders(hooks, step)
@@ -4398,6 +4432,20 @@ export async function runOpenAiCompatibleAgent({
       }
 
       const { content, finalizedToolCalls, phaseReasoning } = stepResult
+      const needsFollowUp =
+        finalizedToolCalls.length > 0 ||
+        (isLengthFinishReason(stepResult.finishReason) &&
+          lengthContinuationAttempts < completionPolicy.maxLengthContinuations)
+      if (needsFollowUp) {
+        transcript = await compactOpenAiRuntimeTranscript({
+          settings,
+          transcript,
+          systemPrompt: activeSystemPrompt,
+          hooks,
+          tools: activeTools,
+          activeContextTokens: activeContextTokensFromUsage(stepResult.usage),
+        })
+      }
       if (finalizedToolCalls.length === 0) {
         if (
           isLengthFinishReason(stepResult.finishReason) &&
@@ -4786,13 +4834,6 @@ export async function runGoogleAgent({
         systemPrompt,
         hooks?.workMemoryContext,
       )
-      transcript = await compactGeminiRuntimeTranscript({
-        settings,
-        transcript,
-        systemPrompt: activeSystemPrompt,
-        hooks,
-        tools: activeTools,
-      })
       const reasoningBlockId = createProviderReasoningBlockId(hooks, 'google', step)
       const reasoningStartedAt = Date.now()
       const { reasoningOrder, toolOrder } = nextProviderTimelineOrders(hooks, step)
@@ -5028,6 +5069,20 @@ export async function runGoogleAgent({
       }
 
       const { content, functionCalls } = stepResult
+      const needsFollowUp =
+        functionCalls.length > 0 ||
+        (isLengthFinishReason(stepResult.finishReason) &&
+          lengthContinuationAttempts < completionPolicy.maxLengthContinuations)
+      if (needsFollowUp) {
+        transcript = await compactGeminiRuntimeTranscript({
+          settings,
+          transcript,
+          systemPrompt: activeSystemPrompt,
+          hooks,
+          tools: activeTools,
+          activeContextTokens: activeContextTokensFromUsage(stepResult.usage),
+        })
+      }
       if (functionCalls.length === 0) {
         if (
           isLengthFinishReason(stepResult.finishReason) &&

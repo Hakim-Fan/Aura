@@ -268,7 +268,7 @@ test('shouldNudgeForObservableProgress asks execution tasks for visible progress
   assert.equal(
     shouldNudgeForObservableProgress({
       settings: { executionMode: 'long-task' },
-      hooks: { routeState: { answerMode: 'execute' } },
+      hooks: { routeState: {} },
       toolEvents: [],
       content: '已经分析出需要读取文件并生成产物，但是这一轮还没有调用任何工具产生可观察结果。当前回答继续描述方案、步骤、原因和预期结果，但没有真正读取文件、写入产物、执行验证或记录进度。',
       nudgeCount: 0,
@@ -278,7 +278,7 @@ test('shouldNudgeForObservableProgress asks execution tasks for visible progress
   assert.equal(
     shouldNudgeForObservableProgress({
       settings: { executionMode: 'long-task' },
-      hooks: { routeState: { answerMode: 'execute' } },
+      hooks: { routeState: {} },
       toolEvents: [{ id: 'tool-1', status: 'success' }],
       content: '已有工具结果。',
       nudgeCount: 0,
@@ -288,7 +288,7 @@ test('shouldNudgeForObservableProgress asks execution tasks for visible progress
   assert.equal(
     shouldNudgeForObservableProgress({
       settings: { executionMode: 'long-task' },
-      hooks: { routeState: { answerMode: 'execute' } },
+      hooks: { routeState: {} },
       toolEvents: [],
       content: '第一次已经提醒过。',
       nudgeCount: 1,

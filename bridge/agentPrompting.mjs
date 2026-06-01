@@ -137,7 +137,6 @@ export function buildUserCustomInstructionsPrompt(settings = {}) {
 }
 
 function deriveCapabilityProfile(routeState, toolAvailability = {}) {
-  const answerMode = routeState?.answerMode || 'advise'
   const needsExternalFacts = routeState?.needsExternalFacts === true
   const webRetrievalAvailable = routeState?.webRetrievalAvailable !== false
   const webInteractionRequired = routeState?.webInteractionRequired === true
@@ -170,8 +169,7 @@ function deriveCapabilityProfile(routeState, toolAvailability = {}) {
     mixedRetrievalAndWorkspaceExecution:
       mountedWeb === true &&
       needsExternalFacts === true &&
-      (mountedWrite === true || mountedAdmin === true) &&
-      answerMode === 'execute',
+      (mountedWrite === true || mountedAdmin === true),
   }
 }
 
@@ -193,9 +191,7 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
       .filter(Boolean)
       .join(', ')
     lines.push(
-      routeState.modelDirected === true
-        ? `Active default-agent capability profile: ${enabledModes || 'safe local reads only'}.`
-        : `Current answer mode: ${routeState.answerMode}. Active capability profile: ${enabledModes || 'safe local reads only'}.`,
+      `Active default-agent capability profile: ${enabledModes || 'safe local reads only'}.`,
     )
     if (routeState.needsExternalFacts === true) {
       lines.push(
@@ -309,7 +305,7 @@ export function buildRuntimeSystemPrompt(
 
     sections.push(
       [
-        `Current answer mode: ${routeState.answerMode}.`,
+        'Model-directed turn: decide whether to answer directly or use tools from the mounted tool list.',
         capabilityProfile.hasInteractiveBrowserTools
           ? 'Interactive browser tools: enabled when explicitly required.'
           : 'Interactive browser tools: not active unless the task explicitly requires them.',
@@ -317,7 +313,7 @@ export function buildRuntimeSystemPrompt(
           ? 'If web retrieval tools are mounted in the tool list, use them for this turn because the task depends on current external facts.'
           : 'If web retrieval tools are mounted in the tool list, they remain optional but usable. Do not wait for classifier hints before using them when local context or current knowledge is insufficient.',
         capabilityProfile.hasWorkspaceWriteTools
-          ? 'Workspace write tools: mounted when available in the tool list. Use them when the user is asking for concrete local changes, and treat route mode as planning guidance rather than a hard prohibition.'
+          ? 'Workspace write tools: mounted when available in the tool list. Use them when the user is asking for concrete local changes; the mounted tool list is the source of truth.'
           : 'Workspace write tools are not mounted for this turn.',
         routeState.researchMode === 'deep'
           ? 'Research mode: deep.'
@@ -346,15 +342,9 @@ export function buildRuntimeSystemPrompt(
       )
     }
 
-    if (routeState.answerMode === 'execute') {
-      sections.push(
-        'The user is primarily asking for execution. If you actually modify files, run commands, or interact with the browser, verify the outcome before saying it is done.',
-      )
-    } else {
-      sections.push(
-        'The user primarily needs advice or diagnosis. Prefer explaining the issue and a concrete next step over pretending the task has already been executed. If mounted write tools are available and the user explicitly asked for concrete local changes, you may still execute instead of refusing purely because of route mode.',
-      )
-    }
+    sections.push(
+      'If the user asks for concrete local changes, use the mounted tools to do the work. If you actually modify files, run commands, or interact with the browser, verify the outcome before saying it is done; if you did not verify, say that plainly.',
+    )
 
     sections.push(
       'Safe local inspection tools may be mounted even on advice-heavy turns. Use them when they materially reduce uncertainty, but do not imply that files were changed unless write evidence exists.',
@@ -533,12 +523,8 @@ export function buildDefaultAgentPromptBlocks(
     'For simple questions, answer directly and keep the response concise.',
     'For multi-step, ambiguous, or stateful work, call todo_write with a short checklist and keep it current. todo_write is only for progress display: use explanation for why the plan changed, and plan items with step/status/activeForm. Do not put acceptance criteria, verification evidence, risks, or long explanations in todo items. Do not create a plan for trivial one-step work.',
     'When a todo step needs verification, perform verification with an appropriate mounted tool before finalizing. Mark todo steps completed only after the current run produced concrete tool evidence for the work represented by that step.',
-    routeState?.answerMode === 'execute'
-      ? 'Execution-mode contract: the user expects concrete work, not another planning pass. todo_write, reading files, and explaining intent are coordination/context only; they do not satisfy an execution step by themselves. After a plan/todo update, move to the concrete tool that creates, edits, runs, verifies, or persists the requested output. If the requested output is large, create the smallest durable file first, then extend it in bounded chunks.'
-      : null,
-    routeState?.answerMode === 'execute'
-      ? 'For large generated deliverables such as HTML prototypes, PRDs, slide decks, reports, or converted documents, avoid a single huge tool-call argument. Persist a compact workspace file scaffold first, then continue with bounded edits and checkpoints.'
-      : null,
+    'When the user expects concrete work, do not stop at another planning pass. todo_write, reading files, and explaining intent are coordination/context only; they do not satisfy the task by themselves. After a plan/todo update, move to the concrete tool that creates, edits, runs, verifies, or persists the requested output. If the requested output is large, create the smallest durable file first, then extend it in bounded chunks.',
+    'For large generated deliverables such as HTML prototypes, PRDs, slide decks, reports, or converted documents, avoid a single huge tool-call argument. Persist a compact workspace file scaffold first, then continue with bounded edits and checkpoints.',
     'Use tools when they materially reduce uncertainty or let you complete the user request. The mounted tool list is the source of truth for this turn.',
     'If a needed capability is not obvious and tool_search is mounted, inspect the current tool catalog before claiming the capability is unavailable.',
     'If the user request needs files, commands, web retrieval, browser interaction, or capability management and the matching tool is mounted, use the tool directly instead of asking the user to do the work.',

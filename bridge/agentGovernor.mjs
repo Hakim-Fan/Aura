@@ -27,7 +27,6 @@ export function summarizeRouteTurn({
   const errorToolEventCount = nextEvents.filter(event => event.status === 'error').length
 
   return {
-    answerMode: routeState?.answerMode,
     capabilityTier: routeState?.capabilityTier,
     toolEventCount: nextEvents.length,
     successfulToolEventCount,

@@ -638,12 +638,6 @@ function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefin
   }
 
   const routeDecision = value as Partial<RouteDecisionSnapshot>
-  const answerMode =
-    routeDecision.answerMode === 'advise' ||
-    routeDecision.answerMode === 'diagnose' ||
-    routeDecision.answerMode === 'execute'
-      ? routeDecision.answerMode
-      : undefined
   const capabilityTier =
     routeDecision.capabilityTier === 'none' ||
     routeDecision.capabilityTier === 'local-readonly' ||
@@ -653,7 +647,7 @@ function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefin
       ? routeDecision.capabilityTier
       : undefined
 
-  if (!answerMode || !capabilityTier) {
+  if (!capabilityTier) {
     return undefined
   }
 
@@ -727,7 +721,6 @@ function normalizeRouteDecision(value: unknown): RouteDecisionSnapshot | undefin
   }
 
   return {
-    answerMode,
     capabilityTier,
     budgets:
       routeDecision.budgets &&

@@ -118,9 +118,7 @@ function collectMessagePendingActions(messages = []) {
 }
 
 function isExecutionRouteDecision(routeDecision) {
-  return routeDecision?.answerMode === 'execute' ||
-    routeDecision?.intentClassification?.answerMode === 'execute' ||
-    routeDecision?.completionPolicy?.requiresEvidenceForDone === true
+  return routeDecision?.completionPolicy?.requiresEvidenceForDone === true
 }
 
 function resolvePriorExecutionState(previousAssistant) {
@@ -147,7 +145,6 @@ function resolvePriorExecutionState(previousAssistant) {
   return {
     completionState,
     reason: 'previous_assistant_incomplete_execution',
-    answerMode: routeDecision?.answerMode || routeDecision?.intentClassification?.answerMode,
     requiresEvidenceForDone:
       routeDecision?.completionPolicy?.requiresEvidenceForDone !== false,
     messageId: previousAssistant?.id,
@@ -195,32 +192,5 @@ export function resolveTaskFrame({ messages = [], runtime = {}, settings = {} } 
     blocksFastPath,
     recommendedPathMode: blocksFastPath ? 'standard' : undefined,
     reasons,
-  }
-}
-
-export function applyTaskFrameToClassification(classification = {}, taskFrame = {}) {
-  if (!taskFrame?.blocksFastPath || classification?.pathMode !== 'fast') {
-    return classification
-  }
-
-  return {
-    ...classification,
-    pathMode: taskFrame.recommendedPathMode || 'standard',
-    requiresTools: true,
-    requiresWrite:
-      classification.requiresWrite === true ||
-      taskFrame.requiresEvidenceForDone === true,
-    reason: [
-      classification.reason,
-      `task_frame_blocked_fast_path:${safeArray(taskFrame.reasons).join('|') || 'structured_context'}`,
-    ]
-      .filter(Boolean)
-      .join(', '),
-    reasons: [
-      ...safeArray(classification.reasons),
-      'task_frame_blocked_fast_path',
-      ...safeArray(taskFrame.reasons),
-    ],
-    taskFrameBlockedFastPath: true,
   }
 }

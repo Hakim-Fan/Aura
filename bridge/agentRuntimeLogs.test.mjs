@@ -125,7 +125,6 @@ test('wrapAgentRuntimeHooks logs route, tool, compression, recovery, and still f
 
   hooks.onRouteDecision({
     capabilityTier: 'local-write',
-    answerMode: 'execute',
     availableEscalations: ['browser-interactive'],
     mountedCapabilities: { tools: ['read_file', 'apply_patch'] },
     budgets: { writeEscalationsRemaining: 1 },

@@ -1100,19 +1100,6 @@ function MessageStatusNotice({
   )
 }
 
-function routeAnswerModeLabel(answerMode?: RouteDecisionSnapshot['answerMode']) {
-  switch (answerMode) {
-    case 'advise':
-      return '建议'
-    case 'diagnose':
-      return '诊断'
-    case 'execute':
-      return '执行'
-    default:
-      return ''
-  }
-}
-
 function routeCapabilityTierLabel(capabilityTier?: RouteDecisionSnapshot['capabilityTier']) {
   switch (capabilityTier) {
     case 'none':
@@ -1136,7 +1123,6 @@ function buildRouteSummary(routeDecision?: RouteDecisionSnapshot) {
   }
 
   const summary = [
-    routeAnswerModeLabel(routeDecision.answerMode),
     routeCapabilityTierLabel(routeDecision.capabilityTier),
     typeof routeDecision.escalationCount === 'number' && routeDecision.escalationCount > 0
       ? `升级 ${routeDecision.escalationCount} 次`
@@ -1167,7 +1153,6 @@ function buildRouteTooltip(routeDecision?: RouteDecisionSnapshot) {
               : null
 
   return [
-    `回答模式：${routeAnswerModeLabel(routeDecision.answerMode) || routeDecision.answerMode}`,
     `当前层级：${routeCapabilityTierLabel(routeDecision.capabilityTier) || routeDecision.capabilityTier}`,
     routeDecision.tierHistory && routeDecision.tierHistory.length > 0
       ? `层级路径：${routeDecision.tierHistory

@@ -22,7 +22,6 @@ const baseSettings = {
 
 const modelDirectedState = {
   modelDirected: true,
-  answerMode: 'advise',
   needsExternalFacts: false,
   researchMode: 'auto',
   responseStyle: 'adaptive-default',
@@ -30,7 +29,6 @@ const modelDirectedState = {
 
 const executionState = {
   ...modelDirectedState,
-  answerMode: 'execute',
   executionMode: 'long-task',
   completionPolicy: {
     requiresEvidenceForDone: true,
@@ -93,7 +91,7 @@ test('default-agent prompt explains Codex-style spawn_agent roles when mounted',
   assert.match(prompt, /Simple tasks should stay in the main agent/i)
 })
 
-test('default-agent prompt makes execution mode evidence-led', () => {
+test('default-agent prompt makes concrete work evidence-led', () => {
   const prompt = buildDefaultAgentSystemPrompt(
     baseSettings,
     '',
@@ -104,7 +102,7 @@ test('default-agent prompt makes execution mode evidence-led', () => {
     },
   )
 
-  assert.match(prompt, /Execution-mode contract/i)
+  assert.match(prompt, /When the user expects concrete work/i)
   assert.match(prompt, /todo_write, reading files, and explaining intent are coordination\/context only/i)
   assert.match(prompt, /smallest durable file first/i)
 })

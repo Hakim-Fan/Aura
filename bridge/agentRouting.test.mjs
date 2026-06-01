@@ -8,7 +8,6 @@ import {
 test('local-first turns keep a small opportunistic web search budget', () => {
   const routeState = inferRouteStateFromClassification(
     {
-      answerMode: 'advise',
       needsExternalFacts: false,
       webInteractionRequired: false,
       workspaceRelated: true,
@@ -34,12 +33,11 @@ test('keyword fallback no longer infers tool routes from natural-language browse
     },
   ])
 
-  assert.equal(routeState.answerMode, 'advise')
   assert.equal(routeState.needsExternalFacts, false)
   assert.equal(routeState.webInteractionRequired, false)
 })
 
-test('attachments with generation action force execute mode', () => {
+test('keyword fallback does not force execute for attachment generation requests', () => {
   const routeState = inferRouteStateFromKeywords([
     {
       role: 'user',
@@ -54,12 +52,11 @@ test('attachments with generation action force execute mode', () => {
     },
   ])
 
-  assert.equal(routeState.answerMode, 'execute')
-  assert.equal(routeState.workspaceRelated, true)
-  assert.equal(routeState.capabilityTier, 'local-write')
+  assert.equal(routeState.workspaceRelated, false)
+  assert.equal(routeState.capabilityTier, 'none')
 })
 
-test('local document generation request forces execute mode without attachment metadata', () => {
+test('keyword fallback does not force execute for local document generation text', () => {
   const routeState = inferRouteStateFromKeywords([
     {
       role: 'user',
@@ -67,12 +64,11 @@ test('local document generation request forces execute mode without attachment m
     },
   ])
 
-  assert.equal(routeState.answerMode, 'execute')
-  assert.equal(routeState.workspaceRelated, true)
-  assert.equal(routeState.capabilityTier, 'local-write')
+  assert.equal(routeState.workspaceRelated, false)
+  assert.equal(routeState.capabilityTier, 'none')
 })
 
-test('skill implementation questions stay read-only diagnostics', () => {
+test('keyword fallback does not infer diagnostics from local implementation text', () => {
   const routeState = inferRouteStateFromKeywords([
     {
       role: 'user',
@@ -80,7 +76,6 @@ test('skill implementation questions stay read-only diagnostics', () => {
     },
   ])
 
-  assert.equal(routeState.answerMode, 'diagnose')
-  assert.equal(routeState.workspaceRelated, true)
-  assert.notEqual(routeState.capabilityTier, 'local-write')
+  assert.equal(routeState.workspaceRelated, false)
+  assert.equal(routeState.capabilityTier, 'none')
 })

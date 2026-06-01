@@ -242,8 +242,6 @@ export type UserCustomInstructions = {
   answerPreferences: string
 }
 
-export type RouteAnswerMode = 'advise' | 'diagnose' | 'execute'
-
 export type RouteCapabilityTier =
   | 'none'
   | 'local-readonly'
@@ -297,7 +295,6 @@ export type PromptBlockDiffSnapshot = {
 }
 
 export type RouteDecisionSnapshot = {
-  answerMode: RouteAnswerMode
   capabilityTier: RouteCapabilityTier
   budgets?: RouteBudgetSnapshot
   allowEscalationTo?: RouteEscalationTarget[]
@@ -494,7 +491,7 @@ export type SessionContextCompression = {
   originalTokenEstimate: number
   compressedTokenEstimate: number
   createdAt: number
-  kind?: 'agent_preflight' | 'agent_runtime' | 'provider_runtime_transcript' | string
+  kind?: 'agent_preflight' | 'agent_runtime' | string
   trigger?: string
   activePromptTokens?: number
   activePromptLimit?: number

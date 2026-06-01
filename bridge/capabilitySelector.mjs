@@ -1,7 +1,4 @@
 function buildSemanticSignals({ classification, routeState }) {
-  const answerMode = routeState?.answerMode || classification?.answerMode || 'advise'
-  const workspaceRelated =
-    routeState?.workspaceRelated === true || classification?.workspaceRelated === true
   const needsExternalFacts =
     routeState?.needsExternalFacts === true || classification?.needsExternalFacts === true
   const browserInteraction =
@@ -15,8 +12,8 @@ function buildSemanticSignals({ classification, routeState }) {
     classification?.planDepth === 'long_horizon'
 
   return {
-    isEditingTask: answerMode === 'execute' && workspaceRelated,
-    isReviewTask: answerMode === 'diagnose' && workspaceRelated,
+    isEditingTask: false,
+    isReviewTask: false,
     isDesktopTask: browserInteraction,
     isBrowserTask: browserInteraction,
     isResearchTask: needsExternalFacts,
@@ -71,11 +68,8 @@ const DISCOVERY_TOOLS = new Set([
 function scoreToolOrdering(tool, context, originalIndex) {
   let score = 0
   const isWorkspaceExecute =
-    context.routeState?.answerMode === 'execute' &&
-    context.routeState?.workspaceRelated === true
-  const isWorkspaceDiagnose =
-    context.routeState?.answerMode === 'diagnose' &&
-    context.routeState?.workspaceRelated === true
+    context.signals.isEditingTask === true
+  const isWorkspaceDiagnose = context.signals.isReviewTask === true
   const isExternalLookup = context.routeState?.needsExternalFacts === true
   const isBrowserInteraction =
     context.routeState?.webInteractionRequired === true ||

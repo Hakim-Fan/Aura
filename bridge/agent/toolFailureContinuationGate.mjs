@@ -83,12 +83,6 @@ export function shouldContinueAfterToolFailure({
   maxContinuationAttempts = 2,
 } = {}) {
   const evidenceSummary = result?.evidenceSummary || {}
-  if (routeState?.answerMode !== 'execute') {
-    return {
-      shouldContinue: false,
-      reason: 'non_execute_route',
-    }
-  }
   if (result?.completionState !== 'failed_after_execution') {
     return {
       shouldContinue: false,

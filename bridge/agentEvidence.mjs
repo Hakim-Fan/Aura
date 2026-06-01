@@ -667,24 +667,12 @@ export function deriveCompletionState(routeState, evidenceSummary, runtimeBlocks
     return 'failed_after_execution'
   }
 
-  if (routeState?.answerMode !== 'execute' && routeState?.modelDirected !== true) {
-    return 'not_executed'
-  }
-
   if (!evidenceSummary.hasAnyExecution) {
-    if (
-      routeState?.answerMode === 'execute' &&
-      Array.isArray(evidenceSummary.records) &&
-      evidenceSummary.records.length > 0
-    ) {
-      return 'executed_unverified'
-    }
     return 'not_executed'
   }
 
   if (
     routeState?.executionMode === 'long-task' &&
-    routeState?.answerMode === 'execute' &&
     !evidenceSummary.hasArtifactEvidence &&
     !evidenceSummary.hasVerifiedEvidence &&
     !evidenceSummary.hasFileVerification
@@ -768,8 +756,7 @@ export function applyCompletionPolicy(result, completionState, evidenceSummary, 
     ...result,
     completionState,
     evidenceSummary,
-    deliveryNote:
-      routeState?.answerMode === 'execute' ? deliveryPolicy.deliveryNote : undefined,
+    deliveryNote: undefined,
   }
 }
 

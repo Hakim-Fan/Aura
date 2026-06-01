@@ -13,12 +13,9 @@ import {
   renderPromptBlocks,
 } from './promptBlocks.mjs'
 import {
-  applyHardSignalIntentOverrides,
   applyRouteToolBudgets,
-  deriveHardSignals,
   escalateRouteState,
   getRouteEscalationTargets,
-  inferRouteState,
 } from './agentRouting.mjs'
 import {
   buildSkillPrompt,
@@ -56,11 +53,6 @@ import {
   deriveCompletionState,
   enforceEvidencePolicy,
 } from './agentEvidence.mjs'
-import { applyCompletionGate } from './completionGate.mjs'
-import {
-  buildStopVerifierContinuationMessages,
-  runStopVerifier,
-} from './stopVerifier.mjs'
 import { evaluateRuntimeCapabilityContract } from './runtimeCapabilityContract.mjs'
 import { createToolRegistry } from './toolRegistry.mjs'
 import { createToolRouter } from './toolRouter.mjs'
@@ -79,11 +71,7 @@ import {
   resolveAgentExecutionMode,
   wrapAgentRuntimeHooks,
 } from './agentRuntimeLogs.mjs'
-import { classifyAgentTask } from './agent/taskClassifier.mjs'
-import {
-  applyTaskFrameToClassification,
-  resolveTaskFrame,
-} from './agent/taskFrame.mjs'
+import { resolveTaskFrame } from './agent/taskFrame.mjs'
 import { compactVisibleTaskTitle } from './taskTitles.mjs'
 import {
   buildToolFailureContinuationNote,
@@ -393,6 +381,7 @@ function buildContextCompressionCheckpoint({
   trigger,
   activePromptTokens,
   activePromptLimit,
+  compressedActivePromptTokens,
   stage,
 }) {
   const summary =
@@ -412,11 +401,17 @@ function buildContextCompressionCheckpoint({
     summary,
     compressedThroughMessageId,
     originalMessageCount: Array.isArray(messages) ? messages.length : 0,
-    originalTokenEstimate: Math.max(0, Math.round(Number(beforeTokens) || 0)),
-    compressedTokenEstimate: Math.max(0, Math.round(Number(afterTokens) || 0)),
+    originalTokenEstimate: Math.max(
+      0,
+      Math.round(Number(activePromptTokens || beforeTokens) || 0),
+    ),
+    compressedTokenEstimate: Math.max(
+      0,
+      Math.round(Number(compressedActivePromptTokens || afterTokens) || 0),
+    ),
     createdAt: Date.now(),
     kind: stage === 'preflight' ? 'agent_preflight' : 'agent_runtime',
-    trigger: trigger || 'local_estimate',
+    trigger: trigger || 'active_context',
     activePromptTokens: Math.max(0, Math.round(Number(activePromptTokens) || 0)),
     activePromptLimit: Math.max(0, Math.round(Number(activePromptLimit) || 0)),
     contextWindowTokens: Math.max(0, Math.round(Number(budget?.contextWindowTokens) || 0)),
@@ -489,6 +484,10 @@ async function maybeCompressMessagesForContext({
     hooks,
   })
   const afterTokens = estimateMessagesTokens(compactedMessages, settings)
+  const recomputedActiveContextTokens =
+    compressionState.budget.systemPromptTokens +
+    compressionState.budget.toolSchemaTokens +
+    afterTokens
   const contextCompression = buildContextCompressionCheckpoint({
     messages,
     compactedMessages,
@@ -499,15 +498,12 @@ async function maybeCompressMessagesForContext({
     trigger: compressionState.trigger,
     activePromptTokens: compressionState.activePromptTokens,
     activePromptLimit: compressionState.activePromptLimit,
+    compressedActivePromptTokens: recomputedActiveContextTokens,
     stage,
   })
   if (contextCompression) {
     hooks?.onContextCompression?.(contextCompression)
   }
-  const recomputedActiveContextTokens =
-    compressionState.budget.systemPromptTokens +
-    compressionState.budget.toolSchemaTokens +
-    afterTokens
   hooks?.onActiveContextEstimate?.({
     latestInputTokens: recomputedActiveContextTokens,
     contextWindow: compressionState.budget.contextWindowTokens,
@@ -517,9 +513,9 @@ async function maybeCompressMessagesForContext({
   hooks?.onReasoningDelta?.(
     [
       `Context compression (${stage || 'runtime'}):`,
-      `${compressionState.estimatedTokens} estimated tokens -> ${afterTokens} estimated tokens.`,
+      `${compressionState.activePromptTokens} active tokens -> ${recomputedActiveContextTokens} active tokens.`,
       compressionState.trigger === 'provider_usage'
-        ? `Triggered by provider usage (${compressionState.latestInputTokens} input tokens).`
+        ? `Triggered by provider usage (${compressionState.latestInputTokens} active tokens).`
         : '',
     ].filter(Boolean).join(' '),
     {
@@ -599,7 +595,6 @@ function shouldLoadRuntimeCapabilityLayers(routeState) {
 function createDefaultAgentRouteState(settings = {}) {
   return {
     modelDirected: true,
-    answerMode: 'advise',
     capabilityTier: 'default-agent',
     researchMode: 'auto',
     webRetrievalAvailable: true,
@@ -612,10 +607,6 @@ function createDefaultAgentRouteState(settings = {}) {
     executionMode: settings?.executionMode === 'long-task' ? 'long-task' : 'bounded',
     allowEscalationTo: [],
     budgets: {},
-    completionPolicy: {
-      canClaimDone: true,
-      requiresEvidenceForDone: false,
-    },
     isCapabilityAdminTask: false,
     explicitSystemBrowserRequest: false,
   }
@@ -696,18 +687,12 @@ function isCompletionStateIncompleteForExecution(result = {}, routeState = {}, t
   if (
     result?.completionState === 'failed_after_execution' ||
     result?.completionState === 'blocked_by_capability' ||
-    result?.completionState === 'blocked_by_approval' ||
-    result?.completionState === 'executed_unverified'
+    result?.completionState === 'blocked_by_approval'
   ) {
     return true
   }
 
-  const requiresEvidence =
-    routeState?.answerMode === 'execute' ||
-    result?.routeDecision?.answerMode === 'execute' ||
-    taskFrame?.requiresEvidenceForDone === true
-
-  return result?.completionState === 'not_executed' && requiresEvidence
+  return false
 }
 
 function completeCurrentTaskWithResult(taskTracker, currentTaskId, routeState, result) {
@@ -748,7 +733,6 @@ function buildRouteDecisionSnapshot({
       : undefined,
     intentClassification: classification
       ? {
-          answerMode: classification.answerMode,
           needsExternalFacts: classification.needsExternalFacts,
           webInteractionRequired: classification.webInteractionRequired,
           workspaceRelated: classification.workspaceRelated,
@@ -761,7 +745,6 @@ function buildRouteDecisionSnapshot({
       : undefined,
     classificationSource: classificationSource || undefined,
     classificationReason: classificationReason || undefined,
-    answerMode: routeState.answerMode,
     capabilityTier: routeState.capabilityTier,
     budgets: {
       searchesRemaining: routeState.budgets?.searchesRemaining ?? 0,
@@ -921,7 +904,8 @@ function createUsageTrackingHooks(baseHooks = {}) {
   let latestContextCompression
 
   function publishUsage() {
-    const activeInputTokens = latestContext.inputTokens || latest.inputTokens
+    const latestActiveTokens = latest.inputTokens + latest.outputTokens
+    const activeInputTokens = latestContext.inputTokens || latestActiveTokens
     baseHooks?.onUsage?.({
       inputTokens: totals.inputTokens,
       outputTokens: totals.outputTokens,
@@ -953,8 +937,9 @@ function createUsageTrackingHooks(baseHooks = {}) {
           cachedInputTokens: normalized.cachedInputTokens,
         }
         if (normalized.estimatedInputTokens > 0 || latestContext.inputTokens <= 0) {
+          const latestActiveTokens = latest.inputTokens + latest.outputTokens
           latestContext = {
-            inputTokens: Math.max(latestContext.inputTokens, latest.inputTokens),
+            inputTokens: Math.max(latestContext.inputTokens, latestActiveTokens),
             outputTokens: latest.outputTokens,
           }
         }
@@ -1000,7 +985,12 @@ function createUsageTrackingHooks(baseHooks = {}) {
       }
       const latestInputTokens = Math.max(
         0,
-        Math.round(Number(latestContext.inputTokens || latest.inputTokens) || 0),
+        Math.round(
+          Number(
+            latestContext.inputTokens ||
+              latest.inputTokens + latest.outputTokens,
+          ) || 0,
+        ),
       )
       return {
         ...normalizedTotals,
@@ -1020,7 +1010,12 @@ function createUsageTrackingHooks(baseHooks = {}) {
     getLatestActiveInputTokens() {
       return Math.max(
         0,
-        Math.round(Number(latestContext.inputTokens || latest.inputTokens) || 0),
+        Math.round(
+          Number(
+            latestContext.inputTokens ||
+              latest.inputTokens + latest.outputTokens,
+          ) || 0,
+        ),
       )
     },
   }
@@ -1430,31 +1425,7 @@ function shouldRunFinalization(
     return true
   }
 
-  const hasConcreteExecution = hasToolContext && recentToolEvents.some(event => {
-    const name = event?.name || ''
-    return (
-      event?.status === 'success' &&
-      (name === 'write_file' || name === 'apply_patch' || name === 'edit_file' ||
-       name === 'multi_edit_file' || name === 'replace_line_range' ||
-       name === 'run_shell' || name === 'exec_command' || name === 'write_stdin' ||
-       name === 'computer_type_text' || name === 'computer_press_shortcut' ||
-       name === 'computer_open_app')
-    )
-  })
-
-  if (
-    routeState?.answerMode === 'execute' &&
-    finalMessage.length < 140 &&
-    looksLikeProceduralDraft(finalMessage)
-  ) {
-    return true
-  }
-
-  if (
-    routeState?.answerMode === 'execute' &&
-    finalMessage.length < 90 &&
-    !hasConcreteExecution
-  ) {
+  if (finalMessage.length < 140 && looksLikeProceduralDraft(finalMessage)) {
     return true
   }
 
@@ -1895,35 +1866,6 @@ function recordPhaseHandoffMemory(context, triggers = [], reason = 'phase_handof
   }
   context.workMemories = upsertWorkMemory(context.workMemories || [], memory)
   return memory
-}
-
-function shouldForceDefaultAgentExecutionRoute(settings = {}, classification = {}, taskFrame = {}) {
-  const reasons = Array.isArray(classification?.reasons) ? classification.reasons : []
-  return Boolean(
-    settings?.executionMode === 'long-task' ||
-    taskFrame?.requiresEvidenceForDone === true ||
-    classification?.requiresWrite === true ||
-    classification?.continuesTask === true ||
-    reasons.includes('write_or_execute_intent') ||
-    reasons.includes('task_continuation')
-  )
-}
-
-function applyDefaultAgentExecutionRoute(routeState, settings = {}, classification = {}, taskFrame = {}) {
-  if (!shouldForceDefaultAgentExecutionRoute(settings, classification, taskFrame)) {
-    return routeState
-  }
-
-  return {
-    ...routeState,
-    answerMode: 'execute',
-    executionMode: 'long-task',
-    completionPolicy: {
-      ...(routeState.completionPolicy || {}),
-      canClaimDone: true,
-      requiresEvidenceForDone: true,
-    },
-  }
 }
 
 function isProviderStreamStallError(normalized = {}, retryInfo = {}) {
@@ -2548,28 +2490,18 @@ export async function runDefaultAgent(request) {
     highRiskToolCount: toolRegistry.catalog?.highRiskCount || 0,
   })
   const taskFrame = resolveTaskFrame({ messages, runtime, settings })
-  const normalizedClassification = applyTaskFrameToClassification(
-    classifyAgentTask({ messages, settings }),
-    taskFrame,
-  )
+  const normalizedClassification = null
   const strategy = {
     chain: 'default-agent',
     reason: 'model-directed',
   }
 
-  let routeState = applyDefaultAgentExecutionRoute(
-    initialRouteState,
-    settings,
-    normalizedClassification,
-    taskFrame,
-  )
+  let routeState = initialRouteState
   const visitedTiers = new Set([routeState.capabilityTier])
   const routeNotes = []
   const routeHistory = []
   let routeEscalationCount = 0
   let toolFailureContinuationCount = 0
-  let stopVerifierAttempts = 0
-  const maxStopVerifierAttempts = 2
   let lastSelectedCapabilities = null
   let lastEffectiveRunSettings = settings
   let lastPromptRouteState = routeState
@@ -2581,7 +2513,6 @@ export async function runDefaultAgent(request) {
     intentClassification: normalizedClassification || undefined,
     classificationSource: undefined,
     classificationReason: undefined,
-    answerMode: routeState.answerMode,
     capabilityTier: routeState.capabilityTier,
     budgets: {
       searchesRemaining: routeState.budgets?.searchesRemaining ?? 0,
@@ -2896,40 +2827,6 @@ export async function runDefaultAgent(request) {
 
       const runtimeBlocks = buildRuntimeBlocks(routeStopReason)
       result = enforceEvidencePolicy(result, toolEvents, promptRouteState, runtimeBlocks)
-      result = applyCompletionGate(result, promptRouteState)
-
-      const stopVerifierResult =
-        runtime?.subagentRole === 'verification'
-          ? { ok: true, reason: 'verification_self_stop' }
-          : runStopVerifier({
-              result,
-              routeState: promptRouteState,
-              attempt: stopVerifierAttempts,
-              maxAttempts: maxStopVerifierAttempts,
-            })
-      if (!stopVerifierResult.ok && !routeStopReason) {
-        stopVerifierAttempts += 1
-        routeNotes.push(`stop_verifier_blocked:${stopVerifierResult.reason}`)
-        messages = buildStopVerifierContinuationMessages({
-          messages: turnResult.resolvedMessages,
-          result,
-          verifierResult: stopVerifierResult,
-        })
-        taskTracker.setStatus(
-          currentTaskId,
-          'running',
-          '最终验证未通过，继续执行或补充验证证据',
-        )
-        hooks?.onPhaseChange?.('preparing', {
-          reason: 'stop_verifier_blocked',
-          verifierReason: stopVerifierResult.reason,
-          stopVerifierAttempts,
-        })
-        continue
-      }
-      if (stopVerifierResult.exhausted) {
-        routeNotes.push(`stop_verifier_exhausted:${stopVerifierResult.reason}`)
-      }
 
       const toolFailureContinuation = shouldContinueAfterToolFailure({
         result,
@@ -2972,8 +2869,7 @@ export async function runDefaultAgent(request) {
         strategy,
         stopReason:
           routeStopReason ||
-          (result.completionState === 'executed_verified' &&
-          routeState.completionPolicy?.requiresEvidenceForDone
+          (result.completionState === 'executed_verified'
             ? 'completed_with_evidence'
             : 'completed'),
       })
@@ -3171,7 +3067,7 @@ export async function runDefaultAgent(request) {
             buildRuntimeBlocks(lastRouteDecision?.stopReason),
           )
           resumedResult = {
-            ...applyCompletionGate(resumedResult, lastPromptRouteState),
+            ...resumedResult,
             recovered: true,
           }
           const summaryReasoning = summarizeReasoning(
@@ -3301,7 +3197,6 @@ export async function runDefaultAgent(request) {
             ...recoveredResult,
             recovered: true,
           }
-          recoveredResult = applyCompletionGate(recoveredResult, routeState)
           const summaryReasoning = summarizeReasoning(
             messages,
             toolEvents,
@@ -3353,7 +3248,6 @@ export async function runDefaultAgent(request) {
         routeState,
         buildRuntimeBlocks(lastRouteDecision?.stopReason),
       )
-      fallbackResult = applyCompletionGate(fallbackResult, routeState)
       const summaryReasoning = summarizeReasoning(
         messages,
         toolEvents,
@@ -3443,14 +3337,10 @@ async function runFastPathAgent(request, classification, taskFrame) {
 
   const toolEvents = []
   const routeState = {
-    answerMode: 'advise',
     capabilityTier: 'none',
     budgets: {},
     allowEscalationTo: [],
     responseStyle: 'concise',
-    completionPolicy: {
-      requiresEvidenceForDone: false,
-    },
   }
   const systemPrompt = [
     'You are Aura running the fast path for a simple request.',
@@ -3477,7 +3367,6 @@ async function runFastPathAgent(request, classification, taskFrame) {
     agentMode: 'default-agent',
     pathMode: 'fast',
     routeDecision: {
-      answerMode: 'advise',
       capabilityTier: 'none',
       budgets: {},
       allowEscalationTo: [],

@@ -35,7 +35,7 @@ test('recovered patch failures do not keep the task in failed_after_execution', 
 
   assert.equal(evidence.hasExecutionFailure, false)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'executed_verified',
   )
 })
@@ -59,7 +59,7 @@ test('read-only inspection does not clear an unresolved patch failure', () => {
 
   assert.equal(evidence.hasExecutionFailure, true)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'failed_after_execution',
   )
 })
@@ -94,7 +94,7 @@ test('artifact verification can verify shell-produced office outputs', () => {
   assert.equal(evidence.hasFileVerification, true)
   assert.deepEqual(evidence.artifactPaths, ['out/deck.pptx'])
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'executed_verified',
   )
 })
@@ -133,7 +133,7 @@ test('spawn_agent verification failure is treated as unresolved execution failur
 
   assert.equal(evidence.hasExecutionFailure, true)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'failed_after_execution',
   )
 })
@@ -191,7 +191,7 @@ test('failed spawn_agent status is treated as unresolved execution failure', () 
 
   assert.equal(evidence.hasExecutionFailure, true)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'failed_after_execution',
   )
 })
@@ -215,7 +215,7 @@ test('successful read-only shell command is verified by exit code', () => {
   assert.equal(evidence.hasSuccessfulCommand, true)
   assert.equal(evidence.hasWriteEffect, false)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'executed_verified',
   )
 })
@@ -250,7 +250,7 @@ test('shell command file mutations count as write and artifact evidence', () => 
   assert.deepEqual(evidence.artifactPaths, ['output.md'])
   assert.equal(
     deriveCompletionState(
-      { answerMode: 'execute', executionMode: 'long-task' },
+      { executionMode: 'long-task' },
       evidence,
     ),
     'executed_verified',
@@ -275,7 +275,7 @@ test('nonzero command exit is always an execution failure', () => {
 
   assert.equal(evidence.hasExecutionFailure, true)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'failed_after_execution',
   )
 })
@@ -310,12 +310,12 @@ test('later successful command clears an earlier command failure of the same eff
 
   assert.equal(evidence.hasExecutionFailure, false)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'executed_verified',
   )
 })
 
-test('failed command execution is not hidden by advise route mode', () => {
+test('failed command execution is not hidden by conversational finalization', () => {
   const evidence = collectEvidenceFromToolEvents([
     {
       name: 'exec_command',
@@ -333,7 +333,7 @@ test('failed command execution is not hidden by advise route mode', () => {
 
   assert.equal(evidence.hasExecutionFailure, true)
   assert.equal(
-    deriveCompletionState({ answerMode: 'advise' }, evidence),
+    deriveCompletionState({}, evidence),
     'failed_after_execution',
   )
 })
@@ -355,12 +355,12 @@ test('failed Aura skill installation is treated as unresolved execution failure'
   assert.equal(evidence.hasWriteEffect, true)
   assert.equal(evidence.hasExecutionFailure, true)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'failed_after_execution',
   )
 })
 
-test('execute route with only read tool progress is executed_unverified', () => {
+test('read-only progress without execution remains not_executed', () => {
   const evidence = collectEvidenceFromToolEvents([
     {
       name: 'glob_files',
@@ -380,8 +380,8 @@ test('execute route with only read tool progress is executed_unverified', () => 
 
   assert.equal(evidence.hasAnyExecution, false)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
-    'executed_unverified',
+    deriveCompletionState({}, evidence),
+    'not_executed',
   )
 })
 
@@ -404,7 +404,7 @@ test('long task execution without artifact or verification stays unverified', ()
   assert.equal(evidence.hasArtifactEvidence, false)
   assert.equal(
     deriveCompletionState(
-      { answerMode: 'execute', executionMode: 'long-task' },
+      { executionMode: 'long-task' },
       evidence,
     ),
     'executed_unverified',
@@ -436,7 +436,7 @@ test('structured tool output provides verification even when display output is t
   assert.equal(evidence.hasVerifiedEvidence, true)
   assert.equal(evidence.hasFileVerification, true)
   assert.equal(
-    deriveCompletionState({ answerMode: 'execute' }, evidence),
+    deriveCompletionState({}, evidence),
     'executed_verified',
   )
 })

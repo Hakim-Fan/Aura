@@ -996,6 +996,7 @@ function contextCompressionEvent(snapshot: AgentTaskSnapshot): MessageEvent | nu
   const before = compression.originalTokenEstimate
   const after = compression.compressedTokenEstimate
   const threshold =
+    compression.activePromptLimit ||
     compression.effectiveThresholdTokens ||
     compression.compressionThresholdTokens ||
     compression.contextWindowTokens ||
@@ -1024,8 +1025,9 @@ function contextCompressionEvent(snapshot: AgentTaskSnapshot): MessageEvent | nu
     output: JSON.stringify({
       kind: compression.kind,
       trigger: compression.trigger,
-      beforeTokens: before,
-      afterTokens: after,
+      activeContextTokensBefore: before,
+      activeContextTokensAfter: after,
+      activePromptLimit: compression.activePromptLimit,
       effectiveThresholdTokens: compression.effectiveThresholdTokens,
       contextWindowTokens: compression.contextWindowTokens,
       windowSource: compression.windowSource,

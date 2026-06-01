@@ -75,7 +75,7 @@ test('tool failure continuation gate continues unresolved execute failures', () 
   const decision = shouldContinueAfterToolFailure({
     result: failedInstallResult,
     toolEvents: failedToolEvents,
-    routeState: { answerMode: 'execute' },
+    routeState: {},
     continuationAttempts: 0,
     maxContinuationAttempts: 2,
   })
@@ -114,7 +114,7 @@ test('tool failure continuation note carries reusable successful results', () =>
       },
     },
     toolEvents: recoveredEnvironmentEvents,
-    routeState: { answerMode: 'execute' },
+    routeState: {},
     continuationAttempts: 0,
     maxContinuationAttempts: 2,
   })
@@ -130,12 +130,12 @@ test('tool failure continuation note carries reusable successful results', () =>
   assert.match(note, /Do not repeat successful environment discovery/)
 })
 
-test('tool failure continuation gate respects attempt budget and route mode', () => {
+test('tool failure continuation gate respects attempt budget', () => {
   assert.equal(
     shouldContinueAfterToolFailure({
       result: failedInstallResult,
       toolEvents: failedToolEvents,
-      routeState: { answerMode: 'execute' },
+      routeState: {},
       continuationAttempts: 2,
       maxContinuationAttempts: 2,
     }).shouldContinue,
@@ -145,8 +145,8 @@ test('tool failure continuation gate respects attempt budget and route mode', ()
     shouldContinueAfterToolFailure({
       result: failedInstallResult,
       toolEvents: failedToolEvents,
-      routeState: { answerMode: 'advise' },
+      routeState: {},
     }).reason,
-    'non_execute_route',
+    'unresolved_execution_failure',
   )
 })

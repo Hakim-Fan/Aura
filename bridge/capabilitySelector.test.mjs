@@ -28,14 +28,12 @@ test('selectTurnCapabilities keeps execute-tool ordering stable without file-cre
     skillEntries: [],
     tools,
     classification: {
-      answerMode: 'execute',
       workspaceRelated: true,
       needsExternalFacts: false,
       webInteractionRequired: false,
       systemBrowserRequested: false,
     },
     routeState: {
-      answerMode: 'execute',
       workspaceRelated: true,
     },
   })
@@ -47,7 +45,7 @@ test('selectTurnCapabilities keeps execute-tool ordering stable without file-cre
   )
 })
 
-test('selectTurnCapabilities prefers apply_patch and long-lived exec tools for code changes', () => {
+test('selectTurnCapabilities keeps mounted execution tools available for model-directed code work', () => {
   const tools = [
     buildTool('run_shell', ['shell']),
     buildTool('exec_command', ['exec']),
@@ -67,26 +65,19 @@ test('selectTurnCapabilities prefers apply_patch and long-lived exec tools for c
     skillEntries: [],
     tools,
     classification: {
-      answerMode: 'execute',
       workspaceRelated: true,
       needsExternalFacts: false,
       webInteractionRequired: false,
       systemBrowserRequested: false,
     },
     routeState: {
-      answerMode: 'execute',
       workspaceRelated: true,
     },
   })
 
-  assert.equal(result.selectedTools[0].name, 'apply_patch')
-  assert.ok(
-    result.selectedTools.findIndex(tool => tool.name === 'exec_command') <
-      result.selectedTools.findIndex(tool => tool.name === 'run_shell'),
-  )
-  assert.ok(
-    result.selectedTools.findIndex(tool => tool.name === 'apply_patch') <
-      result.selectedTools.findIndex(tool => tool.name === 'edit_file'),
+  assert.deepEqual(
+    new Set(result.selectedTools.map(tool => tool.name)),
+    new Set(['run_shell', 'exec_command', 'write_stdin', 'apply_patch', 'edit_file', 'multi_edit_file']),
   )
 })
 
@@ -108,7 +99,6 @@ test('selectTurnCapabilities prioritizes web tools from route semantics without 
     skillEntries: [],
     tools,
     classification: {
-      answerMode: 'advise',
       workspaceRelated: false,
       needsExternalFacts: true,
       webInteractionRequired: false,
@@ -117,7 +107,6 @@ test('selectTurnCapabilities prioritizes web tools from route semantics without 
       planDepth: 'single_step',
     },
     routeState: {
-      answerMode: 'advise',
       workspaceRelated: false,
       needsExternalFacts: true,
       webInteractionRequired: false,
@@ -149,7 +138,6 @@ test('selectTurnCapabilities prioritizes Aura skill tools for capability admin t
       buildTool('aura_import_skill', ['import']),
     ],
     classification: {
-      answerMode: 'execute',
       workspaceRelated: false,
       needsExternalFacts: true,
       webInteractionRequired: false,
@@ -157,7 +145,6 @@ test('selectTurnCapabilities prioritizes Aura skill tools for capability admin t
       systemBrowserRequested: false,
     },
     routeState: {
-      answerMode: 'execute',
       workspaceRelated: false,
       needsExternalFacts: true,
       isCapabilityAdminTask: true,
@@ -186,7 +173,6 @@ test('selectTurnCapabilities boosts spawn_agent for complex tasks', () => {
       buildTool('web_search', ['search']),
     ],
     classification: {
-      answerMode: 'advise',
       workspaceRelated: true,
       needsExternalFacts: false,
       webInteractionRequired: false,
@@ -195,7 +181,6 @@ test('selectTurnCapabilities boosts spawn_agent for complex tasks', () => {
       planDepth: 'multi_step',
     },
     routeState: {
-      answerMode: 'advise',
       workspaceRelated: true,
     },
   })
@@ -226,14 +211,12 @@ test('selectTurnCapabilities exposes all enabled skills instead of prefiltering 
     ],
     tools: [buildTool('read_file')],
     classification: {
-      answerMode: 'advise',
       workspaceRelated: false,
       needsExternalFacts: false,
       webInteractionRequired: false,
       systemBrowserRequested: false,
     },
     routeState: {
-      answerMode: 'advise',
       workspaceRelated: false,
     },
   })

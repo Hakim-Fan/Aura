@@ -1,23 +1,5 @@
 import { createStructuredError } from './runtimeErrors.mjs'
 
-function collectMessageText(message) {
-  const parts = Array.isArray(message?.parts)
-    ? message.parts
-        .map(part => {
-          if (part.type === 'text') {
-            return part.text || ''
-          }
-          if (part.type === 'image' || part.type === 'file') {
-            return [part.name, part.path].filter(Boolean).join(' ')
-          }
-          return ''
-        })
-        .join('\n')
-    : ''
-
-  return [message?.content, parts].filter(Boolean).join('\n')
-}
-
 function latestUserMessage(messages) {
   return [...messages].reverse().find(message => message.role === 'user') || null
 }
@@ -26,49 +8,6 @@ function latestUserResearchMode(messages) {
   return latestUserMessage(messages)?.researchMode === 'deep'
     ? 'deep'
     : 'auto'
-}
-
-function userMessageHasAttachment(message) {
-  if (!message || typeof message !== 'object') {
-    return false
-  }
-  if (Array.isArray(message.attachments) && message.attachments.length > 0) {
-    return true
-  }
-  return Array.isArray(message.parts)
-    ? message.parts.some(part => part?.type === 'image' || part?.type === 'file')
-    : false
-}
-
-const ATTACHMENT_EXECUTION_PATTERN =
-  /\b(?:generate|convert|transform|write|create|save|export|render|build|run|execute|process|extract|parse|transcribe|produce)\b|生成|转换|转成|转为|写入|写到|创建|保存|导出|渲染|构建|执行|运行|处理|提取|解析|转写|生成出/u
-
-const LOCAL_FILE_REFERENCE_PATTERN =
-  /(?:附件|文件|文档|表格|图片|工作目录|当前目录|目录下|本地|word\s*文档|\.docx\b|\.doc\b|\.pdf\b|\.xlsx\b|\.csv\b|\battachments?\b|\bfiles?\b|\bdocuments?\b|\bworkspace\b|\bcwd\b|\blocal\b|\bword\b|\bdocx\b|\bpdf\b|\bxlsx\b|\bcsv\b)/iu
-
-function latestUserRequiresAttachmentExecution(messages) {
-  const latestUser = latestUserMessage(messages)
-  if (!userMessageHasAttachment(latestUser)) {
-    return false
-  }
-  return ATTACHMENT_EXECUTION_PATTERN.test(collectMessageText(latestUser))
-}
-
-function latestUserHasLocalFileContext(messages) {
-  const latestUser = latestUserMessage(messages)
-  if (userMessageHasAttachment(latestUser)) {
-    return true
-  }
-  return LOCAL_FILE_REFERENCE_PATTERN.test(collectMessageText(latestUser))
-}
-
-function latestUserRequiresLocalFileExecution(messages) {
-  const latestUser = latestUserMessage(messages)
-  const text = collectMessageText(latestUser)
-  if (!text || !latestUserHasLocalFileContext(messages)) {
-    return false
-  }
-  return ATTACHMENT_EXECUTION_PATTERN.test(text)
 }
 
 const SEARCH_BUDGET_BY_TIER = {
@@ -1017,7 +956,6 @@ function determineResponseStyle({
 }
 
 function buildRouteStateFromSignals({
-  answerMode,
   needsExternalFacts,
   webInteractionRequired,
   workspaceRelated,
@@ -1034,16 +972,11 @@ function buildRouteStateFromSignals({
     capabilityTier = 'browser-interactive'
   } else if (needsExternalFacts) {
     capabilityTier = 'web-lookup'
-  } else if (answerMode === 'execute' && workspaceRelated) {
-    capabilityTier = 'local-write'
   } else if (workspaceRelated) {
     capabilityTier = 'local-readonly'
   }
 
   const allowEscalationTo = []
-  if (answerMode === 'execute' && workspaceRelated && supportsWriteEscalation(capabilityTier)) {
-    allowEscalationTo.push('local-write')
-  }
   if (!isWebCapableTier(capabilityTier) && needsExternalFacts) {
     allowEscalationTo.push('web-lookup')
   }
@@ -1060,7 +993,6 @@ function buildRouteStateFromSignals({
   })
 
   return {
-    answerMode,
     capabilityTier,
     researchMode,
     webRetrievalAvailable: true,
@@ -1084,14 +1016,7 @@ function buildRouteStateFromSignals({
         webInteractionRequired && supportsBrowserEscalation(capabilityTier)
           ? 1
           : 0,
-      writeEscalationsRemaining:
-        answerMode === 'execute' && workspaceRelated && supportsWriteEscalation(capabilityTier)
-          ? 1
-          : 0,
-    },
-    completionPolicy: {
-      canClaimDone: answerMode === 'execute',
-      requiresEvidenceForDone: answerMode === 'execute',
+      writeEscalationsRemaining: 0,
     },
     isCapabilityAdminTask,
     explicitSystemBrowserRequest,
@@ -1104,8 +1029,8 @@ export function deriveHardSignals(messages) {
     explicitWebLookupRead: false,
     publicWebUrlReference: false,
     explicitSystemBrowserRequest: false,
-    attachmentExecutionRequired: latestUserRequiresAttachmentExecution(messages),
-    localFileExecutionRequired: latestUserRequiresLocalFileExecution(messages),
+    attachmentExecutionRequired: false,
+    localFileExecutionRequired: false,
     forceOrchestrated: false,
   }
 }
@@ -1129,10 +1054,6 @@ export function applyHardSignalIntentOverrides(classification, hardSignals = {})
 
   return {
     ...classification,
-    answerMode:
-      webInteractionRequired || attachmentExecutionRequired || localFileExecutionRequired
-        ? 'execute'
-        : classification.answerMode,
     needsExternalFacts,
     webInteractionRequired,
     workspaceRelated:
@@ -1157,13 +1078,6 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
     })
   }
 
-  let answerMode =
-    normalizedClassification.answerMode === 'execute' ||
-    normalizedClassification.answerMode === 'diagnose' ||
-    normalizedClassification.answerMode === 'advise'
-      ? normalizedClassification.answerMode
-      : 'advise'
-
   const webInteractionRequired =
     normalizedClassification.webInteractionRequired === true ||
     hardSignals.explicitWebInteraction === true
@@ -1174,12 +1088,7 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
     attachmentExecutionRequired ||
     localFileExecutionRequired
 
-  if (webInteractionRequired || attachmentExecutionRequired || localFileExecutionRequired) {
-    answerMode = 'execute'
-  }
-
   return buildRouteStateFromSignals({
-    answerMode,
     needsExternalFacts:
       normalizedClassification.needsExternalFacts === true ||
       hardSignals.explicitWebLookupRead === true,
@@ -1196,19 +1105,11 @@ export function inferRouteStateFromClassification(classification, hardSignals = 
   })
 }
 
-function latestUserHasFileContext(messages) {
-  return latestUserHasLocalFileContext(messages)
-}
-
 export function inferRouteStateFromKeywords(messages, settings = {}) {
-  const workspaceRelated = latestUserHasFileContext(messages)
-  const localFileExecutionRequired = latestUserRequiresLocalFileExecution(messages)
-  const answerMode = localFileExecutionRequired ? 'execute' : workspaceRelated ? 'diagnose' : 'advise'
   return buildRouteStateFromSignals({
-    answerMode,
     needsExternalFacts: false,
     webInteractionRequired: false,
-    workspaceRelated,
+    workspaceRelated: false,
     isCapabilityAdminTask: false,
     explicitSystemBrowserRequest: false,
     researchMode: latestUserResearchMode(messages),

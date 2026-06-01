@@ -282,24 +282,24 @@ export function shouldCompressMessages(
       budget.maxOutputTokens -
       budget.toolResultBufferTokens,
   )
-  const conversationLimitReached =
-    estimatedTokens > budget.effectiveThresholdTokens
   const activePromptLimitReached = activePromptTokens > activePromptLimit
+  const trigger =
+    !activePromptLimitReached
+      ? 'none'
+      : latestInputTokens > 0 && latestInputTokens >= estimatedPromptTokens
+        ? 'provider_usage'
+        : 'active_context'
   return {
     shouldCompress:
-      (conversationLimitReached || activePromptLimitReached) &&
+      activePromptLimitReached &&
       Array.isArray(messages) &&
       messages.length > 1,
     estimatedTokens,
+    estimatedPromptTokens,
     latestInputTokens,
     activePromptTokens,
     activePromptLimit,
-    trigger:
-      activePromptLimitReached && !conversationLimitReached
-        ? 'provider_usage'
-        : conversationLimitReached
-          ? 'local_estimate'
-          : 'none',
+    trigger,
     budget,
   }
 }

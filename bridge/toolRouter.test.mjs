@@ -21,7 +21,6 @@ test('createToolRouter keeps web retrieval tools visible on local-first turns', 
   })
 
   const router = createToolRouter(registry, {
-    answerMode: 'advise',
     workspaceRelated: true,
     needsExternalFacts: false,
   })
@@ -45,7 +44,6 @@ test('createToolRouter keeps local write tools visible even on advise turns', ()
   })
 
   const router = createToolRouter(registry, {
-    answerMode: 'advise',
     workspaceRelated: false,
   })
 
@@ -65,12 +63,10 @@ test('createToolRouter mounts Aura admin tools only for capability admin turns',
   })
 
   const ordinaryRouter = createToolRouter(registry, {
-    answerMode: 'advise',
     workspaceRelated: false,
     isCapabilityAdminTask: false,
   })
   const adminRouter = createToolRouter(registry, {
-    answerMode: 'execute',
     workspaceRelated: false,
     isCapabilityAdminTask: true,
   })
@@ -94,7 +90,6 @@ test('tool_search can find already-mounted direct tools', async () => {
   })
 
   const router = createToolRouter(registry, {
-    answerMode: 'advise',
     workspaceRelated: true,
   })
 
@@ -130,7 +125,6 @@ test('tool_search can find and load deferred MCP tools', async () => {
   })
 
   const router = createToolRouter(registry, {
-    answerMode: 'advise',
     workspaceRelated: true,
   })
 
