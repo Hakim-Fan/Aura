@@ -1,6 +1,9 @@
 import { getVersion } from '@tauri-apps/api/app';
 import { fetch } from '@tauri-apps/plugin-http';
 
+const GITHUB_REPOSITORY = 'Hakim-Fan/Aura';
+const GITHUB_RELEASES_API_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest`;
+
 export interface ReleaseInfo {
   version: string;
   notes: string;
@@ -28,7 +31,7 @@ export function compareVersions(v1: string, v2: string): number {
 export async function checkForUpdates(): Promise<ReleaseInfo | null> {
   try {
     const currentVersion = await getVersion();
-    const response = await fetch('https://api.github.com/repos/Hakim-Fan/Aura-release/releases/latest', {
+    const response = await fetch(GITHUB_RELEASES_API_URL, {
       method: 'GET',
       headers: {
          'Accept': 'application/vnd.github+json',
@@ -43,6 +46,9 @@ export async function checkForUpdates(): Promise<ReleaseInfo | null> {
     
     const data = await response.json();
     const latestVersion = data.tag_name;
+    if (typeof latestVersion !== 'string' || !latestVersion.trim()) {
+      return null;
+    }
     
     // If latest version is higher than current version
     if (compareVersions(latestVersion, currentVersion) > 0) {

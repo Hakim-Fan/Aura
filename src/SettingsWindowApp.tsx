@@ -1,7 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
+import { getVersion } from '@tauri-apps/api/app'
 import { listen } from '@tauri-apps/api/event'
 import { ask, open } from '@tauri-apps/plugin-dialog'
-import { ChevronDown, ChevronUp, FolderOpen, RefreshCw, Search, Trash2 } from 'lucide-react'
+import { open as openUrl } from '@tauri-apps/plugin-shell'
+import {
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  GitBranch,
+  Heart,
+  MessageSquare,
+  UserRound,
+  FolderOpen,
+  RefreshCw,
+  Search,
+  Trash2,
+} from 'lucide-react'
 import { builtinPlugins, builtinSkills } from './catalog'
 import { detectLightpandaRuntime, resolveLightpandaExecutablePath } from './lib/browser'
 import {
@@ -21,6 +35,8 @@ import {
   saveSettingsAndAwaitPersistence,
 } from './lib/storage'
 import { openPathInDefaultApp, readTextFile } from './lib/workspace'
+import { checkForUpdates } from './lib/updater'
+import auraAppIcon from './assets/aura_app_icon.png'
 import { ConfirmModal } from './components/ConfirmModal'
 import {
   broadcastSettingsUpdated,
@@ -43,6 +59,12 @@ const PROVIDER_BASE_URLS: Record<ProviderMode, string> = {
   google: 'https://generativelanguage.googleapis.com/v1beta',
   custom: 'https://api.openai.com/v1',
 }
+
+const AURA_REPOSITORY_URL = 'https://github.com/Hakim-Fan/Aura'
+const AURA_RELEASES_URL = 'https://github.com/Hakim-Fan/Aura/releases'
+const AURA_ISSUES_URL = 'https://github.com/Hakim-Fan/Aura/issues'
+const AURA_AUTHOR_URL = 'https://github.com/Hakim-Fan'
+const AURA_SPONSOR_URL = 'https://github.com/sponsors/Hakim-Fan'
 
 const STEP_PRESETS = [8, 16, 32, 64] as const
 const CONTEXT_COMPRESSION_PRESETS = [128_000, 256_000, 512_000, 1_000_000] as const
@@ -215,6 +237,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
     cloneSettings(loadSettings()),
   )
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
+  const [appVersion, setAppVersion] = useState('')
+  const [aboutStatus, setAboutStatus] = useState<ProviderStatusState | null>(null)
+  const [isCheckingAboutUpdate, setIsCheckingAboutUpdate] = useState(false)
   const [selectedProviderProfileId, setSelectedProviderProfileId] = useState(
     loadSettings().activeProviderProfileId,
   )
@@ -376,6 +401,12 @@ export function SettingsWindowApp({ initialTab }: Props) {
       unlistenOpenTab?.()
       unlistenSettingsUpdated?.()
     }
+  }, [])
+
+  useEffect(() => {
+    getVersion()
+      .then(version => setAppVersion(version))
+      .catch(() => setAppVersion(''))
   }, [])
 
   useEffect(() => {
@@ -1553,6 +1584,45 @@ export function SettingsWindowApp({ initialTab }: Props) {
         tone: 'error',
         message: formatCaughtMessage(caught, '打开工作目录失败。'),
       })
+    }
+  }
+
+  async function openExternalUrl(url: string) {
+    try {
+      await openUrl(url)
+    } catch (caught) {
+      setAboutStatus({
+        tone: 'error',
+        message: formatCaughtMessage(caught, '打开链接失败。'),
+      })
+    }
+  }
+
+  async function handleCheckAboutUpdate() {
+    setIsCheckingAboutUpdate(true)
+    setAboutStatus(null)
+    try {
+      const release = await checkForUpdates()
+      if (release) {
+        setAboutStatus({
+          tone: 'success',
+          message: `发现新版本 v${release.version}，已打开发布页面。`,
+        })
+        await openExternalUrl(release.url)
+        return
+      }
+
+      setAboutStatus({
+        tone: 'success',
+        message: '当前已是最新版本。',
+      })
+    } catch (caught) {
+      setAboutStatus({
+        tone: 'error',
+        message: formatCaughtMessage(caught, '检查更新失败。'),
+      })
+    } finally {
+      setIsCheckingAboutUpdate(false)
     }
   }
 
@@ -3142,6 +3212,95 @@ export function SettingsWindowApp({ initialTab }: Props) {
     )
   }
 
+  function renderAbout() {
+    const versionLabel = appVersion ? `v${appVersion}` : '版本读取中'
+    const aboutCards = [
+      {
+        title: '主作者',
+        detail: 'Hakim-Fan',
+        icon: UserRound,
+        tone: 'text-slate-700',
+        action: () => openExternalUrl(AURA_AUTHOR_URL),
+      },
+      // {
+      //   title: '开源仓库',
+      //   detail: 'Hakim-Fan/Aura',
+      //   icon: GitBranch,
+      //   tone: 'text-slate-900',
+      //   action: () => openExternalUrl(AURA_REPOSITORY_URL),
+      // },
+      // {
+      //   title: '赞助支持',
+      //   detail: '支持项目持续开发',
+      //   icon: Heart,
+      //   tone: 'text-red-500',
+      //   action: () => openExternalUrl(AURA_SPONSOR_URL),
+      // },
+      {
+        title: '意见反馈',
+        detail: '报告问题或提交建议',
+        icon: MessageSquare,
+        tone: 'text-blue-500',
+        action: () => openExternalUrl(AURA_ISSUES_URL),
+      },
+    ]
+
+    return (
+      <section className="section-shell settings-panel about-panel">
+        <div className="about-hero">
+          <div className="about-app-icon">
+            <img src={auraAppIcon} alt="Aura" />
+          </div>
+          <h3>Aura</h3>
+          <div className="about-actions">
+            <span className="about-version-pill">{versionLabel}</span>
+            <button
+              className="secondary-button"
+              disabled={isCheckingAboutUpdate}
+              onClick={() => void handleCheckAboutUpdate()}
+              type="button"
+            >
+              <RefreshCw size={15} className={isCheckingAboutUpdate ? 'spin-icon' : undefined} />
+              {isCheckingAboutUpdate ? '检查中' : '检查更新'}
+            </button>
+            <button
+              className="secondary-button"
+              onClick={() => void openExternalUrl(AURA_RELEASES_URL)}
+              type="button"
+            >
+              <FileText size={15} />
+              更新记录
+            </button>
+          </div>
+          <p>AI 桌面工作流与 Multi-Agent 协作工具</p>
+          {aboutStatus ? (
+            <div className={`provider-feedback ${aboutStatus.tone === 'success' ? 'success' : 'error'} about-feedback`}>
+              <span>{aboutStatus.message}</span>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="about-card-grid">
+          {aboutCards.map(card => {
+            const Icon = card.icon
+            return (
+              <button
+                key={card.title}
+                className="about-info-card"
+                onClick={() => void card.action()}
+                type="button"
+              >
+                <Icon className={card.tone} size={34} strokeWidth={2.1} />
+                <strong>{card.title}</strong>
+                <span>{card.detail}</span>
+              </button>
+            )
+          })}
+        </div>
+      </section>
+    )
+  }
+
   return (
     <div className="settings-window-shell">
       <SettingsView activeTab={activeTab} onSelectTab={setActiveTab}>
@@ -3182,6 +3341,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             togglePlugin,
           )
           : null}
+        {activeTab === 'about' ? renderAbout() : null}
       </SettingsView>
 
       <footer className="settings-window-footer">

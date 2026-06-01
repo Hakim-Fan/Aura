@@ -2,7 +2,7 @@
  * @Author: Haki fanhuaze_1114@126.com
  * @Date: 2026-04-05 00:15:25
  * @LastEditors: Haki fanhuaze_1114@126.com
- * @LastEditTime: 2026-04-10 22:49:19
+ * @LastEditTime: 2026-06-02 00:16:22
  * @FilePath: /desk-agent/src/views/HomeView.tsx
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -29,7 +29,7 @@ export function HomeView({
       <div className="absolute top-0 h-10 w-full shrink-0" data-tauri-drag-region />
 
       <div className="hero-card modern">
-        <div className="hero-badge">Aura Beta</div>
+        <div className="hero-badge">Aura</div>
         <h2>你好，我是 Aura</h2>
         <p className="hero-copy">
           一切准备就绪。唤起 Aura 融入工作区，帮你梳理复杂信息、处理日常事务，或者解答任何疑问。

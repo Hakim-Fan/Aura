@@ -1,6 +1,13 @@
 import type { ReactNode } from 'react'
 
-export type SettingsTab = 'general' | 'providers' | 'browser' | 'mcp' | 'skills' | 'plugins'
+export type SettingsTab =
+  | 'general'
+  | 'providers'
+  | 'browser'
+  | 'mcp'
+  | 'skills'
+  | 'plugins'
+  | 'about'
 
 const tabs: Array<{ id: SettingsTab; label: string }> = [
   { id: 'general', label: '通用' },
@@ -9,6 +16,7 @@ const tabs: Array<{ id: SettingsTab; label: string }> = [
   { id: 'mcp', label: 'MCP' },
   { id: 'skills', label: '技能' },
   { id: 'plugins', label: '插件' },
+  { id: 'about', label: '关于' },
 ]
 
 type Props = {

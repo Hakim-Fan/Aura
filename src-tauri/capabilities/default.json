@@ -24,6 +24,11 @@
     "core:window:default",
     "core:window:allow-start-dragging",
     "shell:allow-open",
-    "http:default"
+    {
+      "identifier": "http:default",
+      "allow": [
+        "https://api.github.com/repos/Hakim-Fan/Aura/releases/latest"
+      ]
+    }
   ]
 }
