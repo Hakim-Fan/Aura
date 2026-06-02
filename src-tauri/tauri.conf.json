@@ -44,6 +44,12 @@
       "../dist-bridge": "dist-bridge",
       "../skills": "skills"
     },
+    "windows": {
+      "nsis": {
+        "startMenuFolder": "Aura",
+        "installerHooks": "nsis/installer-hooks.nsh"
+      }
+    },
     "macOS": {
       "entitlements": "Entitlements-macOS.plist"
     }
