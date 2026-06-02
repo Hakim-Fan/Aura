@@ -81,6 +81,47 @@ test('createToolRouter mounts Aura admin tools only for capability admin turns',
   )
 })
 
+test('createToolRouter hides browser and computer tools by default in model-directed mode', () => {
+  const registry = createToolRegistry({
+    builtinTools: [
+      buildTool('web_search'),
+      buildTool('system_browser_open'),
+      buildTool('computer_capture_screen'),
+    ],
+  })
+
+  const router = createToolRouter(registry, {
+    modelDirected: true,
+    capabilityTier: 'default-agent',
+  })
+  const visibleToolNames = router.modelVisibleTools.map(tool => tool.name)
+
+  assert.ok(visibleToolNames.includes('web_search'))
+  assert.equal(visibleToolNames.includes('system_browser_open'), false)
+  assert.equal(visibleToolNames.includes('computer_capture_screen'), false)
+})
+
+test('createToolRouter mounts browser and computer tools for browser interaction mode', () => {
+  const registry = createToolRegistry({
+    builtinTools: [
+      buildTool('web_search'),
+      buildTool('system_browser_open'),
+      buildTool('computer_capture_screen'),
+    ],
+  })
+
+  const router = createToolRouter(registry, {
+    modelDirected: true,
+    capabilityTier: 'browser-interactive',
+    webInteractionRequired: true,
+  })
+  const visibleToolNames = router.modelVisibleTools.map(tool => tool.name)
+
+  assert.ok(visibleToolNames.includes('web_search'))
+  assert.ok(visibleToolNames.includes('system_browser_open'))
+  assert.ok(visibleToolNames.includes('computer_capture_screen'))
+})
+
 test('tool_search can find already-mounted direct tools', async () => {
   const registry = createToolRegistry({
     builtinTools: [

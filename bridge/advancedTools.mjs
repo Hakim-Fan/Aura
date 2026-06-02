@@ -402,7 +402,7 @@ function buildComputerTools({ settings, context, platform = process.platform }) 
 }
 
 function buildSystemBrowserTools({ settings, context }) {
-  if (settings?.browser?.interactive?.enabled === false) {
+  if (settings?.browser?.interactive?.enabled !== true) {
     return []
   }
 

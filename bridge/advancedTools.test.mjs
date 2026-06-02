@@ -24,6 +24,46 @@ test('createAdvancedTools omits macOS-only computer tools on Windows', () => {
   assert.equal(tools.some(tool => tool.name === 'system_browser_open'), true)
 })
 
+test('createAdvancedTools omits system browser unless Computer Use is enabled for the run', () => {
+  const disabledTools = createAdvancedTools({
+    platform: 'darwin',
+    settings: {
+      enableComputerUse: false,
+      enableMultiAgent: false,
+      browser: {
+        interactive: {
+          enabled: false,
+        },
+      },
+    },
+    context: {
+      cwd: process.cwd(),
+    },
+    runtimeMeta: {},
+  })
+  const enabledTools = createAdvancedTools({
+    platform: 'darwin',
+    settings: {
+      enableComputerUse: true,
+      enableMultiAgent: false,
+      browser: {
+        interactive: {
+          enabled: true,
+        },
+      },
+    },
+    context: {
+      cwd: process.cwd(),
+    },
+    runtimeMeta: {},
+  })
+
+  assert.equal(disabledTools.some(tool => tool.name === 'system_browser_open'), false)
+  assert.equal(disabledTools.some(tool => tool.name.startsWith('computer_')), false)
+  assert.equal(enabledTools.some(tool => tool.name === 'system_browser_open'), true)
+  assert.equal(enabledTools.some(tool => tool.name.startsWith('computer_')), true)
+})
+
 test('createAdvancedTools exposes Claude-style spawn_agent when multi-agent is enabled', () => {
   const baseOptions = {
     platform: 'darwin',

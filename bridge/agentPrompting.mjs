@@ -66,10 +66,12 @@ function buildWorkspaceScratchInstruction(settings = {}) {
 }
 
 function buildApprovalPolicy(settings) {
+  const computerUseMounted =
+    settings?.browser?.interactive?.enabled === true || settings?.enableComputerUse === true
   return [
     `Approval policy: shell is ${settings.autoApproveShell ? 'auto-approved' : 'approval-required'}.`,
     `Approval policy: file writes are ${settings.autoApproveFileWrite ? 'auto-approved' : 'approval-required'}.`,
-    `Approval policy: computer use is ${settings.autoApproveComputerUse ? 'auto-approved' : 'approval-required'}.`,
+    `Approval policy: computer use is ${computerUseMounted ? 'approval-required when mounted' : 'not mounted'}.`,
     `Approval policy: long task plan approval is ${settings.requireLongTaskPlanApproval ? 'approval-required' : 'not required'}.`,
   ].join('\n')
 }

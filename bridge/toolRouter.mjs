@@ -2,15 +2,18 @@ import { createToolSearchTool } from './toolDiscovery.mjs'
 
 function buildCapabilityPolicy(routeState) {
   if (routeState?.modelDirected === true) {
+    const webInteractionRequired = routeState?.webInteractionRequired === true
+    const explicitSystemBrowserRequest =
+      routeState?.explicitSystemBrowserRequest === true
     return {
       capabilityTier: routeState?.capabilityTier || 'default-agent',
       allowReadonly: true,
       allowWrite: true,
       allowWeb: true,
-      allowBrowser: true,
-      allowComputer: true,
-      allowCapabilityAdmin: true,
-      explicitSystemBrowserRequest: routeState?.explicitSystemBrowserRequest === true,
+      allowBrowser: webInteractionRequired || explicitSystemBrowserRequest,
+      allowComputer: webInteractionRequired || explicitSystemBrowserRequest,
+      allowCapabilityAdmin: routeState?.isCapabilityAdminTask === true,
+      explicitSystemBrowserRequest,
     }
   }
 

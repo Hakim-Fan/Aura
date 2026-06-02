@@ -37,6 +37,7 @@ import {
   Eye,
   FolderOpen,
   LayoutGrid,
+  Monitor,
   MoreHorizontal,
   Paperclip,
   Pencil,
@@ -132,6 +133,7 @@ type Props = {
   }>
   capabilityItems: CapabilityPanelItem[]
   capabilitySnapshot?: CapabilityUsageSnapshot
+  computerUseEnabled: boolean
   modelGroups: ModelGroup[]
   activeModelProfileId: string
   researchMode: ResearchMode
@@ -142,6 +144,11 @@ type Props = {
     id: string,
     mode: CapabilityOverrideMode,
   ) => void
+  onSetCapabilityOverrides: (
+    kind: 'skills' | 'plugins' | 'mcp',
+    updates: Array<{ id: string; mode: CapabilityOverrideMode }>,
+  ) => void
+  onToggleComputerUse: (enabled: boolean) => void
   onSubmit: (draftOverride?: string) => void
   onOpenProviders: () => void
   onHandleApproval: (decision: ApprovalDecision) => void
@@ -4361,6 +4368,7 @@ function buildDockedApprovalViewModel(
   const command = readStringField(inputRecord, ['command', 'cmd', 'script'])
   const path = readStringField(inputRecord, ['path', 'filePath', 'targetPath', 'target'])
   const action = readStringField(inputRecord, ['action', 'operation'])
+  const url = readStringField(inputRecord, ['url', 'href', 'targetUrl'])
   const fallbackInput = sanitizeTerminalOutput(approval.input).trim()
 
   if (approval.category === 'plan') {
@@ -4402,6 +4410,15 @@ function buildDockedApprovalViewModel(
   }
 
   if (approval.category === 'computer_use') {
+    if (approval.toolName === 'system_browser_open') {
+      return {
+        eyebrow: '浏览器操作',
+        primaryLabel: '将打开浏览器',
+        primaryText: url || approval.summary || '系统浏览器',
+        summary: approval.summary,
+      }
+    }
+
     return {
       eyebrow: '桌面操作',
       primaryLabel: action ? '将操作' : '将执行桌面操作',
@@ -5613,12 +5630,16 @@ function ModelPickerDialog({
 function CapabilityPanel({
   items,
   snapshot,
+  computerUseEnabled,
   collapsedGroups,
   onToggleGroup,
   onSetCapabilityOverride,
+  onSetCapabilityOverrides,
+  onToggleComputerUse,
 }: {
   items: CapabilityPanelItem[]
   snapshot?: CapabilityUsageSnapshot
+  computerUseEnabled: boolean
   collapsedGroups: Set<'skill' | 'plugin' | 'mcp'>
   onToggleGroup: (group: 'skill' | 'plugin' | 'mcp') => void
   onSetCapabilityOverride: (
@@ -5626,13 +5647,19 @@ function CapabilityPanel({
     id: string,
     mode: CapabilityOverrideMode,
   ) => void
+  onSetCapabilityOverrides: (
+    kind: 'skills' | 'plugins' | 'mcp',
+    updates: Array<{ id: string; mode: CapabilityOverrideMode }>,
+  ) => void
+  onToggleComputerUse: (enabled: boolean) => void
 }) {
   const sections: Array<{ key: 'skill' | 'plugin' | 'mcp'; label: string }> = [
     { key: 'skill', label: 'Skills' },
-    { key: 'plugin', label: 'Plugins' },
     { key: 'mcp', label: 'MCP' },
+    { key: 'plugin', label: 'Plugins' },
   ]
-  const manageableEnabledCount = items.filter(item => item.effectiveEnabled).length
+  const manageableEnabledCount =
+    items.filter(item => item.effectiveEnabled).length + (computerUseEnabled ? 1 : 0)
 
   function resolveNextOverrideMode(item: CapabilityPanelItem) {
     const nextEffectiveEnabled = !item.effectiveEnabled
@@ -5650,27 +5677,31 @@ function CapabilityPanel({
     enabled: boolean,
   ) {
     const sectionItems = items.filter(item => item.kind === sectionKey)
+    const updates: Array<{ id: string; mode: CapabilityOverrideMode }> = []
+    const settingKey =
+      sectionKey === 'skill'
+        ? 'skills'
+        : sectionKey === 'plugin'
+          ? 'plugins'
+          : 'mcp'
     for (const item of sectionItems) {
       if (!item.supported) {
         continue
       }
-      const settingKey =
-        item.kind === 'skill'
-          ? 'skills'
-          : item.kind === 'plugin'
-            ? 'plugins'
-            : 'mcp'
       const nextMode =
         item.scope === 'workspace'
           ? enabled
             ? ('on' as const)
             : ('off' as const)
-          : enabled === item.globalEnabled
-            ? ('inherit' as const)
-            : enabled
-              ? ('on' as const)
-              : ('off' as const)
-      onSetCapabilityOverride(settingKey, item.id, nextMode)
+            : enabled === item.globalEnabled
+              ? ('inherit' as const)
+              : enabled
+                ? ('on' as const)
+                : ('off' as const)
+      updates.push({ id: item.id, mode: nextMode })
+    }
+    if (updates.length > 0) {
+      onSetCapabilityOverrides(settingKey, updates)
     }
   }
 
@@ -5696,6 +5727,42 @@ function CapabilityPanel({
       </div>
 
       <div className="max-h-[420px] overflow-y-auto custom-scrollbar p-2">
+        <div className="mb-2 rounded-xl bg-[rgba(79,123,116,0.06)] px-3 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white text-[var(--accent-soft-strong)] shadow-sm">
+                  <Monitor size={14} />
+                </span>
+                <strong className="text-13px text-[var(--text-primary)]">Computer Use</strong>
+                <span className="rounded-full bg-white px-2 py-0.5 text-10px text-[var(--text-secondary)]">
+                  内置
+                </span>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-10px ${computerUseEnabled
+                    ? 'bg-green-50 text-green-600'
+                    : 'bg-gray-100 text-gray-500'
+                    }`}
+                >
+                  {computerUseEnabled ? '生效中' : '未生效'}
+                </span>
+              </div>
+              <p className="mt-2 max-w-[270px] text-12px leading-relaxed text-[var(--text-secondary)]">
+                打开后，本会话才会挂载系统浏览器和桌面操作工具。
+              </p>
+            </div>
+            <label className="relative flex shrink-0 cursor-pointer items-center gap-3">
+              <input
+                type="checkbox"
+                className="peer sr-only"
+                checked={computerUseEnabled}
+                onChange={event => onToggleComputerUse(event.target.checked)}
+              />
+              <div className="relative h-5 w-9 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-[var(--bg-user-bubble)] after:absolute after:top-0.5 after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-4" />
+            </label>
+          </div>
+        </div>
+
         {sections.map(section => {
           const sectionItems = items.filter(item => item.kind === section.key)
           const supportedItems = sectionItems.filter(item => item.supported)
@@ -5705,32 +5772,41 @@ function CapabilityPanel({
           const isCollapsed = collapsedGroups.has(section.key)
           return (
             <div key={section.key} className="mb-1 last:mb-0">
-              <button
-                className="sticky top-0 z-10 mb-1 flex w-full items-center justify-between gap-3 rounded-lg bg-white px-3 py-2 text-left hover:bg-[rgba(15,23,42,0.03)]"
-                onClick={() => onToggleGroup(section.key)}
-                type="button"
-              >
-                <div className="text-10px font-800 uppercase tracking-widest text-[var(--text-secondary)] opacity-55">
-                  {section.label}
+              <div className="sticky top-0 z-10 mb-1 flex w-full items-center justify-between gap-3 rounded-lg bg-white px-3 py-2 hover:bg-[rgba(15,23,42,0.03)]">
+                <div className="flex min-w-0 items-center gap-2">
+                  <button
+                    className="text-10px font-800 uppercase tracking-widest text-[var(--text-secondary)] opacity-55"
+                    onClick={() => onToggleGroup(section.key)}
+                    type="button"
+                  >
+                    {section.label}
+                  </button>
+                  <label
+                    className={`relative flex shrink-0 items-center ${supportedItems.length > 0 ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'}`}
+                    onClick={event => event.stopPropagation()}
+                    title={allEnabled ? '关闭本组工具' : '打开本组工具'}
+                  >
+                    <input
+                      type="checkbox"
+                      className="peer sr-only"
+                      checked={allEnabled}
+                      disabled={supportedItems.length === 0}
+                      onChange={event => setSectionEnabled(section.key, event.target.checked)}
+                    />
+                    <div className="relative h-5 w-9 shrink-0 rounded-full bg-black/10 transition-all peer-checked:bg-[var(--bg-user-bubble)] after:absolute after:top-0.5 after:left-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-all after:content-[''] peer-checked:after:translate-x-4" />
+                  </label>
                 </div>
-                <div className="flex items-center gap-2 text-11px text-[var(--text-secondary)] opacity-55">
+                <button
+                  className="flex shrink-0 items-center gap-2 text-11px text-[var(--text-secondary)] opacity-55"
+                  onClick={() => onToggleGroup(section.key)}
+                  type="button"
+                >
                   <span>
                     {sectionItems.filter(item => item.effectiveEnabled).length}/{sectionItems.length} 生效
                   </span>
                   <ChevronDown size={12} className={`transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
-                </div>
-              </button>
-              {!isCollapsed && sectionItems.length > 0 ? (
-                <div className="mb-2 flex items-center justify-end px-3">
-                  <button
-                    className="rounded-md px-2.5 py-1 text-11px font-600 text-[var(--text-secondary)] hover:bg-[rgba(15,23,42,0.05)]"
-                    onClick={() => setSectionEnabled(section.key, !allEnabled)}
-                    type="button"
-                  >
-                    {allEnabled ? '全部关闭' : '全部打开'}
-                  </button>
-                </div>
-              ) : null}
+                </button>
+              </div>
               {!isCollapsed && sectionItems.length > 0 ? (
                 <div className="flex flex-col gap-1">
                   {sectionItems.map(item => {
@@ -5800,11 +5876,14 @@ function CapabilityPanel({
                     )
                   })}
                 </div>
-              ) : !isCollapsed ? (
-                <div className="rounded-xl px-3 py-3 text-12px text-[var(--text-secondary)] opacity-65">
-                  还没有可用的 {section.label}。
-                </div>
-              ) : null}
+              ) : !isCollapsed ? 
+              // (
+              //   <div className="rounded-xl px-3 py-3 text-12px text-[var(--text-secondary)] opacity-65">
+              //     还没有可用的 {section.label}。
+              //   </div>
+              // ) 
+              null
+              : null}
             </div>
           )
         })}
@@ -6619,12 +6698,15 @@ export function ChatView({
   attachments,
   capabilityItems,
   capabilitySnapshot,
+  computerUseEnabled,
   modelGroups,
   activeModelProfileId,
   researchMode,
   onDraftChange,
   onToggleResearchMode,
   onSetCapabilityOverride,
+  onSetCapabilityOverrides,
+  onToggleComputerUse,
   onSubmit,
   onOpenProviders,
   onHandleApproval,
@@ -6854,8 +6936,8 @@ export function ChatView({
     return capabilitySnapshot.skills.map(skill => skill.name).join(' · ')
   }, [capabilitySnapshot])
   const manageableCapabilityCount = useMemo(
-    () => capabilityItems.filter(item => item.effectiveEnabled).length,
-    [capabilityItems],
+    () => capabilityItems.filter(item => item.effectiveEnabled).length + (computerUseEnabled ? 1 : 0),
+    [capabilityItems, computerUseEnabled],
   )
   const liveTaskStepsVisible =
     isRunning &&
@@ -7249,6 +7331,7 @@ export function ChatView({
                           <CapabilityPanel
                             items={capabilityItems}
                             snapshot={capabilitySnapshot}
+                            computerUseEnabled={computerUseEnabled}
                             collapsedGroups={collapsedCapabilityGroups}
                             onToggleGroup={group =>
                               setCollapsedCapabilityGroups(current => {
@@ -7259,6 +7342,8 @@ export function ChatView({
                               })
                             }
                             onSetCapabilityOverride={onSetCapabilityOverride}
+                            onSetCapabilityOverrides={onSetCapabilityOverrides}
+                            onToggleComputerUse={onToggleComputerUse}
                           />
                         </div>
                       ) : null}

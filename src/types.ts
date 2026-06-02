@@ -393,6 +393,7 @@ export type WorkspaceCapabilityOverrides = {
   skills: Record<string, CapabilityOverrideMode>
   plugins: Record<string, CapabilityOverrideMode>
   mcp: Record<string, CapabilityOverrideMode>
+  computerUse?: CapabilityOverrideMode
 }
 
 export type ProjectCapabilityOverrides = Record<string, WorkspaceCapabilityOverrides>

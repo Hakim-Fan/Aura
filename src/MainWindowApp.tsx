@@ -1834,6 +1834,7 @@ function createEmptyCapabilityOverrides(): WorkspaceCapabilityOverrides {
     skills: {},
     plugins: {},
     mcp: {},
+    computerUse: 'off',
   }
 }
 
@@ -1861,7 +1862,48 @@ function updateCapabilityOverride(
   const hasAnyOverrides =
     Object.keys(nextOverrides.skills).length > 0 ||
     Object.keys(nextOverrides.plugins).length > 0 ||
-    Object.keys(nextOverrides.mcp).length > 0
+    Object.keys(nextOverrides.mcp).length > 0 ||
+    nextOverrides.computerUse === 'on'
+
+  return hasAnyOverrides ? nextOverrides : undefined
+}
+
+function updateCapabilityOverrides(
+  overrides: WorkspaceCapabilityOverrides | undefined,
+  kind: 'skills' | 'plugins' | 'mcp',
+  updates: Array<{ id: string; mode: CapabilityOverrideMode }>,
+): WorkspaceCapabilityOverrides | undefined {
+  let nextOverrides = overrides || createEmptyCapabilityOverrides()
+
+  for (const update of updates) {
+    nextOverrides =
+      updateCapabilityOverride(nextOverrides, kind, update.id, update.mode) ||
+      createEmptyCapabilityOverrides()
+  }
+
+  const hasAnyOverrides =
+    Object.keys(nextOverrides.skills).length > 0 ||
+    Object.keys(nextOverrides.plugins).length > 0 ||
+    Object.keys(nextOverrides.mcp).length > 0 ||
+    nextOverrides.computerUse === 'on'
+
+  return hasAnyOverrides ? nextOverrides : undefined
+}
+
+function updateComputerUseOverride(
+  overrides: WorkspaceCapabilityOverrides | undefined,
+  enabled: boolean,
+): WorkspaceCapabilityOverrides | undefined {
+  const current = overrides || createEmptyCapabilityOverrides()
+  const nextOverrides: WorkspaceCapabilityOverrides = {
+    ...current,
+    computerUse: enabled ? 'on' : 'off',
+  }
+  const hasAnyOverrides =
+    Object.keys(nextOverrides.skills).length > 0 ||
+    Object.keys(nextOverrides.plugins).length > 0 ||
+    Object.keys(nextOverrides.mcp).length > 0 ||
+    nextOverrides.computerUse === 'on'
 
   return hasAnyOverrides ? nextOverrides : undefined
 }
@@ -2278,6 +2320,7 @@ export function MainWindowApp() {
       ),
     [activeSession?.capabilityOverrides, auraHome, settings],
   )
+  const currentComputerUseEnabled = activeSession?.capabilityOverrides?.computerUse === 'on'
   const currentResolvedCapabilityUsage = useMemo(() => {
     if (!auraHome || !activeProjectWorkspaceRoot.trim()) {
       return undefined
@@ -3819,6 +3862,7 @@ export function MainWindowApp() {
           mcpServers: [],
         },
       }
+    const computerUseEnabledForRun = activeSession.capabilityOverrides?.computerUse === 'on'
     const runtimeSettings: AgentSettings = {
       ...latestSettings,
       activeProviderProfileId:
@@ -3828,6 +3872,16 @@ export function MainWindowApp() {
       baseUrl: latestProviderProfile?.baseUrl || latestSettings.baseUrl,
       model: latestEffectiveModel,
       cwd: workspacePath,
+      enableComputerUse: computerUseEnabledForRun,
+      autoApproveComputerUse: false,
+      browser: {
+        ...latestSettings.browser,
+        interactive: {
+          ...latestSettings.browser.interactive,
+          enabled: computerUseEnabledForRun,
+          allowComputerUse: computerUseEnabledForRun,
+        },
+      },
     }
 
     let runtimeMessages: ChatMessage[] = []
@@ -4467,6 +4521,57 @@ export function MainWindowApp() {
     saveSessions(nextSessions)
   }
 
+  function setProjectCapabilityOverrides(
+    kind: 'skills' | 'plugins' | 'mcp',
+    updates: Array<{ id: string; mode: CapabilityOverrideMode }>,
+  ) {
+    if (!activeSession) {
+      setError('当前会话尚未准备好，暂时无法保存会话工具设置。')
+      return
+    }
+    if (updates.length === 0) {
+      return
+    }
+
+    const nextSessions = sessions.map(session =>
+      session.id === activeSession.id
+        ? {
+          ...session,
+          capabilityOverrides: updateCapabilityOverrides(
+            session.capabilityOverrides,
+            kind,
+            updates,
+          ),
+          updatedAt: Date.now(),
+        }
+        : session,
+    )
+    setSessions(nextSessions)
+    saveSessions(nextSessions)
+  }
+
+  function setSessionComputerUseEnabled(enabled: boolean) {
+    if (!activeSession) {
+      setError('当前会话尚未准备好，暂时无法保存 Computer Use 设置。')
+      return
+    }
+
+    const nextSessions = sessions.map(session =>
+      session.id === activeSession.id
+        ? {
+          ...session,
+          capabilityOverrides: updateComputerUseOverride(
+            session.capabilityOverrides,
+            enabled,
+          ),
+          updatedAt: Date.now(),
+        }
+        : session,
+    )
+    setSessions(nextSessions)
+    saveSessions(nextSessions)
+  }
+
   const effectiveSettings: AgentSettings = {
     ...settings,
     activeProviderProfileId: activeProviderProfile?.id || settings.activeProviderProfileId,
@@ -4569,6 +4674,7 @@ export function MainWindowApp() {
                 attachments={draftAttachments}
                 capabilityItems={currentCapabilityItems}
                 capabilitySnapshot={currentResolvedCapabilityUsage}
+                computerUseEnabled={currentComputerUseEnabled}
                 modelGroups={enabledModelGroups}
                 activeModelProfileId={activeProviderProfile?.id || ''}
                 researchMode={draftResearchMode}
@@ -4591,6 +4697,8 @@ export function MainWindowApp() {
                   }))
                 }}
                 onSetCapabilityOverride={setProjectCapabilityOverride}
+                onSetCapabilityOverrides={setProjectCapabilityOverrides}
+                onToggleComputerUse={setSessionComputerUseEnabled}
                 onSubmit={value => void submit(value)}
                 onOpenProviders={() =>
                   void openSettingsWindow('providers').catch(caught => {

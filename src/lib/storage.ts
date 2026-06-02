@@ -114,8 +114,8 @@ function defaultLightpandaSettings(): LightpandaSettings {
 
 function defaultInteractiveBrowserSettings(): InteractiveBrowserSettings {
   return {
-    enabled: true,
-    allowComputerUse: true,
+    enabled: false,
+    allowComputerUse: false,
   }
 }
 
@@ -215,7 +215,7 @@ export const defaultSettings: AgentSettings = {
   showDetailedExecutionDetails: false,
   requireLongTaskPlanApproval: false,
   enableMultiAgent: true,
-  enableComputerUse: true,
+  enableComputerUse: false,
   autoApproveShell: false,
   autoApproveFileWrite: false,
   autoApproveComputerUse: false,
@@ -249,6 +249,7 @@ function createEmptyWorkspaceCapabilityOverrides(): WorkspaceCapabilityOverrides
     skills: {},
     plugins: {},
     mcp: {},
+    computerUse: 'off',
   }
 }
 
@@ -277,6 +278,10 @@ function normalizeWorkspaceCapabilityOverrides(value: unknown): WorkspaceCapabil
     skills: normalizeCapabilityOverrideMap((value as { skills?: unknown }).skills),
     plugins: normalizeCapabilityOverrideMap((value as { plugins?: unknown }).plugins),
     mcp: normalizeCapabilityOverrideMap((value as { mcp?: unknown }).mcp),
+    computerUse:
+      normalizeCapabilityOverrideMode((value as { computerUse?: unknown }).computerUse) === 'on'
+        ? 'on'
+        : 'off',
   }
 }
 
@@ -1521,6 +1526,8 @@ function parseSettings(raw: string | null): AgentSettings {
         typeof parsed.requireLongTaskPlanApproval === 'boolean'
           ? parsed.requireLongTaskPlanApproval
           : defaultSettings.requireLongTaskPlanApproval,
+      enableComputerUse: false,
+      autoApproveComputerUse: false,
       externalSkillDirs: normalizeStringList(parsed.externalSkillDirs),
       browser: normalizeBrowserSettings(parsed.browser),
       web: normalizeWebToolsSettings(parsed.web),
@@ -2747,7 +2754,8 @@ export function updateWorkspaceCapabilityOverride(
   const hasAnyOverrides =
     Object.keys(nextWorkspaceOverrides.skills).length > 0 ||
     Object.keys(nextWorkspaceOverrides.plugins).length > 0 ||
-    Object.keys(nextWorkspaceOverrides.mcp).length > 0
+    Object.keys(nextWorkspaceOverrides.mcp).length > 0 ||
+    nextWorkspaceOverrides.computerUse === 'on'
 
   if (!hasAnyOverrides) {
     const next = { ...overrides }

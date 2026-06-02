@@ -3258,7 +3258,7 @@ function isAutoApproved(tool, settings) {
     case 'file_write':
       return settings.autoApproveFileWrite
     case 'computer_use':
-      return settings.autoApproveComputerUse
+      return false
     default:
       return true
   }

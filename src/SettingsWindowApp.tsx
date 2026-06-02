@@ -515,23 +515,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
     setBrowserStatus(null)
   }
 
-  function updateInteractiveBrowserSettings(
-    patch: Partial<AgentSettings['browser']['interactive']>,
-  ) {
-    setDraftSettings(current => ({
-      ...current,
-      browser: {
-        ...current.browser,
-        interactive: {
-          ...current.browser.interactive,
-          ...patch,
-        },
-      },
-    }))
-    setSaveState('idle')
-    setBrowserStatus(null)
-  }
-
   function updateWebSettings(patch: Partial<AgentSettings['web']>) {
     setDraftSettings(current => ({
       ...current,
@@ -2173,7 +2156,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
               {[
                 { key: 'autoApproveShell', label: 'Shell 默认自动允许' },
                 { key: 'autoApproveFileWrite', label: '文件写入默认自动允许' },
-                { key: 'autoApproveComputerUse', label: 'Computer Use 默认自动允许' },
                 { key: 'requireLongTaskPlanApproval', label: '长任务规划需要审批' },
               ].map(item => (
                 <label key={item.key} className="relative flex items-center gap-3 cursor-pointer group">
@@ -2196,7 +2178,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
               ))}
             </div>
             <p className="text-12px leading-relaxed text-[var(--text-secondary)] opacity-70">
-              这组开关会在保存后同步到主窗口。长任务规划审批默认关闭；关闭时计划会直接展示并执行，Shell、文件写入和桌面交互仍按各自开关审批。
+              这组开关会在保存后同步到主窗口。长任务规划审批默认关闭；关闭时计划会直接展示并执行，Shell 和文件写入仍按各自开关审批。
             </p>
           </section>
 
@@ -2273,21 +2255,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
               </div>
               <div className="browser-summary-item">
                 <span className="browser-summary-label">浏览器操作</span>
-                <strong>
-                  {draftSettings.browser.interactive.enabled ? '系统浏览器可用' : '已禁用'}
-                </strong>
-                <span className="muted">只服务登录、点击、表单和人工处理等显式网页操作。</span>
+                <strong>由会话工具控制</strong>
+                <span className="muted">默认不挂载系统浏览器，需在聊天工具浮层打开 Computer Use。</span>
               </div>
               <div className="browser-summary-item">
                 <span className="browser-summary-label">Computer Use</span>
-                <strong>
-                  {draftSettings.browser.interactive.allowComputerUse ? '允许配合使用' : '不参与'}
-                </strong>
-                <span className="muted">
-                  {draftSettings.enableComputerUse
-                    ? '系统级桌面交互仍受全局 Computer Use 开关约束。'
-                    : '当前全局 Computer Use 已关闭。'}
-                </span>
+                <strong>默认关闭</strong>
+                <span className="muted">打开后只影响当前会话，并挂载系统浏览器与桌面操作工具。</span>
               </div>
             </div>
           </section>
@@ -2393,41 +2367,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
           <section className="dashboard-card">
             <div className="section-title">浏览器操作</div>
-            <div className="toggle-stack">
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.browser.interactive.enabled}
-                  onChange={event =>
-                    updateInteractiveBrowserSettings({ enabled: event.target.checked })
-                  }
-                  type="checkbox"
-                />
-                <div className="flex flex-col">
-                  <strong>允许系统浏览器处理显式网页操作</strong>
-                  <span className="muted">仅在意图明确是“打开网页并继续操作”时使用系统默认浏览器。</span>
-                </div>
-              </label>
-
-              <label className="toggle-inline">
-                <input
-                  checked={draftSettings.browser.interactive.allowComputerUse}
-                  onChange={event =>
-                    updateInteractiveBrowserSettings({
-                      allowComputerUse: event.target.checked,
-                    })
-                  }
-                  type="checkbox"
-                />
-                <div className="flex flex-col">
-                  <strong>允许配合 `computer_*` 工具</strong>
-                  <span className="muted">打开系统浏览器后，Agent 可以继续用桌面交互工具协助完成操作。</span>
-                </div>
-              </label>
-            </div>
-
             <div className="provider-note mt-3">
-              <p>这里不再维护托管浏览器、浏览器来源切换、登录态导入和自动接管。</p>
-              <p>网页操作就是系统浏览器，资料获取就是 `web_* + Lightpanda`。</p>
+              <p>系统浏览器和 `computer_*` 工具默认不会挂载。</p>
+              <p>需要网页操作时，在聊天输入框下方的工具浮层打开 Computer Use；关闭时普通搜索只会使用 `web_*` 与 Lightpanda。</p>
             </div>
           </section>
 

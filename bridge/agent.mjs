@@ -593,13 +593,16 @@ function shouldLoadRuntimeCapabilityLayers(routeState) {
 }
 
 function createDefaultAgentRouteState(settings = {}) {
+  const computerUseEnabled =
+    settings?.browser?.interactive?.enabled === true ||
+    settings?.enableComputerUse === true
   return {
     modelDirected: true,
-    capabilityTier: 'default-agent',
+    capabilityTier: computerUseEnabled ? 'browser-interactive' : 'default-agent',
     researchMode: 'auto',
     webRetrievalAvailable: true,
     needsExternalFacts: false,
-    webInteractionRequired: false,
+    webInteractionRequired: computerUseEnabled,
     workspaceRelated: true,
     responseStyle: 'adaptive-default',
     taskComplexity: 'model_directed',
