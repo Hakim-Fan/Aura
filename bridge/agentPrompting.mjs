@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import {
   buildLanguagePolicyInstruction,
   getLocaleDisplayName,
@@ -7,6 +9,8 @@ import {
   createPromptBlock,
   renderPromptBlocks,
 } from './promptBlocks.mjs'
+
+const WORKSPACE_AGENTS_MAX_CHARS = 20_000
 
 function buildCurrentDateContext() {
   const now = new Date()
@@ -29,6 +33,46 @@ function buildCurrentDateContext() {
     `Current local date: ${isoDate}.`,
     `Current timezone: ${timezone}.`,
     'When the user says today, tomorrow, yesterday, latest, current, or this week, resolve it from the current local date above instead of relying on model-internal dates.',
+  ].join('\n')
+}
+
+function normalizeInstructionFileText(value, maxLength = WORKSPACE_AGENTS_MAX_CHARS) {
+  const normalized = String(value || '').replace(/\r\n/g, '\n').trim()
+  if (!normalized) {
+    return ''
+  }
+  if (normalized.length <= maxLength) {
+    return normalized
+  }
+  return `${normalized.slice(0, maxLength)}\n\n[Truncated: .aura/AGENTS.md exceeds ${maxLength} characters.]`
+}
+
+export function buildWorkspaceAgentsInstructionsPrompt(settings = {}) {
+  const cwd = typeof settings?.cwd === 'string' ? settings.cwd.trim() : ''
+  if (!cwd) {
+    return ''
+  }
+  const agentsPath = path.join(cwd, '.aura', 'AGENTS.md')
+  let content = ''
+  try {
+    const stats = fs.statSync(agentsPath)
+    if (!stats.isFile()) {
+      return ''
+    }
+    content = fs.readFileSync(agentsPath, 'utf8')
+  } catch {
+    return ''
+  }
+
+  const normalized = normalizeInstructionFileText(content)
+  if (!normalized) {
+    return ''
+  }
+
+  return [
+    'Workspace AGENTS.md instructions:',
+    'These are project-specific developer-level instructions loaded from the active workspace. Follow them when applicable unless they conflict with system safety, workspace permissions, tool policies, or the latest user request.',
+    `<workspace_agents path="${agentsPath}">\n${normalized}\n</workspace_agents>`,
   ].join('\n')
 }
 
@@ -591,6 +635,16 @@ export function buildDefaultAgentPromptBlocks(
       kind: 'user_custom_instructions',
       priority: 40,
       content: customInstructions,
+    }))
+  }
+
+  const workspaceAgentsInstructions = buildWorkspaceAgentsInstructionsPrompt(settings)
+  if (workspaceAgentsInstructions) {
+    blocks.push(createPromptBlock({
+      id: 'workspace-agents-instructions',
+      kind: 'workspace_agents_instructions',
+      priority: 45,
+      content: workspaceAgentsInstructions,
     }))
   }
 

@@ -225,7 +225,8 @@ export const defaultSettings: AgentSettings = {
   browser: defaultBrowserSettings(),
   web: defaultWebToolsSettings(),
   mcpServers: [],
-  sendShortcut: 'meta-enter',
+  sendShortcut: 'enter',
+  uiDefaultsVersion: 2,
 }
 
 const builtinSkillIds = new Set(builtinSkills.map(skill => skill.id))
@@ -242,6 +243,30 @@ function normalizeStringList(values: unknown) {
         .filter(Boolean),
     ),
   )
+}
+
+function normalizeBooleanSetting(value: unknown, fallback: boolean) {
+  if (typeof value === 'boolean') {
+    return value
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true') {
+      return true
+    }
+    if (normalized === 'false') {
+      return false
+    }
+  }
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return true
+    }
+    if (value === 0) {
+      return false
+    }
+  }
+  return fallback
 }
 
 function createEmptyWorkspaceCapabilityOverrides(): WorkspaceCapabilityOverrides {
@@ -1254,6 +1279,40 @@ function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
     providerProfiles: normalizeProviderProfiles(settings.providerProfiles),
     externalSkillDirs: normalizeStringList(settings.externalSkillDirs),
     locale: normalizeLocale(settings.locale),
+    providerProxyEnabled: normalizeBooleanSetting(
+      settings.providerProxyEnabled,
+      defaultSettings.providerProxyEnabled,
+    ),
+    showDetailedExecutionDetails: normalizeBooleanSetting(
+      settings.showDetailedExecutionDetails,
+      defaultSettings.showDetailedExecutionDetails,
+    ),
+    requireLongTaskPlanApproval: normalizeBooleanSetting(
+      settings.requireLongTaskPlanApproval,
+      defaultSettings.requireLongTaskPlanApproval,
+    ),
+    enableMultiAgent: normalizeBooleanSetting(
+      settings.enableMultiAgent,
+      defaultSettings.enableMultiAgent,
+    ),
+    enableComputerUse: normalizeBooleanSetting(
+      settings.enableComputerUse,
+      defaultSettings.enableComputerUse,
+    ),
+    autoApproveShell: normalizeBooleanSetting(
+      settings.autoApproveShell,
+      defaultSettings.autoApproveShell,
+    ),
+    autoApproveFileWrite: normalizeBooleanSetting(
+      settings.autoApproveFileWrite,
+      defaultSettings.autoApproveFileWrite,
+    ),
+    autoApproveComputerUse: normalizeBooleanSetting(
+      settings.autoApproveComputerUse,
+      defaultSettings.autoApproveComputerUse,
+    ),
+    sendShortcut: normalizeSendShortcut(settings.sendShortcut),
+    uiDefaultsVersion: normalizeUiDefaultsVersion(settings.uiDefaultsVersion),
     customInstructions: normalizeCustomInstructions(settings.customInstructions),
     analysisProviderProfileId:
       typeof settings.analysisProviderProfileId === 'string'
@@ -1301,7 +1360,7 @@ function normalizeWebSearchSettings(value: unknown): WebSearchSettings {
 
   const entry = value as Partial<WebSearchSettings>
   return {
-    enabled: entry.enabled !== false,
+    enabled: normalizeBooleanSetting(entry.enabled, defaults.enabled),
     provider:
       entry.provider === 'tavily' ||
       entry.provider === 'brave' ||
@@ -1324,7 +1383,7 @@ function normalizeWebFetchSettings(value: unknown): WebFetchSettings {
 
   const entry = value as Partial<WebFetchSettings>
   return {
-    enabled: entry.enabled !== false,
+    enabled: normalizeBooleanSetting(entry.enabled, defaults.enabled),
     provider:
       entry.provider === 'http-readability' || entry.provider === 'auto'
         ? entry.provider
@@ -1338,7 +1397,7 @@ function normalizeWebFetchSettings(value: unknown): WebFetchSettings {
       10_000_000,
     ),
     maxRedirects: clampIntegerSetting(entry.maxRedirects, defaults.maxRedirects, 0, 10),
-    readability: entry.readability !== false,
+    readability: normalizeBooleanSetting(entry.readability, defaults.readability),
     providers: normalizeWebFetchProviderSettings((entry as Partial<WebFetchSettings>).providers),
   }
 }
@@ -1351,9 +1410,12 @@ function normalizeWebFetchProviderSettings(value: unknown): WebFetchProviderSett
 
   const entry = value as Partial<WebFetchProviderSettings>
   return {
-    jinaEnabled: entry.jinaEnabled === true,
+    jinaEnabled: normalizeBooleanSetting(entry.jinaEnabled, defaults.jinaEnabled),
     jinaApiKey: typeof entry.jinaApiKey === 'string' ? entry.jinaApiKey : defaults.jinaApiKey,
-    jinaAllowAnonymous: entry.jinaAllowAnonymous === true,
+    jinaAllowAnonymous: normalizeBooleanSetting(
+      entry.jinaAllowAnonymous,
+      defaults.jinaAllowAnonymous,
+    ),
   }
 }
 
@@ -1365,7 +1427,7 @@ function normalizeWebResearchSettings(value: unknown): WebResearchSettings {
 
   const entry = value as Partial<WebResearchSettings>
   return {
-    enabled: entry.enabled !== false,
+    enabled: normalizeBooleanSetting(entry.enabled, defaults.enabled),
     defaultSearchLimit: clampIntegerSetting(
       entry.defaultSearchLimit,
       defaults.defaultSearchLimit,
@@ -1384,7 +1446,10 @@ function normalizeWebResearchSettings(value: unknown): WebResearchSettings {
       500,
       20_000,
     ),
-    preferSearchContent: entry.preferSearchContent !== false,
+    preferSearchContent: normalizeBooleanSetting(
+      entry.preferSearchContent,
+      defaults.preferSearchContent,
+    ),
     searchContentMinChars: clampIntegerSetting(
       entry.searchContentMinChars,
       defaults.searchContentMinChars,
@@ -1434,7 +1499,7 @@ function normalizeLightpandaSettings(value: unknown): LightpandaSettings {
 
   const entry = value as Partial<LightpandaSettings>
   return {
-    enabled: entry.enabled === true,
+    enabled: normalizeBooleanSetting(entry.enabled, defaults.enabled),
     executablePath:
       typeof entry.executablePath === 'string' ? entry.executablePath.trim() : defaults.executablePath,
     maxConcurrency: clampIntegerSetting(entry.maxConcurrency, defaults.maxConcurrency, 1, 12),
@@ -1450,8 +1515,11 @@ function normalizeInteractiveBrowserSettings(value: unknown): InteractiveBrowser
 
   const entry = value as Partial<InteractiveBrowserSettings>
   return {
-    enabled: entry.enabled !== false,
-    allowComputerUse: entry.allowComputerUse !== false,
+    enabled: normalizeBooleanSetting(entry.enabled, defaults.enabled),
+    allowComputerUse: normalizeBooleanSetting(
+      entry.allowComputerUse,
+      defaults.allowComputerUse,
+    ),
   }
 }
 
@@ -1497,6 +1565,8 @@ function parseSettings(raw: string | null): AgentSettings {
           ? parsed.activeProviderProfileId
           : undefined,
       )?.id || ''
+    const uiDefaultsVersion = normalizeUiDefaultsVersion(parsed.uiDefaultsVersion)
+    const shouldApplyCurrentInteractionDefaults = uiDefaultsVersion < 2
 
     return syncLegacyFields({
       ...defaultSettings,
@@ -1519,9 +1589,13 @@ function parseSettings(raw: string | null): AgentSettings {
       ),
       reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
       customInstructions: normalizeCustomInstructions(parsed.customInstructions),
-      showDetailedExecutionDetails: normalizeDetailedExecutionSetting(
-        parsed.showDetailedExecutionDetails,
-      ),
+      showDetailedExecutionDetails: shouldApplyCurrentInteractionDefaults
+        ? defaultSettings.showDetailedExecutionDetails
+        : normalizeDetailedExecutionSetting(parsed.showDetailedExecutionDetails),
+      sendShortcut: shouldApplyCurrentInteractionDefaults
+        ? defaultSettings.sendShortcut
+        : normalizeSendShortcut(parsed.sendShortcut),
+      uiDefaultsVersion: defaultSettings.uiDefaultsVersion,
       requireLongTaskPlanApproval:
         typeof parsed.requireLongTaskPlanApproval === 'boolean'
           ? parsed.requireLongTaskPlanApproval
@@ -1548,6 +1622,18 @@ function normalizeExecutionMode(value: unknown): ExecutionMode {
 
 function normalizeMemoryMode(value: unknown): MemoryMode {
   return value === 'summary' ? 'summary' : 'summary'
+}
+
+function normalizeSendShortcut(value: unknown): AgentSettings['sendShortcut'] {
+  return value === 'meta-enter' ? 'meta-enter' : defaultSettings.sendShortcut
+}
+
+function normalizeUiDefaultsVersion(value: unknown) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0
+  }
+  return Math.round(parsed)
 }
 
 function normalizeReasoningEffort(value: unknown): ReasoningEffort {
@@ -1586,7 +1672,7 @@ function normalizeLocale(value: unknown) {
 }
 
 function normalizeDetailedExecutionSetting(value: unknown) {
-  return value === true
+  return normalizeBooleanSetting(value, defaultSettings.showDetailedExecutionDetails)
 }
 
 function normalizeContextCompressionThreshold(value: unknown) {
@@ -1634,7 +1720,7 @@ function normalizeModels(value: unknown) {
         : entry && typeof entry === 'object' && typeof entry.id === 'string'
           ? {
               id: entry.id,
-              enabled: entry.enabled !== false,
+              enabled: normalizeBooleanSetting(entry.enabled, true),
               contextWindowTokens:
                 typeof entry.contextWindowTokens === 'number' &&
                 Number.isFinite(entry.contextWindowTokens) &&
@@ -1658,7 +1744,9 @@ function normalizeModels(value: unknown) {
     const existing = byId.get(modelId)
     byId.set(modelId, {
       id: modelId,
-      enabled: existing ? existing.enabled || normalized.enabled !== false : normalized.enabled !== false,
+      enabled: existing
+        ? existing.enabled || normalizeBooleanSetting(normalized.enabled, true)
+        : normalizeBooleanSetting(normalized.enabled, true),
       contextWindowTokens: Math.max(
         existing?.contextWindowTokens || 0,
         normalized.contextWindowTokens || 0,
@@ -1717,7 +1805,10 @@ function normalizeProfiles(
               ? String((profile as { apiKey?: string }).apiKey)
               : '',
           baseUrl,
-          enabled: (profile as { enabled?: boolean }).enabled !== false,
+          enabled: normalizeBooleanSetting(
+            (profile as { enabled?: unknown }).enabled,
+            true,
+          ),
           models,
           defaultModel,
         } satisfies ProviderProfile

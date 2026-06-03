@@ -279,6 +279,21 @@ function buildPolicyPreview(decision, command) {
   )
 }
 
+function buildManualCapabilityInstallDecision(command) {
+  return buildDecision('deny', {
+    code: 'SHELL_CAPABILITY_ADMIN_MANUAL_INSTALL_BLOCKED',
+    riskLevel: 'high',
+    summary: '已阻止使用 shell 手工安装 Aura 能力。',
+    reason:
+      'The command looks like manual download/copy/clone/package-install work for an Aura capability. Capability installation should use audited Aura tools so the runtime can stage, validate, copy, enable, and report the result consistently.',
+    suggestedAction:
+      '请直接调用 aura_install_skill 处理 URL/GitHub/npm/npx/粘贴内容来源；已有本地 skill 文件或目录时调用 aura_import_skill。',
+    details: {
+      command,
+    },
+  })
+}
+
 export function formatExecutionPolicyPreview(decision, command) {
   return buildPolicyPreview(decision, command)
 }
@@ -307,24 +322,8 @@ export function evaluateToolExecutionPolicy({
     })
   }
 
-  if (
-    routeState?.isCapabilityAdminTask === true &&
-    looksLikeManualCapabilityInstallCommand(command) &&
-    !isKnownSafeCommand(command)
-  ) {
-    return buildDecision('deny', {
-      code: 'SHELL_CAPABILITY_ADMIN_MANUAL_INSTALL_BLOCKED',
-      riskLevel: 'high',
-      summary: '已阻止在能力管理任务中使用 shell 手工安装。',
-      reason:
-        'This turn is classified as Aura capability management, and the command looks like manual download/copy/clone/package-install work. Capability installation should use audited Aura tools so the runtime can stage, validate, copy, enable, and report the result consistently.',
-      suggestedAction:
-        '请直接调用 aura_install_skill 处理 URL/GitHub/npm/npx/粘贴内容来源；已有本地 skill 文件或目录时调用 aura_import_skill。',
-      details: {
-        command,
-      },
-    })
-  }
+  const manualCapabilityInstallCommand =
+    looksLikeManualCapabilityInstallCommand(command) && !isKnownSafeCommand(command)
 
   const dangerous = commandMightBeDangerous(command)
   if (dangerous?.action === 'deny') {
@@ -386,6 +385,9 @@ export function evaluateToolExecutionPolicy({
           },
         })
       }
+      if (manualCapabilityInstallCommand) {
+        return buildManualCapabilityInstallDecision(command)
+      }
       return buildDecision('prompt', {
         code: writesAuraHome
           ? 'SHELL_AURA_HOME_MUTATION'
@@ -407,6 +409,10 @@ export function evaluateToolExecutionPolicy({
         },
       })
     }
+  }
+
+  if (manualCapabilityInstallCommand) {
+    return buildManualCapabilityInstallDecision(command)
   }
 
   if (looksLikeShellFileMutation(command)) {

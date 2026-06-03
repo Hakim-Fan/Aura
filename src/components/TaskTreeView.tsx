@@ -3,14 +3,9 @@ import { CheckCircle2, Circle, LoaderCircle, PauseCircle, XCircle } from 'lucide
 import type { TaskNode } from '../types'
 
 const STRUCTURAL_STEP_KINDS = new Set(['main', 'plan'])
-const MAX_VISIBLE_TASK_TITLE_CHARS = 20
 
-function compactVisibleTaskTitle(value = '') {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  if (normalized.length <= MAX_VISIBLE_TASK_TITLE_CHARS) {
-    return normalized
-  }
-  return `${normalized.slice(0, Math.max(0, MAX_VISIBLE_TASK_TITLE_CHARS - 3))}...`
+function normalizeVisibleTaskTitle(value = '') {
+  return value.replace(/\s+/g, ' ').trim()
 }
 
 function collectStepNodes(nodes: TaskNode[] = []) {
@@ -101,8 +96,8 @@ function pickFocusedStep(steps: TaskNode[] = []) {
 }
 
 function TaskStep({ node, compact = false }: { node: TaskNode; compact?: boolean }) {
-  const displayTitle = compactVisibleTaskTitle(node.title)
-  const titleTooltip = displayTitle === node.title ? undefined : node.title
+  const displayTitle = normalizeVisibleTaskTitle(node.title)
+  const titleTooltip = displayTitle || node.title ? node.title : undefined
   return (
     <li className={`flex min-w-0 ${compact ? 'items-center' : 'items-start'} gap-2.5`}>
       <span

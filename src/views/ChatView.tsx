@@ -4760,7 +4760,7 @@ function DockedTaskStepsPanel({
   return (
     <section
       aria-live="polite"
-      className="mb-3 w-full sm:w-2/3 pointer-events-auto rounded-2xl border border-[rgba(79,123,116,0.14)] bg-white/96 px-3.5 py-2.5 shadow-[0_18px_50px_-24px_rgba(15,23,42,0.45)] ring-1 ring-[rgba(79,123,116,0.08)] backdrop-blur-xl"
+      className="mb-3 w-full pointer-events-auto rounded-2xl border border-[rgba(79,123,116,0.14)] bg-white/96 px-3.5 py-2.5 shadow-[0_18px_50px_-24px_rgba(15,23,42,0.45)] ring-1 ring-[rgba(79,123,116,0.08)] backdrop-blur-xl"
     >
       <div className="flex min-w-0 items-start gap-2">
         <div className="min-w-0 flex-1">
@@ -7594,6 +7594,7 @@ export function ChatView({
                 }}
                 onToggle={onToggleWorkspacePath}
                 onSelectFile={onSelectWorkspaceFile}
+                onOpenFile={onOpenAttachment}
                 onInsertReference={onInsertFileReference}
                 onCopyPath={onCopyPath}
               />

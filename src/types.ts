@@ -736,6 +736,7 @@ export type AgentSettings = {
   web: WebToolsSettings
   mcpServers: McpServerConfig[]
   sendShortcut: 'enter' | 'meta-enter'
+  uiDefaultsVersion?: number
 }
 
 export type Session = {

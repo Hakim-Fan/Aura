@@ -54,11 +54,13 @@ test('createToolRouter keeps local write tools visible even on advise turns', ()
   assert.ok(visibleToolNames.includes('exec_command'))
 })
 
-test('createToolRouter mounts Aura admin tools only for capability admin turns', () => {
+test('createToolRouter keeps Aura skill install tools visible by default', () => {
   const registry = createToolRegistry({
     builtinTools: [
       buildTool('read_file'),
       buildTool('aura_install_skill'),
+      buildTool('aura_import_skill'),
+      buildTool('aura_remove_mcp_server'),
     ],
   })
 
@@ -73,6 +75,14 @@ test('createToolRouter mounts Aura admin tools only for capability admin turns',
 
   assert.equal(
     ordinaryRouter.modelVisibleTools.some(tool => tool.name === 'aura_install_skill'),
+    true,
+  )
+  assert.equal(
+    ordinaryRouter.modelVisibleTools.some(tool => tool.name === 'aura_import_skill'),
+    true,
+  )
+  assert.equal(
+    ordinaryRouter.modelVisibleTools.some(tool => tool.name === 'aura_remove_mcp_server'),
     false,
   )
   assert.equal(

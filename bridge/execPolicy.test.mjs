@@ -171,7 +171,7 @@ test('execution policy blocks Aura capability directory mutations through shell'
   assert.match(result.suggestedAction, /aura_install_skill/)
 })
 
-test('execution policy blocks manual shell installers during capability admin tasks', () => {
+test('execution policy blocks manual shell capability installers without route classification', () => {
   const result = evaluateToolExecutionPolicy({
     tool: {
       name: 'exec_command',
@@ -183,8 +183,24 @@ test('execution policy blocks manual shell installers during capability admin ta
     settings: {
       cwd: path.join(os.tmpdir(), 'aura-policy-workspace'),
     },
-    routeState: {
-      isCapabilityAdminTask: true,
+  })
+
+  assert.equal(result.action, 'deny')
+  assert.equal(result.code, 'SHELL_CAPABILITY_ADMIN_MANUAL_INSTALL_BLOCKED')
+  assert.match(result.suggestedAction, /aura_install_skill/)
+})
+
+test('execution policy blocks npx skills add global installs without route classification', () => {
+  const result = evaluateToolExecutionPolicy({
+    tool: {
+      name: 'run_shell',
+      approvalCategory: 'shell',
+    },
+    args: {
+      command: 'npx skills add anthropics/skills@frontend-design -g -y',
+    },
+    settings: {
+      cwd: path.join(os.tmpdir(), 'aura-policy-workspace'),
     },
   })
 

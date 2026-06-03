@@ -16,6 +16,7 @@ type Props = {
   onOpenRootPath: () => void
   onToggle: (path: string) => void
   onSelectFile: (path: string) => void
+  onOpenFile: (path: string) => void
   onInsertReference: (path: string) => void
   onCopyPath: (path: string) => void
 }
@@ -27,6 +28,7 @@ type TreeNodeProps = {
   selectedFilePath: string | null
   onToggle: (path: string) => void
   onSelectFile: (path: string) => void
+  onOpenFile: (path: string) => void
 }
 
 function TreeNode({
@@ -36,6 +38,7 @@ function TreeNode({
   selectedFilePath,
   onToggle,
   onSelectFile,
+  onOpenFile,
 }: TreeNodeProps) {
   const isDirectory = node.kind === 'directory'
   const isExpanded = expandedPaths.includes(node.path)
@@ -52,7 +55,13 @@ function TreeNode({
         onClick={() =>
           isDirectory ? onToggle(node.path) : onSelectFile(node.path)
         }
+        onDoubleClick={() => {
+          if (!isDirectory) {
+            onOpenFile(node.path)
+          }
+        }}
         style={{ paddingLeft: `${depth * 16 + 12}px` }}
+        title={isDirectory ? '单击展开或收起目录' : '单击预览，双击用默认软件打开'}
       >
         <span className="workspace-node-glyph">
           {isDirectory ? (isExpanded ? '▾' : '▸') : '·'}
@@ -70,6 +79,7 @@ function TreeNode({
               selectedFilePath={selectedFilePath}
               onToggle={onToggle}
               onSelectFile={onSelectFile}
+              onOpenFile={onOpenFile}
             />
           ))}
         </div>
@@ -93,6 +103,7 @@ export function WorkspaceExplorer({
   onOpenRootPath,
   onToggle,
   onSelectFile,
+  onOpenFile,
   onInsertReference,
   onCopyPath,
 }: Props) {
@@ -134,13 +145,14 @@ export function WorkspaceExplorer({
               selectedFilePath={selectedFilePath}
               onToggle={onToggle}
               onSelectFile={onSelectFile}
+              onOpenFile={onOpenFile}
             />
           </div>
         ) : null}
       </div>
 
       <div className="workspace-card preview-card">
-        <div className="inline-between">
+        <div className="inline-between mb-3px">
           <div className="section-title">文件预览</div>
           {selectedFilePath ? (
             <div className="header-actions">
@@ -150,9 +162,9 @@ export function WorkspaceExplorer({
               >
                 引用到输入框
               </button>
-              <button className="mini-button" onClick={() => onCopyPath(selectedFilePath)}>
+              {/* <button className="mini-button" onClick={() => onCopyPath(selectedFilePath)}>
                 复制路径
-              </button>
+              </button> */}
             </div>
           ) : null}
         </div>
@@ -161,15 +173,41 @@ export function WorkspaceExplorer({
         ) : null}
         {previewLoading ? <p className="muted">正在读取文件...</p> : null}
         {previewError ? <div className="error-banner">{previewError}</div> : null}
-        {selectedFilePath ? <div className="preview-path">{selectedFilePath}</div> : null}
+        {selectedFilePath ? (
+          <div
+            className="preview-path"
+            onDoubleClick={() => onOpenFile(selectedFilePath)}
+            title="双击用默认软件打开"
+          >
+            {selectedFilePath}
+          </div>
+        ) : null}
         {previewImage ? (
           <img
             src={previewImage}
             alt={selectedFilePath?.split('/').pop() || 'preview'}
             className="max-h-300px w-full rounded-lg border border-gray-100 object-contain bg-white"
+            onDoubleClick={() => {
+              if (selectedFilePath) {
+                onOpenFile(selectedFilePath)
+              }
+            }}
+            title="双击用默认软件打开"
           />
         ) : null}
-        {previewContent ? <pre className="preview-content">{previewContent}</pre> : null}
+        {previewContent ? (
+          <pre
+            className="preview-content"
+            onDoubleClick={() => {
+              if (selectedFilePath) {
+                onOpenFile(selectedFilePath)
+              }
+            }}
+            title="双击用默认软件打开"
+          >
+            {previewContent}
+          </pre>
+        ) : null}
       </div>
     </section>
   )

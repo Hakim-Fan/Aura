@@ -2100,6 +2100,7 @@ export function MainWindowApp() {
   const [previewImage, setPreviewImage] = useState('')
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState('')
+  const [previewRefreshKey, setPreviewRefreshKey] = useState(0)
   const [storageReady, setStorageReady] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     loadPaneWidth(SIDEBAR_WIDTH_KEY, 260, 220, 420),
@@ -2997,7 +2998,7 @@ export function MainWindowApp() {
     return () => {
       cancelled = true
     }
-  }, [selectedFilePath])
+  }, [selectedFilePath, previewRefreshKey])
 
   function updateSession(sessionId: string, updater: (session: Session) => Session) {
     setSessions(current =>
@@ -4445,6 +4446,9 @@ export function MainWindowApp() {
       const tree = await readWorkspaceTree(activeWorkspacePath)
       setWorkspaceTree(tree)
       setExpandedPaths(current => (current.length > 0 ? current : collectExpandablePaths(tree)))
+      if (selectedFilePath) {
+        setPreviewRefreshKey(current => current + 1)
+      }
     } catch (caught) {
       setWorkspaceError(caught instanceof Error ? caught.message : '刷新工作区失败。')
     } finally {

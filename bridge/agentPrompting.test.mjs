@@ -1,10 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {
   buildCapabilityExposureNote,
   buildDefaultAgentPromptBlocks,
   buildDefaultAgentSystemPrompt,
   buildRuntimeSystemPrompt,
+  buildWorkspaceAgentsInstructionsPrompt,
   buildUserCustomInstructionsPrompt,
 } from './agentPrompting.mjs'
 import {
@@ -204,6 +208,43 @@ test('default-agent prompt includes configured custom instructions', () => {
   assert.match(prompt, /<answer_preferences>\n回答先给结论。/)
 })
 
+test('workspace AGENTS.md prompt loads only .aura/AGENTS.md', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aura-agents-md-'))
+  fs.mkdirSync(path.join(workspace, '.aura'), { recursive: true })
+  fs.writeFileSync(
+    path.join(workspace, '.aura', 'AGENTS.md'),
+    '# Project Rules\n\n- Use pnpm typecheck after edits.',
+    'utf8',
+  )
+  fs.writeFileSync(
+    path.join(workspace, 'AGENTS.md'),
+    '# Root file should not be loaded',
+    'utf8',
+  )
+
+  const prompt = buildWorkspaceAgentsInstructionsPrompt({ cwd: workspace })
+
+  assert.match(prompt, /Workspace AGENTS\.md instructions/)
+  assert.match(prompt, /Use pnpm typecheck after edits/)
+  assert.doesNotMatch(prompt, /Root file should not be loaded/)
+  assert.match(
+    prompt,
+    new RegExp(`${workspace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/\\.aura/AGENTS\\.md`),
+  )
+})
+
+test('workspace AGENTS.md prompt is empty when file is absent', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aura-agents-md-empty-'))
+  assert.equal(buildWorkspaceAgentsInstructionsPrompt({ cwd: workspace }), '')
+})
+
+test('workspace AGENTS.md prompt is empty when file has no user content', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aura-agents-md-blank-'))
+  fs.mkdirSync(path.join(workspace, '.aura'), { recursive: true })
+  fs.writeFileSync(path.join(workspace, '.aura', 'AGENTS.md'), '', 'utf8')
+  assert.equal(buildWorkspaceAgentsInstructionsPrompt({ cwd: workspace }), '')
+})
+
 test('default-agent prompt is assembled from ordered prompt blocks', () => {
   const blocks = buildDefaultAgentPromptBlocks(
     {
@@ -232,6 +273,39 @@ test('default-agent prompt is assembled from ordered prompt blocks', () => {
   assert.equal(blocks[0].kind, 'core_instructions')
   assert.equal(blocks[3].kind, 'user_custom_instructions')
   assert.equal(blocks[5].kind, 'capability_context')
+})
+
+test('workspace AGENTS.md prompt block is inserted before environment context', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aura-agents-block-'))
+  fs.mkdirSync(path.join(workspace, '.aura'), { recursive: true })
+  fs.writeFileSync(path.join(workspace, '.aura', 'AGENTS.md'), '- Prefer pnpm.', 'utf8')
+
+  const blocks = buildDefaultAgentPromptBlocks(
+    {
+      ...baseSettings,
+      cwd: workspace,
+      customInstructions: {
+        workRules: '改代码必须小范围修改。',
+        answerPreferences: '',
+      },
+    },
+    '',
+    'default-agent capability profile',
+    modelDirectedState,
+    {},
+  )
+
+  assert.deepEqual(blocks.map(block => block.id), [
+    'core-instructions',
+    'developer-instructions',
+    'system-safety-and-permissions',
+    'user-custom-instructions',
+    'workspace-agents-instructions',
+    'environment-context',
+    'capability-context',
+  ])
+  assert.equal(blocks[4].kind, 'workspace_agents_instructions')
+  assert.match(blocks[4].content, /Prefer pnpm/)
 })
 
 test('prompt block snapshots isolate changed custom instructions', () => {

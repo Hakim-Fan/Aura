@@ -1,5 +1,10 @@
 import { createToolSearchTool } from './toolDiscovery.mjs'
 
+const DEFAULT_VISIBLE_CAPABILITY_ADMIN_TOOLS = new Set([
+  'aura_install_skill',
+  'aura_import_skill',
+])
+
 function buildCapabilityPolicy(routeState) {
   if (routeState?.modelDirected === true) {
     const webInteractionRequired = routeState?.webInteractionRequired === true
@@ -50,6 +55,10 @@ function allowPluginLikeEntry(entry, policy) {
 function isAllowedByPolicy(entry, policy) {
   if (!policy.allowReadonly) {
     return false
+  }
+
+  if (DEFAULT_VISIBLE_CAPABILITY_ADMIN_TOOLS.has(entry.tool?.name)) {
+    return true
   }
 
   if (entry.source === 'plugin' || entry.source === 'mcp') {

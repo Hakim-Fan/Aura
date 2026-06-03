@@ -1077,6 +1077,17 @@ fn ensure_aura_layout<R: Runtime>(
         ensure_directory(dir)?;
     }
 
+    if let Some(root) = workspace_root.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(trimmed))
+        }
+    }) {
+        ensure_workspace_agents_file(&root)?;
+    }
+
     seed_directory_from_defaults(app, "skills", &skills_dir)?;
     seed_directory_from_defaults(app, "plugins", &plugins_dir)?;
     let external_skill_dirs = load_external_skill_dirs(app);
@@ -1115,6 +1126,22 @@ fn ensure_aura_layout<R: Runtime>(
         mcp_servers_path: mcp_servers_path.display().to_string(),
         skills,
         plugins,
+    })
+}
+
+fn ensure_workspace_agents_file(workspace_root: &Path) -> Result<(), String> {
+    let aura_dir = workspace_root.join(".aura");
+    ensure_directory(&aura_dir)?;
+    let agents_path = aura_dir.join("AGENTS.md");
+    if agents_path.exists() {
+        return Ok(());
+    }
+    fs::write(&agents_path, "")
+    .map_err(|error| {
+        format!(
+            "Failed to create workspace AGENTS.md {}: {error}",
+            agents_path.display()
+        )
     })
 }
 
@@ -6726,6 +6753,7 @@ fn create_session_workspace<R: Runtime>(
                 candidate.display()
             )
         })?;
+        ensure_workspace_agents_file(&candidate)?;
         return Ok(candidate.display().to_string());
     }
 

@@ -1964,19 +1964,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
 
           <section className="dashboard-card">
             <div className="section-title">交互设置</div>
-            <div className="toggle-stack">
-              <label className="toggle-inline">
-                <input
-                  name="shortcut"
-                  type="radio"
-                  checked={draftSettings.sendShortcut === 'meta-enter'}
-                  onChange={() => handleSettingsChange('sendShortcut', 'meta-enter')}
-                />
-                <div className="flex flex-col">
-                  <strong>⌘/Ctrl + Enter 发送</strong>
-                  <span className="muted">Enter 键用于换行</span>
-                </div>
-              </label>
+            <div className="toggle-stack mt-1">
               <label className="toggle-inline mt-2">
                 <input
                   name="shortcut"
@@ -1987,6 +1975,18 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 <div className="flex flex-col">
                   <strong>Enter 发送</strong>
                   <span className="muted">Shift + Enter 用于换行</span>
+                </div>
+              </label>
+              <label className="toggle-inline">
+                <input
+                  name="shortcut"
+                  type="radio"
+                  checked={draftSettings.sendShortcut === 'meta-enter'}
+                  onChange={() => handleSettingsChange('sendShortcut', 'meta-enter')}
+                />
+                <div className="flex flex-col">
+                  <strong>⌘/Ctrl + Enter 发送</strong>
+                  <span className="muted">Enter 键用于换行</span>
                 </div>
               </label>
             </div>
@@ -3229,7 +3229,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
               更新记录
             </button>
           </div>
-          <p>AI 桌面工作流与 Multi-Agent 协作工具</p>
           {aboutStatus ? (
             <div className={`provider-feedback ${aboutStatus.tone === 'success' ? 'success' : 'error'} about-feedback`}>
               <span>{aboutStatus.message}</span>
