@@ -687,33 +687,44 @@ async function stageNpxSandboxExecution(command, requestedId, signal) {
 
 async function stageNpxCommand(fetchImpl, command, requestedId, signal) {
   const spec = parseCommandSpec(command)
-  const directSource = firstInstallSourceFromArgs(spec.args)
-  if (directSource) {
-    return stageAnySource({
-      fetchImpl,
-      cwd: process.cwd(),
-      source: directSource,
-      sourceType: 'auto',
-      requestedId,
-      signal,
-    })
-  }
-
-  const packageName = firstNpmPackageFromNpxArgs(spec.args)
-  if (!packageName) {
-    throw new Error('Could not identify a package or URL inside the npx command.')
-  }
 
   try {
-    const staged = await stageNpmPackage(fetchImpl, packageName, requestedId, signal)
-    return {
-      ...staged,
-      sourceDescription: `npx:${command}`,
-      note:
-        'Parsed the npx command as an npm package source and imported the valid skill from the package tarball.',
+    return await stageNpxSandboxExecution(command, requestedId, signal)
+  } catch (npxError) {
+    const directSource = firstInstallSourceFromArgs(spec.args)
+    if (directSource) {
+      const staged = await stageAnySource({
+        fetchImpl,
+        cwd: process.cwd(),
+        source: directSource,
+        sourceType: 'auto',
+        requestedId,
+        signal,
+      })
+      return {
+        ...staged,
+        sourceDescription: `npx:${command}`,
+        note:
+          `npx installer did not produce a valid skill, so Aura imported the source referenced by the command instead. ${npxError?.message || ''}`.trim(),
+      }
     }
-  } catch {
-    return stageNpxSandboxExecution(command, requestedId, signal)
+
+    const packageName = firstNpmPackageFromNpxArgs(spec.args)
+    if (!packageName) {
+      throw npxError
+    }
+
+    try {
+      const staged = await stageNpmPackage(fetchImpl, packageName, requestedId, signal)
+      return {
+        ...staged,
+        sourceDescription: `npx:${command}`,
+        note:
+          `npx installer did not produce a valid skill, so Aura imported the valid skill from the npm package tarball. ${npxError?.message || ''}`.trim(),
+      }
+    } catch {
+      throw npxError
+    }
   }
 }
 

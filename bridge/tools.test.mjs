@@ -1748,6 +1748,205 @@ test('aura_install_skill installs inline content into workspace skills and enabl
   )
 })
 
+test('aura_install_skill syncs workspace install to global only after approval', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-install-skill-global-'))
+  const auraRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-install-skill-home-'))
+  const skillsDir = path.join(auraRoot, 'skills')
+  const pluginsDir = path.join(auraRoot, 'plugins')
+  const workspaceSkillsDir = path.join(workspace, '.aura', 'skills')
+  await fs.mkdir(skillsDir, { recursive: true })
+  await fs.mkdir(pluginsDir, { recursive: true })
+
+  let settings = {
+    enabledSkillIds: [],
+    enabledPluginIds: [],
+    mcpServers: [],
+  }
+  const sessionOverrides = []
+  const approvalRequests = []
+
+  async function scanAura() {
+    const skills = []
+    for (const root of [skillsDir, workspaceSkillsDir]) {
+      let entries = []
+      try {
+        entries = await fs.readdir(root, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.md')) {
+          continue
+        }
+        const id = path.basename(entry.name, '.md')
+        const entryPath = path.join(root, entry.name)
+        skills.push({
+          id,
+          name: id,
+          description: '',
+          path: entryPath,
+          entryPath,
+          supported: true,
+          supportMessage: '',
+          readonly: false,
+          scope: root === workspaceSkillsDir ? 'workspace' : 'global',
+        })
+      }
+    }
+
+    return {
+      homeDir: auraRoot,
+      skillsDir,
+      pluginsDir,
+      skills,
+      plugins: [],
+    }
+  }
+
+  const installSkill = createBuiltinTools({
+    cwd: workspace,
+    logContext: { sessionId: 'session-1' },
+    async appControl(action, payload) {
+      if (action === 'ensure_aura_home') {
+        return scanAura()
+      }
+      if (action === 'get_settings') {
+        return settings
+      }
+      if (action === 'set_settings') {
+        settings = payload.settings
+        return settings
+      }
+      if (action === 'set_session_capability_override') {
+        sessionOverrides.push(payload)
+        return payload
+      }
+      throw new Error(`Unexpected app action: ${action}`)
+    },
+  }).find(tool => tool.name === 'aura_install_skill')
+
+  const output = parseToolResultJson(
+    await installSkill.run(
+      {
+        content: [
+          '---',
+          'name: Global Demo Skill',
+          'description: Installed from inline content.',
+          '---',
+          '',
+          '# Global Demo Skill',
+        ].join('\n'),
+      },
+      {
+        async requestApproval(request) {
+          approvalRequests.push(request)
+          return 'approve'
+        },
+      },
+    ),
+  )
+
+  assert.equal(output.skillId, 'global-demo-skill')
+  assert.equal(output.requestedScope, 'workspace')
+  assert.equal(output.scope, 'global')
+  assert.equal(output.globalSync.authorization, 'approved')
+  assert.equal(output.globalSync.installed, true)
+  assert.match(output.globalInstalledTo, /global-demo-skill\.md$/)
+  assert.match(await fs.readFile(path.join(workspaceSkillsDir, 'global-demo-skill.md'), 'utf8'), /Global Demo Skill/)
+  assert.match(await fs.readFile(path.join(skillsDir, 'global-demo-skill.md'), 'utf8'), /Global Demo Skill/)
+  assert.deepEqual(settings.enabledSkillIds, ['global-demo-skill'])
+  assert.deepEqual(sessionOverrides, [
+    {
+      sessionId: 'session-1',
+      kind: 'skills',
+      id: 'global-demo-skill',
+      mode: 'on',
+      workspaceRoot: workspace,
+    },
+  ])
+  assert.equal(approvalRequests.length, 1)
+  assert.equal(approvalRequests[0].category, 'external_file_write')
+})
+
+test('aura_install_skill keeps workspace install when global sync is denied', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-install-skill-denied-'))
+  const auraRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-install-skill-home-'))
+  const skillsDir = path.join(auraRoot, 'skills')
+  const pluginsDir = path.join(auraRoot, 'plugins')
+  const workspaceSkillsDir = path.join(workspace, '.aura', 'skills')
+  await fs.mkdir(skillsDir, { recursive: true })
+  await fs.mkdir(pluginsDir, { recursive: true })
+
+  let settings = {
+    enabledSkillIds: [],
+    enabledPluginIds: [],
+    mcpServers: [],
+  }
+
+  async function scanAura() {
+    return {
+      homeDir: auraRoot,
+      skillsDir,
+      pluginsDir,
+      skills: [],
+      plugins: [],
+    }
+  }
+
+  const installSkill = createBuiltinTools({
+    cwd: workspace,
+    logContext: { sessionId: 'session-1' },
+    async appControl(action, payload) {
+      if (action === 'ensure_aura_home') {
+        return scanAura()
+      }
+      if (action === 'get_settings') {
+        return settings
+      }
+      if (action === 'set_settings') {
+        settings = payload.settings
+        return settings
+      }
+      if (action === 'set_session_capability_override') {
+        return payload
+      }
+      throw new Error(`Unexpected app action: ${action}`)
+    },
+  }).find(tool => tool.name === 'aura_install_skill')
+
+  const output = parseToolResultJson(
+    await installSkill.run(
+      {
+        scope: 'global',
+        content: [
+          '---',
+          'name: Local Only Skill',
+          'description: Installed from inline content.',
+          '---',
+          '',
+          '# Local Only Skill',
+        ].join('\n'),
+      },
+      {
+        async requestApproval() {
+          return 'deny'
+        },
+      },
+    ),
+  )
+
+  assert.equal(output.skillId, 'local-only-skill')
+  assert.equal(output.scope, 'workspace')
+  assert.equal(output.globalSync.authorization, 'denied')
+  assert.equal(output.globalSync.installed, false)
+  assert.match(await fs.readFile(path.join(workspaceSkillsDir, 'local-only-skill.md'), 'utf8'), /Local Only Skill/)
+  await assert.rejects(
+    fs.readFile(path.join(skillsDir, 'local-only-skill.md'), 'utf8'),
+    /ENOENT/,
+  )
+  assert.deepEqual(settings.enabledSkillIds, [])
+})
+
 test('aura_import_plugin description exposes the Aura plugin contract', async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-plugin-description-'))
   const importPlugin = createBuiltinTools({

@@ -22,7 +22,7 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
   };
 
   return (
-    <div 
+    <div
       className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/40 backdrop-blur-[4px]"
       style={{ animation: 'update-fade-in 0.25s ease-out' }}
       onClick={onClose}
@@ -37,13 +37,13 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
           to { opacity: 1; transform: scale(1); translateY(0); }
         }
       `}</style>
-      <div 
+      <div
         className="w-full max-w-[420px] bg-white rounded-3xl shadow-[0_32px_64px_rgba(0,0,0,0.25)] border border-[var(--border-subtle)] overflow-hidden"
         style={{ animation: 'update-zoom-in 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="p-8">
-          <div className="flex justify-between items-start mb-6">
+        <div className="p-7 pb-5">
+          <div className="flex justify-between items-start mb-4">
             <div>
               <h3 className="text-20px font-700 text-[var(--text-primary)] mb-1.5 tracking-tight">
                 软件更新
@@ -52,7 +52,7 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
                 发现新版本可用
               </p>
             </div>
-            <button 
+            <button
               onClick={onClose}
               className="p-1.5 rounded-full hover:bg-gray-100 text-gray-400 transition-colors"
             >
@@ -60,7 +60,7 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
             </button>
           </div>
 
-          <div className="flex items-center gap-4 py-3 px-4 bg-gray-50/80 rounded-2xl mb-6 border border-gray-100/50">
+          <div className="flex items-center gap-4 py-2.5 px-4 bg-gray-50/80 rounded-2xl mb-4 border border-gray-100/50">
             <span className="font-mono text-14px font-600 text-[var(--text-secondary)] opacity-60">
               {currentVersion}
             </span>
@@ -70,11 +70,11 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
             </span>
           </div>
 
-          <div className="mb-6">
-            <h4 className="text-13px font-700 text-[var(--text-secondary)] uppercase tracking-wider mb-3 opacity-60">
+          <div>
+            <h4 className="text-13px font-700 text-[var(--text-secondary)] uppercase tracking-wider mb-2 opacity-60">
               更新内容
             </h4>
-            <div className="max-h-[180px] overflow-y-auto pr-2 custom-scrollbar">
+            <div className="max-h-[min(220px,28vh)] overflow-y-auto pr-2 custom-scrollbar">
               <div className="prose prose-sm prose-slate max-w-none">
                 {release.notes ? (
                   <div className="text-14px text-[var(--text-primary)] leading-relaxed space-y-1 opacity-90">
@@ -100,7 +100,7 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
           </div>
         </div>
 
-        <div className="px-8 py-5 bg-gray-50/30 border-t border-gray-100 flex justify-end items-center gap-4">
+        <div className="px-7 py-4 bg-gray-50/30 border-t border-gray-100 flex justify-end items-center gap-4">
           <button
             onClick={onClose}
             className="text-14px font-600 text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"

@@ -1822,6 +1822,43 @@ function resolveCapabilityTargetRoot(context, aura, kind, scope) {
   return path.join(workspaceRoot, '.aura', kind)
 }
 
+async function requestGlobalCapabilitySyncApproval(runtime, { kind, capabilityId, workspacePath, globalPath }) {
+  if (typeof runtime?.requestApproval !== 'function') {
+    return 'unavailable'
+  }
+  const label = kind === 'skills' ? 'skill' : 'plugin'
+  const decision = await runtime.requestApproval({
+    id: `global-${kind}-sync-${capabilityId}-${Date.now().toString(36)}`,
+    category: 'external_file_write',
+    toolName: kind === 'skills' ? 'aura_install_skill' : 'aura_import_plugin',
+    summary: `已安装到当前工作区。是否同时同步 ${label} "${capabilityId}" 到全局 Aura 目录？拒绝将只保留工作区安装。`,
+    input: stringifyOutput({
+      capabilityId,
+      kind,
+      workspacePath,
+      globalPath,
+      targetPath: globalPath,
+    }),
+    output: stringifyOutput({
+      phase: 'global_capability_sync_approval',
+      operation: 'copy_workspace_capability_to_global',
+      capabilityId,
+      kind,
+      workspacePath,
+      globalPath,
+      note: 'Approve to copy the installed workspace capability into the global Aura directory. Deny to keep it workspace-only.',
+    }),
+    policy: {
+      code: 'AURA_GLOBAL_CAPABILITY_SYNC',
+      riskLevel: 'medium',
+      reason: '同步到全局 Aura 目录会让这个能力在其他项目中也可用。',
+      suggestedAction: '如果只想当前项目使用，请拒绝；如果希望所有项目默认可用，请批准。',
+      guardian: 'aura_capability_installer',
+    },
+  })
+  return decision === 'approve' ? 'approved' : 'denied'
+}
+
 async function setSessionCapabilityOverride(context, kind, capabilityId, enabled) {
   const appControl = ensureAppControl(context)
   const sessionId =
@@ -2932,7 +2969,7 @@ export function createBuiltinTools(context) {
       aliases: ['installauraskill', 'install_skill', 'skill_install'],
       approvalCategory: 'file_write',
       description:
-        'Install and enable a skill into Aura from a local path, pasted SKILL.md content, raw URL, GitHub source such as https://github.com/owner/repo/tree/ref/path, npm package, or npx command. Defaults to the current workspace at .aura/skills and enables only this session; use scope "global" only when the user explicitly asks for global installation. For npx commands, the installer first tries safe package extraction and only falls back to executing npx inside an isolated temporary home before importing the produced skill. Use this directly whenever the user wants to install a skill for Aura; do not pre-download or shell-copy into ~/.aura/skills.',
+        'Install and enable a skill into Aura from a local path, pasted SKILL.md content, raw URL, GitHub source such as https://github.com/owner/repo/tree/ref/path, npm package, or npx command. The installer always writes the skill to the current workspace at .aura/skills first and enables it for this session; after workspace installation succeeds, Aura may ask the user whether to also sync it into the global ~/.aura/skills directory. For npx commands, the installer executes npx inside an isolated temporary home first, then falls back to importing a URL/GitHub/npm source referenced by the command if npx produces no valid skill. Use this directly whenever the user wants to install a skill for Aura; do not pre-download or shell-copy into ~/.aura/skills.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2961,14 +2998,15 @@ export function createBuiltinTools(context) {
           scope: {
             type: 'string',
             enum: ['workspace', 'global'],
-            description: 'Installation scope. Defaults to workspace/current session; choose global only when explicitly requested.',
+            description: 'Legacy compatibility hint. Aura installs to workspace first, then asks the user whether to also sync into ~/.aura/skills when approval UI is available.',
           },
         },
       },
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
         const aura = await getAuraState(context)
-        const scope = normalizeInstallScope(args.scope)
+        const requestedScope = normalizeInstallScope(args.scope)
+        const workspaceScope = 'workspace'
         const staged = await resolveAuraSkillInstallSource({
           cwd: context.cwd,
           source: args.source || '',
@@ -2984,31 +3022,63 @@ export function createBuiltinTools(context) {
             kind: 'skills',
             sourcePath: staged.stagedPath,
             targetId: args.skillId || staged.inferredSkillId || '',
-            targetRoot: resolveCapabilityTargetRoot(context, aura, 'skills', scope),
+            targetRoot: resolveCapabilityTargetRoot(context, aura, 'skills', workspaceScope),
           })
           let enableResult = {
             enabled: args.enable !== false,
-            scope,
+            scope: workspaceScope,
             enabledForCurrentSession: args.enable !== false,
           }
           if (args.enable !== false) {
-            enableResult = await updateCapabilityEnabledForScope(context, 'skill', imported.id, true, scope)
+            enableResult = await updateCapabilityEnabledForScope(context, 'skill', imported.id, true, workspaceScope)
           } else {
             await refreshAuraState(context)
           }
+          const globalRoot = resolveCapabilityTargetRoot(context, aura, 'skills', 'global')
+          const globalSync = {
+            requested: true,
+            authorization: 'not_requested',
+            installed: false,
+            installedTo: '',
+          }
+          globalSync.authorization = await requestGlobalCapabilitySyncApproval(runtime, {
+            kind: 'skills',
+            capabilityId: imported.id,
+            workspacePath: imported.destinationPath,
+            globalPath: path.join(globalRoot, path.basename(imported.destinationPath)),
+          })
+          if (globalSync.authorization === 'approved') {
+            const globalImported = await copyIntoAuraDirectory({
+              cwd: context.cwd,
+              kind: 'skills',
+              sourcePath: imported.destinationPath,
+              targetId: imported.id,
+              targetRoot: globalRoot,
+            })
+            globalSync.installed = true
+            globalSync.installedTo = globalImported.destinationPath
+            if (args.enable !== false) {
+              await updateCapabilityEnabledForScope(context, 'skill', imported.id, true, 'global')
+            }
+          }
+          const finalScope = globalSync.installed ? 'global' : 'workspace'
           const refreshedAura = await getAuraState(context)
           const installedSkill = (refreshedAura.skills || []).find(skill => skill.id === imported.id)
           return stringifyOutput({
             installedFrom: staged.sourceDescription || args.source || 'inline content',
             installedTo: imported.destinationPath,
+            workspaceInstalledTo: imported.destinationPath,
+            globalInstalledTo: globalSync.installedTo,
             skillId: imported.id,
-            scope,
+            scope: finalScope,
+            requestedScope,
             name: staged.name,
             description: staged.description,
             enabled: enableResult.enabled,
             enabledForCurrentSession: enableResult.enabledForCurrentSession,
+            globalSync,
             note: staged.note || '',
-            usageHint: buildSkillImmediateUseHint(imported.id, enableResult.enabled, scope),
+            usageHint: buildSkillImmediateUseHint(imported.id, enableResult.enabled, finalScope),
             skill: installedSkill || null,
           })
         } finally {
@@ -3842,6 +3912,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
           signal: abortController?.signal,
           settings: hooks.settings,
           appControl: hooks.appControl,
+          requestApproval: hooks.requestApproval,
           routeState: hooks.routeState,
           researchMode: hooks.researchMode,
           throwIfAborted() {

@@ -356,11 +356,11 @@ export function buildRuntimeSystemPrompt(
       'If you truly need the user to confirm a risky change or provide a missing local decision, call request_user_input. Do not hide the question only inside reasoning text.',
     )
     sections.push(
-      'For skill installation requests, first identify the target application. If the user wants to install a skill for Aura, use aura_install_skill or aura_import_skill and do not execute third-party npx/Claude/Codex installer commands through shell directly. Aura skill/plugin installers default to the current workspace and current session; pass scope="global" only when the user explicitly asks for global installation. Treat third-party commands as sources for the audited Aura installer, which may run npx only inside an isolated temporary home before importing the produced skill. If the user appears to be installing a skill for another application, ask for confirmation before running that app-specific installer.',
+      'For skill installation requests, first identify the target application. If the user wants to install a skill for Aura, use aura_install_skill or aura_import_skill and do not execute third-party npx/Claude/Codex installer commands through shell directly. aura_install_skill installs into the current workspace first and may ask the user whether to also sync the installed skill into the global Aura directory. Treat third-party commands as sources for the audited Aura installer, which may run npx only inside an isolated temporary home before importing the produced skill. If the user appears to be installing a skill for another application, ask for confirmation before running that app-specific installer.',
     )
     if (capabilityProfile.hasCapabilityAdminTools) {
       sections.push(
-        'Capability management tools are mounted. For Aura skill installation from a URL, GitHub path, npm package, npx command, local path, or pasted SKILL.md, call aura_install_skill directly with that source; use aura_import_skill only when you already have a local skill file/directory. Do not pre-download, git clone, mkdir, cp, or mv into ~/.aura/skills by shell. Use default workspace scope unless the user explicitly says global.',
+        'Capability management tools are mounted. For Aura skill installation from a URL, GitHub path, npm package, npx command, local path, or pasted SKILL.md, call aura_install_skill directly with that source; use aura_import_skill only when you already have a local skill file/directory. Do not pre-download, git clone, mkdir, cp, or mv into ~/.aura/skills by shell. The installer writes to the workspace first; the user decides whether to sync to global through Aura approval.',
       )
     }
     if (capabilityProfile.hasMultiAgentTools) {

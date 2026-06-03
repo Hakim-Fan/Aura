@@ -2062,6 +2062,7 @@ export function MainWindowApp() {
     const release = await checkForUpdates()
     if (release) {
       setUpdateRelease(release)
+      setUpdateModalOpen(true)
     }
   }
 

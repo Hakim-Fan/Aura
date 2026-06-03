@@ -37,11 +37,21 @@ test('resolveAuraSkillInstallSource stages direct SKILL.md content', async () =>
   }
 })
 
-test('resolveAuraSkillInstallSource treats npx commands as source clues instead of scripts to execute', async () => {
+test('resolveAuraSkillInstallSource falls back to command source clues when npx produces no skill', async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'aura-skill-installer-'))
+  const fakeBin = path.join(workspace, 'bin')
+  const fakeNpx = path.join(fakeBin, 'npx')
+  await fs.mkdir(fakeBin, { recursive: true })
+  await fs.writeFile(
+    fakeNpx,
+    ['#!/bin/sh', 'echo "installer failed" >&2', 'exit 1'].join('\n'),
+    'utf8',
+  )
+  await fs.chmod(fakeNpx, 0o755)
   const seenUrls = []
   const staged = await resolveAuraSkillInstallSource({
-    cwd: await fs.mkdtemp(path.join(os.tmpdir(), 'aura-skill-installer-')),
-    source: 'npx -y some-foreign-installer https://example.com/SKILL.md',
+    cwd: workspace,
+    source: `${fakeNpx} -y some-foreign-installer https://example.com/SKILL.md`,
     sourceType: 'npx',
     fetchImpl: async url => {
       seenUrls.push(url)
@@ -52,6 +62,7 @@ test('resolveAuraSkillInstallSource treats npx commands as source clues instead 
   try {
     assert.deepEqual(seenUrls, ['https://example.com/SKILL.md'])
     assert.equal(staged.inferredSkillId, 'remote-skill')
+    assert.match(staged.note, /did not produce a valid skill/)
     assert.match(await fs.readFile(staged.stagedPath, 'utf8'), /Remote Skill/)
   } finally {
     await staged.cleanup()
