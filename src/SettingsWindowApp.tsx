@@ -110,6 +110,10 @@ function normalizePathList(paths: string[] = []) {
     })
 }
 
+function normalizeComparablePath(path: string) {
+  return path.trim().replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase()
+}
+
 function createProviderProfile(provider: ProviderMode = 'custom'): ProviderProfile {
   return {
     id: `profile-${provider}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1059,40 +1063,34 @@ export function SettingsWindowApp({ initialTab }: Props) {
       return
     }
 
-    const nextDirs = normalizePathList([selected])
-    const selectedPath = nextDirs[0]
+    const selectedPath = normalizePathList([selected])[0]
     if (!selectedPath) {
       return
     }
 
-    const isChangingDirectory =
-      existingDirs.length > 0 &&
-      (existingDirs.length !== 1 || existingDirs[0] !== selectedPath)
-    if (isChangingDirectory) {
-      const confirmed = await ask(
-        '换绑外部 Skill 目录会从 Aura 列表中移除之前绑定目录的 skills，并清除这些 skills 的启用状态；不会删除原目录文件。确认继续？',
-        {
-          title: '换绑外部目录',
-          kind: 'warning',
-          okLabel: '确认换绑',
-          cancelLabel: '取消',
-        },
-      )
-      if (!confirmed) {
-        return
-      }
-    }
-
-    const previousExternalSkillIds = new Set(
-      availableSkills
-        .filter(item => item.external)
-        .map(item => item.id),
-    )
+    const nextDirs = normalizePathList([...existingDirs, selectedPath])
     await persistSettingsAndRefreshAssets({
       ...draftSettings,
-      enabledSkillIds: isChangingDirectory
-        ? draftSettings.enabledSkillIds.filter(id => !previousExternalSkillIds.has(id))
-        : draftSettings.enabledSkillIds,
+      externalSkillDirs: nextDirs,
+    }, 'skills')
+  }
+
+  async function clearExternalSkillDirectory(directory: string) {
+    const existingDirs = normalizePathList(draftSettings.externalSkillDirs || [])
+    const nextDirs = existingDirs.filter(
+      entry => normalizeComparablePath(entry) !== normalizeComparablePath(directory),
+    )
+    const removedExternalSkillIds = new Set(
+      availableSkills
+        .filter(item => item.external && isPathInsideDirectory(item.path, directory))
+        .map(item => item.id),
+    )
+
+    await persistSettingsAndRefreshAssets({
+      ...draftSettings,
+      enabledSkillIds: draftSettings.enabledSkillIds.filter(
+        id => !removedExternalSkillIds.has(id),
+      ),
       externalSkillDirs: nextDirs,
     }, 'skills')
   }
@@ -1175,9 +1173,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   async function openAuraMcpFolder() {
-    const nextAura = auraHome || (await ensureAuraHome())
-    setAuraHome(nextAura)
-    await openPathInDefaultApp(nextAura.mcpDir)
+    const folderPath = auraHome?.mcpDir
+    if (!folderPath) return
+    await openPathInDefaultApp(folderPath)
   }
 
   async function testMcpServer(
@@ -1318,10 +1316,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
     })
   }
 
-  async function openAuraAssetFolder(kind: 'skills' | 'plugins') {
-    const nextAura = auraHome || (await ensureAuraHome())
-    setAuraHome(nextAura)
-    const folderPath = kind === 'skills' ? nextAura.skillsDir : nextAura.pluginsDir
+  async function openAuraAssetFolder(folderPath: string) {
+    if (!folderPath) return
     await openPathInDefaultApp(folderPath)
   }
 
@@ -1428,13 +1424,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   async function openLightpandaInstallDirectory() {
-    const nextAura = auraHome || (await ensureAuraHome())
-    setAuraHome(nextAura)
+    const browserDir = auraHome?.browserDir
+    if (!browserDir) return
     setBrowserStatus(null)
     setIsAwaitingLightpandaSelection(true)
 
     try {
-      await openPathInDefaultApp(nextAura.browserDir)
+      await openPathInDefaultApp(browserDir)
     } catch (caught) {
       setIsAwaitingLightpandaSelection(false)
       setBrowserStatus({
@@ -1545,9 +1541,9 @@ export function SettingsWindowApp({ initialTab }: Props) {
   async function openAuraLogsFolder() {
     setGeneralStatus(null)
     try {
-      const nextAura = auraHome || (await ensureAuraHome())
-      setAuraHome(nextAura)
-      await openPathInDefaultApp(nextAura.logsDir)
+      const logsDir = auraHome?.logsDir
+      if (!logsDir) return
+      await openPathInDefaultApp(logsDir)
     } catch (caught) {
       setGeneralStatus({
         tone: 'error',
@@ -1763,6 +1759,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
               </div>
               <button
                 className="block w-full truncate text-left text-12px leading-relaxed text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                disabled={!auraHome?.logsDir}
                 onClick={() => void openAuraLogsFolder()}
                 title={auraHome?.logsDir || '正在初始化 Aura 数据目录…'}
                 type="button"
@@ -2303,7 +2300,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 <div className="ml-auto min-w-0 max-w-[32rem]">
                   <button
                     className="inline-flex min-w-0 max-w-full items-center gap-2 rounded-lg px-2 py-1 text-12px font-500 text-black/45 transition-colors hover:bg-black/5 hover:text-black/65 disabled:opacity-40"
-                    disabled={isRefreshingLightpandaStatus}
+                    disabled={isRefreshingLightpandaStatus || !auraHome?.browserDir}
                     onClick={() => void openLightpandaInstallDirectory()}
                     title={lightpandaInstanceLabel}
                     type="button"
@@ -2810,6 +2807,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             </button>
             <button
               className="secondary-button"
+              disabled={!auraHome?.mcpDir}
               onClick={() => void openAuraMcpFolder()}
             >
               <FolderOpen size={14} />
@@ -2983,7 +2981,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
     const folderPath =
       kind === 'skills' ? auraHome?.skillsDir || '' : auraHome?.pluginsDir || ''
     const externalSkillDirs = normalizePathList(draftSettings.externalSkillDirs || [])
-    const externalSkillPath = kind === 'skills' ? externalSkillDirs.join('、') : ''
+    const hasExternalSkillDirs = kind === 'skills' && externalSkillDirs.length > 0
 
     return (
       <section className="section-shell settings-panel">
@@ -3021,7 +3019,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             <button
               className="secondary-button"
               disabled={!folderPath}
-              onClick={() => void openAuraAssetFolder(kind)}
+              onClick={() => void openAuraAssetFolder(folderPath)}
             >
               <FolderOpen size={14} />
               打开文件夹
@@ -3032,16 +3030,33 @@ export function SettingsWindowApp({ initialTab }: Props) {
                 onClick={() => void bindExternalSkillDirectory()}
               >
                 <FolderOpen size={14} />
-                {externalSkillPath ? '换绑外部目录' : '绑定外部目录'}
+                {hasExternalSkillDirs ? '添加外部目录' : '绑定外部目录'}
               </button>
             ) : null}
           </div>
         </header>
 
-        {kind === 'skills' && externalSkillPath ? (
-          <div className="external-skill-path-row">
-            <span>当前外部目录</span>
-            <code title={externalSkillPath}>{externalSkillPath}</code>
+        {hasExternalSkillDirs ? (
+          <div className="external-skill-path-list">
+            <div className="external-skill-path-items">
+              {externalSkillDirs.map(directory => (
+                <div key={directory} className="external-skill-path-row">
+                  <div className="external-skill-path-row-header">
+                    <span className="external-skill-path-list-label">当前外部目录</span>
+                    <button
+                      className="external-skill-clear-button"
+                      aria-label="清除这个外部目录绑定"
+                      onClick={() => void clearExternalSkillDirectory(directory)}
+                      title="清除这个外部目录绑定"
+                      type="button"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                  <code title={directory}>{directory}</code>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
 

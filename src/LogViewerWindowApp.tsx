@@ -19,7 +19,7 @@ import {
   type AppLogFile,
   type AppLogLevel,
 } from './lib/appLogs'
-import { ensureAuraHome } from './lib/aura'
+import { resolveAuraLogsDir } from './lib/aura'
 import { openPathInDefaultApp } from './lib/workspace'
 
 type ViewerMode = 'live' | 'history'
@@ -382,6 +382,7 @@ export function LogViewerWindowApp() {
   const [expandedKey, setExpandedKey] = useState('')
   const [autoFollow, setAutoFollow] = useState(true)
   const [loadingHistory, setLoadingHistory] = useState(false)
+  const [logsDir, setLogsDir] = useState('')
   const [status, setStatus] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
@@ -462,8 +463,8 @@ export function LogViewerWindowApp() {
 
   async function openLogsFolder() {
     try {
-      const aura = await ensureAuraHome()
-      await openPathInDefaultApp(aura.logsDir)
+      if (!logsDir) return
+      await openPathInDefaultApp(logsDir)
     } catch (caught) {
       setStatus({
         tone: 'error',
@@ -488,6 +489,10 @@ export function LogViewerWindowApp() {
   }
 
   useEffect(() => {
+    void resolveAuraLogsDir().then(setLogsDir).catch(() => {
+      // Opening the folder will remain disabled if the logs directory cannot be resolved.
+    })
+
     void refreshLogFiles().catch(caught => {
       setStatus({
         tone: 'error',
@@ -550,7 +555,12 @@ export function LogViewerWindowApp() {
             实时模式只显示本窗口打开后的日志，最多保留 {MAX_LIVE_LOG_ENTRIES} 条；历史模式按日期读取 JSONL 文件。
           </p>
         </div>
-        <button className="secondary-button" onClick={() => void openLogsFolder()} type="button">
+        <button
+          className="secondary-button"
+          disabled={!logsDir}
+          onClick={() => void openLogsFolder()}
+          type="button"
+        >
           <FolderOpen size={14} />
           <span>打开日志目录</span>
         </button>

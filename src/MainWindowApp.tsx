@@ -1829,6 +1829,12 @@ function loadPaneWidth(storageKey: string, fallback: number, min: number, max: n
 const builtinSkillIds = new Set(builtinSkills.map(skill => skill.id))
 const builtinPluginIds = new Set(builtinPlugins.map(plugin => plugin.id))
 
+function detectComputerUseSupport() {
+  const platform = typeof navigator !== 'undefined' ? navigator.platform || '' : ''
+  const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent || '' : ''
+  return /Mac|Darwin/iu.test(`${platform} ${userAgent}`)
+}
+
 function createEmptyCapabilityOverrides(): WorkspaceCapabilityOverrides {
   return {
     skills: {},
@@ -2320,7 +2326,9 @@ export function MainWindowApp() {
       ),
     [activeSession?.capabilityOverrides, auraHome, settings],
   )
-  const currentComputerUseEnabled = activeSession?.capabilityOverrides?.computerUse === 'on'
+  const computerUseSupported = useMemo(() => detectComputerUseSupport(), [])
+  const currentComputerUseEnabled =
+    computerUseSupported && activeSession?.capabilityOverrides?.computerUse === 'on'
   const currentResolvedCapabilityUsage = useMemo(() => {
     if (!auraHome || !activeProjectWorkspaceRoot.trim()) {
       return undefined
@@ -3862,7 +3870,8 @@ export function MainWindowApp() {
           mcpServers: [],
         },
       }
-    const computerUseEnabledForRun = activeSession.capabilityOverrides?.computerUse === 'on'
+    const computerUseEnabledForRun =
+      computerUseSupported && activeSession.capabilityOverrides?.computerUse === 'on'
     const runtimeSettings: AgentSettings = {
       ...latestSettings,
       activeProviderProfileId:
@@ -4555,6 +4564,10 @@ export function MainWindowApp() {
       setError('当前会话尚未准备好，暂时无法保存 Computer Use 设置。')
       return
     }
+    if (enabled && !computerUseSupported) {
+      setError('当前系统暂不支持 Computer Use。')
+      return
+    }
 
     const nextSessions = sessions.map(session =>
       session.id === activeSession.id
@@ -4674,6 +4687,7 @@ export function MainWindowApp() {
                 attachments={draftAttachments}
                 capabilityItems={currentCapabilityItems}
                 capabilitySnapshot={currentResolvedCapabilityUsage}
+                computerUseSupported={computerUseSupported}
                 computerUseEnabled={currentComputerUseEnabled}
                 modelGroups={enabledModelGroups}
                 activeModelProfileId={activeProviderProfile?.id || ''}

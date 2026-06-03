@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createAdvancedTools } from './advancedTools.mjs'
 
-test('createAdvancedTools omits macOS-only computer tools on Windows', () => {
+test('createAdvancedTools omits all Computer Use tools on Windows', () => {
   const tools = createAdvancedTools({
     platform: 'win32',
     settings: {
@@ -21,7 +21,29 @@ test('createAdvancedTools omits macOS-only computer tools on Windows', () => {
   })
 
   assert.equal(tools.some(tool => tool.name.startsWith('computer_')), false)
-  assert.equal(tools.some(tool => tool.name === 'system_browser_open'), true)
+  assert.equal(tools.some(tool => tool.name === 'system_browser_open'), false)
+})
+
+test('createAdvancedTools omits all Computer Use tools on Linux', () => {
+  const tools = createAdvancedTools({
+    platform: 'linux',
+    settings: {
+      enableComputerUse: true,
+      enableMultiAgent: false,
+      browser: {
+        interactive: {
+          enabled: true,
+        },
+      },
+    },
+    context: {
+      cwd: process.cwd(),
+    },
+    runtimeMeta: {},
+  })
+
+  assert.equal(tools.some(tool => tool.name.startsWith('computer_')), false)
+  assert.equal(tools.some(tool => tool.name === 'system_browser_open'), false)
 })
 
 test('createAdvancedTools omits system browser unless Computer Use is enabled for the run', () => {

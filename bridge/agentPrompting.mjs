@@ -67,7 +67,8 @@ function buildWorkspaceScratchInstruction(settings = {}) {
 
 function buildApprovalPolicy(settings) {
   const computerUseMounted =
-    settings?.browser?.interactive?.enabled === true || settings?.enableComputerUse === true
+    process.platform === 'darwin' &&
+    (settings?.browser?.interactive?.enabled === true || settings?.enableComputerUse === true)
   return [
     `Approval policy: shell is ${settings.autoApproveShell ? 'auto-approved' : 'approval-required'}.`,
     `Approval policy: file writes are ${settings.autoApproveFileWrite ? 'auto-approved' : 'approval-required'}.`,

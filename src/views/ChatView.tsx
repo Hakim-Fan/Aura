@@ -133,6 +133,7 @@ type Props = {
   }>
   capabilityItems: CapabilityPanelItem[]
   capabilitySnapshot?: CapabilityUsageSnapshot
+  computerUseSupported: boolean
   computerUseEnabled: boolean
   modelGroups: ModelGroup[]
   activeModelProfileId: string
@@ -5630,6 +5631,7 @@ function ModelPickerDialog({
 function CapabilityPanel({
   items,
   snapshot,
+  computerUseSupported,
   computerUseEnabled,
   collapsedGroups,
   onToggleGroup,
@@ -5639,6 +5641,7 @@ function CapabilityPanel({
 }: {
   items: CapabilityPanelItem[]
   snapshot?: CapabilityUsageSnapshot
+  computerUseSupported: boolean
   computerUseEnabled: boolean
   collapsedGroups: Set<'skill' | 'plugin' | 'mcp'>
   onToggleGroup: (group: 'skill' | 'plugin' | 'mcp') => void
@@ -5659,7 +5662,8 @@ function CapabilityPanel({
     { key: 'plugin', label: 'Plugins' },
   ]
   const manageableEnabledCount =
-    items.filter(item => item.effectiveEnabled).length + (computerUseEnabled ? 1 : 0)
+    items.filter(item => item.effectiveEnabled).length +
+    (computerUseSupported && computerUseEnabled ? 1 : 0)
 
   function resolveNextOverrideMode(item: CapabilityPanelItem) {
     const nextEffectiveEnabled = !item.effectiveEnabled
@@ -5727,6 +5731,7 @@ function CapabilityPanel({
       </div>
 
       <div className="max-h-[420px] overflow-y-auto custom-scrollbar p-2">
+        {computerUseSupported ? (
         <div className="mb-2 rounded-xl bg-[rgba(79,123,116,0.06)] px-3 py-3">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -5762,6 +5767,7 @@ function CapabilityPanel({
             </label>
           </div>
         </div>
+        ) : null}
 
         {sections.map(section => {
           const sectionItems = items.filter(item => item.kind === section.key)
@@ -6698,6 +6704,7 @@ export function ChatView({
   attachments,
   capabilityItems,
   capabilitySnapshot,
+  computerUseSupported,
   computerUseEnabled,
   modelGroups,
   activeModelProfileId,
@@ -6936,8 +6943,10 @@ export function ChatView({
     return capabilitySnapshot.skills.map(skill => skill.name).join(' · ')
   }, [capabilitySnapshot])
   const manageableCapabilityCount = useMemo(
-    () => capabilityItems.filter(item => item.effectiveEnabled).length + (computerUseEnabled ? 1 : 0),
-    [capabilityItems, computerUseEnabled],
+    () =>
+      capabilityItems.filter(item => item.effectiveEnabled).length +
+      (computerUseSupported && computerUseEnabled ? 1 : 0),
+    [capabilityItems, computerUseEnabled, computerUseSupported],
   )
   const liveTaskStepsVisible =
     isRunning &&
@@ -7331,6 +7340,7 @@ export function ChatView({
                           <CapabilityPanel
                             items={capabilityItems}
                             snapshot={capabilitySnapshot}
+                            computerUseSupported={computerUseSupported}
                             computerUseEnabled={computerUseEnabled}
                             collapsedGroups={collapsedCapabilityGroups}
                             onToggleGroup={group =>

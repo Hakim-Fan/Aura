@@ -40,6 +40,10 @@ export async function ensureAuraHome(workspaceRoot?: string): Promise<AuraHomeSt
   })
 }
 
+export async function resolveAuraLogsDir(): Promise<string> {
+  return invoke<string>('resolve_aura_logs_dir')
+}
+
 export async function readAuraFile(relativePath: string): Promise<string | null> {
   return invoke<string | null>('read_aura_file', { relativePath })
 }

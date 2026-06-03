@@ -401,8 +401,8 @@ function buildComputerTools({ settings, context, platform = process.platform }) 
   ]
 }
 
-function buildSystemBrowserTools({ settings, context }) {
-  if (settings?.browser?.interactive?.enabled !== true) {
+function buildSystemBrowserTools({ settings, context, platform = process.platform }) {
+  if (settings?.browser?.interactive?.enabled !== true || platform !== 'darwin') {
     return []
   }
 
@@ -437,12 +437,7 @@ function buildSystemBrowserTools({ settings, context }) {
           })
         }
 
-        const command =
-          process.platform === 'darwin'
-            ? { file: 'open', args: [normalizedUrl] }
-            : process.platform === 'win32'
-              ? { file: 'cmd', args: ['/c', 'start', '', normalizedUrl] }
-              : { file: 'xdg-open', args: [normalizedUrl] }
+        const command = { file: 'open', args: [normalizedUrl] }
 
         try {
           await execFileAsync(command.file, command.args, {

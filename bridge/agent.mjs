@@ -594,8 +594,9 @@ function shouldLoadRuntimeCapabilityLayers(routeState) {
 
 function createDefaultAgentRouteState(settings = {}) {
   const computerUseEnabled =
-    settings?.browser?.interactive?.enabled === true ||
-    settings?.enableComputerUse === true
+    process.platform === 'darwin' &&
+    (settings?.browser?.interactive?.enabled === true ||
+      settings?.enableComputerUse === true)
   return {
     modelDirected: true,
     capabilityTier: computerUseEnabled ? 'browser-interactive' : 'default-agent',

@@ -33,6 +33,22 @@ const SNAPSHOT_TRUNCATION_MARKER: &str = "\n...(truncated to keep memory bounded
 const MAX_INLINE_IMAGE_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RUNTIME_IMAGE_DATA_URL_BYTES: usize = 12 * 1024 * 1024;
 const MAX_TERMINAL_TASK_SNAPSHOTS: usize = 64;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_WINDOW_TARGET_WIDTH: f64 = 1280.0;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_WINDOW_TARGET_HEIGHT: f64 = 820.0;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_WINDOW_MAX_WIDTH: f64 = 1360.0;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_WINDOW_MAX_HEIGHT: f64 = 860.0;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_WINDOW_MIN_WIDTH: f64 = 1024.0;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_WINDOW_MIN_HEIGHT: f64 = 720.0;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_WINDOW_WORK_AREA_WIDTH_RATIO: f64 = 0.92;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_WINDOW_WORK_AREA_HEIGHT_RATIO: f64 = 0.94;
 
 #[derive(Clone, Serialize, Default)]
 struct AgentTaskSnapshot {
@@ -969,6 +985,10 @@ fn copy_path_recursively(source_path: &Path, target_path: &Path) -> Result<(), S
         return Ok(());
     }
 
+    if target_path.exists() {
+        return Ok(());
+    }
+
     if let Some(parent) = target_path.parent() {
         ensure_directory(parent)?;
     }
@@ -982,6 +1002,19 @@ fn copy_path_recursively(source_path: &Path, target_path: &Path) -> Result<(), S
     })?;
 
     Ok(())
+}
+
+#[tauri::command]
+fn resolve_aura_logs_dir() -> Result<String, String> {
+    let logs_dir = resolve_aura_home()?.join("logs");
+    ensure_directory(&logs_dir)?;
+    Ok(logs_dir.display().to_string())
+}
+
+fn resolve_aura_logs_path() -> Result<PathBuf, String> {
+    let logs_dir = resolve_aura_home()?.join("logs");
+    ensure_directory(&logs_dir)?;
+    Ok(logs_dir)
 }
 
 fn seed_directory_from_defaults<R: Runtime>(
@@ -6297,7 +6330,8 @@ fn is_valid_app_log_date(value: &str) -> bool {
 
 #[tauri::command]
 fn list_app_log_files<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<AppLogFile>, String> {
-    let logs_dir = PathBuf::from(ensure_aura_layout(&app, None)?.logs_dir);
+    let _ = app;
+    let logs_dir = resolve_aura_logs_path()?;
     let mut files = Vec::new();
     let Ok(entries) = fs::read_dir(&logs_dir) else {
         return Ok(files);
@@ -6338,11 +6372,12 @@ fn read_app_log_file<R: Runtime>(
     app: tauri::AppHandle<R>,
     date: String,
 ) -> Result<Vec<AppLogEntry>, String> {
+    let _ = app;
     let date = date.trim();
     if !is_valid_app_log_date(date) {
         return Err("Invalid log date.".into());
     }
-    let logs_dir = PathBuf::from(ensure_aura_layout(&app, None)?.logs_dir);
+    let logs_dir = resolve_aura_logs_path()?;
     let path = logs_dir.join(format!("app-{date}.jsonl"));
     if !path.exists() {
         return Ok(Vec::new());
@@ -6780,9 +6815,65 @@ fn quit_app(app_handle: tauri::AppHandle) {
     app_handle.exit(0);
 }
 
+#[cfg(target_os = "windows")]
+fn clamp_window_axis(target: f64, max: f64, min: f64, available: f64, ratio: f64) -> f64 {
+    let available_cap = (available * ratio).round().max(1.0);
+    let dynamic_min = min.min(available_cap);
+    target.min(max).min(available_cap).max(dynamic_min)
+}
+
+#[cfg(target_os = "windows")]
+fn fit_main_window_to_work_area<R: Runtime>(app: &tauri::App<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+
+    let work_area = monitor.work_area();
+    let scale_factor = monitor.scale_factor().max(1.0);
+    let work_area_width = work_area.size.width as f64 / scale_factor;
+    let work_area_height = work_area.size.height as f64 / scale_factor;
+    let work_area_x = work_area.position.x as f64 / scale_factor;
+    let work_area_y = work_area.position.y as f64 / scale_factor;
+
+    let width = clamp_window_axis(
+        WINDOWS_MAIN_WINDOW_TARGET_WIDTH,
+        WINDOWS_MAIN_WINDOW_MAX_WIDTH,
+        WINDOWS_MAIN_WINDOW_MIN_WIDTH,
+        work_area_width,
+        WINDOWS_MAIN_WINDOW_WORK_AREA_WIDTH_RATIO,
+    );
+    let height = clamp_window_axis(
+        WINDOWS_MAIN_WINDOW_TARGET_HEIGHT,
+        WINDOWS_MAIN_WINDOW_MAX_HEIGHT,
+        WINDOWS_MAIN_WINDOW_MIN_HEIGHT,
+        work_area_height,
+        WINDOWS_MAIN_WINDOW_WORK_AREA_HEIGHT_RATIO,
+    );
+    let min_width = WINDOWS_MAIN_WINDOW_MIN_WIDTH.min(width);
+    let min_height = WINDOWS_MAIN_WINDOW_MIN_HEIGHT.min(height);
+
+    let _ = window.set_min_size(Some(tauri::LogicalSize::new(min_width, min_height)));
+    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+
+    let x = work_area_x + ((work_area_width - width).max(0.0) / 2.0);
+    let y = work_area_y + ((work_area_height - height).max(0.0) / 2.0);
+    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            #[cfg(target_os = "windows")]
+            fit_main_window_to_work_area(app);
             if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!(
                 "../../src/assets/aura_status_icon_white.png"
             )) {
@@ -6798,7 +6889,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
-                if window.label() == "main" {
+                if window.label() == "main" || window.label() == "settings" {
                     let _ = window.hide();
                     api.prevent_close();
                 }
@@ -6840,6 +6931,7 @@ fn main() {
             compress_agent_context,
             run_mcp_action,
             ensure_aura_home,
+            resolve_aura_logs_dir,
             list_app_log_files,
             read_app_log_file,
             detect_lightpanda_runtime,
