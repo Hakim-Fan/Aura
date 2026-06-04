@@ -6,6 +6,8 @@ import { open as openUrl } from '@tauri-apps/plugin-shell'
 import {
   ChevronDown,
   ChevronUp,
+  Brain,
+  Clock3,
   FileText,
   GitBranch,
   Heart,
@@ -14,6 +16,7 @@ import {
   FolderOpen,
   RefreshCw,
   Search,
+  ShieldCheck,
   Trash2,
 } from 'lucide-react'
 import { builtinPlugins, builtinSkills } from './catalog'
@@ -113,6 +116,10 @@ function normalizePathList(paths: string[] = []) {
 
 function normalizeComparablePath(path: string) {
   return path.trim().replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase()
+}
+
+function normalizeWorkspaceRoot(path: string) {
+  return path.trim().replace(/\\/g, '/').replace(/\/+$/g, '')
 }
 
 function createProviderProfile(provider: ProviderMode = 'custom'): ProviderProfile {
@@ -351,6 +358,24 @@ export function SettingsWindowApp({ initialTab }: Props) {
   )
     ? titleModelRouteStoredValue
     : ''
+  const projectMemoryModelRouteStoredValue =
+    draftSettings.projectMemory.providerProfileId && draftSettings.projectMemory.model
+      ? encodeModelRouteValue(
+        draftSettings.projectMemory.providerProfileId,
+        draftSettings.projectMemory.model,
+      )
+      : ''
+  const projectMemoryModelRouteValue = modelRouteOptions.some(
+    option => option.value === projectMemoryModelRouteStoredValue,
+  )
+    ? projectMemoryModelRouteStoredValue
+    : ''
+  const currentWorkspaceRoot = normalizeWorkspaceRoot(draftSettings.cwd)
+  const isCurrentWorkspaceMemoryDisabled = currentWorkspaceRoot
+    ? draftSettings.projectMemory.disabledWorkspaceRoots
+      .map(normalizeWorkspaceRoot)
+      .includes(currentWorkspaceRoot)
+    : false
 
   const browserValidationError = useMemo(() => {
     if (draftSettings.browser.lightpanda.enabled && !lightpandaStatus?.valid) {
@@ -452,6 +477,29 @@ export function SettingsWindowApp({ initialTab }: Props) {
     })
     setSaveState('idle')
   }, [modelRouteOptions, titleModelRouteStoredValue])
+
+  useEffect(() => {
+    if (!projectMemoryModelRouteStoredValue) {
+      return
+    }
+    if (modelRouteOptions.some(option => option.value === projectMemoryModelRouteStoredValue)) {
+      return
+    }
+    setDraftSettings(current => {
+      if (!current.projectMemory.providerProfileId && !current.projectMemory.model) {
+        return current
+      }
+      return {
+        ...current,
+        projectMemory: {
+          ...current.projectMemory,
+          providerProfileId: '',
+          model: '',
+        },
+      }
+    })
+    setSaveState('idle')
+  }, [modelRouteOptions, projectMemoryModelRouteStoredValue])
 
   useEffect(() => {
     if (browserStatus?.tone !== 'success') {
@@ -974,6 +1022,48 @@ export function SettingsWindowApp({ initialTab }: Props) {
       titleModel: selection.modelId,
     }))
     setSaveState('idle')
+  }
+
+  function updateProjectMemorySettings(patch: Partial<AgentSettings['projectMemory']>) {
+    setDraftSettings(current => ({
+      ...current,
+      projectMemory: {
+        ...current.projectMemory,
+        ...patch,
+      },
+    }))
+    setSaveState('idle')
+  }
+
+  function updateProjectMemoryModelRoute(value: string) {
+    const selection = decodeModelRouteValue(value)
+
+    if (!selection) {
+      updateProjectMemorySettings({
+        providerProfileId: '',
+        model: '',
+      })
+      return
+    }
+
+    updateProjectMemorySettings({
+      providerProfileId: selection.profileId,
+      model: selection.modelId,
+    })
+  }
+
+  function toggleCurrentWorkspaceMemoryDisabled(disabled: boolean) {
+    const workspaceRoot = normalizeWorkspaceRoot(draftSettings.cwd)
+    if (!workspaceRoot) {
+      return
+    }
+    const currentRoots = draftSettings.projectMemory.disabledWorkspaceRoots
+      .map(normalizeWorkspaceRoot)
+      .filter(Boolean)
+    const nextRoots = disabled
+      ? Array.from(new Set([...currentRoots, workspaceRoot]))
+      : currentRoots.filter(entry => entry !== workspaceRoot)
+    updateProjectMemorySettings({ disabledWorkspaceRoots: nextRoots })
   }
 
   function toggleSkill(skillId: string) {
@@ -2212,6 +2302,167 @@ export function SettingsWindowApp({ initialTab }: Props) {
     )
   }
 
+  function renderProjectMemory() {
+    const memoryPath = currentWorkspaceRoot
+      ? `${currentWorkspaceRoot}/.aura/memory/`
+      : '当前工作区/.aura/memory/'
+    const memoryCards = [
+      {
+        icon: Brain,
+        title: draftSettings.projectMemory.enabled ? '全局启用' : '全局关闭',
+        detail: draftSettings.projectMemory.enabled
+          ? '模型可在需要时静默检索本项目记忆。'
+          : '不会检索或更新任何项目长期记忆。',
+        tone: draftSettings.projectMemory.enabled ? 'text-emerald-600' : 'text-black/35',
+      },
+      {
+        icon: ShieldCheck,
+        title: isCurrentWorkspaceMemoryDisabled ? '当前项目关闭' : '当前项目开启',
+        detail: currentWorkspaceRoot
+          ? '项目可独立覆盖全局开关。'
+          : '先在通用页选择工作区后可设置项目覆盖。',
+        tone: isCurrentWorkspaceMemoryDisabled ? 'text-amber-600' : 'text-sky-600',
+      },
+      {
+        icon: Clock3,
+        title: `${draftSettings.projectMemory.idleUpdateThresholdHours} 小时`,
+        detail: '会话结束后持续空闲达到阈值才更新记忆。',
+        tone: 'text-violet-600',
+      },
+    ]
+
+    return (
+      <section className="section-shell settings-panel">
+        <div className="settings-grid">
+          <section className="dashboard-card col-span-full">
+            <div className="settings-hero-row">
+              <div>
+                <div className="section-title">项目长期记忆</div>
+                <p className="muted">
+                  记忆只保存在本机当前项目的 <code>.aura/memory/</code> 中，默认写入 <code>.gitignore</code>，不会作为团队文件提交。
+                </p>
+              </div>
+              <span className="micro-pill">Local only</span>
+            </div>
+            <div className="settings-feature-grid">
+              {memoryCards.map(card => {
+                const Icon = card.icon
+                return (
+                  <div key={card.title} className="dashboard-row modern !items-start">
+                    <Icon className={card.tone} size={24} strokeWidth={2.1} />
+                    <div className="flex min-w-0 flex-col">
+                      <strong>{card.title}</strong>
+                      <span className="muted">{card.detail}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+
+          <section className="dashboard-card">
+            <div className="section-title">启用范围</div>
+            <div className="toggle-stack">
+              <label className="toggle-inline">
+                <input
+                  checked={draftSettings.projectMemory.enabled}
+                  type="checkbox"
+                  onChange={event => updateProjectMemorySettings({ enabled: event.target.checked })}
+                />
+                <div className="flex flex-col">
+                  <strong>启用长期记忆</strong>
+                  <span className="muted">
+                    允许模型在判断需要时调用静默记忆检索，并在空闲阈值后更新项目记忆。
+                  </span>
+                </div>
+              </label>
+              <label className={`toggle-inline ${!currentWorkspaceRoot ? 'disabled' : ''}`}>
+                <input
+                  checked={isCurrentWorkspaceMemoryDisabled}
+                  disabled={!currentWorkspaceRoot}
+                  type="checkbox"
+                  onChange={event => toggleCurrentWorkspaceMemoryDisabled(event.target.checked)}
+                />
+                <div className="flex flex-col">
+                  <strong>关闭当前项目记忆</strong>
+                  <span className="muted">
+                    只影响当前工作区，不改变其他项目的长期记忆设置。
+                  </span>
+                </div>
+              </label>
+            </div>
+            <div className="provider-note mt-3">
+              <p>{memoryPath}</p>
+              <p>记忆目录内的用户编辑会被保留；后台更新只做增量合并，不覆盖整份文件。</p>
+            </div>
+          </section>
+
+          <section className="dashboard-card">
+            <div className="section-title">更新时机</div>
+            <p className="muted">
+              只有用户明确要求更新记忆，或当前会话结束后持续空闲达到阈值，才会触发记忆更新。
+            </p>
+            <label className="settings-number-field mt-3">
+              <span>空闲阈值（小时）</span>
+              <input
+                type="number"
+                min={1}
+                max={72}
+                step={1}
+                value={draftSettings.projectMemory.idleUpdateThresholdHours}
+                onChange={event =>
+                  updateProjectMemorySettings({
+                    idleUpdateThresholdHours: Math.max(1, Math.min(72, Number(event.target.value) || 4)),
+                  })
+                }
+              />
+            </label>
+          </section>
+
+          <section className="dashboard-card col-span-full">
+            <div className="section-title">记忆模型</div>
+            <p className="muted">
+              默认跟随当前会话模型。需要降低成本或隔离后台调用时，可为长期记忆单独选择一个已启用模型。
+            </p>
+            <div className="model-routing-panel mt-3">
+              <div className="model-route-list">
+                <label className="model-route-row">
+                  <div className="model-route-copy">
+                    <span>长期记忆</span>
+                    <strong>检索与空闲更新</strong>
+                    <small>用于项目记忆检索、显式更新和空闲后的增量总结。</small>
+                  </div>
+                  <div className="model-route-control">
+                    <select
+                      key={modelRouteOptionsSignature}
+                      aria-label="长期记忆模型"
+                      className="model-route-select"
+                      value={projectMemoryModelRouteValue}
+                      onChange={event => updateProjectMemoryModelRoute(event.target.value)}
+                    >
+                      <option value="">当前会话模型</option>
+                      {modelRouteOptions.map(option => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown size={15} />
+                  </div>
+                </label>
+              </div>
+              {modelRouteOptions.length === 0 ? (
+                <p className="model-route-empty">
+                  还没有可选的已启用模型。先到“提供商”页启用至少一个模型。
+                </p>
+              ) : null}
+            </div>
+          </section>
+        </div>
+      </section>
+    )
+  }
+
   function renderBrowser() {
     const savedLightpandaPath = resolveLightpandaExecutablePath(
       draftSettings.browser.lightpanda.executablePath,
@@ -3292,6 +3543,7 @@ export function SettingsWindowApp({ initialTab }: Props) {
             onFetchModels={() => void handleFetchModels()}
           />
         ) : null}
+        {activeTab === 'memory' ? renderProjectMemory() : null}
         {activeTab === 'browser' ? renderBrowser() : null}
         {activeTab === 'mcp' ? renderMcp() : null}
         {activeTab === 'skills'

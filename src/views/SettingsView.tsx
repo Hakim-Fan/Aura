@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 export type SettingsTab =
   | 'general'
   | 'providers'
+  | 'memory'
   | 'browser'
   | 'mcp'
   | 'skills'
@@ -12,6 +13,7 @@ export type SettingsTab =
 const tabs: Array<{ id: SettingsTab; label: string }> = [
   { id: 'general', label: '通用' },
   { id: 'providers', label: '提供商' },
+  { id: 'memory', label: '长期记忆' },
   { id: 'browser', label: '网页与浏览器' },
   { id: 'mcp', label: 'MCP' },
   { id: 'skills', label: '技能' },

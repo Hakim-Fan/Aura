@@ -71,6 +71,11 @@ import {
   resolveAgentExecutionMode,
   wrapAgentRuntimeHooks,
 } from './agentRuntimeLogs.mjs'
+import {
+  createProjectMemoryRuntime,
+  isProjectMemoryEnabled,
+  scheduleProjectMemoryIdleUpdate,
+} from './projectMemory.mjs'
 import { resolveTaskFrame } from './agent/taskFrame.mjs'
 import { compactVisibleTaskTitle } from './taskTitles.mjs'
 import {
@@ -667,6 +672,9 @@ const VERIFICATION_TOOL_NAMES = new Set([
 
 export function filterToolsForSubagentRole(tools = [], runtime = {}) {
   const role = String(runtime?.subagentRole || '').trim().toLowerCase()
+  if (role === 'memory_lookup' || role === 'memory_writer') {
+    return []
+  }
   if (role !== 'explorer' && role !== 'verification') {
     return Array.isArray(tools) ? tools : []
   }
@@ -1110,6 +1118,8 @@ function summarizeMountedToolAvailability(tools = []) {
       [...names].some(name => name.startsWith('aura_')),
     hasMultiAgentTools:
       names.has('spawn_agent'),
+    hasProjectMemoryTools:
+      names.has('spawn_memory_agent') || names.has('update_project_memory'),
   }
 }
 
@@ -2405,12 +2415,18 @@ export async function runDefaultAgent(request) {
     stage: 'preflight',
   })
   messages = preflightCompression.messages
+  const runNestedAgent = nestedRequest =>
+    runAgent({
+      ...nestedRequest,
+      hooks: nestedRequest?.hooks || hooks,
+    })
 
   const toolEvents = []
   const context = {
     cwd: settings.cwd,
     appRoot,
     appControl: hooks.appControl,
+    toolEvents,
     logContext: request.logContext || {},
     activeCapabilityIds: {
       skills: new Set((capabilities?.skills || []).map(entry => entry?.id || entry).filter(Boolean)),
@@ -2426,7 +2442,26 @@ export async function runDefaultAgent(request) {
     workMemories: runtime.workMemories || [],
     autoToolEvidence: normalizePersistedToolEvidence(runtime.persistedWorkMemories),
     settings,
+    getMessages() {
+      return messages
+    },
     cleanupHandlers: [],
+  }
+  context.projectMemoryHooks = hooks
+  context.projectMemoryRuntime = isProjectMemoryEnabled(settings)
+    ? createProjectMemoryRuntime({
+        settings,
+        messages,
+        hooks,
+        runNestedAgent,
+      })
+    : null
+  async function drainProjectMemoryAsyncContext() {
+    if (!context.projectMemoryRuntime?.hasUninjectedLookup?.()) {
+      return ''
+    }
+    await context.projectMemoryRuntime.waitForUninjectedLookups?.()
+    return context.projectMemoryRuntime.drainReadyContext?.() || ''
   }
   const taskTracker =
     runtime.taskTracker || createTaskTracker(hooks, summarizeMessages(messages))
@@ -2444,11 +2479,7 @@ export async function runDefaultAgent(request) {
       ...runtime,
       executionStepIds,
     },
-    runNestedAgent: nestedRequest =>
-      runAgent({
-        ...nestedRequest,
-        hooks,
-    }),
+    runNestedAgent,
     taskTracker,
   })
   const [skillCatalog, pluginInventory, mcpInventory] = await Promise.all([
@@ -2672,8 +2703,13 @@ export async function runDefaultAgent(request) {
         ),
         carryoverContext,
       )
+      const readyProjectMemoryContext =
+        context.projectMemoryRuntime?.drainReadyContext?.() || ''
+      const promptWithProjectMemory = readyProjectMemoryContext
+        ? `${lastSystemPrompt}\n\n${readyProjectMemoryContext}`
+        : lastSystemPrompt
       const activeSystemPrompt = appendRuntimeExecutionContextToSystemPrompt(
-        lastSystemPrompt,
+        promptWithProjectMemory,
         context,
       )
       const allTools = roleFilteredTools
@@ -2718,7 +2754,7 @@ export async function runDefaultAgent(request) {
       try {
         turnResult = await runProviderTurn({
           settings: effectiveRunSettings,
-          systemPrompt: lastSystemPrompt,
+          systemPrompt: promptWithProjectMemory,
           messages,
           tools: allTools,
           toolEvents,
@@ -2732,6 +2768,7 @@ export async function runDefaultAgent(request) {
             onTodoWrite(items, explanation) {
               taskTracker.syncTodoItems?.(items, explanation, currentTaskId)
             },
+            drainAsyncContext: drainProjectMemoryAsyncContext,
             rethrowToolError(error) {
               return extractRouteEscalationRequest(error) !== null
             },
@@ -2772,10 +2809,23 @@ export async function runDefaultAgent(request) {
         pass,
       })
 
+      if (context.projectMemoryRuntime?.hasUninjectedLookup?.()) {
+        await context.projectMemoryRuntime.waitForUninjectedLookups?.()
+        if (context.projectMemoryRuntime?.hasUninjectedLookup?.()) {
+          taskTracker.setStatus(
+            currentTaskId,
+            'running',
+            '项目长期记忆已返回，准备合并到下一次模型调用',
+          )
+          hooks?.onPhaseChange?.('preparing')
+          continue
+        }
+      }
+
       let result = turnResult.result
       const latestPromptContextSnapshot = buildPromptContextSnapshot(
         effectiveRunSettings,
-        appendRuntimeExecutionContextToSystemPrompt(lastSystemPrompt, context),
+        appendRuntimeExecutionContextToSystemPrompt(promptWithProjectMemory, context),
         allTools,
         runtimeCompression.afterTokens,
         toolSchemaTokens,
@@ -3054,6 +3104,7 @@ export async function runDefaultAgent(request) {
               onTodoWrite(items, explanation) {
                 taskTracker.syncTodoItems?.(items, explanation, currentTaskId)
               },
+              drainAsyncContext: drainProjectMemoryAsyncContext,
               rethrowToolError(error) {
                 return extractRouteEscalationRequest(error) !== null
               },
@@ -3491,6 +3542,22 @@ export async function runAgent(request) {
       'agent.metrics.summary',
       buildMetricsSummaryDetails(result, runtimeLogger, result?.status || 'completed'),
     )
+    if (
+      effectiveRequest.runtime?.skipProjectMemoryIdleUpdate !== true &&
+      !String(effectiveRequest.runtime?.subagentRole || '').startsWith('memory_')
+    ) {
+      scheduleProjectMemoryIdleUpdate({
+        settings: effectiveSettings,
+        messages: effectiveRequest.messages,
+        result,
+        hooks,
+        runNestedAgent: nestedRequest =>
+          runAgent({
+            ...nestedRequest,
+            hooks: nestedRequest?.hooks || hooks,
+          }),
+      })
+    }
     return result
   } catch (error) {
     runtimeLogger.emit(

@@ -1,6 +1,6 @@
 {
   "name": "desk-agent",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@9.1.1",

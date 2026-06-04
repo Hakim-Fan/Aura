@@ -3561,6 +3561,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       toolName: effectiveTool.name,
       toolCallId: hooks.toolCallId,
       eventId,
+      internalOnly: effectiveTool.internalOnly === true,
       ...activePlanStep,
     })
   }
@@ -3663,6 +3664,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       toolName: effectiveTool.name,
       toolCallId: hooks.toolCallId,
       eventId,
+      internalOnly: effectiveTool.internalOnly === true,
       ...activePlanStep,
     })
   }
@@ -3710,6 +3712,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       toolName: effectiveTool.name,
       toolCallId: hooks.toolCallId,
       eventId,
+      internalOnly: effectiveTool.internalOnly === true,
       ...activePlanStep,
     })
   }
@@ -3848,6 +3851,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         toolName: effectiveTool.name,
         toolCallId: hooks.toolCallId,
         eventId,
+        internalOnly: effectiveTool.internalOnly === true,
         ...activePlanStep,
       })
     }
@@ -3903,6 +3907,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
         toolName: effectiveTool.name,
         toolCallId: hooks.toolCallId,
         eventId,
+        internalOnly: effectiveTool.internalOnly === true,
         ...activePlanStep,
       })
     }
@@ -4021,6 +4026,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       toolName: effectiveTool.name,
       toolCallId: hooks.toolCallId,
       eventId,
+      internalOnly: effectiveTool.internalOnly === true,
       ...activePlanStep,
     })
   } catch (error) {
@@ -4066,6 +4072,7 @@ export async function invokeTool(tool, args, toolEvents, hooks = {}) {
       toolName: effectiveTool.name,
       toolCallId: hooks.toolCallId,
       eventId,
+      internalOnly: effectiveTool.internalOnly === true,
       ...activePlanStep,
     })
   } finally {
@@ -4108,6 +4115,7 @@ export async function invokeToolWithRetry(tool, args, toolEvents, hooks = {}) {
           toolName: tool.name,
           toolCallId: hooks.toolCallId,
           attempt,
+          internalOnly: tool.internalOnly === true,
           ...normalizeActivePlanStep(hooks),
         })
       }
@@ -4125,6 +4133,7 @@ export async function invokeToolWithRetry(tool, args, toolEvents, hooks = {}) {
           toolName: tool.name,
           toolCallId: hooks.toolCallId,
           attempt,
+          internalOnly: tool.internalOnly === true,
           ...normalizeActivePlanStep(hooks),
         })
       }
@@ -4140,6 +4149,7 @@ export async function invokeToolWithRetry(tool, args, toolEvents, hooks = {}) {
     error: lastError,
     toolName: tool.name,
     toolCallId: hooks.toolCallId,
+    internalOnly: tool.internalOnly === true,
     ...normalizeActivePlanStep(hooks),
   })
 }

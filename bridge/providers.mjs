@@ -282,6 +282,9 @@ function summarizeSpilloverText(content = '') {
 }
 
 function upsertToolEventEntry(toolEvents = [], entry = {}) {
+  if (!entry) {
+    return
+  }
   if (!entry?.id) {
     toolEvents.push(entry)
     return
@@ -4102,6 +4105,7 @@ export async function runOpenAiCompatibleAgent({
   let providerReasoning = ''
   const providerReasoningBlocks = []
   let lastDraftMessage = ''
+  let asyncRuntimeContext = ''
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
   const maxRetries = getProviderFailureRecoveryMaxRetries()
@@ -4134,7 +4138,7 @@ export async function runOpenAiCompatibleAgent({
         },
       )
       const activeSystemPrompt = appendRuntimeExecutionContextToSystemPrompt(
-        systemPrompt,
+        asyncRuntimeContext ? `${systemPrompt}\n\n${asyncRuntimeContext}` : systemPrompt,
         hooks?.workMemoryContext,
       )
       if (transcript[0]?.role === 'system') {
@@ -4721,6 +4725,23 @@ export async function runOpenAiCompatibleAgent({
         toolEventStartIndex,
         hasUnresolvedToolError,
       )
+      if (typeof hooks?.drainAsyncContext === 'function') {
+        const drainedAsyncContext = await hooks.drainAsyncContext()
+        if (drainedAsyncContext) {
+          asyncRuntimeContext = [asyncRuntimeContext, drainedAsyncContext]
+            .filter(Boolean)
+            .join('\n\n')
+          if (transcript[0]?.role === 'system') {
+            transcript[0] = {
+              ...transcript[0],
+              content: appendRuntimeExecutionContextToSystemPrompt(
+                `${systemPrompt}\n\n${asyncRuntimeContext}`,
+                hooks?.workMemoryContext,
+              ),
+            }
+          }
+        }
+      }
       if (
         isRepairIteration &&
         hasWriteRepairAttemptSince(toolEvents, toolEventStartIndex)
@@ -4799,6 +4820,7 @@ export async function runGoogleAgent({
   let providerReasoning = ''
   const providerReasoningBlocks = []
   let lastDraftMessage = ''
+  let asyncRuntimeContext = ''
   const loopConfig = getLoopConfig(settings)
   const loopGuard = createLongTaskGuard(loopConfig)
   const maxRetries = getProviderFailureRecoveryMaxRetries()
@@ -4831,7 +4853,7 @@ export async function runGoogleAgent({
         },
       )
       const activeSystemPrompt = appendRuntimeExecutionContextToSystemPrompt(
-        systemPrompt,
+        asyncRuntimeContext ? `${systemPrompt}\n\n${asyncRuntimeContext}` : systemPrompt,
         hooks?.workMemoryContext,
       )
       const reasoningBlockId = createProviderReasoningBlockId(hooks, 'google', step)
@@ -5358,6 +5380,14 @@ export async function runGoogleAgent({
         toolEventStartIndex,
         hasUnresolvedToolError,
       )
+      if (typeof hooks?.drainAsyncContext === 'function') {
+        const drainedAsyncContext = await hooks.drainAsyncContext()
+        if (drainedAsyncContext) {
+          asyncRuntimeContext = [asyncRuntimeContext, drainedAsyncContext]
+            .filter(Boolean)
+            .join('\n\n')
+        }
+      }
       if (
         isRepairIteration &&
         hasWriteRepairAttemptSince(toolEvents, toolEventStartIndex)
@@ -5371,7 +5401,7 @@ export async function runGoogleAgent({
       settings,
       apiBase,
       systemPrompt: appendRuntimeExecutionContextToSystemPrompt(
-        systemPrompt,
+        asyncRuntimeContext ? `${systemPrompt}\n\n${asyncRuntimeContext}` : systemPrompt,
         hooks?.workMemoryContext,
       ),
       transcript,

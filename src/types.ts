@@ -691,6 +691,14 @@ export type WebToolsSettings = {
   research: WebResearchSettings
 }
 
+export type ProjectMemorySettings = {
+  enabled: boolean
+  disabledWorkspaceRoots: string[]
+  idleUpdateThresholdHours: number
+  providerProfileId: string
+  model: string
+}
+
 export type LightpandaRuntimeStatusRecord = {
   detected: boolean
   executablePath?: string
@@ -719,6 +727,7 @@ export type AgentSettings = {
   maxSteps: number
   executionMode: ExecutionMode
   memoryMode: MemoryMode
+  projectMemory: ProjectMemorySettings
   contextCompressionThresholdTokens: number
   reasoningEffort: ReasoningEffort
   customInstructions: UserCustomInstructions

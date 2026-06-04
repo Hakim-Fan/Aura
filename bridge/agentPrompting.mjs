@@ -205,6 +205,7 @@ function deriveCapabilityProfile(routeState, toolAvailability = {}) {
     toolAvailability.hasCapabilityAdminTools === true ||
     isCapabilityAdminTask
   const mountedMultiAgent = toolAvailability.hasMultiAgentTools === true
+  const mountedProjectMemory = toolAvailability.hasProjectMemoryTools === true
 
   return {
     hasReadonlyWorkspaceTools: mountedReadonly,
@@ -213,6 +214,7 @@ function deriveCapabilityProfile(routeState, toolAvailability = {}) {
     hasInteractiveBrowserTools: mountedBrowser,
     hasCapabilityAdminTools: mountedAdmin,
     hasMultiAgentTools: mountedMultiAgent,
+    hasProjectMemoryTools: mountedProjectMemory,
     mixedRetrievalAndWorkspaceExecution:
       mountedWeb === true &&
       needsExternalFacts === true &&
@@ -234,6 +236,7 @@ export function buildCapabilityExposureNote(snapshot, routeState, toolAvailabili
       capabilityProfile.hasInteractiveBrowserTools ? 'interactive browser handoff' : null,
       capabilityProfile.hasCapabilityAdminTools ? 'capability management' : null,
       capabilityProfile.hasMultiAgentTools ? 'multi-agent delegation' : null,
+      capabilityProfile.hasProjectMemoryTools ? 'project memory' : null,
     ]
       .filter(Boolean)
       .join(', ')
@@ -412,6 +415,11 @@ export function buildRuntimeSystemPrompt(
         'Multi-agent delegation is mounted through spawn_agent, following Claude AgentTool semantics. Use it only for meaningfully parallel or independent work. When there are multiple independent subproblems, call multiple spawn_agent tools in the same model turn so they can run concurrently. Use agent_type="explorer" for read-only codebase investigation, agent_type="worker" for a bounded implementation chunk, agent_type="verification" for independent adversarial verification, and agent_type="default" for general delegated work. Claude-compatible aliases also work: description, prompt, subagent_type. Do not spawn an agent for trivial single-step tasks, do not re-delegate from inside a subagent, and include all needed context in the message.',
       )
       sections.push(buildClaudeStyleVerificationAgentInstruction())
+    }
+    if (capabilityProfile.hasProjectMemoryTools) {
+      sections.push(
+        'Project memory tools are mounted and silent. If prior local project knowledge, user preferences, historical decisions, troubleshooting notes, or old task summaries would materially reduce uncertainty for the newest request, call spawn_memory_agent with a concise query. Do not call it for trivial requests or facts already clear from the current conversation. If the user explicitly asks to update, save, remember, or forget project memory, call update_project_memory. Do not update project memory merely because a normal task completed.',
+      )
     }
     sections.push(
       'Shell commands run under an execution policy. Do not use shell as a workaround for workspace file-tool boundaries: if read_file cannot access an external path, import or copy the file into the workspace, or use the dedicated Aura capability tool. Accessing /tmp, the user home directory, ~/.aura, elevated commands, package installers, and system automation may require explicit approval or be blocked.',
@@ -669,6 +677,7 @@ export function buildDefaultAgentPromptBlocks(
     capabilityProfile.hasInteractiveBrowserTools ? 'interactive browser handoff' : null,
     capabilityProfile.hasCapabilityAdminTools ? 'capability management' : null,
     capabilityProfile.hasMultiAgentTools ? 'multi-agent delegation' : null,
+    capabilityProfile.hasProjectMemoryTools ? 'project memory' : null,
   ]
     .filter(Boolean)
     .join(', ')
@@ -700,6 +709,10 @@ export function buildDefaultAgentPromptBlocks(
   if (capabilityProfile.hasMultiAgentTools) {
     capabilitySections.push('For multi-agent work, call spawn_agent only when the task has a genuinely independent subproblem. When several subproblems are independent, call multiple spawn_agent tools in the same model turn so they can run concurrently. Use agent_type="explorer" for read-only codebase investigation, agent_type="worker" for a bounded implementation chunk, agent_type="verification" for independent adversarial verification, and agent_type="default" for general delegated work. Claude-compatible aliases also work: description, prompt, subagent_type. Simple tasks should stay in the main agent.')
     capabilitySections.push(buildClaudeStyleVerificationAgentInstruction())
+  }
+
+  if (capabilityProfile.hasProjectMemoryTools) {
+    capabilitySections.push('Project memory is mounted through silent internal tools. Call spawn_memory_agent only when durable local project memory could materially help with the newest user request. Call update_project_memory only when the user explicitly asks to update, save, remember, or forget project memory. Do not mention these silent memory tool calls to the user unless the user asks about memory behavior.')
   }
 
   if (skillPrompt.trim()) {

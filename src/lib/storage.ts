@@ -187,6 +187,16 @@ function defaultWebToolsSettings(): WebToolsSettings {
   }
 }
 
+function defaultProjectMemorySettings(): AgentSettings['projectMemory'] {
+  return {
+    enabled: true,
+    disabledWorkspaceRoots: [],
+    idleUpdateThresholdHours: 4,
+    providerProfileId: '',
+    model: '',
+  }
+}
+
 export const defaultSettings: AgentSettings = {
   provider: 'openai',
   apiKey: '',
@@ -206,6 +216,7 @@ export const defaultSettings: AgentSettings = {
   maxSteps: 8,
   executionMode: 'bounded',
   memoryMode: 'summary',
+  projectMemory: defaultProjectMemorySettings(),
   contextCompressionThresholdTokens: 256_000,
   reasoningEffort: 'medium',
   customInstructions: {
@@ -1273,6 +1284,31 @@ function normalizeCustomInstructions(value: unknown): AgentSettings['customInstr
   }
 }
 
+function normalizeWorkspaceRootList(value: unknown) {
+  return normalizeStringList(value)
+    .map(entry => entry.replace(/\\/g, '/').replace(/\/+$/g, '').trim())
+    .filter(Boolean)
+}
+
+function normalizeProjectMemorySettings(value: unknown): AgentSettings['projectMemory'] {
+  const defaults = defaultSettings.projectMemory
+  if (!value || typeof value !== 'object') {
+    return defaults
+  }
+  const entry = value as Partial<AgentSettings['projectMemory']>
+  const idleUpdateThresholdHours = Number(entry.idleUpdateThresholdHours)
+  return {
+    enabled: normalizeBooleanSetting(entry.enabled, defaults.enabled),
+    disabledWorkspaceRoots: normalizeWorkspaceRootList(entry.disabledWorkspaceRoots),
+    idleUpdateThresholdHours: Number.isFinite(idleUpdateThresholdHours)
+      ? Math.max(1, Math.min(72, Math.round(idleUpdateThresholdHours)))
+      : defaults.idleUpdateThresholdHours,
+    providerProfileId:
+      typeof entry.providerProfileId === 'string' ? entry.providerProfileId : defaults.providerProfileId,
+    model: typeof entry.model === 'string' ? entry.model : defaults.model,
+  }
+}
+
 function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
   return {
     ...settings,
@@ -1314,6 +1350,7 @@ function normalizeMutableSettings(settings: AgentSettings): AgentSettings {
     sendShortcut: normalizeSendShortcut(settings.sendShortcut),
     uiDefaultsVersion: normalizeUiDefaultsVersion(settings.uiDefaultsVersion),
     customInstructions: normalizeCustomInstructions(settings.customInstructions),
+    projectMemory: normalizeProjectMemorySettings(settings.projectMemory),
     analysisProviderProfileId:
       typeof settings.analysisProviderProfileId === 'string'
         ? settings.analysisProviderProfileId
@@ -1584,6 +1621,7 @@ function parseSettings(raw: string | null): AgentSettings {
       maxSteps: normalizeMaxSteps(parsed.maxSteps),
       executionMode: normalizeExecutionMode(parsed.executionMode),
       memoryMode: normalizeMemoryMode(parsed.memoryMode),
+      projectMemory: normalizeProjectMemorySettings(parsed.projectMemory),
       contextCompressionThresholdTokens: normalizeContextCompressionThreshold(
         parsed.contextCompressionThresholdTokens,
       ),

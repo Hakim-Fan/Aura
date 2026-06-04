@@ -868,6 +868,20 @@ button {
   gap: 20px;
 }
 
+.settings-hero-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.settings-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
 .dashboard-card,
 .asset-card,
 .providers-list-card,

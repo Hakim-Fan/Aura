@@ -3,6 +3,11 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createStructuredError } from './runtimeErrors.mjs'
+import {
+  isProjectMemoryEnabled,
+  runSpawnMemoryAgentTool,
+  startProjectMemoryUpdateAgent,
+} from './projectMemory.mjs'
 import { resolveWorkspacePath, stringifyOutput, truncate } from './utils.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -608,8 +613,86 @@ function buildMultiAgentTools({
   ]
 }
 
+function buildProjectMemoryTools({ settings, context, runtimeMeta, runNestedAgent }) {
+  if (
+    !isProjectMemoryEnabled(settings) ||
+    (runtimeMeta?.subagentDepth || 0) >= 1
+  ) {
+    return []
+  }
+
+  return [
+    {
+      source: 'builtin',
+      name: 'spawn_memory_agent',
+      internalOnly: true,
+      description: [
+        'Silently starts an asynchronous Aura project-memory lookup subagent for the active workspace and returns a memory_task_id.',
+        'The lookup result is injected into a later model call by the runtime; do not expect this tool call to return the memory content directly.',
+        'Use this only when project history, user preferences, prior decisions, troubleshooting notes, or an old task recap would materially reduce uncertainty for the newest user request.',
+        'Do not call it for trivial questions, current external facts, or information that is clearly available in the current conversation.',
+      ].join('\n\n'),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Current user request or a concise query describing the memory needed.',
+          },
+          reason: {
+            type: 'string',
+            description: 'Why project memory is likely relevant.',
+          },
+        },
+      },
+      async run(args, runtime = {}) {
+        return runSpawnMemoryAgentTool(context, args, runtime)
+      },
+    },
+    {
+      source: 'builtin',
+      name: 'update_project_memory',
+      internalOnly: true,
+      description: [
+        'Silently updates Aura project long-term memory for the active workspace.',
+        'Use this only when the user explicitly asks to update, save, remember, or forget project memory. Do not use it merely because a normal task completed.',
+        'The update is local-only under .aura/memory and preserves user edits by appending incremental sections.',
+      ].join('\n\n'),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          notes: {
+            type: 'string',
+            description: 'The user-approved memory update notes or facts to save.',
+          },
+          reason: {
+            type: 'string',
+            description: 'Short reason for this memory update.',
+          },
+        },
+      },
+      async run(args, runtime = {}) {
+        runtime.throwIfAborted?.()
+        const result = startProjectMemoryUpdateAgent({
+          settings,
+          messages: typeof context.getMessages === 'function' ? context.getMessages() : [],
+          result: {
+            toolEvents: context.toolEvents || [],
+          },
+          notes: args.notes || args.reason || '',
+          reason: 'manual',
+          hooks: context.projectMemoryHooks,
+          runNestedAgent,
+        })
+        return stringifyOutput(result)
+      },
+    },
+  ]
+}
+
 export function createAdvancedTools(options) {
   return [
+    ...buildProjectMemoryTools(options),
     ...buildMultiAgentTools(options),
     ...buildComputerTools(options),
     ...buildSystemBrowserTools(options),

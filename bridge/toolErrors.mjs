@@ -209,6 +209,7 @@ export class ToolResult {
     planId,
     subtaskId,
     subtaskTitle,
+    internalOnly,
   }) {
     this.success = success
     this.output = output
@@ -220,6 +221,7 @@ export class ToolResult {
     this.planId = planId
     this.subtaskId = subtaskId
     this.subtaskTitle = subtaskTitle
+    this.internalOnly = internalOnly === true
     this.timestamp = Date.now()
   }
 
@@ -239,6 +241,9 @@ export class ToolResult {
   }
 
   toToolEventEntry() {
+    if (this.internalOnly) {
+      return null
+    }
     if (this.success) {
       return {
         ...this.baseToolEventFields(),
