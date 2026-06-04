@@ -15,6 +15,7 @@ import {
   writePersistentCache,
 } from './web/shared/persistentCache.mjs'
 import { parseCommandSpec, parseLooseJson, stringifyOutput } from './utils.mjs'
+import { APP_VERSION } from '../app-version.mjs'
 
 const MCP_TOOL_METADATA_CACHE = new Map()
 const MCP_TOOL_METADATA_NAMESPACE = 'mcp-tools'
@@ -277,7 +278,7 @@ function createMcpSession(server, commandSpec, env) {
       const nextClient = new Client(
         {
           name: 'aura-desktop',
-          version: '2.1.3',
+          version: APP_VERSION,
         },
         {
           capabilities: {},

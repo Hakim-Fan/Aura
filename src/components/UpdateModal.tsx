@@ -1,6 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Download, Loader2, X } from 'lucide-react';
-import { installReleaseUpdate, type ReleaseInfo, type UpdateInstallProgress } from '../lib/updater';
+import {
+  downloadReleaseUpdate,
+  getUpdateTaskSnapshot,
+  installDownloadedUpdate,
+  subscribeUpdateTask,
+  type ReleaseInfo,
+  type UpdateTaskSnapshot,
+} from '../lib/updater';
 
 type Props = {
   isOpen: boolean;
@@ -10,53 +17,49 @@ type Props = {
 };
 
 export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props) {
-  const [installing, setInstalling] = useState(false);
-  const [progress, setProgress] = useState<UpdateInstallProgress | null>(null);
-  const [error, setError] = useState('');
+  const [task, setTask] = useState<UpdateTaskSnapshot>(() => getUpdateTaskSnapshot());
+  const displayRelease = task.release?.version === release?.version ? task.release : release;
+  const taskMatchesRelease = Boolean(displayRelease && task.release?.version === displayRelease.version);
+  const status = taskMatchesRelease ? task.status : 'idle';
+  const progress = taskMatchesRelease ? task.progress : null;
+  const error = taskMatchesRelease ? task.error : '';
+  const isDownloading = status === 'downloading';
+  const isDownloaded = status === 'downloaded';
+  const isInstalling = status === 'installing' || status === 'relaunching';
+  const canClose = !isInstalling;
 
-  useEffect(() => {
-    if (!isOpen) {
-      setInstalling(false);
-      setProgress(null);
-      setError('');
-    }
-  }, [isOpen, release?.version]);
+  useEffect(() => subscribeUpdateTask(setTask), []);
 
-  if (!isOpen || !release) return null;
+  const progressLabel = useMemo(() => {
+    if (status === 'relaunching') return '正在重启应用…';
+    if (status === 'installing') return '正在安装更新…';
+    if (status === 'downloaded') return '更新已下载';
+    if (progress?.percent != null) return `正在后台下载 ${progress.percent}%`;
+    if (isDownloading) return '正在准备后台下载…';
+    return '';
+  }, [isDownloading, progress?.percent, status]);
 
-  const handleDownload = async () => {
-    if (installing) return;
-    setInstalling(true);
-    setError('');
-    setProgress(null);
-    try {
-      const result = await installReleaseUpdate(release, setProgress);
-      if (result === 'opened-download-page') {
-        onClose();
-      }
-    } catch (err) {
-      console.error('Failed to install update:', err);
-      setError(err instanceof Error ? err.message : '更新安装失败。');
-      setInstalling(false);
-    }
+  if (!isOpen || !displayRelease) return null;
+
+  const handleDownload = () => {
+    if (isDownloading || isInstalling) return;
+    void downloadReleaseUpdate(displayRelease).catch(error => {
+      console.error('Failed to download update:', error);
+    });
   };
 
-  const progressLabel =
-    progress?.phase === 'relaunching'
-      ? '正在重启应用…'
-      : progress?.phase === 'installing'
-        ? '正在安装更新…'
-        : progress?.percent != null
-          ? `正在下载 ${progress.percent}%`
-          : installing
-            ? '正在准备下载…'
-            : '';
+  const handleInstall = () => {
+    if (!isDownloaded || isInstalling) return;
+    void installDownloadedUpdate().catch(error => {
+      console.error('Failed to install update:', error);
+    });
+  };
 
   return (
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/40 backdrop-blur-[4px]"
       style={{ animation: 'update-fade-in 0.25s ease-out' }}
-      onClick={installing ? undefined : onClose}
+      onClick={canClose ? onClose : undefined}
     >
       <style>{`
         @keyframes update-fade-in {
@@ -80,19 +83,20 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
                 软件更新
               </h3>
               <p className="text-15px text-[var(--text-secondary)] font-500 opacity-70">
-                发现新版本可用
+                {isDownloaded ? '更新已准备好' : '发现新版本可用'}
               </p>
             </div>
             <button
-              onClick={installing ? undefined : onClose}
-              className="p-1.5 rounded-full hover:bg-gray-100 text-gray-400 transition-colors"
-              disabled={installing}
+              onClick={canClose ? onClose : undefined}
+              className="p-1.5 rounded-full hover:bg-gray-100 text-gray-400 transition-colors disabled:opacity-45"
+              disabled={!canClose}
+              aria-label="关闭"
             >
               <X size={20} />
             </button>
           </div>
 
-          {installing ? (
+          {isDownloading || isDownloaded || isInstalling ? (
             <div className="mb-4 rounded-2xl border border-[rgba(79,123,116,0.14)] bg-[rgba(79,123,116,0.06)] px-4 py-3">
               <div className="mb-2 flex items-center justify-between gap-3 text-12px font-700 text-[var(--accent-soft-strong)]">
                 <span>{progressLabel}</span>
@@ -101,7 +105,7 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
               <div className="h-1.5 overflow-hidden rounded-full bg-white/80">
                 <div
                   className="h-full rounded-full bg-[var(--accent-soft-strong)] transition-all"
-                  style={{ width: `${progress?.percent ?? 8}%` }}
+                  style={{ width: `${progress?.percent ?? (isDownloaded ? 100 : 8)}%` }}
                 />
               </div>
             </div>
@@ -113,13 +117,31 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
             </div>
           ) : null}
 
+          {!isDownloading && !isDownloaded && !isInstalling && displayRelease.source !== 'tauri' ? (
+            <div className="mb-4 rounded-2xl border border-amber-100 bg-amber-50 px-4 py-3 text-13px text-amber-700">
+              当前只检测到 GitHub Release。点击后会重新检查应用内更新包；如果仍失败，说明该 Release 还缺少 latest.json 或签名更新包。
+            </div>
+          ) : null}
+
+          {isDownloading ? (
+            <div className="mb-4 rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-13px text-blue-700">
+              下载已在后台进行，你可以关闭此窗口继续使用 Aura。
+            </div>
+          ) : null}
+
+          {isDownloaded ? (
+            <div className="mb-4 rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-13px text-emerald-700">
+              更新包已下载完成。你可以现在安装并重启，也可以稍后再回来完成安装。
+            </div>
+          ) : null}
+
           <div className="flex items-center gap-4 py-2.5 px-4 bg-gray-50/80 rounded-2xl mb-4 border border-gray-100/50">
             <span className="font-mono text-14px font-600 text-[var(--text-secondary)] opacity-60">
               {currentVersion}
             </span>
             <span className="text-gray-300">→</span>
             <span className="font-mono text-14px font-700 text-[var(--accent-soft-strong)]">
-              {release.version}
+              {displayRelease.version}
             </span>
           </div>
 
@@ -129,9 +151,9 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
             </h4>
             <div className="max-h-[min(220px,28vh)] overflow-y-auto pr-2 custom-scrollbar">
               <div className="prose prose-sm prose-slate max-w-none">
-                {release.notes ? (
+                {displayRelease.notes ? (
                   <div className="text-14px text-[var(--text-primary)] leading-relaxed space-y-1 opacity-90">
-                    {release.notes.split('\n').map((line, i) => {
+                    {displayRelease.notes.split('\n').map((line, i) => {
                       const trimmed = line.trim();
                       if (!trimmed) return <div key={i} className="h-2" />;
                       if (trimmed.startsWith('-') || trimmed.startsWith('*')) {
@@ -156,18 +178,18 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
         <div className="px-7 py-4 bg-gray-50/30 border-t border-gray-100 flex justify-end items-center gap-4">
           <button
             onClick={onClose}
-            disabled={installing}
-            className="text-14px font-600 text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            disabled={!canClose}
+            className="text-14px font-600 text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors disabled:opacity-45"
           >
-            取消
+            {isDownloaded ? '稍后安装' : '取消'}
           </button>
           <button
-            onClick={handleDownload}
-            disabled={installing}
+            onClick={isDownloaded ? handleInstall : handleDownload}
+            disabled={isDownloading || isInstalling}
             className="flex items-center gap-2 px-6 py-2.5 text-14px font-600 rounded-xl bg-[var(--accent-soft-strong)] text-white shadow-[0_4px_12px_-2px_rgba(79,123,116,0.3)] hover:brightness-110 active:scale-[0.97] transition-all disabled:opacity-70 disabled:active:scale-100"
           >
-            {installing ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
-            {release.source === 'tauri' ? '下载并安装' : '打开下载页'}
+            {isDownloading || isInstalling ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
+            {isDownloaded ? '立即安装并重启' : isDownloading ? '后台下载中' : '立即下载更新'}
           </button>
         </div>
       </div>

@@ -74,6 +74,7 @@ jobs:
 
       - name: Build Tauri App
         run: |
+          pnpm sync:version
           for attempt in 1 2; do
             pnpm tauri build --target ${{ matrix.target }} && exit 0
             status=$?
@@ -169,7 +170,9 @@ jobs:
           "AURA_NODE_BINARY=$($nodeExe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build Tauri Windows
-        run: pnpm tauri build --target ${{ matrix.target }}
+        run: |
+          pnpm sync:version
+          pnpm tauri build --target ${{ matrix.target }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -229,7 +232,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Tauri Linux
-        run: pnpm tauri build
+        run: |
+          pnpm sync:version
+          pnpm tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

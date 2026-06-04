@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { parseCommandSpec } from './utils.mjs'
+import { APP_VERSION } from '../app-version.mjs'
 
 function parseEnv(input) {
   if (!input || !input.trim()) {
@@ -52,7 +53,7 @@ async function inspectServer(server) {
   const client = new Client(
     {
       name: 'aura-desktop',
-      version: '2.1.3', // 客户端标识版本，随应用版本同步更新
+      version: APP_VERSION,
     },
     {
       capabilities: {},

@@ -89,7 +89,7 @@ import type {
 } from './types'
 import { ChatView } from './views/ChatView'
 import { HomeView } from './views/HomeView'
-import { checkForUpdates, type ReleaseInfo } from './lib/updater'
+import { checkForUpdates, subscribeUpdateTask, type ReleaseInfo } from './lib/updater'
 import { UpdateModal } from './components/UpdateModal'
 import { getVersion } from '@tauri-apps/api/app'
 import { sortSessionsByRecentActivity } from './lib/sessionMeta'
@@ -2073,8 +2073,15 @@ export function MainWindowApp() {
     const unlistenPromise = listen('tauri://focus', () => {
       handleCheckUpdate()
     })
+    const unsubscribeUpdateTask = subscribeUpdateTask(snapshot => {
+      if (snapshot.status === 'downloaded' && snapshot.release) {
+        setUpdateRelease(snapshot.release)
+        setUpdateModalOpen(true)
+      }
+    })
 
     return () => {
+      unsubscribeUpdateTask()
       unlistenPromise.then(unlisten => unlisten())
     }
   }, [])

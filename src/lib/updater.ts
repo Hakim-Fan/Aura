@@ -14,14 +14,72 @@ export interface ReleaseInfo {
   publishedAt: string;
   source: 'tauri' | 'github';
   update?: Update;
+  updaterError?: string;
 }
 
 export type UpdateInstallProgress = {
-  phase: 'downloading' | 'installing' | 'relaunching';
+  phase: 'downloading' | 'downloaded' | 'installing' | 'relaunching';
   downloaded: number;
   total?: number;
   percent?: number;
 };
+
+export type UpdateTaskStatus =
+  | 'idle'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'relaunching'
+  | 'error';
+
+export type UpdateTaskSnapshot = {
+  status: UpdateTaskStatus;
+  release: ReleaseInfo | null;
+  progress: UpdateInstallProgress | null;
+  error: string;
+};
+
+type UpdateTaskListener = (snapshot: UpdateTaskSnapshot) => void;
+
+let updateTask: UpdateTaskSnapshot = {
+  status: 'idle',
+  release: null,
+  progress: null,
+  error: '',
+};
+let pendingUpdate: Update | null = null;
+let downloadTask: Promise<void> | null = null;
+const updateTaskListeners = new Set<UpdateTaskListener>();
+
+function updateTaskSnapshot(): UpdateTaskSnapshot {
+  return {
+    ...updateTask,
+    progress: updateTask.progress ? { ...updateTask.progress } : null,
+  };
+}
+
+function setUpdateTask(next: Partial<UpdateTaskSnapshot>) {
+  updateTask = {
+    ...updateTask,
+    ...next,
+  };
+  const snapshot = updateTaskSnapshot();
+  for (const listener of updateTaskListeners) {
+    listener(snapshot);
+  }
+}
+
+export function getUpdateTaskSnapshot(): UpdateTaskSnapshot {
+  return updateTaskSnapshot();
+}
+
+export function subscribeUpdateTask(listener: UpdateTaskListener): () => void {
+  updateTaskListeners.add(listener);
+  listener(updateTaskSnapshot());
+  return () => {
+    updateTaskListeners.delete(listener);
+  };
+}
 
 function extractVersion(value: string): string {
   return String(value || '').match(/v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?/)?.[0] || '';
@@ -74,7 +132,7 @@ function extractAtomLink(entry: string): string {
   );
 }
 
-async function checkForUpdatesFromAtom(currentVersion: string): Promise<ReleaseInfo | null> {
+async function checkForUpdatesFromAtom(currentVersion: string, updaterError = ''): Promise<ReleaseInfo | null> {
   const response = await fetch(GITHUB_RELEASES_ATOM_URL, {
     method: 'GET',
     headers: {
@@ -105,11 +163,13 @@ async function checkForUpdatesFromAtom(currentVersion: string): Promise<ReleaseI
     url: extractAtomLink(entry) || `https://github.com/${GITHUB_REPOSITORY}/releases`,
     publishedAt: extractAtomText(entry, 'updated'),
     source: 'github',
+    updaterError,
   };
 }
 
 export async function checkForUpdates(): Promise<ReleaseInfo | null> {
   const currentVersion = await getVersion();
+  let updaterError = '';
 
   try {
     const update = await checkTauriUpdate({
@@ -126,6 +186,7 @@ export async function checkForUpdates(): Promise<ReleaseInfo | null> {
       };
     }
   } catch (error) {
+    updaterError = error instanceof Error ? error.message : String(error);
     console.warn('Tauri updater check failed, falling back to GitHub release check:', error);
   }
 
@@ -140,7 +201,7 @@ export async function checkForUpdates(): Promise<ReleaseInfo | null> {
     });
     
     if (!response.ok) {
-      return await checkForUpdatesFromAtom(currentVersion);
+      return await checkForUpdatesFromAtom(currentVersion, updaterError);
     }
     
     const data = await response.json();
@@ -157,6 +218,7 @@ export async function checkForUpdates(): Promise<ReleaseInfo | null> {
         url: data.html_url,
         publishedAt: data.published_at,
         source: 'github',
+        updaterError,
       };
     }
     
@@ -164,7 +226,7 @@ export async function checkForUpdates(): Promise<ReleaseInfo | null> {
   } catch (error) {
     console.error('Check for updates failed:', error);
     try {
-      return await checkForUpdatesFromAtom(currentVersion);
+      return await checkForUpdatesFromAtom(currentVersion, updaterError);
     } catch (fallbackError) {
       console.error('Check for updates fallback failed:', fallbackError);
       return null;
@@ -172,56 +234,143 @@ export async function checkForUpdates(): Promise<ReleaseInfo | null> {
   }
 }
 
-export async function installReleaseUpdate(
-  release: ReleaseInfo,
-  onProgress?: (progress: UpdateInstallProgress) => void,
-): Promise<'installed' | 'opened-download-page'> {
-  if (!release.update) {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(release.url);
-    return 'opened-download-page';
+export function downloadReleaseUpdate(release: ReleaseInfo): Promise<void> {
+  if (
+    downloadTask &&
+    updateTask.release?.version === release.version &&
+    updateTask.status === 'downloading'
+  ) {
+    return downloadTask;
   }
 
-  let downloaded = 0;
-  let total: number | undefined;
-  await release.update.downloadAndInstall((event: DownloadEvent) => {
-    if (event.event === 'Started') {
-      downloaded = 0;
-      total = event.data.contentLength;
-      onProgress?.({
-        phase: 'downloading',
-        downloaded,
-        total,
-        percent: total ? 0 : undefined,
-      });
-      return;
+  downloadTask = (async () => {
+    setUpdateTask({
+      status: 'downloading',
+      release,
+      progress: null,
+      error: '',
+    });
+
+    const update = release.update ?? await checkTauriUpdate({
+      timeout: 10000,
+    });
+
+    if (!update) {
+      throw new Error(
+        release.updaterError
+          ? `暂时无法应用内安装更新：${release.updaterError}`
+          : '暂时无法应用内安装更新。请确认当前 GitHub Release 已上传 latest.json 和签名更新包。',
+      );
     }
 
-    if (event.event === 'Progress') {
-      downloaded += event.data.chunkLength;
-      onProgress?.({
-        phase: 'downloading',
+    let downloaded = 0;
+    let total: number | undefined;
+    await update.download((event: DownloadEvent) => {
+      if (event.event === 'Started') {
+        downloaded = 0;
+        total = event.data.contentLength;
+        setUpdateTask({
+          progress: {
+            phase: 'downloading',
+            downloaded,
+            total,
+            percent: total ? 0 : undefined,
+          },
+        });
+        return;
+      }
+
+      if (event.event === 'Progress') {
+        downloaded += event.data.chunkLength;
+        setUpdateTask({
+          progress: {
+            phase: 'downloading',
+            downloaded,
+            total,
+            percent: total ? Math.min(100, Math.round((downloaded / total) * 100)) : undefined,
+          },
+        });
+        return;
+      }
+
+      setUpdateTask({
+        progress: {
+          phase: 'downloaded',
+          downloaded,
+          total,
+          percent: total ? 100 : undefined,
+        },
+      });
+    });
+
+    pendingUpdate = update;
+    setUpdateTask({
+      status: 'downloaded',
+      release: {
+        ...release,
+        source: 'tauri',
+        update,
+      },
+      progress: {
+        phase: 'downloaded',
         downloaded,
         total,
-        percent: total ? Math.min(100, Math.round((downloaded / total) * 100)) : undefined,
-      });
-      return;
-    }
+        percent: total ? 100 : undefined,
+      },
+      error: '',
+    });
+  })().catch(error => {
+    const message = error instanceof Error ? error.message : String(error);
+    setUpdateTask({
+      status: 'error',
+      release,
+      error: message,
+    });
+    throw error;
+  }).finally(() => {
+    downloadTask = null;
+  });
 
-    onProgress?.({
+  return downloadTask;
+}
+
+export async function installDownloadedUpdate(): Promise<void> {
+  if (!pendingUpdate) {
+    throw new Error('更新包尚未下载完成。');
+  }
+
+  const downloaded = updateTask.progress?.downloaded ?? 0;
+  const total = updateTask.progress?.total;
+  setUpdateTask({
+    status: 'installing',
+    progress: {
       phase: 'installing',
       downloaded,
       total,
       percent: total ? 100 : undefined,
-    });
+    },
   });
 
-  onProgress?.({
-    phase: 'relaunching',
-    downloaded,
-    total,
-    percent: total ? 100 : undefined,
-  });
-  await relaunch();
-  return 'installed';
+  try {
+    await pendingUpdate.install();
+    pendingUpdate = null;
+
+    setUpdateTask({
+      status: 'relaunching',
+      progress: {
+        phase: 'relaunching',
+        downloaded,
+        total,
+        percent: total ? 100 : undefined,
+      },
+    });
+    await relaunch();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setUpdateTask({
+      status: 'error',
+      error: message,
+    });
+    throw error;
+  }
 }

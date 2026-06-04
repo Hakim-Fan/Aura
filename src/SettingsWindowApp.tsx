@@ -35,7 +35,7 @@ import {
   saveSettingsAndAwaitPersistence,
 } from './lib/storage'
 import { openPathInDefaultApp, readTextFile } from './lib/workspace'
-import { checkForUpdates, type ReleaseInfo } from './lib/updater'
+import { checkForUpdates, subscribeUpdateTask, type ReleaseInfo } from './lib/updater'
 import auraAppIcon from './assets/aura_app_icon.png'
 import { ConfirmModal } from './components/ConfirmModal'
 import { UpdateModal } from './components/UpdateModal'
@@ -414,6 +414,15 @@ export function SettingsWindowApp({ initialTab }: Props) {
     getVersion()
       .then(version => setAppVersion(version))
       .catch(() => setAppVersion(''))
+  }, [])
+
+  useEffect(() => {
+    return subscribeUpdateTask(snapshot => {
+      if (snapshot.status === 'downloaded' && snapshot.release) {
+        setUpdateRelease(snapshot.release)
+        setUpdateModalOpen(true)
+      }
+    })
   }, [])
 
   useEffect(() => {
