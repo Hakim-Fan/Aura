@@ -57,6 +57,7 @@
   },
   "plugins": {
     "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg3QTg0RDg4NjU2RDY5N0QKUldSOWFXMWxpRTJvaDBQUGF1cTdFQ3Z4SGtkOXZLanNXMkYyNTVOZGRjL0NGR3FuTEpjM1hCakkK",
       "endpoints": [
         "https://github.com/Hakim-Fan/Aura/releases/latest/download/latest.json"
       ],
