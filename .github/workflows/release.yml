@@ -293,5 +293,5 @@ jobs:
               --notes "Aura ${TAG_NAME} released."
           fi
 
-          # 上传所有产物
-          find artifacts -type f -exec gh release upload "${TAG_NAME}" {} +
+          # 上传安装包、updater 包和 latest.json
+          find artifacts/release-assets -type f -exec gh release upload "${TAG_NAME}" {} +
