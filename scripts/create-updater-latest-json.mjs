@@ -68,7 +68,8 @@ for (const sigPath of files.filter(file => file.endsWith('.sig'))) {
 }
 
 if (Object.keys(platforms).length === 0) {
-  throw new Error('No updater artifacts with signatures were found.');
+  const scannedFiles = files.length > 0 ? files.map(file => `- ${file}`).join('\n') : '(none)';
+  throw new Error(`No updater artifacts with signatures were found.\nScanned files:\n${scannedFiles}`);
 }
 
 const manifest = {
