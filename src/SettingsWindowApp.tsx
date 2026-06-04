@@ -35,9 +35,10 @@ import {
   saveSettingsAndAwaitPersistence,
 } from './lib/storage'
 import { openPathInDefaultApp, readTextFile } from './lib/workspace'
-import { checkForUpdates } from './lib/updater'
+import { checkForUpdates, type ReleaseInfo } from './lib/updater'
 import auraAppIcon from './assets/aura_app_icon.png'
 import { ConfirmModal } from './components/ConfirmModal'
+import { UpdateModal } from './components/UpdateModal'
 import {
   broadcastSettingsUpdated,
   closeCurrentWindow,
@@ -242,6 +243,8 @@ export function SettingsWindowApp({ initialTab }: Props) {
   )
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
   const [appVersion, setAppVersion] = useState('')
+  const [updateRelease, setUpdateRelease] = useState<ReleaseInfo | null>(null)
+  const [updateModalOpen, setUpdateModalOpen] = useState(false)
   const [aboutStatus, setAboutStatus] = useState<ProviderStatusState | null>(null)
   const [isCheckingAboutUpdate, setIsCheckingAboutUpdate] = useState(false)
   const [selectedProviderProfileId, setSelectedProviderProfileId] = useState(
@@ -1583,11 +1586,12 @@ export function SettingsWindowApp({ initialTab }: Props) {
     try {
       const release = await checkForUpdates()
       if (release) {
+        setUpdateRelease(release)
+        setUpdateModalOpen(true)
         setAboutStatus({
           tone: 'success',
-          message: `发现新版本 v${release.version}，已打开发布页面。`,
+          message: `发现新版本 v${release.version}。`,
         })
-        await openExternalUrl(release.url)
         return
       }
 
@@ -3352,6 +3356,13 @@ export function SettingsWindowApp({ initialTab }: Props) {
         variant="danger"
         onConfirm={() => void handleFactoryReset()}
         onCancel={() => setIsResetting(false)}
+      />
+
+      <UpdateModal
+        currentVersion={appVersion}
+        isOpen={updateModalOpen}
+        release={updateRelease}
+        onClose={() => setUpdateModalOpen(false)}
       />
     </div>
   )

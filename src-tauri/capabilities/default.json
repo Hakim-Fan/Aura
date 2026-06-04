@@ -23,7 +23,9 @@
     "dialog:default",
     "core:window:default",
     "core:window:allow-start-dragging",
+    "process:allow-restart",
     "shell:allow-open",
+    "updater:default",
     {
       "identifier": "http:default",
       "allow": [

@@ -1,4 +1,6 @@
 import { getVersion } from '@tauri-apps/api/app';
+import { check as checkTauriUpdate, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 import { fetch } from '@tauri-apps/plugin-http';
 
 const GITHUB_REPOSITORY = 'Hakim-Fan/Aura';
@@ -10,7 +12,16 @@ export interface ReleaseInfo {
   notes: string;
   url: string;
   publishedAt: string;
+  source: 'tauri' | 'github';
+  update?: Update;
 }
+
+export type UpdateInstallProgress = {
+  phase: 'downloading' | 'installing' | 'relaunching';
+  downloaded: number;
+  total?: number;
+  percent?: number;
+};
 
 function extractVersion(value: string): string {
   return String(value || '').match(/v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?/)?.[0] || '';
@@ -93,12 +104,32 @@ async function checkForUpdatesFromAtom(currentVersion: string): Promise<ReleaseI
     notes: stripHtml(extractAtomText(entry, 'content')),
     url: extractAtomLink(entry) || `https://github.com/${GITHUB_REPOSITORY}/releases`,
     publishedAt: extractAtomText(entry, 'updated'),
+    source: 'github',
   };
 }
 
 export async function checkForUpdates(): Promise<ReleaseInfo | null> {
+  const currentVersion = await getVersion();
+
   try {
-    const currentVersion = await getVersion();
+    const update = await checkTauriUpdate({
+      timeout: 5000,
+    });
+    if (update) {
+      return {
+        version: update.version,
+        notes: update.body || '',
+        url: `https://github.com/${GITHUB_REPOSITORY}/releases`,
+        publishedAt: update.date || '',
+        source: 'tauri',
+        update,
+      };
+    }
+  } catch (error) {
+    console.warn('Tauri updater check failed, falling back to GitHub release check:', error);
+  }
+
+  try {
     const response = await fetch(GITHUB_RELEASES_API_URL, {
       method: 'GET',
       headers: {
@@ -125,6 +156,7 @@ export async function checkForUpdates(): Promise<ReleaseInfo | null> {
         notes: data.body || '',
         url: data.html_url,
         publishedAt: data.published_at,
+        source: 'github',
       };
     }
     
@@ -132,11 +164,64 @@ export async function checkForUpdates(): Promise<ReleaseInfo | null> {
   } catch (error) {
     console.error('Check for updates failed:', error);
     try {
-      const currentVersion = await getVersion();
       return await checkForUpdatesFromAtom(currentVersion);
     } catch (fallbackError) {
       console.error('Check for updates fallback failed:', fallbackError);
       return null;
     }
   }
+}
+
+export async function installReleaseUpdate(
+  release: ReleaseInfo,
+  onProgress?: (progress: UpdateInstallProgress) => void,
+): Promise<'installed' | 'opened-download-page'> {
+  if (!release.update) {
+    const { open } = await import('@tauri-apps/plugin-shell');
+    await open(release.url);
+    return 'opened-download-page';
+  }
+
+  let downloaded = 0;
+  let total: number | undefined;
+  await release.update.downloadAndInstall((event: DownloadEvent) => {
+    if (event.event === 'Started') {
+      downloaded = 0;
+      total = event.data.contentLength;
+      onProgress?.({
+        phase: 'downloading',
+        downloaded,
+        total,
+        percent: total ? 0 : undefined,
+      });
+      return;
+    }
+
+    if (event.event === 'Progress') {
+      downloaded += event.data.chunkLength;
+      onProgress?.({
+        phase: 'downloading',
+        downloaded,
+        total,
+        percent: total ? Math.min(100, Math.round((downloaded / total) * 100)) : undefined,
+      });
+      return;
+    }
+
+    onProgress?.({
+      phase: 'installing',
+      downloaded,
+      total,
+      percent: total ? 100 : undefined,
+    });
+  });
+
+  onProgress?.({
+    phase: 'relaunching',
+    downloaded,
+    total,
+    percent: total ? 100 : undefined,
+  });
+  await relaunch();
+  return 'installed';
 }

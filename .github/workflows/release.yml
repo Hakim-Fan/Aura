@@ -92,6 +92,8 @@ jobs:
           done
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
@@ -223,6 +225,9 @@ jobs:
 
       - name: Build Tauri Linux
         run: pnpm tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
@@ -256,6 +261,11 @@ jobs:
             echo "::error::No artifacts found — build jobs may have failed"
             exit 1
           fi
+
+      - name: Create updater manifest
+        run: |
+          TAG_NAME="${{ github.event.inputs.version || github.ref_name }}"
+          node scripts/create-updater-latest-json.mjs artifacts "${TAG_NAME}" "${GITHUB_REPOSITORY}" RELEASE_NOTES.md
 
       - name: Publish Release
         env:

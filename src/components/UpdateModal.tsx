@@ -1,6 +1,6 @@
-import { Download, X } from 'lucide-react';
-import { open as openUrl } from '@tauri-apps/plugin-shell';
-import type { ReleaseInfo } from '../lib/updater';
+import { useEffect, useState } from 'react';
+import { Download, Loader2, X } from 'lucide-react';
+import { installReleaseUpdate, type ReleaseInfo, type UpdateInstallProgress } from '../lib/updater';
 
 type Props = {
   isOpen: boolean;
@@ -10,22 +10,53 @@ type Props = {
 };
 
 export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props) {
+  const [installing, setInstalling] = useState(false);
+  const [progress, setProgress] = useState<UpdateInstallProgress | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!isOpen) {
+      setInstalling(false);
+      setProgress(null);
+      setError('');
+    }
+  }, [isOpen, release?.version]);
+
   if (!isOpen || !release) return null;
 
   const handleDownload = async () => {
+    if (installing) return;
+    setInstalling(true);
+    setError('');
+    setProgress(null);
     try {
-      await openUrl(release.url);
-      onClose();
+      const result = await installReleaseUpdate(release, setProgress);
+      if (result === 'opened-download-page') {
+        onClose();
+      }
     } catch (err) {
-      console.error('Failed to open download URL:', err);
+      console.error('Failed to install update:', err);
+      setError(err instanceof Error ? err.message : '更新安装失败。');
+      setInstalling(false);
     }
   };
+
+  const progressLabel =
+    progress?.phase === 'relaunching'
+      ? '正在重启应用…'
+      : progress?.phase === 'installing'
+        ? '正在安装更新…'
+        : progress?.percent != null
+          ? `正在下载 ${progress.percent}%`
+          : installing
+            ? '正在准备下载…'
+            : '';
 
   return (
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/40 backdrop-blur-[4px]"
       style={{ animation: 'update-fade-in 0.25s ease-out' }}
-      onClick={onClose}
+      onClick={installing ? undefined : onClose}
     >
       <style>{`
         @keyframes update-fade-in {
@@ -53,12 +84,34 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
               </p>
             </div>
             <button
-              onClick={onClose}
+              onClick={installing ? undefined : onClose}
               className="p-1.5 rounded-full hover:bg-gray-100 text-gray-400 transition-colors"
+              disabled={installing}
             >
               <X size={20} />
             </button>
           </div>
+
+          {installing ? (
+            <div className="mb-4 rounded-2xl border border-[rgba(79,123,116,0.14)] bg-[rgba(79,123,116,0.06)] px-4 py-3">
+              <div className="mb-2 flex items-center justify-between gap-3 text-12px font-700 text-[var(--accent-soft-strong)]">
+                <span>{progressLabel}</span>
+                {progress?.percent != null ? <span>{progress.percent}%</span> : null}
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-white/80">
+                <div
+                  className="h-full rounded-full bg-[var(--accent-soft-strong)] transition-all"
+                  style={{ width: `${progress?.percent ?? 8}%` }}
+                />
+              </div>
+            </div>
+          ) : null}
+
+          {error ? (
+            <div className="mb-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-13px text-red-600">
+              {error}
+            </div>
+          ) : null}
 
           <div className="flex items-center gap-4 py-2.5 px-4 bg-gray-50/80 rounded-2xl mb-4 border border-gray-100/50">
             <span className="font-mono text-14px font-600 text-[var(--text-secondary)] opacity-60">
@@ -103,16 +156,18 @@ export function UpdateModal({ isOpen, currentVersion, release, onClose }: Props)
         <div className="px-7 py-4 bg-gray-50/30 border-t border-gray-100 flex justify-end items-center gap-4">
           <button
             onClick={onClose}
+            disabled={installing}
             className="text-14px font-600 text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
           >
             取消
           </button>
           <button
             onClick={handleDownload}
-            className="flex items-center gap-2 px-6 py-2.5 text-14px font-600 rounded-xl bg-[var(--accent-soft-strong)] text-white shadow-[0_4px_12px_-2px_rgba(79,123,116,0.3)] hover:brightness-110 active:scale-[0.97] transition-all"
+            disabled={installing}
+            className="flex items-center gap-2 px-6 py-2.5 text-14px font-600 rounded-xl bg-[var(--accent-soft-strong)] text-white shadow-[0_4px_12px_-2px_rgba(79,123,116,0.3)] hover:brightness-110 active:scale-[0.97] transition-all disabled:opacity-70 disabled:active:scale-100"
           >
-            <Download size={16} />
-            立即下载
+            {installing ? <Loader2 size={16} className="spin-icon" /> : <Download size={16} />}
+            {release.source === 'tauri' ? '下载并安装' : '打开下载页'}
           </button>
         </div>
       </div>

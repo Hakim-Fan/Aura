@@ -33,6 +33,7 @@ const SNAPSHOT_TRUNCATION_MARKER: &str = "\n...(truncated to keep memory bounded
 const MAX_INLINE_IMAGE_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RUNTIME_IMAGE_DATA_URL_BYTES: usize = 12 * 1024 * 1024;
 const MAX_TERMINAL_TASK_SNAPSHOTS: usize = 64;
+const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg3QTg0RDg4NjU2RDY5N0QKUldSOWFXMWxpRTJvaDBQUGF1cTdFQ3Z4SGtkOXZLanNXMkYyNTVOZGRjL0NGR3FuTEpjM1hCakkK";
 #[cfg(target_os = "windows")]
 const WINDOWS_MAIN_WINDOW_TARGET_WIDTH: f64 = 1280.0;
 #[cfg(target_os = "windows")]
@@ -6914,7 +6915,9 @@ fn main() {
         .manage(AgentTaskStore::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().pubkey(UPDATER_PUBKEY).build())
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if window.label() == "main" || window.label() == "settings" {
