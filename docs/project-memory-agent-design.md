@@ -135,7 +135,7 @@
   -> 派发 memory agent
   -> spawn_memory_agent 立即返回 memory_task_id
   -> 主 agent 继续处理当前任务
-  -> memory lookup 子 agent 后台检索和总结相关记忆
+  -> project_memory_retriever 后台检索和总结相关记忆
   -> 完成后写入 mailbox / pending_context
   -> 主 agent 下一次模型调用前合并记忆结果
 ```
@@ -152,14 +152,14 @@
 记忆整理采用 Claude 式后台异步模式：
 
 - 用户明确要求更新/保存/记住/忘记项目记忆时，主 agent 只调用 `update_project_memory`。
-- `update_project_memory` 不直接整理和写入完整记忆，而是静默启动 memory writer 子 agent。
-- 空闲阈值触发时，同样只启动 memory writer 子 agent，不在前台任务内同步整理。
-- memory writer 子 agent 生成结构化增量草稿，宿主进程再按固定文件结构受控追加到 `.aura/memory/**`。
-- memory writer 子 agent 完成后本次整理即结束；失败只记录日志，不打断前台任务。
+- `update_project_memory` 不直接整理和写入完整记忆，而是静默启动 `project_memory_organizer`。
+- 空闲阈值触发时，同样只启动 `project_memory_organizer`，不在前台任务内同步整理。
+- `project_memory_organizer` 生成结构化增量草稿，宿主进程再按固定文件结构受控追加到 `.aura/memory/**`。
+- `project_memory_organizer` 完成后本次整理即结束；失败只记录日志，不打断前台任务。
 
 Memory agent 权限需要按 Claude 自动记忆的方式收紧：
 
-- 第一版 memory lookup / memory writer 子 agent 不暴露普通工具，由宿主进程提供受控的 `.aura/memory/**` 快照和当前会话摘要。
+- 第一版 `project_memory_retriever` / `project_memory_organizer` 不暴露普通工具，由宿主进程提供受控的 `.aura/memory/**` 快照和当前会话摘要。
 - 写入由宿主进程执行，只允许写入 `.aura/memory/**` 和必要的 `.gitignore` 记忆忽略规则。
 - 禁止普通 shell 写入、安装、网络、MCP、插件工具、浏览器、电脑控制和再次派发子 agent。
 - 写入必须尊重用户手工编辑，采用增量合并，不整文件覆盖。
@@ -181,7 +181,7 @@ Memory agent 权限需要按 Claude 自动记忆的方式收紧：
 
 需要运行时做去重，不只依赖模型自觉。
 
-建议维护一个 memory lookup registry：
+建议维护一个 memory retrieval registry：
 
 ```text
 key = project_id + turn_id + normalized_user_request

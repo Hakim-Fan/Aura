@@ -672,7 +672,7 @@ const VERIFICATION_TOOL_NAMES = new Set([
 
 export function filterToolsForSubagentRole(tools = [], runtime = {}) {
   const role = String(runtime?.subagentRole || '').trim().toLowerCase()
-  if (role === 'memory_lookup' || role === 'memory_writer') {
+  if (role === 'project_memory_retriever' || role === 'project_memory_organizer') {
     return []
   }
   if (role !== 'explorer' && role !== 'verification') {
@@ -2454,14 +2454,11 @@ export async function runDefaultAgent(request) {
         messages,
         hooks,
         runNestedAgent,
+        scopeId: request.logContext?.sessionId,
       })
     : null
   async function drainProjectMemoryAsyncContext() {
-    if (!context.projectMemoryRuntime?.hasUninjectedLookup?.()) {
-      return ''
-    }
-    await context.projectMemoryRuntime.waitForUninjectedLookups?.()
-    return context.projectMemoryRuntime.drainReadyContext?.() || ''
+    return context.projectMemoryRuntime?.drainReadyContext?.() || ''
   }
   const taskTracker =
     runtime.taskTracker || createTaskTracker(hooks, summarizeMessages(messages))
@@ -2809,17 +2806,14 @@ export async function runDefaultAgent(request) {
         pass,
       })
 
-      if (context.projectMemoryRuntime?.hasUninjectedLookup?.()) {
-        await context.projectMemoryRuntime.waitForUninjectedLookups?.()
-        if (context.projectMemoryRuntime?.hasUninjectedLookup?.()) {
-          taskTracker.setStatus(
-            currentTaskId,
-            'running',
-            '项目长期记忆已返回，准备合并到下一次模型调用',
-          )
-          hooks?.onPhaseChange?.('preparing')
-          continue
-        }
+      if (context.projectMemoryRuntime?.hasReadyContext?.()) {
+        taskTracker.setStatus(
+          currentTaskId,
+          'running',
+          '项目长期记忆已返回，准备合并到下一次模型调用',
+        )
+        hooks?.onPhaseChange?.('preparing')
+        continue
       }
 
       let result = turnResult.result
@@ -3544,7 +3538,9 @@ export async function runAgent(request) {
     )
     if (
       effectiveRequest.runtime?.skipProjectMemoryIdleUpdate !== true &&
-      !String(effectiveRequest.runtime?.subagentRole || '').startsWith('memory_')
+      !['project_memory_retriever', 'project_memory_organizer'].includes(
+        String(effectiveRequest.runtime?.subagentRole || ''),
+      )
     ) {
       scheduleProjectMemoryIdleUpdate({
         settings: effectiveSettings,

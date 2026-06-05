@@ -13,8 +13,12 @@ const METADATA_FILE = 'metadata.json'
 const SESSIONS_DIR = 'sessions'
 const MAX_MEMORY_FILE_CHARS = 24_000
 const MAX_LOOKUP_CONTEXT_CHARS = 10_000
+const LOOKUP_TASK_TTL_MS = 30 * 60 * 1000
 const idleTimers = new Map()
+const lookupTasks = new Map()
 const updateTasks = new Map()
+const updateWriteQueues = new Map()
+let lookupSequence = 0
 
 function safeString(value) {
   return typeof value === 'string' ? value.trim() : ''
@@ -59,6 +63,10 @@ function compactText(value = '', maxChars = 1200) {
     : normalized
 }
 
+function stableTaskKeyPart(value = '', maxChars = 400) {
+  return compactText(value, maxChars).toLowerCase()
+}
+
 function memoryRoot(cwd) {
   return path.join(cwd, MEMORY_DIR)
 }
@@ -85,6 +93,26 @@ function emitMemoryLog(hooks, event, details = {}, level = 'info') {
     })
   } catch {
     // Memory logging must not affect the foreground task.
+  }
+}
+
+function projectMemoryScopeKey(settings = {}, scopeId = '') {
+  return [
+    normalizeComparableRoot(settings.cwd),
+    safeString(scopeId) || 'workspace',
+  ].join('::')
+}
+
+function cleanupLookupTasks(now = Date.now()) {
+  for (const [key, entry] of lookupTasks.entries()) {
+    const terminalAt = entry.injectedAt || entry.finishedAt
+    if (
+      terminalAt &&
+      now - terminalAt > LOOKUP_TASK_TTL_MS &&
+      (entry.injected === true || entry.status === 'failed')
+    ) {
+      lookupTasks.delete(key)
+    }
   }
 }
 
@@ -362,7 +390,7 @@ async function readProjectMemorySnapshot(settings = {}, hooks) {
   }
 }
 
-function buildLookupAgentPrompt({ settings, query, snapshot }) {
+function buildRetrieverAgentPrompt({ settings, query, snapshot }) {
   const language = localeLabel(settings)
   const deterministicContext = buildLookupContext({
     cwd: snapshot.cwd,
@@ -383,7 +411,7 @@ function buildLookupAgentPrompt({ settings, query, snapshot }) {
       : '',
   ].filter(Boolean).join('\n\n')
   return [
-    `You are Aura project-memory lookup agent. Answer in ${language}.`,
+    `You are Aura project-memory retriever, an internal task-time memory query subagent. Answer in ${language}.`,
     'You are an internal asynchronous subagent. Do not answer the user directly.',
     'Use only the provided local project memory snapshot. Do not invent facts.',
     'Return only one <project_memory>...</project_memory> block.',
@@ -426,7 +454,7 @@ function createSilentMemoryHooks(hooks) {
 
 async function runLookup(entry, settings, hooks, runNestedAgent) {
   if (typeof runNestedAgent !== 'function') {
-    throw new Error('Project memory lookup requires a nested memory agent runner.')
+    throw new Error('Project memory retrieval requires a nested project_memory_retriever runner.')
   }
   const snapshot = await readProjectMemorySnapshot(settings, hooks)
   const result = await runNestedAgent({
@@ -442,7 +470,7 @@ async function runLookup(entry, settings, hooks, runNestedAgent) {
     messages: [
       {
         role: 'user',
-        content: buildLookupAgentPrompt({
+        content: buildRetrieverAgentPrompt({
           settings,
           query: entry.query,
           snapshot,
@@ -452,8 +480,8 @@ async function runLookup(entry, settings, hooks, runNestedAgent) {
     hooks: createSilentMemoryHooks(hooks),
     runtime: {
       subagentDepth: 1,
-      subagentRole: 'memory_lookup',
-      subagentTaskName: 'project_memory_lookup',
+      subagentRole: 'project_memory_retriever',
+      subagentTaskName: 'project_memory_retriever',
       skipProjectMemoryIdleUpdate: true,
     },
   })
@@ -471,9 +499,9 @@ export function createProjectMemoryRuntime({
   messages = [],
   hooks = {},
   runNestedAgent,
+  scopeId = '',
 } = {}) {
-  const registry = new Map()
-  let sequence = 0
+  const scopeKey = projectMemoryScopeKey(settings, scopeId)
 
   function latestUserRequest() {
     const latest = [...messages].reverse().find(message => message?.role === 'user')
@@ -482,25 +510,37 @@ export function createProjectMemoryRuntime({
 
   function keyFor(query) {
     return [
-      normalizeComparableRoot(settings.cwd),
-      compactText(query, 400).toLowerCase(),
+      scopeKey,
+      stableTaskKeyPart(query, 400),
     ].join('::')
+  }
+
+  function scopedEntries() {
+    cleanupLookupTasks()
+    return [...lookupTasks.values()].filter(entry => entry.scopeKey === scopeKey)
   }
 
   function startLookup(args = {}) {
     const query = safeString(args.query || args.request || args.topic) || latestUserRequest()
     const key = keyFor(query)
-    const existing = registry.get(key)
-    if (existing) {
-      return existing
+    cleanupLookupTasks()
+    const existing = lookupTasks.get(key)
+    if (existing && existing.status !== 'failed') {
+      if (existing.status === 'done' && existing.injected === true) {
+        lookupTasks.delete(key)
+      } else {
+        return existing
+      }
     }
     const entry = {
       key,
+      scopeKey,
       query,
       status: 'pending',
-      memoryTaskId: `memory-${Date.now().toString(36)}-${sequence += 1}`,
+      memoryTaskId: `memory-retrieval-${Date.now().toString(36)}-${lookupSequence += 1}`,
       result: '',
       injected: false,
+      injectedAt: null,
       startedAt: Date.now(),
       finishedAt: null,
       promise: null,
@@ -527,7 +567,7 @@ export function createProjectMemoryRuntime({
         }, 'warn')
         return ''
       })
-    registry.set(key, entry)
+    lookupTasks.set(key, entry)
     emitMemoryLog(hooks, 'project_memory.lookup_started', {
       memoryTaskId: entry.memoryTaskId,
       query: compactText(query, 300),
@@ -536,11 +576,12 @@ export function createProjectMemoryRuntime({
   }
 
   function drainReadyContext() {
-    const ready = [...registry.values()].filter(entry =>
+    const ready = scopedEntries().filter(entry =>
       entry.status === 'done' && entry.result && entry.injected !== true,
     )
     for (const entry of ready) {
       entry.injected = true
+      entry.injectedAt = Date.now()
     }
     if (ready.length === 0) {
       return ''
@@ -548,15 +589,20 @@ export function createProjectMemoryRuntime({
     return ready.map(entry => entry.result).join('\n\n')
   }
 
-  function hasUninjectedLookup() {
-    return [...registry.values()].some(entry =>
-      entry.injected !== true &&
-      (entry.status === 'pending' || (entry.status === 'done' && entry.result)),
+  function hasReadyContext() {
+    return scopedEntries().some(entry =>
+      entry.injected !== true && entry.status === 'done' && entry.result,
+    )
+  }
+
+  function hasPendingLookup() {
+    return scopedEntries().some(entry =>
+      entry.injected !== true && entry.status === 'pending',
     )
   }
 
   async function waitForUninjectedLookups() {
-    const pending = [...registry.values()].filter(entry =>
+    const pending = scopedEntries().filter(entry =>
       entry.injected !== true && entry.status === 'pending' && entry.promise,
     )
     if (pending.length === 0) {
@@ -568,7 +614,8 @@ export function createProjectMemoryRuntime({
   return {
     startLookup,
     drainReadyContext,
-    hasUninjectedLookup,
+    hasReadyContext,
+    hasPendingLookup,
     waitForUninjectedLookups,
   }
 }
@@ -586,7 +633,7 @@ export async function runSpawnMemoryAgentTool(context, args = {}, runtime = {}) 
   return stringifyOutput({
     status: entry.status,
     memory_task_id: entry.memoryTaskId,
-    message: 'Project memory lookup subagent is running in the background. Results will be injected into a later model call when ready.',
+    message: 'project_memory_retriever is running in the background. Results will be injected into a later model call when ready.',
   })
 }
 
@@ -624,10 +671,10 @@ function summarizeToolEvents(toolEvents = []) {
     .join('\n')
 }
 
-function buildMemoryWriterPrompt({ settings, messages, result, notes, reason, snapshot }) {
+function buildMemoryOrganizerPrompt({ settings, messages, result, notes, reason, snapshot }) {
   const language = localeLabel(settings)
   return [
-    'You are Aura project-memory writer, an internal asynchronous subagent.',
+    'You are Aura project-memory organizer, an internal background memory organization subagent.',
     `Write durable local project memory draft in ${language}.`,
     'Use only evidence from the supplied conversation summary, tool evidence, final result, and explicit user notes.',
     'Do not invent facts. Do not store secrets, tokens, credentials, generic plans, raw chain-of-thought, or temporary speculation.',
@@ -694,7 +741,7 @@ async function generateMemoryDraftWithAgent({
   runNestedAgent,
 }) {
   if (typeof runNestedAgent !== 'function') {
-    throw new Error('Project memory update requires a nested memory writer agent runner.')
+    throw new Error('Project memory update requires a nested memory organizer agent runner.')
   }
   const snapshot = await readProjectMemorySnapshot(settings, hooks)
   const effectiveSettings = resolveMemoryModelSettings(settings)
@@ -711,7 +758,7 @@ async function generateMemoryDraftWithAgent({
     messages: [
       {
         role: 'user',
-        content: buildMemoryWriterPrompt({
+        content: buildMemoryOrganizerPrompt({
           settings,
           messages,
           result,
@@ -724,8 +771,8 @@ async function generateMemoryDraftWithAgent({
     hooks: createSilentMemoryHooks(hooks),
     runtime: {
       subagentDepth: 1,
-      subagentRole: 'memory_writer',
-      subagentTaskName: 'project_memory_update',
+      subagentRole: 'project_memory_organizer',
+      subagentTaskName: 'project_memory_organizer',
       skipProjectMemoryIdleUpdate: true,
     },
   })
@@ -764,7 +811,23 @@ async function writeSessionSummary(cwd, title, summary) {
   return true
 }
 
-export async function updateProjectMemoryNow({
+function enqueueProjectMemoryUpdate(cwd, task) {
+  const previous = updateWriteQueues.get(cwd) || Promise.resolve()
+  const current = previous.catch(() => {}).then(task)
+  updateWriteQueues.set(cwd, current)
+  current.then(() => {
+    if (updateWriteQueues.get(cwd) === current) {
+      updateWriteQueues.delete(cwd)
+    }
+  }, () => {
+    if (updateWriteQueues.get(cwd) === current) {
+      updateWriteQueues.delete(cwd)
+    }
+  })
+  return current
+}
+
+async function updateProjectMemoryNowUnlocked({
   settings = {},
   messages = [],
   result = {},
@@ -801,9 +864,9 @@ export async function updateProjectMemoryNow({
     emitMemoryLog(hooks, 'project_memory.update_skipped', {
       cwd,
       reason,
-      skipReason: 'memory_writer_returned_no_draft',
+      skipReason: 'memory_organizer_returned_no_draft',
     }, 'warn')
-    return { status: 'skipped', reason: 'memory_writer_returned_no_draft' }
+    return { status: 'skipped', reason: 'memory_organizer_returned_no_draft' }
   }
   const sectionTitle = `${isoDate()} ${reason === 'idle' ? '空闲更新' : '记忆更新'}`
   const changedFiles = []
@@ -845,6 +908,17 @@ export async function updateProjectMemoryNow({
   }
 }
 
+export async function updateProjectMemoryNow(options = {}) {
+  if (!isProjectMemoryEnabled(options.settings || {})) {
+    return { status: 'skipped', reason: 'disabled' }
+  }
+  const cwd = normalizeWorkspaceRoot(options.settings?.cwd)
+  if (!cwd) {
+    return { status: 'skipped', reason: 'missing_cwd' }
+  }
+  return enqueueProjectMemoryUpdate(cwd, () => updateProjectMemoryNowUnlocked(options))
+}
+
 export function startProjectMemoryUpdateAgent({
   settings = {},
   messages = [],
@@ -861,10 +935,17 @@ export function startProjectMemoryUpdateAgent({
   const key = [
     cwd,
     reason,
-    compactText(notes || result?.message || summarizeMessagesForMemory(messages, 2), 240),
-    Date.now().toString(36),
+    stableTaskKeyPart(notes || result?.message || summarizeMessagesForMemory(messages, 2), 240),
   ].join('::')
-  const memoryTaskId = `memory-update-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const existing = updateTasks.get(key)
+  if (existing) {
+    return {
+      status: 'scheduled',
+      memoryTaskId: existing.memoryTaskId,
+      deduped: true,
+    }
+  }
+  const memoryTaskId = `memory-organizer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const promise = updateProjectMemoryNow({
     settings,
     messages,
@@ -896,6 +977,28 @@ export function startProjectMemoryUpdateAgent({
   }
 }
 
+async function shouldRunIdleUpdate(settings = {}, hooks, thresholdHours = 4) {
+  const cwd = normalizeWorkspaceRoot(settings.cwd)
+  try {
+    await ensureProjectMemoryLayout(settings, hooks)
+    const metadata = await readJson(path.join(memoryRoot(cwd), METADATA_FILE), {})
+    const latestUpdate = [metadata.last_updated, metadata.last_idle_update_at]
+      .map(value => Date.parse(value))
+      .filter(value => Number.isFinite(value))
+      .sort((a, b) => b - a)[0]
+    if (!latestUpdate) {
+      return true
+    }
+    return Date.now() - latestUpdate >= thresholdHours * 60 * 60 * 1000
+  } catch (error) {
+    emitMemoryLog(hooks, 'project_memory.idle_update_check_failed', {
+      cwd,
+      error: error instanceof Error ? error.message : String(error),
+    }, 'warn')
+    return false
+  }
+}
+
 export function scheduleProjectMemoryIdleUpdate({
   settings = {},
   messages = [],
@@ -918,8 +1021,15 @@ export function scheduleProjectMemoryIdleUpdate({
   if (existing) {
     clearTimeout(existing)
   }
-  const timer = setTimeout(() => {
+  const timer = setTimeout(async () => {
     idleTimers.delete(cwd)
+    if (!(await shouldRunIdleUpdate(settings, hooks, thresholdHours))) {
+      emitMemoryLog(hooks, 'project_memory.idle_update_skipped_recent', {
+        cwd,
+        thresholdHours,
+      })
+      return
+    }
     startProjectMemoryUpdateAgent({
       settings,
       messages,

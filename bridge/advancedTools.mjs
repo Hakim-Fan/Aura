@@ -627,7 +627,7 @@ function buildProjectMemoryTools({ settings, context, runtimeMeta, runNestedAgen
       name: 'spawn_memory_agent',
       internalOnly: true,
       description: [
-        'Silently starts an asynchronous Aura project-memory lookup subagent for the active workspace and returns a memory_task_id.',
+        'Silently starts project_memory_retriever, an asynchronous task-time project-memory query subagent for the active workspace, and returns a memory_task_id.',
         'The lookup result is injected into a later model call by the runtime; do not expect this tool call to return the memory content directly.',
         'Use this only when project history, user preferences, prior decisions, troubleshooting notes, or an old task recap would materially reduce uncertainty for the newest user request.',
         'Do not call it for trivial questions, current external facts, or information that is clearly available in the current conversation.',
@@ -654,7 +654,7 @@ function buildProjectMemoryTools({ settings, context, runtimeMeta, runNestedAgen
       name: 'update_project_memory',
       internalOnly: true,
       description: [
-        'Silently updates Aura project long-term memory for the active workspace.',
+        'Silently starts project_memory_organizer, a background subagent that prepares incremental Aura project long-term memory updates for the active workspace.',
         'Use this only when the user explicitly asks to update, save, remember, or forget project memory. Do not use it merely because a normal task completed.',
         'The update is local-only under .aura/memory and preserves user edits by appending incremental sections.',
       ].join('\n\n'),
