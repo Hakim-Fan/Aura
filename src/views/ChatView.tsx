@@ -51,7 +51,11 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
-import { readImagePreview } from '../lib/workspace'
+import { readImagePreview, readTextFile } from '../lib/workspace'
+import {
+  loadProjectMemoryStatus,
+  type ProjectMemoryStatusRecord,
+} from '../lib/persistence'
 import { WorkspaceExplorer } from '../components/WorkspaceExplorer'
 import { TaskTreeView } from '../components/TaskTreeView'
 import {
@@ -150,8 +154,10 @@ type Props = {
     updates: Array<{ id: string; mode: CapabilityOverrideMode }>,
   ) => void
   onToggleComputerUse: (enabled: boolean) => void
+  onToggleProjectMemory: (enabled: boolean) => void
   onSubmit: (draftOverride?: string) => void
   onOpenProviders: () => void
+  onOpenProjectMemoryFolder: () => void
   onHandleApproval: (decision: ApprovalDecision) => void
   onOpenWorkspaceExplorer: () => void
   onChooseWorkspace: () => void
@@ -227,6 +233,58 @@ function resolveConfiguredContextWindowTokens(settings: AgentSettings) {
   }
 
   return DEFAULT_CONTEXT_WINDOW_TOKENS
+}
+
+function resolveCurrentModelMetadata(settings: AgentSettings) {
+  const profiles = Array.isArray(settings.providerProfiles) ? settings.providerProfiles : []
+  const activeProfile =
+    profiles.find(profile => profile.id === settings.activeProviderProfileId) ||
+    profiles.find(profile => profile.provider === settings.provider)
+  return activeProfile?.models?.find(entry => entry.id === settings.model)
+}
+
+function resolveReasoningOutputBudgetTokens(settings: AgentSettings) {
+  switch (settings.reasoningEffort) {
+    case 'off':
+      return 16_000
+    case 'low':
+      return 32_000
+    case 'high':
+    case 'max':
+    case 'medium':
+    default:
+      return 64_000
+  }
+}
+
+function resolveCurrentMaxOutputTokens(settings: AgentSettings, contextWindowTokens: number) {
+  const configured = Number(resolveCurrentModelMetadata(settings)?.maxOutputTokens)
+  const reasoningBudget = resolveReasoningOutputBudgetTokens(settings)
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.round(Math.min(configured, reasoningBudget))
+  }
+  return Math.round(
+    Math.max(
+      2_000,
+      Math.min(reasoningBudget, Math.max(2_000, contextWindowTokens * 0.5)),
+    ),
+  )
+}
+
+function resolveCurrentCompressionThresholdTokens(
+  settings: AgentSettings,
+  contextWindowTokens: number,
+) {
+  const configuredThreshold = Number(settings.contextCompressionThresholdTokens)
+  const autoCompactWindowTokens =
+    Number.isFinite(configuredThreshold) && configuredThreshold > 0
+      ? Math.min(contextWindowTokens, Math.round(configuredThreshold))
+      : contextWindowTokens
+  const reservedOutputTokens = Math.min(
+    resolveCurrentMaxOutputTokens(settings, contextWindowTokens),
+    20_000,
+  )
+  return Math.max(1_000, autoCompactWindowTokens - reservedOutputTokens - 13_000)
 }
 
 function estimateTextTokens(value = '', model = '') {
@@ -364,6 +422,7 @@ function ContextTokenMeter({
   currentTokens,
   cumulativeTokens,
   contextWindowTokens,
+  compressionThresholdTokens,
   contextCompression,
   compressionRunning,
   compressionDisabled,
@@ -372,6 +431,7 @@ function ContextTokenMeter({
   currentTokens: number
   cumulativeTokens: number
   contextWindowTokens: number
+  compressionThresholdTokens: number
   contextCompression?: SessionContextCompression
   compressionRunning?: boolean
   compressionDisabled?: boolean
@@ -380,11 +440,7 @@ function ContextTokenMeter({
   const [open, setOpen] = useState(false)
   const closeTimerRef = useRef<number | null>(null)
   const safeContextWindow = Math.max(1, contextWindowTokens || DEFAULT_CONTEXT_WINDOW_TOKENS)
-  const effectiveWindow = contextCompression?.contextWindowTokens || safeContextWindow
-  const effectiveThreshold =
-    contextCompression?.effectiveThresholdTokens ||
-    contextCompression?.compressionThresholdTokens ||
-    0
+  const effectiveThreshold = Math.max(0, Math.round(Number(compressionThresholdTokens) || 0))
   const windowSourceLabel =
     contextCompression?.windowSource === 'model_metadata'
       ? '模型配置'
@@ -472,12 +528,6 @@ function ContextTokenMeter({
             <div className="mt-1 text-12px text-[var(--text-secondary)]">
               {formatTokenCount(currentTokens)} / {formatTokenCount(safeContextWindow)}
             </div>
-            {contextCompression?.contextWindowTokens || contextCompression?.windowSource ? (
-              <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-65">
-                实际窗口 {formatTokenCount(effectiveWindow)}
-                {windowSourceLabel ? ` · ${windowSourceLabel}` : ''}
-              </div>
-            ) : null}
             {effectiveThreshold > 0 ? (
               <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-65">
                 有效压缩阈值 {formatTokenCount(effectiveThreshold)}
@@ -490,7 +540,6 @@ function ContextTokenMeter({
               <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-65">
                 上次压缩 {formatTokenCount(contextCompression.originalTokenEstimate)}{' -> '}
                 {formatTokenCount(contextCompression.compressedTokenEstimate)}
-                {contextCompression.kind ? ` · ${contextCompression.kind}` : ''}
               </div>
             ) : (
               <div className="mt-1 text-10px text-[var(--text-secondary)] opacity-50">上次压缩 暂无</div>
@@ -529,6 +578,41 @@ function summarizePath(path: string) {
     return path
   }
   return `.../${segments.slice(-2).join('/')}`
+}
+
+function normalizeMemoryWorkspaceRoot(path: string) {
+  return path.trim().replace(/\\/g, '/').replace(/\/+$/g, '')
+}
+
+function formatMemoryDate(value?: string | number | null) {
+  if (!value) {
+    return '暂无'
+  }
+  const timestamp = typeof value === 'number' ? value : Date.parse(value)
+  if (!Number.isFinite(timestamp)) {
+    return '暂无'
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp))
+}
+
+function projectMemoryJobLabel(status?: string) {
+  switch (status) {
+    case 'running':
+      return '整理中'
+    case 'done':
+      return '已完成'
+    case 'failed':
+      return '整理失败'
+    case 'pending':
+      return '等待整理'
+    default:
+      return status ? status : '尚未整理'
+  }
 }
 
 function mimeTypeFromAttachmentPath(filePath?: string) {
@@ -6714,8 +6798,10 @@ export function ChatView({
   onSetCapabilityOverride,
   onSetCapabilityOverrides,
   onToggleComputerUse,
+  onToggleProjectMemory,
   onSubmit,
   onOpenProviders,
+  onOpenProjectMemoryFolder,
   onHandleApproval,
   onOpenWorkspaceExplorer,
   onChooseWorkspace,
@@ -6759,12 +6845,23 @@ export function ChatView({
     name: string
     preview: string
   } | null>(null)
+  const [projectMemoryOpen, setProjectMemoryOpen] = useState(false)
+  const [projectMemoryStatus, setProjectMemoryStatus] =
+    useState<ProjectMemoryStatusRecord | null>(null)
+  const [projectMemoryMetadata, setProjectMemoryMetadata] = useState<{
+    last_updated?: string | null
+    last_update_reason?: string | null
+    last_idle_update_at?: string | null
+    last_project_memory_job_id?: string | null
+  } | null>(null)
+  const [projectMemoryStatusError, setProjectMemoryStatusError] = useState('')
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true)
   const [hasLocalDraftText, setHasLocalDraftText] = useState(() => draft.trim().length > 0)
 
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const reasoningMenuRef = useRef<HTMLDivElement>(null)
   const capabilityMenuRef = useRef<HTMLDivElement>(null)
+  const projectMemoryMenuRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
   const draftSyncTimerRef = useRef<number | null>(null)
@@ -6882,7 +6979,7 @@ export function ChatView({
   }, [messages.at(-1)?.id])
 
   useEffect(() => {
-    if (!modelMenuOpen && !reasoningMenuOpen && !capabilityPanelOpen) return
+    if (!modelMenuOpen && !reasoningMenuOpen && !capabilityPanelOpen && !projectMemoryOpen) return
     function handleClickOutside(event: MouseEvent) {
       if (modelMenuRef.current && !modelMenuRef.current.contains(event.target as Node)) {
         setModelMenuOpen(false)
@@ -6899,10 +6996,58 @@ export function ChatView({
       ) {
         setCapabilityPanelOpen(false)
       }
+      if (
+        projectMemoryMenuRef.current &&
+        !projectMemoryMenuRef.current.contains(event.target as Node)
+      ) {
+        setProjectMemoryOpen(false)
+      }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [capabilityPanelOpen, modelMenuOpen, reasoningMenuOpen])
+  }, [capabilityPanelOpen, modelMenuOpen, projectMemoryOpen, reasoningMenuOpen])
+
+  useEffect(() => {
+    const workspaceRoot = normalizeMemoryWorkspaceRoot(workspaceRootPath || settings.cwd)
+    if (!projectMemoryOpen || !workspaceRoot) {
+      return
+    }
+    let cancelled = false
+    setProjectMemoryStatusError('')
+
+    void Promise.allSettled([
+      loadProjectMemoryStatus(workspaceRoot),
+      readTextFile(`${workspaceRoot}/.aura/memory/metadata.json`),
+    ]).then(results => {
+      if (cancelled) {
+        return
+      }
+      const [statusResult, metadataResult] = results
+      if (statusResult.status === 'fulfilled') {
+        setProjectMemoryStatus(statusResult.value)
+      } else {
+        setProjectMemoryStatus(null)
+        setProjectMemoryStatusError(
+          statusResult.reason instanceof Error
+            ? statusResult.reason.message
+            : '读取记忆状态失败。',
+        )
+      }
+      if (metadataResult.status === 'fulfilled') {
+        try {
+          setProjectMemoryMetadata(JSON.parse(metadataResult.value))
+        } catch {
+          setProjectMemoryMetadata(null)
+        }
+      } else {
+        setProjectMemoryMetadata(null)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [projectMemoryOpen, settings.cwd, workspaceRootPath])
 
   const modelLabel =
     settings.model.split('/').filter(Boolean).at(-1) || settings.model || '选择模型'
@@ -6910,6 +7055,33 @@ export function ChatView({
     reasoningEffortOptions.find(option => option.value === settings.reasoningEffort) ||
     reasoningEffortOptions[2]
   const deepResearchEnabled = researchMode === 'deep'
+  const memoryWorkspaceRoot = normalizeMemoryWorkspaceRoot(workspaceRootPath || settings.cwd)
+  const memoryPath = memoryWorkspaceRoot
+    ? `${memoryWorkspaceRoot}/.aura/memory/`
+    : '当前工作区/.aura/memory/'
+  const disabledMemoryRoots = Array.isArray(settings.projectMemory?.disabledWorkspaceRoots)
+    ? settings.projectMemory.disabledWorkspaceRoots.map(normalizeMemoryWorkspaceRoot)
+    : []
+  const globalProjectMemoryEnabled = settings.projectMemory?.enabled !== false
+  const currentProjectMemoryDisabled = memoryWorkspaceRoot
+    ? disabledMemoryRoots.includes(memoryWorkspaceRoot)
+    : false
+  const projectMemoryEnabled =
+    globalProjectMemoryEnabled && Boolean(memoryWorkspaceRoot) && !currentProjectMemoryDisabled
+  const latestProjectMemoryJob = projectMemoryStatus?.latestJob || null
+  const projectMemoryRunning =
+    (projectMemoryStatus?.runningJobCount || 0) > 0 || latestProjectMemoryJob?.status === 'running'
+  const projectMemoryStatusLabel = !globalProjectMemoryEnabled
+    ? '全局关闭'
+    : !memoryWorkspaceRoot
+      ? '未设置工作区'
+      : projectMemoryRunning
+        ? '整理中'
+        : latestProjectMemoryJob
+          ? projectMemoryJobLabel(latestProjectMemoryJob.status)
+          : projectMemoryMetadata?.last_updated
+            ? '已整理'
+            : '尚未整理'
   const isMetaEnter = settings.sendShortcut === 'meta-enter'
   const composerMetaHint = settings.cwd
     ? isMetaEnter
@@ -6998,11 +7170,15 @@ export function ChatView({
     ),
   )
   const promptContextWindowTokens =
-    liveContextCompression?.contextWindowTokens ||
-    latestMessageUsage?.contextWindow ||
     configuredContextWindowTokens ||
+    latestMessageUsage?.contextWindow ||
     latestRouteDecision?.contextEstimate?.contextWindowTokens ||
+    liveContextCompression?.contextWindowTokens ||
     DEFAULT_CONTEXT_WINDOW_TOKENS
+  const promptCompressionThresholdTokens = useMemo(
+    () => resolveCurrentCompressionThresholdTokens(settings, promptContextWindowTokens),
+    [promptContextWindowTokens, settings],
+  )
   const localCurrentPromptContextTokens = sessionContextTokens + promptEnvelopeTokens
   const hasLocalPromptEnvelope = promptEnvelopeTokens > 0
   const currentPromptContextTokens =
@@ -7080,29 +7256,123 @@ export function ChatView({
         data-tauri-drag-region
       >
         <div className="absolute inset-0" data-tauri-drag-region />
-        <div className="flex items-center gap-2 text-12px text-[var(--text-secondary)] opacity-60">
+        <div className="flex max-w-[calc(100%-7rem)] items-center gap-2 text-12px text-[var(--text-secondary)]">
           <span>{messages.length} 条消息</span>
           <span>·</span>
           <button
-            className="relative z-10 flex items-center gap-1 hover:text-[var(--text-primary)] cursor-pointer transition-colors bg-transparent border-none p-0 text-12px text-[var(--text-secondary)] opacity-100"
+            className="relative z-10 flex max-w-52 items-center gap-1 truncate bg-transparent p-0 text-12px text-[var(--text-secondary)] opacity-60 transition-colors hover:text-[var(--text-primary)] hover:opacity-100"
             title="复制 session_id"
             onClick={() => onCopyText(sessionId)}
             type="button"
           >
-            <span>{sessionId}</span>
+            <span className="truncate">{sessionId}</span>
           </button>
           {/* <span>·</span>
           <button
-            className="relative z-10 flex items-center gap-1 hover:text-[var(--text-primary)] cursor-pointer transition-colors bg-transparent border-none p-0 text-12px text-[var(--text-secondary)] opacity-100"
+            className="relative z-10 flex max-w-44 items-center gap-1 truncate bg-transparent p-0 text-12px text-[var(--text-secondary)] opacity-60 transition-colors hover:text-[var(--text-primary)] hover:opacity-100"
             title={settings.cwd || '未设置工作区'}
             onClick={() => {
               setInspectorOpen(true)
               onOpenWorkspaceExplorer()
             }}
+            type="button"
           >
             <FolderOpen size={12} />
-            {summarizePath(settings.cwd)}
+            <span className="truncate">{summarizePath(settings.cwd)}</span>
           </button> */}
+          <span>·</span>
+          <div className="relative z-20" ref={projectMemoryMenuRef}>
+            <button
+              className={`flex h-7 items-center gap-1.5 rounded-md border px-2 text-12px font-700 transition-colors ${
+                projectMemoryEnabled
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                  : 'border-black/10 bg-white text-[var(--text-secondary)] hover:bg-black/[0.03]'
+              }`}
+              type="button"
+              onClick={() => setProjectMemoryOpen(current => !current)}
+              title={projectMemoryEnabled ? '项目记忆已开启' : '项目记忆已关闭'}
+            >
+              <Brain size={13} />
+              <span>{projectMemoryEnabled ? '开启记忆' : '关闭记忆'}</span>
+            </button>
+            {projectMemoryOpen ? (
+              <div className="absolute left-1/2 top-[calc(100%+9px)] z-40 w-[min(23rem,calc(100vw-2rem))] -translate-x-1/2 rounded-xl border border-black/10 bg-white p-3 text-left text-12px text-[var(--text-primary)] shadow-xl shadow-black/10">
+                <div className="mb-3 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-13px font-800">项目长期记忆</div>
+                    <div className="mt-0.5 text-11px text-[var(--text-secondary)]">
+                      {projectMemoryStatusLabel}
+                    </div>
+                  </div>
+                  <label className="flex shrink-0 cursor-pointer items-center gap-2">
+                    <span className="text-11px font-700 text-[var(--text-secondary)]">
+                      {projectMemoryEnabled ? '开启' : '关闭'}
+                    </span>
+                    <input
+                      checked={projectMemoryEnabled}
+                      className="peer sr-only"
+                      disabled={!memoryWorkspaceRoot || !globalProjectMemoryEnabled}
+                      type="checkbox"
+                      onChange={event => onToggleProjectMemory(event.target.checked)}
+                    />
+                    <span className="relative h-5 w-9 rounded-full bg-black/10 transition-all peer-checked:bg-emerald-500 after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:content-[''] peer-checked:after:translate-x-4 peer-disabled:opacity-40" />
+                  </label>
+                </div>
+
+                <div className="grid gap-2">
+                  <div className="rounded-lg bg-black/[0.025] px-2.5 py-2">
+                    <div className="text-10px font-800 uppercase text-black/35">记忆路径</div>
+                    <div className="mt-1 break-all font-mono text-11px text-[var(--text-secondary)]">
+                      {memoryPath}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-lg bg-black/[0.025] px-2.5 py-2">
+                      <div className="text-10px font-800 uppercase text-black/35">最新整理</div>
+                      <div className="mt-1 text-12px font-700">
+                        {formatMemoryDate(
+                          projectMemoryMetadata?.last_updated ||
+                          latestProjectMemoryJob?.finishedAt ||
+                          null,
+                        )}
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-black/[0.025] px-2.5 py-2">
+                      <div className="text-10px font-800 uppercase text-black/35">状态</div>
+                      <div className="mt-1 text-12px font-700">
+                        {projectMemoryStatusLabel}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between rounded-lg border border-black/5 px-2.5 py-2">
+                    <div className="min-w-0">
+                      <div className="font-700">待整理数据</div>
+                      <div className="text-11px text-[var(--text-secondary)]">
+                        {projectMemoryStatus?.pendingSourceCount || 0} 条 source 等待整理
+                      </div>
+                    </div>
+                    <button
+                      className="shrink-0 rounded-md border border-black/10 px-2 py-1 text-11px font-700 text-[var(--text-secondary)] transition-colors hover:bg-black/[0.03]"
+                      type="button"
+                      onClick={onOpenProjectMemoryFolder}
+                    >
+                      打开目录
+                    </button>
+                  </div>
+                </div>
+                {projectMemoryStatusError ? (
+                  <div className="mt-2 rounded-lg bg-red-50 px-2.5 py-2 text-11px text-red-600">
+                    {projectMemoryStatusError}
+                  </div>
+                ) : null}
+                {!globalProjectMemoryEnabled ? (
+                  <div className="mt-2 rounded-lg bg-amber-50 px-2.5 py-2 text-11px text-amber-700">
+                    全局长期记忆已关闭，需要到设置页启用后才能打开当前项目记忆。
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         </div>
 
         {hasInspectorContent && (
@@ -7521,6 +7791,7 @@ export function ChatView({
                       currentTokens={currentPromptContextTokens}
                       cumulativeTokens={sessionTotalTokens}
                       contextWindowTokens={promptContextWindowTokens}
+                      compressionThresholdTokens={promptCompressionThresholdTokens}
                       contextCompression={liveContextCompression}
                       compressionRunning={contextCompressionRunning || autoCompressionRunning}
                       compressionDisabled={contextCompressionRunning || isRunning}

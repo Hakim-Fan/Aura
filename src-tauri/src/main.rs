@@ -878,7 +878,8 @@ fn scan_skill_roots<R: Runtime>(
             continue;
         }
 
-        let Ok(mut external_skills) = scan_aura_assets(app, external_dir, "skills", "external") else {
+        let Ok(mut external_skills) = scan_aura_assets(app, external_dir, "skills", "external")
+        else {
             continue;
         };
         for skill in external_skills.iter_mut() {
@@ -914,7 +915,10 @@ fn scan_workspace_assets<R: Runtime>(
     workspace_root: Option<&str>,
     kind: &str,
 ) -> Vec<AuraAssetMetadata> {
-    let Some(workspace_root) = workspace_root.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(workspace_root) = workspace_root
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return Vec::new();
     };
     let dir = PathBuf::from(workspace_root).join(".aura").join(kind);
@@ -1137,8 +1141,7 @@ fn ensure_workspace_agents_file(workspace_root: &Path) -> Result<(), String> {
     if agents_path.exists() {
         return Ok(());
     }
-    fs::write(&agents_path, "")
-    .map_err(|error| {
+    fs::write(&agents_path, "").map_err(|error| {
         format!(
             "Failed to create workspace AGENTS.md {}: {error}",
             agents_path.display()
@@ -1205,7 +1208,9 @@ fn local_log_datetime(timestamp_ms: u64) -> chrono::DateTime<Local> {
 }
 
 fn local_log_date(timestamp_ms: u64) -> String {
-    local_log_datetime(timestamp_ms).format("%Y-%m-%d").to_string()
+    local_log_datetime(timestamp_ms)
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 fn local_log_timestamp(timestamp_ms: u64) -> String {
@@ -1358,7 +1363,10 @@ fn append_app_log<R: Runtime>(
     };
     append_log_line(logs_dir.join(format!("app-{date}.log")), &human_line);
     if let Ok(serialized_entry) = serde_json::to_string(&entry) {
-        append_log_line(logs_dir.join(format!("app-{date}.jsonl")), &serialized_entry);
+        append_log_line(
+            logs_dir.join(format!("app-{date}.jsonl")),
+            &serialized_entry,
+        );
     }
     let _ = app.emit("app-log-entry", entry);
 }
@@ -1389,7 +1397,10 @@ fn insert_log_string(
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return;
     };
-    fields.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+    fields.insert(
+        key.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
 }
 
 fn agent_log_context_details(task_id: &str, payload: &serde_json::Value) -> serde_json::Value {
@@ -1404,7 +1415,9 @@ fn agent_log_context_details(task_id: &str, payload: &serde_json::Value) -> serd
     insert_log_string(
         &mut fields,
         "sessionId",
-        log_context.get("sessionId").and_then(|value| value.as_str()),
+        log_context
+            .get("sessionId")
+            .and_then(|value| value.as_str()),
     );
     insert_log_string(
         &mut fields,
@@ -1425,10 +1438,7 @@ fn agent_log_context_details(task_id: &str, payload: &serde_json::Value) -> serd
     serde_json::Value::Object(fields)
 }
 
-fn agent_log_details(
-    context: &serde_json::Value,
-    details: serde_json::Value,
-) -> serde_json::Value {
+fn agent_log_details(context: &serde_json::Value, details: serde_json::Value) -> serde_json::Value {
     let mut fields = context.as_object().cloned().unwrap_or_default();
     if let serde_json::Value::Object(details) = details {
         for (key, value) in details {
@@ -1445,24 +1455,27 @@ fn agent_payload_log_details(task_id: &str, payload: &serde_json::Value) -> serd
         .and_then(|value| value.as_array())
         .map(|value| value.len())
         .unwrap_or(0);
-    agent_log_details(&agent_log_context_details(task_id, payload), serde_json::json!({
-        "provider": settings.get("provider").and_then(|value| value.as_str()),
-        "model": settings.get("model").and_then(|value| value.as_str()),
-        "baseUrl": settings
-            .get("baseUrl")
-            .and_then(|value| value.as_str())
-            .map(sanitize_url_for_log),
-        "providerProxyEnabled": settings
-            .get("providerProxyEnabled")
-            .and_then(|value| value.as_bool()),
-        "networkProxyConfigured": settings
-            .get("networkProxy")
-            .and_then(|value| value.as_str())
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false),
-        "cwd": settings.get("cwd").and_then(|value| value.as_str()),
-        "messageCount": message_count,
-    }))
+    agent_log_details(
+        &agent_log_context_details(task_id, payload),
+        serde_json::json!({
+            "provider": settings.get("provider").and_then(|value| value.as_str()),
+            "model": settings.get("model").and_then(|value| value.as_str()),
+            "baseUrl": settings
+                .get("baseUrl")
+                .and_then(|value| value.as_str())
+                .map(sanitize_url_for_log),
+            "providerProxyEnabled": settings
+                .get("providerProxyEnabled")
+                .and_then(|value| value.as_bool()),
+            "networkProxyConfigured": settings
+                .get("networkProxy")
+                .and_then(|value| value.as_str())
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false),
+            "cwd": settings.get("cwd").and_then(|value| value.as_str()),
+            "messageCount": message_count,
+        }),
+    )
 }
 
 fn context_compression_log_details(payload: &serde_json::Value) -> serde_json::Value {
@@ -1479,7 +1492,9 @@ fn context_compression_log_details(payload: &serde_json::Value) -> serde_json::V
     insert_log_string(
         &mut fields,
         "sessionId",
-        log_context.get("sessionId").and_then(|value| value.as_str()),
+        log_context
+            .get("sessionId")
+            .and_then(|value| value.as_str()),
     );
     insert_log_string(
         &mut fields,
@@ -1615,83 +1630,107 @@ fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> 
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
     match event_type {
-        "text_delta" => agent_log_details(context, serde_json::json!({
-            "stepId": event_step_id(event),
-            "blockId": event.get("blockId").and_then(|value| value.as_str()),
-            "target": event.get("target").and_then(|value| value.as_str()),
-            "order": event.get("order").and_then(|value| value.as_f64()),
-            "deltaChars": delta_log_char_count(event),
-            "delta": delta_log_preview(event),
-        })),
-        "reasoning_delta" => agent_log_details(context, serde_json::json!({
-            "stepId": event_step_id(event),
-            "reasoningStepId": event_step_id(event),
-            "blockId": event.get("blockId").and_then(|value| value.as_str()),
-            "kind": event.get("kind").and_then(|value| value.as_str()),
-            "order": event.get("order").and_then(|value| value.as_f64()),
-            "deltaChars": delta_log_char_count(event),
-            "delta": delta_log_preview(event),
-        })),
-        "reasoning_discard" => agent_log_details(context, serde_json::json!({
-            "stepId": event_step_id(event),
-            "reasoningStepId": event_step_id(event),
-            "blockId": event.get("blockId").and_then(|value| value.as_str()),
-            "reason": event.get("reason").and_then(|value| value.as_str()),
-            "attemptNumber": event.get("attemptNumber").and_then(|value| value.as_u64()),
-            "nextAttemptNumber": event.get("nextAttemptNumber").and_then(|value| value.as_u64()),
-        })),
-        "runtime_status" => agent_log_details(context, serde_json::json!({
-            "phase": event.get("phase").and_then(|value| value.as_str()),
-            "stalled": event.get("stalled").and_then(|value| value.as_bool()),
-            "lastHeartbeatAt": event.get("lastHeartbeatAt").and_then(|value| value.as_u64()),
-            "lastProgressAt": event.get("lastProgressAt").and_then(|value| value.as_u64()),
-        })),
-        "retry_progress" => agent_log_details(context, serde_json::json!({
-            "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
-        })),
+        "text_delta" => agent_log_details(
+            context,
+            serde_json::json!({
+                "stepId": event_step_id(event),
+                "blockId": event.get("blockId").and_then(|value| value.as_str()),
+                "target": event.get("target").and_then(|value| value.as_str()),
+                "order": event.get("order").and_then(|value| value.as_f64()),
+                "deltaChars": delta_log_char_count(event),
+                "delta": delta_log_preview(event),
+            }),
+        ),
+        "reasoning_delta" => agent_log_details(
+            context,
+            serde_json::json!({
+                "stepId": event_step_id(event),
+                "reasoningStepId": event_step_id(event),
+                "blockId": event.get("blockId").and_then(|value| value.as_str()),
+                "kind": event.get("kind").and_then(|value| value.as_str()),
+                "order": event.get("order").and_then(|value| value.as_f64()),
+                "deltaChars": delta_log_char_count(event),
+                "delta": delta_log_preview(event),
+            }),
+        ),
+        "reasoning_discard" => agent_log_details(
+            context,
+            serde_json::json!({
+                "stepId": event_step_id(event),
+                "reasoningStepId": event_step_id(event),
+                "blockId": event.get("blockId").and_then(|value| value.as_str()),
+                "reason": event.get("reason").and_then(|value| value.as_str()),
+                "attemptNumber": event.get("attemptNumber").and_then(|value| value.as_u64()),
+                "nextAttemptNumber": event.get("nextAttemptNumber").and_then(|value| value.as_u64()),
+            }),
+        ),
+        "runtime_status" => agent_log_details(
+            context,
+            serde_json::json!({
+                "phase": event.get("phase").and_then(|value| value.as_str()),
+                "stalled": event.get("stalled").and_then(|value| value.as_bool()),
+                "lastHeartbeatAt": event.get("lastHeartbeatAt").and_then(|value| value.as_u64()),
+                "lastProgressAt": event.get("lastProgressAt").and_then(|value| value.as_u64()),
+            }),
+        ),
+        "retry_progress" => agent_log_details(
+            context,
+            serde_json::json!({
+                "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
+            }),
+        ),
         "runtime_log" => {
             let runtime_event = event.get("event").unwrap_or(&serde_json::Value::Null);
             let details = runtime_event
                 .get("details")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            agent_log_details(context, serde_json::json!({
-                "runtimeEvent": runtime_event.get("event").and_then(|value| value.as_str()),
-                "runtimeLevel": runtime_event.get("level").and_then(|value| value.as_str()),
-                "details": details,
-            }))
+            agent_log_details(
+                context,
+                serde_json::json!({
+                    "runtimeEvent": runtime_event.get("event").and_then(|value| value.as_str()),
+                    "runtimeLevel": runtime_event.get("level").and_then(|value| value.as_str()),
+                    "details": details,
+                }),
+            )
         }
         "context_compression" => {
             let compression = event
                 .get("contextCompression")
                 .unwrap_or(&serde_json::Value::Null);
-            agent_log_details(context, serde_json::json!({
-                "stepId": compression.get("id").and_then(|value| value.as_str()),
-                "compressionId": compression.get("id").and_then(|value| value.as_str()),
-                "compressedThroughMessageId": compression
-                    .get("compressedThroughMessageId")
-                    .and_then(|value| value.as_str()),
-                "originalTokenEstimate": compression
-                    .get("originalTokenEstimate")
-                    .and_then(|value| value.as_u64()),
-                "compressedTokenEstimate": compression
-                    .get("compressedTokenEstimate")
-                    .and_then(|value| value.as_u64()),
-            }))
+            agent_log_details(
+                context,
+                serde_json::json!({
+                    "stepId": compression.get("id").and_then(|value| value.as_str()),
+                    "compressionId": compression.get("id").and_then(|value| value.as_str()),
+                    "compressedThroughMessageId": compression
+                        .get("compressedThroughMessageId")
+                        .and_then(|value| value.as_str()),
+                    "originalTokenEstimate": compression
+                        .get("originalTokenEstimate")
+                        .and_then(|value| value.as_u64()),
+                    "compressedTokenEstimate": compression
+                        .get("compressedTokenEstimate")
+                        .and_then(|value| value.as_u64()),
+                }),
+            )
         }
         "tool_event" => {
             let tool_event = event.get("event").unwrap_or(&serde_json::Value::Null);
-            agent_log_details(context, serde_json::json!({
-                "stepId": tool_event.get("id").and_then(|value| value.as_str()),
-                "toolEventId": tool_event.get("id").and_then(|value| value.as_str()),
-                "source": tool_event.get("source").and_then(|value| value.as_str()),
-                "toolName": tool_event.get("name").and_then(|value| value.as_str()),
-                "summary": tool_event.get("summary").and_then(|value| value.as_str()),
-                "input": tool_event.get("input").and_then(|value| value.as_str()),
-                "status": tool_event.get("status").and_then(|value| value.as_str()),
-                "error": tool_event.get("error").and_then(|value| value.as_str()),
-                "errorInfo": tool_event.get("errorInfo").cloned().unwrap_or(serde_json::Value::Null),
-            }))
+            agent_log_details(
+                context,
+                serde_json::json!({
+                    "stepId": tool_event.get("id").and_then(|value| value.as_str()),
+                    "toolEventId": tool_event.get("id").and_then(|value| value.as_str()),
+                    "source": tool_event.get("source").and_then(|value| value.as_str()),
+                    "toolName": tool_event.get("name").and_then(|value| value.as_str()),
+                    "summary": tool_event.get("summary").and_then(|value| value.as_str()),
+                    "input": tool_event.get("input").and_then(|value| value.as_str()),
+                    "status": tool_event.get("status").and_then(|value| value.as_str()),
+                    "error": tool_event.get("error").and_then(|value| value.as_str()),
+                    "errorInfo": tool_event.get("errorInfo").cloned().unwrap_or(serde_json::Value::Null),
+                }),
+            )
         }
         "task_tree" => {
             let tree = event.get("tree").unwrap_or(&serde_json::Value::Null);
@@ -1699,78 +1738,99 @@ fn event_log_details(context: &serde_json::Value, event: &serde_json::Value) -> 
                 .as_array()
                 .and_then(|entries| entries.first())
                 .unwrap_or(&serde_json::Value::Null);
-            agent_log_details(context, serde_json::json!({
-                "stepId": root.get("id").and_then(|value| value.as_str()),
-                "rootTaskId": root.get("id").and_then(|value| value.as_str()),
-                "rootTitle": root.get("title").and_then(|value| value.as_str()),
-                "rootStatus": root.get("status").and_then(|value| value.as_str()),
-                "rootSummary": root.get("summary").and_then(|value| value.as_str()),
-                "tree": tree.clone(),
-            }))
+            agent_log_details(
+                context,
+                serde_json::json!({
+                    "stepId": root.get("id").and_then(|value| value.as_str()),
+                    "rootTaskId": root.get("id").and_then(|value| value.as_str()),
+                    "rootTitle": root.get("title").and_then(|value| value.as_str()),
+                    "rootStatus": root.get("status").and_then(|value| value.as_str()),
+                    "rootSummary": root.get("summary").and_then(|value| value.as_str()),
+                    "tree": tree.clone(),
+                }),
+            )
         }
         "route_decision" => {
             let route_decision = event
                 .get("routeDecision")
                 .unwrap_or(&serde_json::Value::Null);
-            agent_log_details(context, serde_json::json!({
-                "stepId": context_step_id(context, "route", "decision"),
-                "answerMode": route_decision.get("answerMode").and_then(|value| value.as_str()),
-                "capabilityTier": route_decision
-                    .get("capabilityTier")
-                    .and_then(|value| value.as_str()),
-                "stopReason": route_decision.get("stopReason").and_then(|value| value.as_str()),
-                "escalationCount": route_decision
-                    .get("escalationCount")
-                    .and_then(|value| value.as_u64()),
-                "routeDecision": route_decision.clone(),
-            }))
+            agent_log_details(
+                context,
+                serde_json::json!({
+                    "stepId": context_step_id(context, "route", "decision"),
+                    "answerMode": route_decision.get("answerMode").and_then(|value| value.as_str()),
+                    "capabilityTier": route_decision
+                        .get("capabilityTier")
+                        .and_then(|value| value.as_str()),
+                    "stopReason": route_decision.get("stopReason").and_then(|value| value.as_str()),
+                    "escalationCount": route_decision
+                        .get("escalationCount")
+                        .and_then(|value| value.as_u64()),
+                    "routeDecision": route_decision.clone(),
+                }),
+            )
         }
         "approval_required" => {
             let request = event.get("request").unwrap_or(&serde_json::Value::Null);
-            agent_log_details(context, serde_json::json!({
-                "stepId": request.get("id").and_then(|value| value.as_str()),
-                "approvalId": request.get("id").and_then(|value| value.as_str()),
-                "category": request.get("category").and_then(|value| value.as_str()),
-                "toolName": request.get("toolName").and_then(|value| value.as_str()),
-                "summary": request.get("summary").and_then(|value| value.as_str()),
-            }))
+            agent_log_details(
+                context,
+                serde_json::json!({
+                    "stepId": request.get("id").and_then(|value| value.as_str()),
+                    "approvalId": request.get("id").and_then(|value| value.as_str()),
+                    "category": request.get("category").and_then(|value| value.as_str()),
+                    "toolName": request.get("toolName").and_then(|value| value.as_str()),
+                    "summary": request.get("summary").and_then(|value| value.as_str()),
+                }),
+            )
         }
         "user_input_required" => {
             let request = event.get("request").unwrap_or(&serde_json::Value::Null);
-            agent_log_details(context, serde_json::json!({
-                "stepId": request.get("id").and_then(|value| value.as_str()),
-                "userInputRequestId": request.get("id").and_then(|value| value.as_str()),
-                "question": request.get("question").and_then(|value| value.as_str()),
-                "allowAttachments": request
-                    .get("allowAttachments")
-                    .and_then(|value| value.as_bool()),
-            }))
+            agent_log_details(
+                context,
+                serde_json::json!({
+                    "stepId": request.get("id").and_then(|value| value.as_str()),
+                    "userInputRequestId": request.get("id").and_then(|value| value.as_str()),
+                    "question": request.get("question").and_then(|value| value.as_str()),
+                    "allowAttachments": request
+                        .get("allowAttachments")
+                        .and_then(|value| value.as_bool()),
+                }),
+            )
         }
-        "failed" => agent_log_details(context, serde_json::json!({
-            "message": event.get("message").and_then(|value| value.as_str()),
-            "code": event.get("code").and_then(|value| value.as_str()),
-            "source": event.get("source").and_then(|value| value.as_str()),
-            "rawMessage": event.get("rawMessage").and_then(|value| value.as_str()),
-            "errorInfo": event.get("errorInfo").cloned().unwrap_or(serde_json::Value::Null),
-            "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
-        })),
+        "failed" => agent_log_details(
+            context,
+            serde_json::json!({
+                "message": event.get("message").and_then(|value| value.as_str()),
+                "code": event.get("code").and_then(|value| value.as_str()),
+                "source": event.get("source").and_then(|value| value.as_str()),
+                "rawMessage": event.get("rawMessage").and_then(|value| value.as_str()),
+                "errorInfo": event.get("errorInfo").cloned().unwrap_or(serde_json::Value::Null),
+                "retryInfo": event.get("retryInfo").cloned().unwrap_or(serde_json::Value::Null),
+            }),
+        ),
         "completed" => {
             let result = event.get("result").unwrap_or(&serde_json::Value::Null);
-            agent_log_details(context, serde_json::json!({
-                "status": "completed",
-                "usage": result.get("usage").cloned().unwrap_or(serde_json::Value::Null),
-                "agentMode": result.get("agentMode").and_then(|value| value.as_str()),
-                "completionState": result.get("completionState").and_then(|value| value.as_str()),
-                "toolEventCount": result
-                    .get("toolEvents")
-                    .and_then(|value| value.as_array())
-                    .map(|value| value.len())
-                    .unwrap_or(0),
-            }))
+            agent_log_details(
+                context,
+                serde_json::json!({
+                    "status": "completed",
+                    "usage": result.get("usage").cloned().unwrap_or(serde_json::Value::Null),
+                    "agentMode": result.get("agentMode").and_then(|value| value.as_str()),
+                    "completionState": result.get("completionState").and_then(|value| value.as_str()),
+                    "toolEventCount": result
+                        .get("toolEvents")
+                        .and_then(|value| value.as_array())
+                        .map(|value| value.len())
+                        .unwrap_or(0),
+                }),
+            )
         }
-        _ => agent_log_details(context, serde_json::json!({
-            "type": event_type,
-        })),
+        _ => agent_log_details(
+            context,
+            serde_json::json!({
+                "type": event_type,
+            }),
+        ),
     }
 }
 
@@ -1930,7 +1990,8 @@ fn work_memories_has_session_fk(connection: &Connection) -> Result<bool, String>
         .map_err(|error| format!("Failed to query work_memories foreign keys: {error}"))?;
 
     for row in rows {
-        let table = row.map_err(|error| format!("Failed to decode work_memories foreign key: {error}"))?;
+        let table =
+            row.map_err(|error| format!("Failed to decode work_memories foreign key: {error}"))?;
         if table == "sessions" {
             return Ok(true);
         }
@@ -2164,6 +2225,32 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               updated_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS project_memory_sources (
+              id TEXT PRIMARY KEY,
+              workspace_root TEXT NOT NULL,
+              session_id TEXT,
+              source_type TEXT NOT NULL,
+              source_id TEXT NOT NULL,
+              source_version TEXT NOT NULL,
+              source_updated_at INTEGER NOT NULL,
+              memory_status TEXT NOT NULL,
+              extracted_at INTEGER,
+              consolidated_at INTEGER,
+              last_error TEXT,
+              UNIQUE(workspace_root, source_type, source_id, source_version)
+            );
+
+            CREATE TABLE IF NOT EXISTS project_memory_jobs (
+              id TEXT PRIMARY KEY,
+              workspace_root TEXT NOT NULL,
+              status TEXT NOT NULL,
+              reason TEXT NOT NULL,
+              input_watermark INTEGER,
+              output_watermark INTEGER,
+              started_at INTEGER,
+              finished_at INTEGER
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_session_sort
               ON messages(session_id, sort_index);
             CREATE INDEX IF NOT EXISTS idx_message_versions_message_version
@@ -2180,6 +2267,12 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               ON agent_runs(task_id, updated_at);
             CREATE INDEX IF NOT EXISTS idx_agent_run_checkpoints_run
               ON agent_run_checkpoints(run_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_project_memory_sources_workspace_status
+              ON project_memory_sources(workspace_root, memory_status, source_updated_at);
+            CREATE INDEX IF NOT EXISTS idx_project_memory_sources_session
+              ON project_memory_sources(session_id, source_updated_at);
+            CREATE INDEX IF NOT EXISTS idx_project_memory_jobs_workspace_status
+              ON project_memory_jobs(workspace_root, status, started_at);
             "#,
         )
         .map_err(|error| format!("Failed to initialize SQLite schema: {error}"))?;
@@ -2208,10 +2301,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
         }
     }
 
-    if let Err(error) = connection.execute(
-        "ALTER TABLE messages ADD COLUMN group_id TEXT",
-        [],
-    ) {
+    if let Err(error) = connection.execute("ALTER TABLE messages ADD COLUMN group_id TEXT", []) {
         let message = error.to_string();
         if !message.contains("duplicate column name") {
             return Err(format!(
@@ -2220,10 +2310,9 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
         }
     }
 
-    if let Err(error) = connection.execute(
-        "ALTER TABLE message_versions ADD COLUMN group_id TEXT",
-        [],
-    ) {
+    if let Err(error) =
+        connection.execute("ALTER TABLE message_versions ADD COLUMN group_id TEXT", [])
+    {
         let message = error.to_string();
         if !message.contains("duplicate column name") {
             return Err(format!(
@@ -2502,7 +2591,12 @@ fn normalize_work_memory_source_refs(value: &serde_json::Value) -> serde_json::V
                     }
                     serde_json::Value::Object(normalized)
                 })
-                .filter(|entry| entry.as_object().map(|map| !map.is_empty()).unwrap_or(false))
+                .filter(|entry| {
+                    entry
+                        .as_object()
+                        .map(|map| !map.is_empty())
+                        .unwrap_or(false)
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -2526,18 +2620,10 @@ fn normalize_work_memory_payload(payload: &serde_json::Value) -> Result<serde_js
         "phase_artifact",
         MAX_WORK_MEMORY_KIND_CHARS,
     );
-    let title = get_work_memory_string_field(
-        payload,
-        "title",
-        kind.as_str(),
-        MAX_WORK_MEMORY_TITLE_CHARS,
-    );
-    let summary = get_work_memory_string_field(
-        payload,
-        "summary",
-        "",
-        MAX_WORK_MEMORY_SUMMARY_CHARS,
-    );
+    let title =
+        get_work_memory_string_field(payload, "title", kind.as_str(), MAX_WORK_MEMORY_TITLE_CHARS);
+    let summary =
+        get_work_memory_string_field(payload, "summary", "", MAX_WORK_MEMORY_SUMMARY_CHARS);
     if summary.is_empty() {
         return Err("Work memory requires a summary.".into());
     }
@@ -2627,17 +2713,22 @@ fn get_optional_json_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
     })
 }
 
-fn runtime_run_status(event_name: &str, details: &serde_json::Value, level: &str) -> Option<String> {
+fn runtime_run_status(
+    event_name: &str,
+    details: &serde_json::Value,
+    level: &str,
+) -> Option<String> {
     match event_name {
         "agent.run.started" => Some("running".to_string()),
-        "agent.run.finished" | "agent.metrics.summary" => get_optional_json_string(details, "status")
-            .or_else(|| {
+        "agent.run.finished" | "agent.metrics.summary" => {
+            get_optional_json_string(details, "status").or_else(|| {
                 if level == "error" {
                     Some("failed".to_string())
                 } else {
                     Some("completed".to_string())
                 }
-            }),
+            })
+        }
         "agent.error.classified" => Some("failed".to_string()),
         _ => None,
     }
@@ -2753,10 +2844,35 @@ fn persist_agent_runtime_log<R: Runtime>(
         )
         .map_err(|error| format!("Failed to persist agent run: {error}"))?;
 
-    if matches!(event_name, "agent.checkpoint.created" | "agent.checkpoint.restored") {
+    if let (Some(workspace_root), Some(session_id)) = (
+        get_optional_json_string(details, "cwd")
+            .map(|value| normalize_project_memory_workspace_root(Some(&value)))
+            .filter(|value| !value.is_empty()),
+        get_optional_json_string(details, "sessionId"),
+    ) {
+        let _ = upsert_project_memory_source(
+            &connection,
+            &workspace_root,
+            Some(session_id),
+            "task_result",
+            &run_id,
+            "run",
+            now,
+            "pending",
+        )?;
+    }
+
+    if matches!(
+        event_name,
+        "agent.checkpoint.created" | "agent.checkpoint.restored"
+    ) {
         if let Some(checkpoint_id) = get_optional_json_string(details, "checkpointId") {
             let id = format!("{run_id}:{checkpoint_id}");
-            let restored = if event_name == "agent.checkpoint.restored" { 1 } else { 0 };
+            let restored = if event_name == "agent.checkpoint.restored" {
+                1
+            } else {
+                0
+            };
             connection
                 .execute(
                     "INSERT INTO agent_run_checkpoints (
@@ -2838,8 +2954,14 @@ fn store_work_memory<R: Runtime>(
                 next_use = excluded.next_use,
                 created_at = excluded.created_at",
             params![
-                memory.get("id").and_then(|value| value.as_str()).unwrap_or_default(),
-                memory.get("sessionId").and_then(|value| value.as_str()).unwrap_or_default(),
+                memory
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+                memory
+                    .get("sessionId")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
                 memory
                     .get("taskId")
                     .and_then(|value| value.as_str())
@@ -2848,22 +2970,665 @@ fn store_work_memory<R: Runtime>(
                     .get("assistantMessageId")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.is_empty()),
-                memory.get("kind").and_then(|value| value.as_str()).unwrap_or("phase_artifact"),
-                memory.get("title").and_then(|value| value.as_str()).unwrap_or("phase_artifact"),
-                memory.get("summary").and_then(|value| value.as_str()).unwrap_or_default(),
-                memory.get("status").and_then(|value| value.as_str()).unwrap_or("draft"),
+                memory
+                    .get("kind")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("phase_artifact"),
+                memory
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("phase_artifact"),
+                memory
+                    .get("summary")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+                memory
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("draft"),
                 value_to_json_string(&content)?,
                 value_to_json_string(&source_refs)?,
                 memory
                     .get("nextUse")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.is_empty()),
-                memory.get("createdAt").and_then(|value| value.as_i64()).unwrap_or(0),
+                memory
+                    .get("createdAt")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(0),
             ],
         )
         .map_err(|error| format!("Failed to persist work memory: {error}"))?;
 
     Ok(memory)
+}
+
+fn normalize_project_memory_workspace_root(value: Option<&str>) -> String {
+    value
+        .unwrap_or_default()
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn normalize_project_memory_status(value: &str) -> &'static str {
+    match value {
+        "pending" | "extracted" | "consolidated" | "stale" | "deleted" | "skipped" => match value {
+            "extracted" => "extracted",
+            "consolidated" => "consolidated",
+            "stale" => "stale",
+            "deleted" => "deleted",
+            "skipped" => "skipped",
+            _ => "pending",
+        },
+        _ => "pending",
+    }
+}
+
+fn upsert_project_memory_source(
+    connection: &Connection,
+    workspace_root: &str,
+    session_id: Option<String>,
+    source_type: &str,
+    source_id: &str,
+    source_version: &str,
+    source_updated_at: i64,
+    next_status: &str,
+) -> Result<bool, String> {
+    if workspace_root.trim().is_empty() || source_id.trim().is_empty() {
+        return Ok(false);
+    }
+    let status = normalize_project_memory_status(next_status);
+    let id = format!("{workspace_root}:{source_type}:{source_id}:{source_version}");
+    let changed = connection
+        .execute(
+            "INSERT INTO project_memory_sources (
+                id, workspace_root, session_id, source_type, source_id, source_version,
+                source_updated_at, memory_status, extracted_at, consolidated_at, last_error
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL)
+             ON CONFLICT(workspace_root, source_type, source_id, source_version) DO UPDATE SET
+                session_id = COALESCE(excluded.session_id, project_memory_sources.session_id),
+                source_updated_at = excluded.source_updated_at,
+                memory_status = CASE
+                  WHEN excluded.memory_status = 'deleted' THEN 'deleted'
+                  WHEN excluded.source_updated_at <> project_memory_sources.source_updated_at THEN 'pending'
+                  WHEN project_memory_sources.memory_status IN ('deleted', 'stale') THEN 'pending'
+                  ELSE project_memory_sources.memory_status
+                END,
+                extracted_at = CASE
+                  WHEN excluded.source_updated_at <> project_memory_sources.source_updated_at THEN NULL
+                  ELSE project_memory_sources.extracted_at
+                END,
+                consolidated_at = CASE
+                  WHEN excluded.source_updated_at <> project_memory_sources.source_updated_at THEN NULL
+                  ELSE project_memory_sources.consolidated_at
+                END,
+                last_error = NULL",
+            params![
+                id,
+                workspace_root,
+                session_id,
+                source_type,
+                source_id,
+                source_version,
+                source_updated_at.max(0),
+                status,
+            ],
+        )
+        .map_err(|error| format!("Failed to upsert project memory source: {error}"))?;
+    Ok(changed > 0)
+}
+
+fn mark_stale_project_memory_source_versions(
+    connection: &Connection,
+    workspace_root: &str,
+    source_type: &str,
+    source_id: &str,
+    active_version: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE project_memory_sources
+             SET memory_status = CASE
+               WHEN memory_status = 'deleted' THEN 'deleted'
+               ELSE 'stale'
+             END
+             WHERE workspace_root = ?1
+               AND source_type = ?2
+               AND source_id = ?3
+               AND source_version <> ?4",
+            params![workspace_root, source_type, source_id, active_version],
+        )
+        .map_err(|error| format!("Failed to mark stale project memory source versions: {error}"))?;
+    Ok(())
+}
+
+fn sync_project_memory_sources_for_workspace(
+    connection: &Connection,
+    workspace_root: &str,
+    session_id: Option<&str>,
+) -> Result<i64, String> {
+    let normalized_workspace = normalize_project_memory_workspace_root(Some(workspace_root));
+    if normalized_workspace.is_empty() {
+        return Ok(0);
+    }
+
+    let mut changed = 0_i64;
+
+    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
+        let mut statement = connection
+            .prepare(
+                "SELECT m.id, m.session_id, m.active_version_index, m.updated_at, m.deleted_at
+                 FROM messages m
+                 WHERE m.session_id = ?1",
+            )
+            .map_err(|error| format!("Failed to prepare project memory message sync: {error}"))?;
+        let rows = statement
+            .query_map(params![session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|error| format!("Failed to query project memory messages: {error}"))?;
+        for row in rows {
+            let (message_id, row_session_id, active_version, updated_at, deleted_at) =
+                row.map_err(|error| format!("Failed to decode project memory message: {error}"))?;
+            let source_version = active_version.to_string();
+            mark_stale_project_memory_source_versions(
+                connection,
+                &normalized_workspace,
+                "message",
+                &message_id,
+                &source_version,
+            )?;
+            if upsert_project_memory_source(
+                connection,
+                &normalized_workspace,
+                Some(row_session_id),
+                "message",
+                &message_id,
+                &source_version,
+                updated_at.max(deleted_at),
+                if deleted_at > 0 { "deleted" } else { "pending" },
+            )? {
+                changed += 1;
+            }
+        }
+
+        let mut statement = connection
+            .prepare(
+                "SELECT mv.message_id, m.session_id, mv.version_index, mv.created_at, mv.deleted_at, m.deleted_at
+                 FROM message_versions mv
+                 JOIN messages m ON m.id = mv.message_id
+                 WHERE m.session_id = ?1",
+            )
+            .map_err(|error| format!("Failed to prepare project memory version sync: {error}"))?;
+        let rows = statement
+            .query_map(params![session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|error| format!("Failed to query project memory message versions: {error}"))?;
+        for row in rows {
+            let (
+                message_id,
+                row_session_id,
+                version_index,
+                created_at,
+                version_deleted_at,
+                message_deleted_at,
+            ) = row.map_err(|error| {
+                format!("Failed to decode project memory message version: {error}")
+            })?;
+            if upsert_project_memory_source(
+                connection,
+                &normalized_workspace,
+                Some(row_session_id),
+                "message_version",
+                &message_id,
+                &version_index.to_string(),
+                created_at.max(version_deleted_at).max(message_deleted_at),
+                if version_deleted_at > 0 || message_deleted_at > 0 {
+                    "deleted"
+                } else {
+                    "pending"
+                },
+            )? {
+                changed += 1;
+            }
+        }
+
+        let mut statement = connection
+            .prepare(
+                "SELECT d.message_id, m.session_id, d.version_index, d.event_id, d.updated_at, m.deleted_at
+                 FROM message_event_details d
+                 JOIN messages m ON m.id = d.message_id
+                 WHERE m.session_id = ?1",
+            )
+            .map_err(|error| format!("Failed to prepare project memory tool event sync: {error}"))?;
+        let rows = statement
+            .query_map(params![session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|error| format!("Failed to query project memory tool events: {error}"))?;
+        for row in rows {
+            let (
+                message_id,
+                row_session_id,
+                version_index,
+                event_id,
+                updated_at,
+                message_deleted_at,
+            ) = row
+                .map_err(|error| format!("Failed to decode project memory tool event: {error}"))?;
+            let source_id = format!("{message_id}:{version_index}:{event_id}");
+            if upsert_project_memory_source(
+                connection,
+                &normalized_workspace,
+                Some(row_session_id),
+                "tool_event",
+                &source_id,
+                "event",
+                updated_at.max(message_deleted_at),
+                if message_deleted_at > 0 {
+                    "deleted"
+                } else {
+                    "pending"
+                },
+            )? {
+                changed += 1;
+            }
+        }
+
+        let mut statement = connection
+            .prepare(
+                "SELECT run_id, session_id, updated_at
+                 FROM agent_runs
+                 WHERE cwd = ?1 AND session_id = ?2",
+            )
+            .map_err(|error| {
+                format!("Failed to prepare project memory task result sync: {error}")
+            })?;
+        let rows = statement
+            .query_map(params![&normalized_workspace, session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|error| format!("Failed to query project memory task results: {error}"))?;
+        for row in rows {
+            let (run_id, row_session_id, updated_at) = row
+                .map_err(|error| format!("Failed to decode project memory task result: {error}"))?;
+            if upsert_project_memory_source(
+                connection,
+                &normalized_workspace,
+                row_session_id,
+                "task_result",
+                &run_id,
+                "run",
+                updated_at,
+                "pending",
+            )? {
+                changed += 1;
+            }
+        }
+    }
+
+    Ok(changed)
+}
+
+fn project_memory_source_detail(
+    connection: &Connection,
+    source: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let source_type = source
+        .get("sourceType")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let source_id = source
+        .get("sourceId")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let source_version = source
+        .get("sourceVersion")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    match source_type {
+        "message" => {
+            let version_index = source_version.parse::<i64>().unwrap_or(0);
+            let detail: Option<serde_json::Value> = connection
+                .query_row(
+                    "SELECT m.role, substr(mv.content, 1, 6000), m.updated_at, m.deleted_at
+                     FROM messages m
+                     LEFT JOIN message_versions mv ON mv.message_id = m.id AND mv.version_index = ?2
+                     WHERE m.id = ?1",
+                    params![source_id, version_index],
+                    |row| {
+                        Ok(serde_json::json!({
+                            "role": row.get::<_, String>(0)?,
+                            "content": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                            "updatedAt": row.get::<_, i64>(2)?,
+                            "deletedAt": row.get::<_, i64>(3)?,
+                        }))
+                    },
+                )
+                .optional()
+                .map_err(|error| {
+                    format!("Failed to load project memory message source: {error}")
+                })?;
+            Ok(detail.unwrap_or(serde_json::Value::Null))
+        }
+        "message_version" => {
+            let version_index = source_version.parse::<i64>().unwrap_or(0);
+            let detail: Option<serde_json::Value> = connection
+                .query_row(
+                    "SELECT m.role, substr(mv.content, 1, 6000), mv.status, mv.created_at, mv.deleted_at
+                     FROM message_versions mv
+                     JOIN messages m ON m.id = mv.message_id
+                     WHERE mv.message_id = ?1 AND mv.version_index = ?2",
+                    params![source_id, version_index],
+                    |row| {
+                        Ok(serde_json::json!({
+                            "role": row.get::<_, String>(0)?,
+                            "content": row.get::<_, String>(1)?,
+                            "status": row.get::<_, Option<String>>(2)?,
+                            "createdAt": row.get::<_, i64>(3)?,
+                            "deletedAt": row.get::<_, i64>(4)?,
+                        }))
+                    },
+                )
+                .optional()
+                .map_err(|error| format!("Failed to load project memory message version source: {error}"))?;
+            Ok(detail.unwrap_or(serde_json::Value::Null))
+        }
+        "tool_event" => {
+            let parts: Vec<&str> = source_id.splitn(3, ':').collect();
+            if parts.len() != 3 {
+                return Ok(serde_json::Value::Null);
+            }
+            let version_index = parts[1].parse::<i64>().unwrap_or(0);
+            let detail: Option<serde_json::Value> = connection
+                .query_row(
+                    "SELECT event_id, substr(detail_json, 1, 6000), updated_at
+                     FROM message_event_details
+                     WHERE message_id = ?1 AND version_index = ?2 AND event_id = ?3",
+                    params![parts[0], version_index, parts[2]],
+                    |row| {
+                        Ok(serde_json::json!({
+                            "eventId": row.get::<_, String>(0)?,
+                            "detailRaw": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                            "updatedAt": row.get::<_, i64>(2)?,
+                        }))
+                    },
+                )
+                .optional()
+                .map_err(|error| {
+                    format!("Failed to load project memory tool event source: {error}")
+                })?;
+            Ok(detail.unwrap_or(serde_json::Value::Null))
+        }
+        "task_result" => {
+            let detail: Option<serde_json::Value> = connection
+                .query_row(
+                    "SELECT status, completion_state, substr(summary_json, 1, 8000), updated_at
+                     FROM agent_runs
+                     WHERE run_id = ?1",
+                    params![source_id],
+                    |row| {
+                        Ok(serde_json::json!({
+                            "status": row.get::<_, String>(0)?,
+                            "completionState": row.get::<_, Option<String>>(1)?,
+                            "summaryRaw": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                            "updatedAt": row.get::<_, i64>(3)?,
+                        }))
+                    },
+                )
+                .optional()
+                .map_err(|error| {
+                    format!("Failed to load project memory task result source: {error}")
+                })?;
+            Ok(detail.unwrap_or(serde_json::Value::Null))
+        }
+        _ => Ok(serde_json::Value::Null),
+    }
+}
+
+fn start_project_memory_job<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let workspace_root = normalize_project_memory_workspace_root(
+        payload
+            .get("workspaceRoot")
+            .and_then(|value| value.as_str()),
+    );
+    if workspace_root.is_empty() {
+        return Err("Project memory job requires workspaceRoot.".into());
+    }
+    let reason = payload
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("manual");
+    let session_id = payload
+        .get("sessionId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let limit = payload
+        .get("limit")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(48)
+        .clamp(1, 120);
+    let now = current_timestamp_ms() as i64;
+    let connection = open_app_db(app)?;
+    let _ = sync_project_memory_sources_for_workspace(&connection, &workspace_root, session_id)?;
+    connection
+        .execute(
+            "UPDATE project_memory_jobs
+             SET status = 'failed', finished_at = ?2
+             WHERE workspace_root = ?1
+               AND status = 'running'
+               AND started_at < ?3",
+            params![&workspace_root, now, now - 10 * 60 * 1000],
+        )
+        .map_err(|error| format!("Failed to expire stale project memory jobs: {error}"))?;
+    let input_watermark: Option<i64> = connection
+        .query_row(
+            "SELECT MAX(source_updated_at)
+             FROM project_memory_sources
+             WHERE workspace_root = ?1
+               AND memory_status IN ('pending', 'stale', 'deleted')",
+            params![&workspace_root],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to inspect project memory input watermark: {error}"))?
+        .flatten();
+    let job_id = format!(
+        "project-memory-job-{}-{}",
+        now,
+        NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    connection
+        .execute(
+            "INSERT INTO project_memory_jobs (
+                id, workspace_root, status, reason, input_watermark, output_watermark, started_at, finished_at
+             ) VALUES (?1, ?2, 'running', ?3, ?4, NULL, ?5, NULL)",
+            params![&job_id, &workspace_root, reason, input_watermark, now],
+        )
+        .map_err(|error| format!("Failed to create project memory job: {error}"))?;
+
+    let mut statement = connection
+        .prepare(
+            "SELECT id, workspace_root, session_id, source_type, source_id, source_version,
+                    source_updated_at, memory_status, extracted_at, consolidated_at, last_error
+             FROM project_memory_sources
+             WHERE workspace_root = ?1
+               AND memory_status IN ('pending', 'stale', 'deleted')
+             ORDER BY source_updated_at ASC
+             LIMIT ?2",
+        )
+        .map_err(|error| format!("Failed to prepare project memory source load: {error}"))?;
+    let rows = statement
+        .query_map(params![&workspace_root, limit], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "workspaceRoot": row.get::<_, String>(1)?,
+                "sessionId": row.get::<_, Option<String>>(2)?,
+                "sourceType": row.get::<_, String>(3)?,
+                "sourceId": row.get::<_, String>(4)?,
+                "sourceVersion": row.get::<_, String>(5)?,
+                "sourceUpdatedAt": row.get::<_, i64>(6)?,
+                "memoryStatus": row.get::<_, String>(7)?,
+                "extractedAt": row.get::<_, Option<i64>>(8)?,
+                "consolidatedAt": row.get::<_, Option<i64>>(9)?,
+                "lastError": row.get::<_, Option<String>>(10)?,
+            }))
+        })
+        .map_err(|error| format!("Failed to query project memory sources: {error}"))?;
+    let mut sources = Vec::new();
+    for row in rows {
+        let mut source =
+            row.map_err(|error| format!("Failed to decode project memory source: {error}"))?;
+        let detail = project_memory_source_detail(&connection, &source)?;
+        if let Some(object) = source.as_object_mut() {
+            object.insert("detail".into(), detail);
+        }
+        sources.push(source);
+    }
+
+    Ok(serde_json::json!({
+        "job": {
+            "id": job_id,
+            "workspaceRoot": workspace_root,
+            "status": "running",
+            "reason": reason,
+            "inputWatermark": input_watermark,
+            "startedAt": now,
+        },
+        "sources": sources,
+    }))
+}
+
+fn finish_project_memory_job<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let job_id = payload
+        .get("jobId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Project memory finish requires jobId.".to_string())?;
+    let status = payload
+        .get("status")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "done" | "failed"))
+        .unwrap_or("done");
+    let source_status = payload
+        .get("sourceStatus")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "consolidated" | "skipped" | "pending"))
+        .unwrap_or(if status == "done" {
+            "consolidated"
+        } else {
+            "pending"
+        });
+    let error = payload
+        .get("error")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let source_ids: Vec<String> = payload
+        .get("sourceIds")
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::trim))
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let now = current_timestamp_ms() as i64;
+    let connection = open_app_db(app)?;
+    let output_watermark = if source_ids.is_empty() {
+        None
+    } else {
+        let mut max_watermark: Option<i64> = None;
+        for source_id in &source_ids {
+            let source_watermark: Option<i64> = connection
+                .query_row(
+                    "SELECT source_updated_at FROM project_memory_sources WHERE id = ?1",
+                    params![source_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|err| {
+                    format!("Failed to inspect project memory source watermark: {err}")
+                })?;
+            if let Some(value) = source_watermark {
+                max_watermark = Some(max_watermark.map_or(value, |current| current.max(value)));
+            }
+            connection
+                .execute(
+                    "UPDATE project_memory_sources
+                     SET memory_status = ?2,
+                         extracted_at = COALESCE(extracted_at, ?3),
+                         consolidated_at = CASE
+                           WHEN ?2 IN ('consolidated', 'skipped') THEN ?3
+                           ELSE consolidated_at
+                         END,
+                         last_error = ?4
+                     WHERE id = ?1",
+                    params![source_id, source_status, now, error],
+                )
+                .map_err(|err| format!("Failed to update project memory source status: {err}"))?;
+        }
+        max_watermark
+    };
+    connection
+        .execute(
+            "UPDATE project_memory_jobs
+             SET status = ?2, output_watermark = ?3, finished_at = ?4
+             WHERE id = ?1",
+            params![job_id, status, output_watermark, now],
+        )
+        .map_err(|error| format!("Failed to finish project memory job: {error}"))?;
+
+    Ok(serde_json::json!({
+        "jobId": job_id,
+        "status": status,
+        "sourceStatus": source_status,
+        "sourceCount": source_ids.len(),
+        "outputWatermark": output_watermark,
+        "finishedAt": now,
+    }))
 }
 
 fn edit_transaction_snapshot_key(transaction_id: &str) -> String {
@@ -3020,6 +3785,8 @@ fn handle_bridge_app_action<R: Runtime>(
             let memory_payload = payload.get("memory").unwrap_or(payload);
             store_work_memory(app, memory_payload)
         }
+        "start_project_memory_job" => start_project_memory_job(app, payload),
+        "finish_project_memory_job" => finish_project_memory_job(app, payload),
         "ensure_aura_home" => {
             let workspace_root = payload
                 .get("workspaceRoot")
@@ -3479,9 +4246,7 @@ fn should_attempt_system_node_fallback(_error: &std::io::Error) -> bool {
 }
 
 fn fallback_node_launch_message(primary_message: &str, fallback_error: &std::io::Error) -> String {
-    format!(
-        "{primary_message}\nFallback to system Node also failed: {fallback_error}"
-    )
+    format!("{primary_message}\nFallback to system Node also failed: {fallback_error}")
 }
 
 fn spawn_node_command_with_fallback<R, F>(
@@ -3957,10 +4722,7 @@ fn spawn_agent_task<R: Runtime>(
             .entry("logContext")
             .or_insert_with(|| serde_json::json!({}));
         if let Some(log_context_object) = log_context.as_object_mut() {
-            log_context_object.insert(
-                "taskId".into(),
-                serde_json::Value::String(task_id.clone()),
-            );
+            log_context_object.insert("taskId".into(), serde_json::Value::String(task_id.clone()));
         }
     }
     let log_context = agent_log_context_details(&task_id, &payload);
@@ -3979,42 +4741,47 @@ fn spawn_agent_task<R: Runtime>(
         &app,
         "info",
         "bridge_launch_prepared",
-        agent_log_details(&log_context, serde_json::json!({
-            "launch": launch_details.clone(),
-        })),
+        agent_log_details(
+            &log_context,
+            serde_json::json!({
+                "launch": launch_details.clone(),
+            }),
+        ),
     );
-    let (mut child, used_system_node_fallback) = spawn_node_command_with_fallback(
-        &app,
-        &bridge_cwd,
-        &augmented_path,
-        |command| {
+    let (mut child, used_system_node_fallback) =
+        spawn_node_command_with_fallback(&app, &bridge_cwd, &augmented_path, |command| {
             command
                 .arg(&bridge_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-        },
-    )
-    .map_err(|message| {
+        })
+        .map_err(|message| {
             append_app_log(
                 &app,
                 "error",
                 "bridge_launch_failed",
-                agent_log_details(&log_context, serde_json::json!({
-                    "error": message,
-                    "launch": launch_details_for_error.clone(),
-                })),
+                agent_log_details(
+                    &log_context,
+                    serde_json::json!({
+                        "error": message,
+                        "launch": launch_details_for_error.clone(),
+                    }),
+                ),
             );
             message
-    })?;
+        })?;
     if used_system_node_fallback {
         append_app_log(
             &app,
             "warn",
             "bridge_launch_system_node_fallback_used",
-            agent_log_details(&log_context, serde_json::json!({
-                "launch": launch_details.clone(),
-            })),
+            agent_log_details(
+                &log_context,
+                serde_json::json!({
+                    "launch": launch_details.clone(),
+                }),
+            ),
         );
     }
 
@@ -4118,9 +4885,12 @@ fn spawn_agent_task<R: Runtime>(
                     &stdout_log_app,
                     "error",
                     "bridge_event_parse_failed",
-                    agent_log_details(&stdout_log_context, serde_json::json!({
-                        "line": line,
-                    })),
+                    agent_log_details(
+                        &stdout_log_context,
+                        serde_json::json!({
+                            "line": line,
+                        }),
+                    ),
                 );
                 with_snapshot(&stdout_snapshot, |current| {
                     current.status = "failed".into();
@@ -4242,10 +5012,13 @@ fn spawn_agent_task<R: Runtime>(
                             &stdout_log_app,
                             "warn",
                             "agent_run_persist_failed",
-                            agent_log_details(&stdout_log_context, serde_json::json!({
-                                "runtimeEvent": event_name,
-                                "error": error,
-                            })),
+                            agent_log_details(
+                                &stdout_log_context,
+                                serde_json::json!({
+                                    "runtimeEvent": event_name,
+                                    "error": error,
+                                }),
+                            ),
                         );
                     }
                     append_app_log(
@@ -4570,12 +5343,7 @@ fn spawn_agent_task<R: Runtime>(
 
             if should_emit_agent_task_update(&event_type) {
                 if let Ok(current) = stdout_snapshot.lock() {
-                    emit_agent_task_update(
-                        &stdout_app,
-                        &stdout_log_context,
-                        &current,
-                        &event_type,
-                    );
+                    emit_agent_task_update(&stdout_app, &stdout_log_context, &current, &event_type);
                 }
             }
         }
@@ -4599,9 +5367,12 @@ fn spawn_agent_task<R: Runtime>(
                     &stdout_log_app,
                     "error",
                     "bridge_process_disconnected",
-                    agent_log_details(&stdout_log_context, serde_json::json!({
-                        "stderr": stderr_message,
-                    })),
+                    agent_log_details(
+                        &stdout_log_context,
+                        serde_json::json!({
+                            "stderr": stderr_message,
+                        }),
+                    ),
                 );
                 current.error = Some(if stderr_message.is_empty() {
                     "Node 桥接进程已断开。这可能是由于网络错误或脚本执行异常导致的崩溃。".into()
@@ -4634,9 +5405,12 @@ fn spawn_agent_task<R: Runtime>(
                 &stderr_log_app,
                 "warn",
                 "bridge_stderr",
-                agent_log_details(&stderr_log_context, serde_json::json!({
-                    "line": line.as_str(),
-                })),
+                agent_log_details(
+                    &stderr_log_context,
+                    serde_json::json!({
+                        "line": line.as_str(),
+                    }),
+                ),
             );
             // 实时追加每行 stderr 到共享 buffer，上限 8KB
             if let Ok(mut buf) = stderr_buf_for_thread.lock() {
@@ -4715,8 +5489,8 @@ async fn run_provider_action<R: Runtime>(
         .map_err(|error| format!("Failed to serialize provider action payload: {error}"))?;
     let app_handle = app.clone();
     let payload_for_blocking = payload.clone();
-    let (output, used_system_node_fallback) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(std::process::Output, bool), String> {
+    let (output, used_system_node_fallback) = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(std::process::Output, bool), String> {
             output_node_command_with_fallback(
                 &app_handle,
                 &bridge_cwd,
@@ -4739,9 +5513,10 @@ async fn run_provider_action<R: Runtime>(
                 );
                 message
             })
-        })
-        .await
-        .map_err(|error| format!("Failed to join provider action task: {error}"))??;
+        },
+    )
+    .await
+    .map_err(|error| format!("Failed to join provider action task: {error}"))??;
     if used_system_node_fallback {
         append_app_log(
             &app,
@@ -4839,18 +5614,18 @@ async fn compress_agent_context<R: Runtime>(
                 },
             )
             .map_err(|error| {
-                    let message = format!("Failed to run context compression bridge: {error}");
-                    append_app_log(
-                        &app_handle,
-                        "error",
-                        "context_compression_launch_failed",
-                        serde_json::json!({
-                            "request": context_compression_log_details(&payload_for_blocking),
-                            "error": message,
-                            "launch": launch_details_for_error.clone(),
-                        }),
-                    );
-                    message
+                let message = format!("Failed to run context compression bridge: {error}");
+                append_app_log(
+                    &app_handle,
+                    "error",
+                    "context_compression_launch_failed",
+                    serde_json::json!({
+                        "request": context_compression_log_details(&payload_for_blocking),
+                        "error": message,
+                        "launch": launch_details_for_error.clone(),
+                    }),
+                );
+                message
             })?;
             if used_system_node_fallback {
                 append_app_log(
@@ -4967,16 +5742,16 @@ async fn run_mcp_action<R: Runtime>(
                 },
             )
             .map_err(|message| {
-                    append_app_log(
-                        &app_handle,
-                        "error",
-                        "mcp_action_launch_failed",
-                        serde_json::json!({
-                            "error": message,
-                            "launch": launch_details_for_error.clone(),
-                        }),
-                    );
-                    message
+                append_app_log(
+                    &app_handle,
+                    "error",
+                    "mcp_action_launch_failed",
+                    serde_json::json!({
+                        "error": message,
+                        "launch": launch_details_for_error.clone(),
+                    }),
+                );
+                message
             })?;
             if used_system_node_fallback {
                 append_app_log(
@@ -5388,7 +6163,8 @@ fn load_persisted_app_state<R: Runtime>(
 
     let mut sessions = Vec::new();
     for session_row in session_rows {
-        sessions.push(session_row.map_err(|error| format!("Failed to decode session row: {error}"))?);
+        sessions
+            .push(session_row.map_err(|error| format!("Failed to decode session row: {error}"))?);
     }
 
     Ok(serde_json::json!({
@@ -5542,7 +6318,8 @@ fn search_sessions_sqlite<R: Runtime>(
         .map_err(|error| format!("Failed to execute sessions search query: {error}"))?;
     let mut session_ids = Vec::new();
     for row in rows {
-        session_ids.push(row.map_err(|error| format!("Failed to decode sessions search row: {error}"))?);
+        session_ids
+            .push(row.map_err(|error| format!("Failed to decode sessions search row: {error}"))?);
     }
     Ok(session_ids)
 }
@@ -5588,7 +6365,8 @@ fn list_deleted_sessions_sqlite<R: Runtime>(
         .map_err(|error| format!("Failed to read deleted sessions: {error}"))?;
     let mut sessions = Vec::new();
     for row in rows {
-        sessions.push(row.map_err(|error| format!("Failed to decode deleted session row: {error}"))?);
+        sessions
+            .push(row.map_err(|error| format!("Failed to decode deleted session row: {error}"))?);
     }
     Ok(sessions)
 }
@@ -5822,7 +6600,10 @@ fn load_agent_run_sqlite<R: Runtime>(
         checkpoints.push(row.map_err(|error| format!("Failed to decode checkpoint row: {error}"))?);
     }
     if let Some(object) = run.as_object_mut() {
-        object.insert("checkpoints".to_string(), serde_json::Value::Array(checkpoints));
+        object.insert(
+            "checkpoints".to_string(),
+            serde_json::Value::Array(checkpoints),
+        );
     }
     Ok(run)
 }
@@ -5946,9 +6727,14 @@ fn purge_session_sqlite<R: Runtime>(
              WHERE run_id IN (SELECT run_id FROM agent_runs WHERE session_id = ?1)",
             params![&session_id],
         )
-        .map_err(|error| format!("Failed to purge session agent run checkpoints from SQLite: {error}"))?;
+        .map_err(|error| {
+            format!("Failed to purge session agent run checkpoints from SQLite: {error}")
+        })?;
     connection
-        .execute("DELETE FROM agent_runs WHERE session_id = ?1", params![&session_id])
+        .execute(
+            "DELETE FROM agent_runs WHERE session_id = ?1",
+            params![&session_id],
+        )
         .map_err(|error| format!("Failed to purge session agent runs from SQLite: {error}"))?;
     connection
         .execute(
@@ -5962,7 +6748,9 @@ fn purge_session_sqlite<R: Runtime>(
              WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?1)",
             params![&session_id],
         )
-        .map_err(|error| format!("Failed to purge session message event details from SQLite: {error}"))?;
+        .map_err(|error| {
+            format!("Failed to purge session message event details from SQLite: {error}")
+        })?;
     connection
         .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
         .map_err(|error| format!("Failed to purge session from SQLite: {error}"))?;
@@ -5995,9 +6783,9 @@ fn upsert_message_sqlite<R: Runtime>(
                 deleted_at = 0,
                 updated_at = excluded.updated_at",
             params![
-                message_id,
-                group_id,
-                session_id,
+                &message_id,
+                &group_id,
+                &session_id,
                 get_json_string_field(&message, "role", "assistant"),
                 message.get("linkedMessageId").and_then(|value| value.as_str()),
                 sort_index,
@@ -6007,6 +6795,36 @@ fn upsert_message_sqlite<R: Runtime>(
             ],
         )
         .map_err(|error| format!("Failed to upsert message into SQLite: {error}"))?;
+    if let Some(workspace_root) = connection
+        .query_row(
+            "SELECT COALESCE(NULLIF(workspace_path, ''), workspace_root) FROM sessions WHERE id = ?1",
+            params![&session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to resolve message workspace for project memory: {error}")
+        })?
+    {
+        let active_version = get_json_i64_field(&message, "activeVersionIndex", 0).to_string();
+        mark_stale_project_memory_source_versions(
+            &connection,
+            &workspace_root,
+            "message",
+            &message_id,
+            &active_version,
+        )?;
+        let _ = upsert_project_memory_source(
+            &connection,
+            &workspace_root,
+            Some(session_id),
+            "message",
+            &message_id,
+            &active_version,
+            get_json_i64_field(&message, "createdAt", 0),
+            "pending",
+        )?;
+    }
     Ok(())
 }
 
@@ -6020,9 +6838,40 @@ fn delete_message_sqlite<R: Runtime>(
     connection
         .execute(
             "UPDATE messages SET deleted_at = ?2, updated_at = ?2 WHERE id = ?1 AND deleted_at = 0",
-            params![message_id, deleted_at],
+            params![&message_id, deleted_at],
         )
         .map_err(|error| format!("Failed to delete message from SQLite: {error}"))?;
+    if let Some((workspace_root, session_id, active_version)) = connection
+        .query_row(
+            "SELECT COALESCE(NULLIF(s.workspace_path, ''), s.workspace_root), m.session_id, m.active_version_index
+             FROM messages m
+             JOIN sessions s ON s.id = m.session_id
+             WHERE m.id = ?1",
+            params![&message_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to resolve deleted message project memory source: {error}")
+        })?
+    {
+        let _ = upsert_project_memory_source(
+            &connection,
+            &workspace_root,
+            Some(session_id),
+            "message",
+            &message_id,
+            &active_version.to_string(),
+            deleted_at,
+            "deleted",
+        )?;
+    }
     Ok(())
 }
 
@@ -6102,9 +6951,9 @@ fn upsert_message_version_sqlite<R: Runtime>(
                 id = excluded.id,
                 deleted_at = 0",
             params![
-                persisted_version_id,
-                group_id,
-                message_id,
+                &persisted_version_id,
+                &group_id,
+                &message_id,
                 version_index,
                 get_json_string_field(&version, "content", ""),
                 value_to_json_string(&get_json_array_field(&version, "parts"))?,
@@ -6158,6 +7007,31 @@ fn upsert_message_version_sqlite<R: Runtime>(
             ],
         )
         .map_err(|error| format!("Failed to upsert message version into SQLite: {error}"))?;
+    if let Some((workspace_root, session_id)) = connection
+        .query_row(
+            "SELECT COALESCE(NULLIF(s.workspace_path, ''), s.workspace_root), m.session_id
+             FROM messages m
+             JOIN sessions s ON s.id = m.session_id
+             WHERE m.id = ?1",
+            params![&message_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to resolve message version workspace for project memory: {error}")
+        })?
+    {
+        let _ = upsert_project_memory_source(
+            &connection,
+            &workspace_root,
+            Some(session_id),
+            "message_version",
+            &message_id,
+            &version_index.to_string(),
+            get_json_i64_field(&version, "createdAt", 0),
+            "pending",
+        )?;
+    }
     Ok(())
 }
 
@@ -6172,9 +7046,34 @@ fn delete_message_version_sqlite<R: Runtime>(
     connection
         .execute(
             "UPDATE message_versions SET deleted_at = ?3 WHERE message_id = ?1 AND version_index = ?2 AND deleted_at = 0",
-            params![message_id, version_index, deleted_at],
+            params![&message_id, version_index, deleted_at],
         )
         .map_err(|error| format!("Failed to delete message version from SQLite: {error}"))?;
+    if let Some((workspace_root, session_id)) = connection
+        .query_row(
+            "SELECT COALESCE(NULLIF(s.workspace_path, ''), s.workspace_root), m.session_id
+             FROM messages m
+             JOIN sessions s ON s.id = m.session_id
+             WHERE m.id = ?1",
+            params![&message_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to resolve deleted message version project memory source: {error}")
+        })?
+    {
+        let _ = upsert_project_memory_source(
+            &connection,
+            &workspace_root,
+            Some(session_id),
+            "message_version",
+            &message_id,
+            &version_index.to_string(),
+            deleted_at,
+            "deleted",
+        )?;
+    }
     Ok(())
 }
 
@@ -6233,15 +7132,43 @@ fn upsert_message_event_details_sqlite<R: Runtime>(
                     detail_json = excluded.detail_json,
                     updated_at = excluded.updated_at",
                 params![
-                    group_id,
+                    &group_id,
                     &message_id,
                     version_index,
-                    event_id,
+                    &event_id,
                     value_to_json_string(&detail)?,
                     updated_at,
                 ],
             )
-            .map_err(|error| format!("Failed to upsert message event detail into SQLite: {error}"))?;
+            .map_err(|error| {
+                format!("Failed to upsert message event detail into SQLite: {error}")
+            })?;
+        if let Some((workspace_root, session_id)) = connection
+            .query_row(
+                "SELECT COALESCE(NULLIF(s.workspace_path, ''), s.workspace_root), m.session_id
+                 FROM messages m
+                 JOIN sessions s ON s.id = m.session_id
+                 WHERE m.id = ?1",
+                params![&message_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| {
+                format!("Failed to resolve tool event workspace for project memory: {error}")
+            })?
+        {
+            let source_id = format!("{message_id}:{version_index}:{event_id}");
+            let _ = upsert_project_memory_source(
+                &connection,
+                &workspace_root,
+                Some(session_id),
+                "tool_event",
+                &source_id,
+                "event",
+                updated_at,
+                "pending",
+            )?;
+        }
     }
 
     Ok(())
@@ -6267,6 +7194,83 @@ fn load_message_event_detail_sqlite<R: Runtime>(
         .map_err(|error| format!("Failed to load message event detail from SQLite: {error}"))?;
 
     Ok(raw.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok()))
+}
+
+#[tauri::command]
+fn load_project_memory_status_sqlite<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    workspace_root: String,
+) -> Result<serde_json::Value, String> {
+    let normalized_workspace = normalize_project_memory_workspace_root(Some(&workspace_root));
+    if normalized_workspace.is_empty() {
+        return Ok(serde_json::json!({
+            "workspaceRoot": "",
+            "latestJob": serde_json::Value::Null,
+            "pendingSourceCount": 0,
+            "runningJobCount": 0,
+        }));
+    }
+    let connection = open_app_db(&app)?;
+    let now = current_timestamp_ms() as i64;
+    connection
+        .execute(
+            "UPDATE project_memory_jobs
+             SET status = 'failed', finished_at = ?2
+             WHERE workspace_root = ?1
+               AND status = 'running'
+               AND started_at < ?3",
+            params![&normalized_workspace, now, now - 10 * 60 * 1000],
+        )
+        .map_err(|error| format!("Failed to expire stale project memory jobs: {error}"))?;
+    let latest_job: Option<serde_json::Value> = connection
+        .query_row(
+            "SELECT id, status, reason, input_watermark, output_watermark, started_at, finished_at
+             FROM project_memory_jobs
+             WHERE workspace_root = ?1
+             ORDER BY COALESCE(started_at, 0) DESC, id DESC
+             LIMIT 1",
+            params![&normalized_workspace],
+            |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "status": row.get::<_, String>(1)?,
+                    "reason": row.get::<_, String>(2)?,
+                    "inputWatermark": row.get::<_, Option<i64>>(3)?,
+                    "outputWatermark": row.get::<_, Option<i64>>(4)?,
+                    "startedAt": row.get::<_, Option<i64>>(5)?,
+                    "finishedAt": row.get::<_, Option<i64>>(6)?,
+                }))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load latest project memory job: {error}"))?;
+    let pending_source_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM project_memory_sources
+             WHERE workspace_root = ?1
+               AND memory_status IN ('pending', 'stale', 'deleted')",
+            params![&normalized_workspace],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Failed to count pending project memory sources: {error}"))?;
+    let running_job_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM project_memory_jobs
+             WHERE workspace_root = ?1
+               AND status = 'running'",
+            params![&normalized_workspace],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Failed to count running project memory jobs: {error}"))?;
+
+    Ok(serde_json::json!({
+        "workspaceRoot": normalized_workspace,
+        "latestJob": latest_job.unwrap_or(serde_json::Value::Null),
+        "pendingSourceCount": pending_source_count,
+        "runningJobCount": running_job_count,
+    }))
 }
 
 #[tauri::command]
@@ -6387,7 +7391,10 @@ fn list_app_log_files<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<AppLog
             name: file_name.to_string(),
             path: path.display().to_string(),
             size: metadata.len(),
-            modified_at: metadata.modified().ok().and_then(system_time_to_timestamp_ms),
+            modified_at: metadata
+                .modified()
+                .ok()
+                .and_then(system_time_to_timestamp_ms),
         });
     }
 
@@ -6917,7 +7924,11 @@ fn main() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().pubkey(UPDATER_PUBKEY).build())
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .pubkey(UPDATER_PUBKEY)
+                .build(),
+        )
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if window.label() == "main" || window.label() == "settings" {
@@ -6950,6 +7961,7 @@ fn main() {
             purge_message_version_sqlite,
             upsert_message_event_details_sqlite,
             load_message_event_detail_sqlite,
+            load_project_memory_status_sqlite,
             start_agent_task,
             get_agent_task,
             release_agent_task,

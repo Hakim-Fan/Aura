@@ -3,8 +3,8 @@ import { countTextTokens } from './tokenizer.mjs'
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
 const DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS = 32_000
 export const DEFAULT_CONTEXT_COMPRESSION_THRESHOLD_TOKENS = 256_000
-const MIN_TOOL_BUFFER_TOKENS = 4_000
-const MAX_TOOL_BUFFER_TOKENS = 20_000
+const COMPACT_MAX_OUTPUT_TOKENS = 20_000
+const AUTOCOMPACT_BUFFER_TOKENS = 13_000
 const DEFAULT_KEEP_RECENT_MESSAGE_COUNT = 6
 export const DEFAULT_RECENT_USER_MESSAGE_TOKEN_BUDGET = 20_000
 const DEFAULT_COMPACTION_INPUT_BATCH_RATIO = 0.45
@@ -215,23 +215,25 @@ export function buildContextCompressionBudget(settings = {}, options = {}) {
     Number(settings.contextCompressionThresholdTokens) > 0
       ? Math.round(Number(settings.contextCompressionThresholdTokens))
       : DEFAULT_CONTEXT_COMPRESSION_THRESHOLD_TOKENS
-  const toolResultBufferTokens = Math.round(
-    Math.max(
-      MIN_TOOL_BUFFER_TOKENS,
-      Math.min(MAX_TOOL_BUFFER_TOKENS, contextWindowTokens * 0.12),
-    ),
-  )
-  const compressionThresholdTokens = Math.min(
+  const autoCompactWindowTokens = Math.min(
+    contextWindowTokens,
     configuredThresholdTokens,
-    Math.floor(contextWindowTokens * 0.85),
+  )
+  const compactionReservedOutputTokens = Math.round(
+    Math.max(0, Math.min(maxOutputTokens, COMPACT_MAX_OUTPUT_TOKENS)),
+  )
+  const autoCompactBufferTokens = AUTOCOMPACT_BUFFER_TOKENS
+  const effectiveContextWindowTokens = Math.max(
+    1_000,
+    autoCompactWindowTokens - compactionReservedOutputTokens,
+  )
+  const compressionThresholdTokens = Math.max(
+    1_000,
+    effectiveContextWindowTokens - autoCompactBufferTokens,
   )
   const effectiveThresholdTokens = Math.max(
     1_000,
-    compressionThresholdTokens -
-      systemPromptTokens -
-      toolSchemaTokens -
-      maxOutputTokens -
-      toolResultBufferTokens,
+    compressionThresholdTokens - systemPromptTokens - toolSchemaTokens,
   )
   const targetConversationTokens = Math.max(
     1_500,
@@ -252,7 +254,10 @@ export function buildContextCompressionBudget(settings = {}, options = {}) {
     systemPromptTokens,
     toolSchemaTokens,
     maxOutputTokens,
-    toolResultBufferTokens,
+    compactionReservedOutputTokens,
+    autoCompactBufferTokens,
+    toolResultBufferTokens: autoCompactBufferTokens,
+    effectiveContextWindowTokens,
     compressionThresholdTokens,
     effectiveThresholdTokens,
     targetConversationTokens,
@@ -278,9 +283,7 @@ export function shouldCompressMessages(
   const activePromptTokens = Math.max(latestInputTokens, estimatedPromptTokens)
   const activePromptLimit = Math.max(
     1_000,
-    budget.compressionThresholdTokens -
-      budget.maxOutputTokens -
-      budget.toolResultBufferTokens,
+    budget.compressionThresholdTokens,
   )
   const activePromptLimitReached = activePromptTokens > activePromptLimit
   const trigger =

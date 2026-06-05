@@ -16,7 +16,6 @@ import {
   FolderOpen,
   RefreshCw,
   Search,
-  ShieldCheck,
   Trash2,
 } from 'lucide-react'
 import { builtinPlugins, builtinSkills } from './catalog'
@@ -116,10 +115,6 @@ function normalizePathList(paths: string[] = []) {
 
 function normalizeComparablePath(path: string) {
   return path.trim().replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase()
-}
-
-function normalizeWorkspaceRoot(path: string) {
-  return path.trim().replace(/\\/g, '/').replace(/\/+$/g, '')
 }
 
 function createProviderProfile(provider: ProviderMode = 'custom'): ProviderProfile {
@@ -370,13 +365,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
   )
     ? projectMemoryModelRouteStoredValue
     : ''
-  const currentWorkspaceRoot = normalizeWorkspaceRoot(draftSettings.cwd)
-  const isCurrentWorkspaceMemoryDisabled = currentWorkspaceRoot
-    ? draftSettings.projectMemory.disabledWorkspaceRoots
-      .map(normalizeWorkspaceRoot)
-      .includes(currentWorkspaceRoot)
-    : false
-
   const browserValidationError = useMemo(() => {
     if (draftSettings.browser.lightpanda.enabled && !lightpandaStatus?.valid) {
       return lightpandaStatus?.error || 'Lightpanda 已启用，但当前不可用。'
@@ -1050,20 +1038,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
       providerProfileId: selection.profileId,
       model: selection.modelId,
     })
-  }
-
-  function toggleCurrentWorkspaceMemoryDisabled(disabled: boolean) {
-    const workspaceRoot = normalizeWorkspaceRoot(draftSettings.cwd)
-    if (!workspaceRoot) {
-      return
-    }
-    const currentRoots = draftSettings.projectMemory.disabledWorkspaceRoots
-      .map(normalizeWorkspaceRoot)
-      .filter(Boolean)
-    const nextRoots = disabled
-      ? Array.from(new Set([...currentRoots, workspaceRoot]))
-      : currentRoots.filter(entry => entry !== workspaceRoot)
-    updateProjectMemorySettings({ disabledWorkspaceRoots: nextRoots })
   }
 
   function toggleSkill(skillId: string) {
@@ -2303,9 +2277,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
   }
 
   function renderProjectMemory() {
-    const memoryPath = currentWorkspaceRoot
-      ? `${currentWorkspaceRoot}/.aura/memory/`
-      : '当前工作区/.aura/memory/'
     const memoryCards = [
       {
         icon: Brain,
@@ -2314,14 +2285,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
           ? '模型可在需要时静默检索本项目记忆。'
           : '不会检索或更新任何项目长期记忆。',
         tone: draftSettings.projectMemory.enabled ? 'text-emerald-600' : 'text-black/35',
-      },
-      {
-        icon: ShieldCheck,
-        title: isCurrentWorkspaceMemoryDisabled ? '当前项目关闭' : '当前项目开启',
-        detail: currentWorkspaceRoot
-          ? '项目可独立覆盖全局开关。'
-          : '先在通用页选择工作区后可设置项目覆盖。',
-        tone: isCurrentWorkspaceMemoryDisabled ? 'text-amber-600' : 'text-sky-600',
       },
       {
         icon: Clock3,
@@ -2376,24 +2339,6 @@ export function SettingsWindowApp({ initialTab }: Props) {
                   </span>
                 </div>
               </label>
-              <label className={`toggle-inline ${!currentWorkspaceRoot ? 'disabled' : ''}`}>
-                <input
-                  checked={isCurrentWorkspaceMemoryDisabled}
-                  disabled={!currentWorkspaceRoot}
-                  type="checkbox"
-                  onChange={event => toggleCurrentWorkspaceMemoryDisabled(event.target.checked)}
-                />
-                <div className="flex flex-col">
-                  <strong>关闭当前项目记忆</strong>
-                  <span className="muted">
-                    只影响当前工作区，不改变其他项目的长期记忆设置。
-                  </span>
-                </div>
-              </label>
-            </div>
-            <div className="provider-note mt-3">
-              <p>{memoryPath}</p>
-              <p>记忆目录内的用户编辑会被保留；后台更新只做增量合并，不覆盖整份文件。</p>
             </div>
           </section>
 

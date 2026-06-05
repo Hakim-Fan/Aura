@@ -147,6 +147,72 @@ test('project_memory_organizer writes are serialized so concurrent updates prese
   assert.match(projectMemory, /第 2 次整理/u)
 })
 
+test('project_memory_organizer reads pending DB sources instead of transient messages', async () => {
+  const cwd = await makeWorkspace()
+  const finished = []
+  const hooks = {
+    async appControl(action, payload) {
+      if (action === 'start_project_memory_job') {
+        assert.equal(payload.workspaceRoot, cwd)
+        return {
+          job: {
+            id: 'job-db-sources',
+            workspaceRoot: cwd,
+            status: 'running',
+            reason: payload.reason,
+            inputWatermark: 123,
+          },
+          sources: [
+            {
+              id: 'source-1',
+              sourceType: 'message',
+              sourceId: 'message-1',
+              sourceVersion: '0',
+              memoryStatus: 'pending',
+              detail: {
+                role: 'user',
+                content: '数据库 source：项目记忆整理不要使用 work_memory。',
+              },
+            },
+          ],
+        }
+      }
+      if (action === 'finish_project_memory_job') {
+        finished.push(payload)
+        return { status: payload.status, sourceStatus: payload.sourceStatus }
+      }
+      throw new Error(`unexpected appControl action: ${action}`)
+    },
+  }
+  const runNestedAgent = async request => {
+    const prompt = request.messages[0].content
+    assert.match(prompt, /数据库 source：项目记忆整理不要使用 work_memory/u)
+    assert.doesNotMatch(prompt, /这段临时 messages 不该出现/u)
+    return {
+      message: JSON.stringify({
+        project: '记忆整理来源改为 project_memory_sources。',
+        decisions: '',
+        troubleshooting: '',
+        preferences: '',
+        session_title: 'DB sources',
+        session_summary: 'organizer 从 DB source 整理。',
+      }),
+    }
+  }
+
+  const result = await updateProjectMemoryNow({
+    settings: settingsFor(cwd),
+    messages: [{ role: 'user', content: '这段临时 messages 不该出现' }],
+    sessionId: 'session-1',
+    hooks,
+    runNestedAgent,
+  })
+
+  assert.equal(result.status, 'updated')
+  assert.equal(result.sourceCount, 1)
+  assert.equal(finished.at(-1)?.sourceStatus, 'consolidated')
+})
+
 test('project_memory_organizer scheduled updates dedupe identical pending work', async () => {
   const cwd = await makeWorkspace()
   const pending = new Promise(() => {})

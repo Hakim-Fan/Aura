@@ -61,14 +61,59 @@
 
 ```text
 任务结束
-  -> 检查 .aura/memory/metadata.json
+  -> 原始数据写入 DB
+  -> project_memory_sources 标记对应 message/version/tool/task_result 为 pending
   -> 重置当前项目 idle timer
   -> 如果 idle timer 到达阈值且用户没有继续任务
-  -> 启动 memory summary（静默）
+  -> 创建 project_memory_jobs
+  -> organizer 从 DB 读取 pending/stale/deleted sources
   -> 更新对应 markdown 文件
+  -> source 标记 consolidated 或 skipped
 ```
 
-显式更新记忆时，不等待 idle timer，立即走同一套受限写入路径。
+显式更新记忆时，不等待 idle timer，立即走同一套受限写入路径，并在工具调用内等到写入完成后再返回。
+
+## 3.1 数据来源
+
+不使用 `work_memory` 作为项目长期记忆来源。
+
+项目记忆整理只依赖已有 DB 原始数据和一张轻量状态表：
+
+```text
+project_memory_sources
+  id
+  workspace_root
+  session_id
+  source_type        message | message_version | tool_event | task_result
+  source_id
+  source_version
+  source_updated_at
+  memory_status      pending | extracted | consolidated | stale | deleted | skipped
+  extracted_at
+  consolidated_at
+  last_error
+
+project_memory_jobs
+  id
+  workspace_root
+  status             pending | running | done | failed
+  reason             idle | manual | retry
+  input_watermark
+  output_watermark
+  started_at
+  finished_at
+```
+
+真实内容仍然从已有表读取：
+
+- `messages`
+- `message_versions`
+- `message_event_details`
+- `agent_runs`
+
+`project_memory_sources` 只记录“哪些原始数据需要整理、是否已整理”，不复制大段内容。
+
+消息重答、工具事件更新、任务结果更新时，对应 source 回到 `pending`。消息或版本删除时，对应 source 变成 `deleted`，organizer 下次会把它当作修正信号处理。
 
 ## 4. 更新什么
 
@@ -151,9 +196,10 @@
 
 记忆整理采用 Claude 式后台异步模式：
 
-- 用户明确要求更新/保存/记住/忘记项目记忆时，主 agent 只调用 `update_project_memory`。
-- `update_project_memory` 不直接整理和写入完整记忆，而是静默启动 `project_memory_organizer`。
-- 空闲阈值触发时，同样只启动 `project_memory_organizer`，不在前台任务内同步整理。
+- 用户明确要求更新/保存/记住/忘记项目记忆时，主 agent 调用 `update_project_memory`，并等待本次整理写入完成。
+- `update_project_memory` 不直接整理和写入完整记忆，而是创建 `project_memory_jobs`，再运行 `project_memory_organizer`。
+- 空闲阈值触发时，同样只触发 job，不携带整段会话临时内存。
+- `project_memory_organizer` 读取 DB 中 `pending/stale/deleted` sources 的真实内容，生成增量草稿。
 - `project_memory_organizer` 生成结构化增量草稿，宿主进程再按固定文件结构受控追加到 `.aura/memory/**`。
 - `project_memory_organizer` 完成后本次整理即结束；失败只记录日志，不打断前台任务。
 

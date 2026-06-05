@@ -226,6 +226,9 @@ function normalizeTaskContextCompression(
     systemPromptTokens: numberField('systemPromptTokens'),
     toolSchemaTokens: numberField('toolSchemaTokens'),
     maxOutputTokens: numberField('maxOutputTokens'),
+    compactionReservedOutputTokens: numberField('compactionReservedOutputTokens'),
+    autoCompactBufferTokens: numberField('autoCompactBufferTokens'),
+    effectiveContextWindowTokens: numberField('effectiveContextWindowTokens'),
     toolResultBufferTokens: numberField('toolResultBufferTokens'),
     summaryTokens: numberField('summaryTokens'),
     windowSource: stringField('windowSource'),
@@ -840,6 +843,10 @@ function collectEnabledModelsByProfile(settings: AgentSettings) {
       models: profile.models.filter(model => model.enabled),
     }))
     .filter(group => group.models.length > 0)
+}
+
+function normalizeProjectMemoryRoot(path: string) {
+  return path.trim().replace(/\\/g, '/').replace(/\/+$/g, '')
 }
 
 function presentToolEventTitle(event: ToolEvent) {
@@ -4514,6 +4521,30 @@ export function MainWindowApp() {
     saveSettings(nextSettings)
   }
 
+  function setCurrentProjectMemoryEnabled(enabled: boolean) {
+    const workspaceRoot = normalizeProjectMemoryRoot(activeWorkspacePath || activeProjectWorkspaceRoot)
+    if (!workspaceRoot) {
+      setError('当前会话尚未设置工作区，暂时无法切换项目记忆。')
+      return
+    }
+    const currentRoots = (settings.projectMemory.disabledWorkspaceRoots || [])
+      .map(normalizeProjectMemoryRoot)
+      .filter(Boolean)
+    const nextDisabledRoots = enabled
+      ? currentRoots.filter(entry => entry !== workspaceRoot)
+      : Array.from(new Set([...currentRoots, workspaceRoot]))
+    const nextSettings: AgentSettings = {
+      ...settings,
+      projectMemory: {
+        ...settings.projectMemory,
+        disabledWorkspaceRoots: nextDisabledRoots,
+      },
+    }
+    setSettings(nextSettings)
+    saveSettings(nextSettings)
+    showToast(enabled ? '已开启当前项目记忆。' : '已关闭当前项目记忆。')
+  }
+
   function setProjectCapabilityOverride(
     kind: 'skills' | 'plugins' | 'mcp',
     id: string,
@@ -4725,12 +4756,23 @@ export function MainWindowApp() {
                 onSetCapabilityOverride={setProjectCapabilityOverride}
                 onSetCapabilityOverrides={setProjectCapabilityOverrides}
                 onToggleComputerUse={setSessionComputerUseEnabled}
+                onToggleProjectMemory={setCurrentProjectMemoryEnabled}
                 onSubmit={value => void submit(value)}
                 onOpenProviders={() =>
                   void openSettingsWindow('providers').catch(caught => {
                     setError(caught instanceof Error ? caught.message : '打开设置窗口失败。')
                   })
                 }
+                onOpenProjectMemoryFolder={() => {
+                  const workspaceRoot = normalizeProjectMemoryRoot(activeWorkspacePath || activeProjectWorkspaceRoot)
+                  if (!workspaceRoot) {
+                    setError('当前会话尚未设置工作区，无法打开项目记忆目录。')
+                    return
+                  }
+                  void openPathInDefaultApp(`${workspaceRoot}/.aura/memory`).catch(caught => {
+                    setError(caught instanceof Error ? caught.message : '打开记忆目录失败。')
+                  })
+                }}
                 onHandleApproval={decision => void handleApproval(decision)}
                 onOpenWorkspaceExplorer={() => {
                   if (activeWorkspacePath.trim() && !workspaceTree && !workspaceLoading) {

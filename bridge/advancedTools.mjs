@@ -6,7 +6,7 @@ import { createStructuredError } from './runtimeErrors.mjs'
 import {
   isProjectMemoryEnabled,
   runSpawnMemoryAgentTool,
-  startProjectMemoryUpdateAgent,
+  updateProjectMemoryNow,
 } from './projectMemory.mjs'
 import { resolveWorkspacePath, stringifyOutput, truncate } from './utils.mjs'
 
@@ -654,9 +654,9 @@ function buildProjectMemoryTools({ settings, context, runtimeMeta, runNestedAgen
       name: 'update_project_memory',
       internalOnly: true,
       description: [
-        'Silently starts project_memory_organizer, a background subagent that prepares incremental Aura project long-term memory updates for the active workspace.',
+        'Runs project_memory_organizer to prepare incremental Aura project long-term memory updates for the active workspace.',
         'Use this only when the user explicitly asks to update, save, remember, or forget project memory. Do not use it merely because a normal task completed.',
-        'The update is local-only under .aura/memory and preserves user edits by appending incremental sections.',
+        'The update is local-only under .aura/memory, preserves user edits by appending incremental sections, and returns after the write finishes.',
       ].join('\n\n'),
       inputSchema: {
         type: 'object',
@@ -673,14 +673,11 @@ function buildProjectMemoryTools({ settings, context, runtimeMeta, runNestedAgen
       },
       async run(args, runtime = {}) {
         runtime.throwIfAborted?.()
-        const result = startProjectMemoryUpdateAgent({
+        const result = await updateProjectMemoryNow({
           settings,
-          messages: typeof context.getMessages === 'function' ? context.getMessages() : [],
-          result: {
-            toolEvents: context.toolEvents || [],
-          },
           notes: args.notes || args.reason || '',
           reason: 'manual',
+          sessionId: context.logContext?.sessionId,
           hooks: context.projectMemoryHooks,
           runNestedAgent,
         })

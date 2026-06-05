@@ -123,6 +123,25 @@ export function loadPersistedMessageEventDetail(
   })
 }
 
+export type ProjectMemoryStatusRecord = {
+  workspaceRoot: string
+  latestJob: {
+    id: string
+    status: 'pending' | 'running' | 'done' | 'failed' | string
+    reason: 'idle' | 'manual' | 'retry' | string
+    inputWatermark?: number | null
+    outputWatermark?: number | null
+    startedAt?: number | null
+    finishedAt?: number | null
+  } | null
+  pendingSourceCount: number
+  runningJobCount: number
+}
+
+export function loadProjectMemoryStatus(workspaceRoot: string) {
+  return invoke<ProjectMemoryStatusRecord>('load_project_memory_status_sqlite', { workspaceRoot })
+}
+
 export function deletePersistedMessageVersion(messageId: string, versionIndex: number) {
   return invoke('delete_message_version_sqlite', { messageId, versionIndex })
 }

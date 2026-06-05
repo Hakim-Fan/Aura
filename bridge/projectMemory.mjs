@@ -671,28 +671,48 @@ function summarizeToolEvents(toolEvents = []) {
     .join('\n')
 }
 
-function buildMemoryOrganizerPrompt({ settings, messages, result, notes, reason, snapshot }) {
+function summarizeProjectMemorySources(sources = []) {
+  return (Array.isArray(sources) ? sources : [])
+    .map((source, index) => {
+      const header = [
+        `#${index + 1}`,
+        source?.sourceType || 'source',
+        source?.memoryStatus ? `status=${source.memoryStatus}` : '',
+        source?.sessionId ? `session=${source.sessionId}` : '',
+        source?.sourceId ? `id=${source.sourceId}` : '',
+        source?.sourceVersion ? `version=${source.sourceVersion}` : '',
+      ].filter(Boolean).join(' ')
+      const detail = typeof source?.detail === 'string'
+        ? source.detail
+        : JSON.stringify(source?.detail || {}, null, 2)
+      return `${header}\n${truncate(detail, 4200)}`
+    })
+    .join('\n\n')
+}
+
+function buildMemoryOrganizerPrompt({ settings, notes, reason, snapshot, job, sources }) {
   const language = localeLabel(settings)
+  const sourceEvidence = summarizeProjectMemorySources(sources)
   return [
     'You are Aura project-memory organizer, an internal background memory organization subagent.',
     `Write durable local project memory draft in ${language}.`,
-    'Use only evidence from the supplied conversation summary, tool evidence, final result, and explicit user notes.',
+    'Use only evidence from the supplied database sources and explicit user notes.',
     'Do not invent facts. Do not store secrets, tokens, credentials, generic plans, raw chain-of-thought, or temporary speculation.',
     'Return strict JSON with keys: project, decisions, troubleshooting, preferences, session_title, session_summary.',
     'Each value must be a concise markdown string. Use empty strings for fields that should not be updated.',
     'Respect manual user edits in existing memory. Do not rewrite the existing files; produce only incremental additions.',
+    'Treat sources with status=deleted or status=stale as corrections. If they invalidate prior memory, write a short correction instead of repeating obsolete content.',
     '',
     `Update reason: ${reason}`,
+    job?.id ? `Job: ${job.id}` : '',
+    job?.inputWatermark ? `Input watermark: ${job.inputWatermark}` : '',
     notes ? `Explicit notes:\n${notes}` : '',
-    `Recent conversation:\n${summarizeMessagesForMemory(messages)}`,
-    result?.message ? `Final answer:\n${compactText(result.message, 1800)}` : '',
-    Array.isArray(result?.toolEvents) ? `Tool evidence:\n${summarizeToolEvents(result.toolEvents)}` : '',
+    sourceEvidence ? `Database sources to organize:\n${truncate(sourceEvidence, 26_000)}` : '',
     `Existing project memory snapshot:\n${truncate(buildLookupContext({
       cwd: snapshot.cwd,
       query: [
         notes,
-        result?.message,
-        summarizeMessagesForMemory(messages, 4),
+        sourceEvidence,
       ].filter(Boolean).join('\n'),
       memoryFiles: snapshot.memoryFiles,
       sessions: snapshot.sessions.slice(-3),
@@ -733,10 +753,10 @@ function parseMemoryDraft(text = '') {
 
 async function generateMemoryDraftWithAgent({
   settings,
-  messages,
-  result,
   notes,
   reason,
+  job,
+  sources,
   hooks,
   runNestedAgent,
 }) {
@@ -760,11 +780,11 @@ async function generateMemoryDraftWithAgent({
         role: 'user',
         content: buildMemoryOrganizerPrompt({
           settings,
-          messages,
-          result,
           notes,
           reason,
           snapshot,
+          job,
+          sources,
         }),
       },
     ],
@@ -781,6 +801,58 @@ async function generateMemoryDraftWithAgent({
     return null
   }
   return parseMemoryDraft(text)
+}
+
+async function startProjectMemoryJob({ settings = {}, reason = 'manual', sessionId = '', hooks } = {}) {
+  const cwd = normalizeWorkspaceRoot(settings.cwd)
+  if (!cwd || typeof hooks?.appControl !== 'function') {
+    return null
+  }
+  try {
+    return await hooks.appControl('start_project_memory_job', {
+      workspaceRoot: cwd,
+      sessionId: safeString(sessionId),
+      reason,
+      limit: 48,
+    })
+  } catch (error) {
+    emitMemoryLog(hooks, 'project_memory.job_start_failed', {
+      cwd,
+      reason,
+      error: error instanceof Error ? error.message : String(error),
+    }, 'warn')
+    return null
+  }
+}
+
+async function finishProjectMemoryJob({
+  job,
+  sourceIds = [],
+  sourceStatus = 'consolidated',
+  status = 'done',
+  error = '',
+  hooks,
+} = {}) {
+  if (!job?.id || typeof hooks?.appControl !== 'function') {
+    return null
+  }
+  try {
+    return await hooks.appControl('finish_project_memory_job', {
+      jobId: job.id,
+      status,
+      sourceStatus,
+      sourceIds,
+      error,
+    })
+  } catch (finishError) {
+    emitMemoryLog(hooks, 'project_memory.job_finish_failed', {
+      jobId: job.id,
+      status,
+      sourceStatus,
+      error: finishError instanceof Error ? finishError.message : String(finishError),
+    }, 'warn')
+    return null
+  }
 }
 
 async function appendSection(cwd, fileName, title, body) {
@@ -829,10 +901,9 @@ function enqueueProjectMemoryUpdate(cwd, task) {
 
 async function updateProjectMemoryNowUnlocked({
   settings = {},
-  messages = [],
-  result = {},
   notes = '',
   reason = 'manual',
+  sessionId = '',
   hooks,
   runNestedAgent,
 } = {}) {
@@ -842,18 +913,51 @@ async function updateProjectMemoryNowUnlocked({
   const cwd = normalizeWorkspaceRoot(settings.cwd)
   await ensureProjectMemoryLayout(settings, hooks)
   emitMemoryLog(hooks, 'project_memory.update_started', { cwd, reason })
+  const jobPayload = await startProjectMemoryJob({
+    settings,
+    reason,
+    sessionId,
+    hooks,
+  })
+  const job = jobPayload?.job || null
+  const sources = Array.isArray(jobPayload?.sources) ? jobPayload.sources : []
+  const sourceIds = sources.map(source => safeString(source?.id)).filter(Boolean)
+  if (sources.length === 0 && !safeString(notes)) {
+    await finishProjectMemoryJob({
+      job,
+      sourceIds,
+      sourceStatus: 'skipped',
+      status: 'done',
+      hooks,
+    })
+    emitMemoryLog(hooks, 'project_memory.update_skipped', {
+      cwd,
+      reason,
+      skipReason: 'no_pending_project_memory_sources',
+      jobId: job?.id,
+    })
+    return { status: 'skipped', reason: 'no_pending_project_memory_sources' }
+  }
   let draft = null
   try {
     draft = await generateMemoryDraftWithAgent({
       settings,
-      messages,
-      result,
       notes,
       reason,
+      job,
+      sources,
       hooks,
       runNestedAgent,
     })
   } catch (error) {
+    await finishProjectMemoryJob({
+      job,
+      sourceIds,
+      sourceStatus: 'pending',
+      status: 'failed',
+      error: error instanceof Error ? error.message : String(error),
+      hooks,
+    })
     emitMemoryLog(hooks, 'project_memory.update_model_failed', {
       cwd,
       reason,
@@ -861,10 +965,18 @@ async function updateProjectMemoryNowUnlocked({
     }, 'warn')
   }
   if (!draft) {
+    await finishProjectMemoryJob({
+      job,
+      sourceIds,
+      sourceStatus: 'skipped',
+      status: 'done',
+      hooks,
+    })
     emitMemoryLog(hooks, 'project_memory.update_skipped', {
       cwd,
       reason,
       skipReason: 'memory_organizer_returned_no_draft',
+      jobId: job?.id,
     }, 'warn')
     return { status: 'skipped', reason: 'memory_organizer_returned_no_draft' }
   }
@@ -896,15 +1008,26 @@ async function updateProjectMemoryNowUnlocked({
     last_updated: nowIso(),
     last_update_reason: reason,
     last_idle_update_at: reason === 'idle' ? nowIso() : metadata.last_idle_update_at || null,
+    last_project_memory_job_id: job?.id || metadata.last_project_memory_job_id || null,
+  })
+  await finishProjectMemoryJob({
+    job,
+    sourceIds,
+    sourceStatus: changedFiles.length > 0 ? 'consolidated' : 'skipped',
+    status: 'done',
+    hooks,
   })
   emitMemoryLog(hooks, 'project_memory.update_done', {
     cwd,
     reason,
     changedFiles,
+    jobId: job?.id,
+    sourceCount: sources.length,
   })
   return {
     status: 'updated',
     changedFiles,
+    sourceCount: sources.length,
   }
 }
 
@@ -921,10 +1044,9 @@ export async function updateProjectMemoryNow(options = {}) {
 
 export function startProjectMemoryUpdateAgent({
   settings = {},
-  messages = [],
-  result = {},
   notes = '',
   reason = 'manual',
+  sessionId = '',
   hooks,
   runNestedAgent,
 } = {}) {
@@ -935,7 +1057,8 @@ export function startProjectMemoryUpdateAgent({
   const key = [
     cwd,
     reason,
-    stableTaskKeyPart(notes || result?.message || summarizeMessagesForMemory(messages, 2), 240),
+    safeString(sessionId) || 'workspace',
+    stableTaskKeyPart(notes, 240),
   ].join('::')
   const existing = updateTasks.get(key)
   if (existing) {
@@ -948,10 +1071,9 @@ export function startProjectMemoryUpdateAgent({
   const memoryTaskId = `memory-organizer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const promise = updateProjectMemoryNow({
     settings,
-    messages,
-    result,
     notes,
     reason,
+    sessionId,
     hooks,
     runNestedAgent,
   }).catch(error => {
@@ -1001,8 +1123,7 @@ async function shouldRunIdleUpdate(settings = {}, hooks, thresholdHours = 4) {
 
 export function scheduleProjectMemoryIdleUpdate({
   settings = {},
-  messages = [],
-  result = {},
+  sessionId = '',
   hooks,
   runNestedAgent,
 } = {}) {
@@ -1032,8 +1153,7 @@ export function scheduleProjectMemoryIdleUpdate({
     }
     startProjectMemoryUpdateAgent({
       settings,
-      messages,
-      result,
+      sessionId,
       reason: 'idle',
       hooks,
       runNestedAgent,

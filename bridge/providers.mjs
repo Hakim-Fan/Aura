@@ -1493,6 +1493,25 @@ async function compactRuntimeTranscript({
             ) || 0,
           ),
         )
+  if (afterActiveTokens >= activeContextTokens) {
+    hooks?.onReasoningDelta?.(
+      [
+        'Context compression skipped:',
+        `${activeContextTokens} active tokens -> ${afterActiveTokens} active tokens did not reduce context.`,
+      ].join(' '),
+      {
+        blockId: createExecutionStepId(
+          hooks,
+          'reasoning',
+          `runtime-transcript-compression-skipped-${providerKind}`,
+          `runtime-transcript-compression-skipped-${providerKind}`,
+        ),
+        kind: 'summary',
+        order: -100,
+      },
+    )
+    return transcript
+  }
   hooks?.onContextCompression?.({
     id: compressionStepId,
     kind: 'agent_runtime',
@@ -1516,6 +1535,9 @@ async function compactRuntimeTranscript({
     systemPromptTokens: budget.systemPromptTokens,
     toolSchemaTokens: budget.toolSchemaTokens,
     maxOutputTokens: budget.maxOutputTokens,
+    compactionReservedOutputTokens: budget.compactionReservedOutputTokens,
+    autoCompactBufferTokens: budget.autoCompactBufferTokens,
+    effectiveContextWindowTokens: budget.effectiveContextWindowTokens,
     toolResultBufferTokens: budget.toolResultBufferTokens,
     summaryTokens: estimateTextTokens(summaryText, settings),
     windowSource: budget.windowSource,
@@ -2917,6 +2939,45 @@ function resolveReasoningCompletionPolicy(settings = {}) {
   }
 }
 
+function resolveContextAwareMaxCompletionTokens(
+  settings = {},
+  requestedMaxCompletionTokens,
+  estimatedInputTokens,
+) {
+  const requested = Math.max(
+    1,
+    Math.round(Number(requestedMaxCompletionTokens) || 0),
+  )
+  const inputTokens = Math.max(
+    0,
+    Math.round(Number(estimatedInputTokens) || 0),
+  )
+  if (inputTokens <= 0) {
+    return requested
+  }
+
+  const budget = buildContextCompressionBudget(settings)
+  const contextWindowTokens = Math.max(
+    1,
+    Math.round(Number(budget.contextWindowTokens) || 0),
+  )
+  const remaining = contextWindowTokens - inputTokens
+  if (remaining <= 0) {
+    return Math.min(requested, 1_024)
+  }
+
+  const safetyBufferTokens = Math.max(
+    1_024,
+    Math.min(3_000, Math.floor(contextWindowTokens * 0.03)),
+  )
+  const available = remaining - safetyBufferTokens
+  if (available <= 0) {
+    return Math.min(requested, 1_024)
+  }
+
+  return Math.max(1_024, Math.min(requested, Math.floor(available)))
+}
+
 function buildOpenAiCompletionBudgetParams(settings = {}, maxCompletionTokens) {
   const normalized = Math.max(
     1,
@@ -4163,6 +4224,11 @@ export async function runOpenAiCompatibleAgent({
               activeTools,
               settings,
             )
+            const maxCompletionTokens = resolveContextAwareMaxCompletionTokens(
+              settings,
+              completionPolicy.maxCompletionTokens,
+              estimatedInputTokens,
+            )
             let response
             try {
               response = await fetchWithTimeout(
@@ -4177,7 +4243,7 @@ export async function runOpenAiCompatibleAgent({
                     tool_choice: 'auto',
                     ...buildOpenAiCompletionBudgetParams(
                       settings,
-                      completionPolicy.maxCompletionTokens,
+                      maxCompletionTokens,
                     ),
                     stream: true,
                     ...(settings.provider === 'openai'
@@ -4873,6 +4939,11 @@ export async function runGoogleAgent({
               activeTools,
               settings,
             )
+            const maxCompletionTokens = resolveContextAwareMaxCompletionTokens(
+              settings,
+              completionPolicy.maxCompletionTokens,
+              estimatedInputTokens,
+            )
             let response
             try {
               response = await fetchWithTimeout(
@@ -4890,7 +4961,7 @@ export async function runGoogleAgent({
                     contents: transcript,
                     tools: geminiToolDefs(activeTools),
                     generationConfig: {
-                      maxOutputTokens: completionPolicy.maxCompletionTokens,
+                      maxOutputTokens: maxCompletionTokens,
                     },
                   }),
                 },

@@ -504,6 +504,9 @@ export type SessionContextCompression = {
   systemPromptTokens?: number
   toolSchemaTokens?: number
   maxOutputTokens?: number
+  compactionReservedOutputTokens?: number
+  autoCompactBufferTokens?: number
+  effectiveContextWindowTokens?: number
   toolResultBufferTokens?: number
   summaryTokens?: number
   windowSource?: 'model_metadata' | 'settings' | 'inferred' | string

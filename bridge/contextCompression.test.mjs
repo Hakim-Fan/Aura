@@ -87,7 +87,9 @@ test('buildContextCompressionBudget uses model metadata when available', () => {
   assert.equal(budget.configuredContextWindowTokens, 256_000)
   assert.equal(budget.configuredThresholdTokens, 256_000)
   assert.equal(budget.maxOutputTokens, 20_000)
-  assert.ok(budget.effectiveThresholdTokens < budget.compressionThresholdTokens)
+  assert.equal(budget.compactionReservedOutputTokens, 20_000)
+  assert.equal(budget.autoCompactBufferTokens, 13_000)
+  assert.equal(budget.effectiveThresholdTokens, budget.compressionThresholdTokens)
 })
 
 test('buildContextCompressionBudget uses configured budget when model metadata is absent', () => {
@@ -100,7 +102,9 @@ test('buildContextCompressionBudget uses configured budget when model metadata i
   assert.equal(budget.contextWindowTokens, 64_000)
   assert.equal(budget.windowSource, 'settings')
   assert.equal(budget.configuredThresholdTokens, 64_000)
-  assert.equal(budget.compressionThresholdTokens, Math.floor(64_000 * 0.85))
+  assert.equal(budget.compactionReservedOutputTokens, 20_000)
+  assert.equal(budget.autoCompactBufferTokens, 13_000)
+  assert.equal(budget.compressionThresholdTokens, 31_000)
 })
 
 test('buildContextCompressionBudget subtracts tool schema tokens from effective threshold', () => {
@@ -166,6 +170,28 @@ test('shouldCompressMessages only triggers beyond the effective token threshold'
 
   assert.equal(result.shouldCompress, true)
   assert.ok(result.estimatedTokens > result.budget.effectiveThresholdTokens)
+})
+
+test('shouldCompressMessages does not reserve the full 64k output budget for every turn', () => {
+  const result = shouldCompressMessages(
+    [
+      { role: 'user', content: 'small' },
+      { role: 'assistant', content: 'small' },
+    ],
+    {
+      provider: 'openai',
+      model: 'gpt-main',
+      contextCompressionThresholdTokens: 128_000,
+    },
+    {
+      latestInputTokens: 32_000,
+    },
+  )
+
+  assert.equal(result.budget.maxOutputTokens, 64_000)
+  assert.equal(result.budget.compactionReservedOutputTokens, 20_000)
+  assert.equal(result.activePromptLimit, 95_000)
+  assert.equal(result.shouldCompress, false)
 })
 
 test('shouldCompressMessages can trigger for short conversations with oversized history', () => {

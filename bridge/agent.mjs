@@ -439,6 +439,18 @@ function buildContextCompressionCheckpoint({
     systemPromptTokens: Math.max(0, Math.round(Number(budget?.systemPromptTokens) || 0)),
     toolSchemaTokens: Math.max(0, Math.round(Number(budget?.toolSchemaTokens) || 0)),
     maxOutputTokens: Math.max(0, Math.round(Number(budget?.maxOutputTokens) || 0)),
+    compactionReservedOutputTokens: Math.max(
+      0,
+      Math.round(Number(budget?.compactionReservedOutputTokens) || 0),
+    ),
+    autoCompactBufferTokens: Math.max(
+      0,
+      Math.round(Number(budget?.autoCompactBufferTokens) || 0),
+    ),
+    effectiveContextWindowTokens: Math.max(
+      0,
+      Math.round(Number(budget?.effectiveContextWindowTokens) || 0),
+    ),
     toolResultBufferTokens: Math.max(
       0,
       Math.round(Number(budget?.toolResultBufferTokens) || 0),
@@ -493,6 +505,26 @@ async function maybeCompressMessagesForContext({
     compressionState.budget.systemPromptTokens +
     compressionState.budget.toolSchemaTokens +
     afterTokens
+  if (recomputedActiveContextTokens >= compressionState.activePromptTokens) {
+    hooks?.onReasoningDelta?.(
+      [
+        `Context compression (${stage || 'runtime'}) skipped:`,
+        `${compressionState.activePromptTokens} active tokens -> ${recomputedActiveContextTokens} active tokens did not reduce context.`,
+      ].join(' '),
+      {
+        blockId: `context-compression-skipped-${stage || 'runtime'}`,
+        kind: 'summary',
+        order: -100,
+      },
+    )
+    return {
+      messages,
+      compressed: false,
+      beforeTokens: compressionState.estimatedTokens,
+      afterTokens,
+      budget: compressionState.budget,
+    }
+  }
   const contextCompression = buildContextCompressionCheckpoint({
     messages,
     compactedMessages,
@@ -3544,8 +3576,8 @@ export async function runAgent(request) {
     ) {
       scheduleProjectMemoryIdleUpdate({
         settings: effectiveSettings,
-        messages: effectiveRequest.messages,
-        result,
+        sessionId: effectiveRequest.logContext?.sessionId,
+        runId: runtimeLogger.runId,
         hooks,
         runNestedAgent: nestedRequest =>
           runAgent({
