@@ -29,6 +29,37 @@ function replaceRequired(text, pattern, replacement, label) {
   return text.replace(pattern, replacement)
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function replaceCargoLockPackageVersion(text, packageName, version) {
+  const packageNamePattern = new RegExp(
+    `^name = "${escapeRegExp(packageName)}"\\r?$`,
+    'm',
+  )
+  const packageBlocks = text.split(/(?=^\[\[package\]\]\r?$)/m)
+  let found = false
+  const nextBlocks = packageBlocks.map((block) => {
+    if (!packageNamePattern.test(block)) {
+      return block
+    }
+    found = true
+    return replaceRequired(
+      block,
+      /^version = ".*"\r?$/m,
+      `version = "${version}"`,
+      `${packageName} package version in src-tauri/Cargo.lock`,
+    )
+  })
+
+  if (!found) {
+    throw new Error(`Unable to find ${packageName} package in src-tauri/Cargo.lock`)
+  }
+
+  return nextBlocks.join('')
+}
+
 const packageJson = JSON.parse(readText('package.json'))
 packageJson.version = APP_VERSION
 writeJson('package.json', packageJson)
@@ -45,14 +76,18 @@ const cargoToml = replaceRequired(
 )
 writeText('src-tauri/Cargo.toml', cargoToml)
 
+const cargoPackageNameMatch = cargoToml.match(/^name = "([^"]+)"$/m)
+if (!cargoPackageNameMatch) {
+  throw new Error('Unable to find package name in src-tauri/Cargo.toml')
+}
+
 const cargoLockPath = 'src-tauri/Cargo.lock'
 if (fs.existsSync(path.join(repoRoot, cargoLockPath))) {
   const cargoLock = readText(cargoLockPath)
-  const nextCargoLock = replaceRequired(
+  const nextCargoLock = replaceCargoLockPackageVersion(
     cargoLock,
-    /(\[\[package\]\]\nname = "Aura"\nversion = ").*(")/,
-    `$1${APP_VERSION}$2`,
-    'Aura package version in src-tauri/Cargo.lock',
+    cargoPackageNameMatch[1],
+    APP_VERSION,
   )
   writeText(cargoLockPath, nextCargoLock)
 }
