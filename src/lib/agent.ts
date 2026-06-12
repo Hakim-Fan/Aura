@@ -15,6 +15,7 @@ import { loadPersistedWorkMemories } from './persistence'
 import { readImageDataUrl } from './workspace'
 
 const DEFAULT_MANUAL_CONTEXT_COMPRESSION_KEEP_RECENT_MESSAGES = 6
+const PROJECT_MEMORY_UPDATE_POLL_MS = 2_000
 
 type AgentTaskLogContext = {
   sessionId?: string
@@ -790,6 +791,61 @@ export async function getAgentTask(taskId: string): Promise<AgentTaskSnapshot> {
 
 export async function releaseAgentTask(taskId: string): Promise<void> {
   return invoke('release_agent_task', { taskId })
+}
+
+function delay(ms: number) {
+  return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+export async function runProjectMemoryIdleUpdate(
+  settings: AgentSettings,
+  sessionId?: string,
+): Promise<AgentTaskSnapshot> {
+  const startedAt = Date.now()
+  const runtimeMessages = await buildAgentRuntimeMessages([
+    {
+      id: `project-memory-idle-${startedAt}`,
+      role: 'user',
+      content: '后台整理当前项目记忆。',
+      parts: [
+        {
+          type: 'text',
+          text: '后台整理当前项目记忆。',
+        },
+      ],
+      status: 'completed',
+      createdAt: startedAt,
+    },
+  ])
+  const taskId = await invoke<string>('start_agent_task', {
+    payload: {
+      settings,
+      logContext: {
+        sessionId,
+      },
+      runtime: {
+        projectMemoryUpdate: true,
+        projectMemoryUpdateReason: 'idle',
+        skipProjectMemoryIdleUpdate: true,
+      },
+      messages: runtimeMessages,
+    },
+  })
+
+  try {
+    while (true) {
+      const snapshot = await getAgentTask(taskId)
+      if (snapshot.status === 'completed') {
+        return snapshot
+      }
+      if (snapshot.status === 'failed') {
+        throw new Error(snapshot.error || snapshot.message || '项目记忆后台整理失败。')
+      }
+      await delay(PROJECT_MEMORY_UPDATE_POLL_MS)
+    }
+  } finally {
+    releaseAgentTask(taskId).catch(() => undefined)
+  }
 }
 
 export async function respondToApproval(

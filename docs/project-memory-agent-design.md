@@ -63,13 +63,17 @@
 任务结束
   -> 原始数据写入 DB
   -> project_memory_sources 标记对应 message/version/tool/task_result 为 pending
-  -> 重置当前项目 idle timer
+  -> 常驻前端窗口重置当前项目 idle timer
   -> 如果 idle timer 到达阈值且用户没有继续任务
   -> 创建 project_memory_jobs
-  -> organizer 从 DB 读取 pending/stale/deleted sources
+  -> organizer 从 DB 按 task/message group 读取 pending/stale/deleted sources
   -> 更新对应 markdown 文件
   -> source 标记 consolidated 或 skipped
 ```
+
+idle timer 不放在 bridge 任务进程里。bridge 进程是一次任务一次生命周期，任务结束后就会退出，不能承载 4 小时这类长计时。
+
+整理 source 时优先按 task/message group 成组处理，避免一个任务被固定条数切成上下两段。source 很多时仍会分多批，但每批尽量保持同一任务内部上下文完整。
 
 显式更新记忆时，不等待 idle timer，立即走同一套受限写入路径，并在工具调用内等到写入完成后再返回。
 

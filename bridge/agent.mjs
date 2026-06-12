@@ -74,7 +74,7 @@ import {
 import {
   createProjectMemoryRuntime,
   isProjectMemoryEnabled,
-  scheduleProjectMemoryIdleUpdate,
+  updateProjectMemoryNow,
 } from './projectMemory.mjs'
 import { resolveTaskFrame } from './agent/taskFrame.mjs'
 import { compactVisibleTaskTitle } from './taskTitles.mjs'
@@ -3470,6 +3470,75 @@ async function runFastPathAgent(request, classification, taskFrame) {
   }
 }
 
+function stringifyProjectMemoryUpdateResult(result = {}) {
+  if (result?.status === 'updated') {
+    const sourceCount = Number.isFinite(result.sourceCount) ? result.sourceCount : 0
+    return `项目记忆整理完成，已处理 ${sourceCount} 条来源。`
+  }
+  if (result?.status === 'skipped') {
+    return `项目记忆整理已跳过：${result.reason || 'no_changes'}。`
+  }
+  if (result?.status === 'failed') {
+    return `项目记忆整理失败：${result.error || result.reason || 'unknown_error'}。`
+  }
+  return `项目记忆整理结束：${JSON.stringify(result)}`
+}
+
+async function runProjectMemoryUpdateRuntime({
+  effectiveRequest,
+  effectiveSettings,
+  hooks,
+} = {}) {
+  const maxBatches = Math.max(
+    1,
+    Math.min(10, Number(effectiveRequest?.runtime?.projectMemoryMaxBatches) || 10),
+  )
+  const drainPending = effectiveRequest?.runtime?.projectMemoryDrainPending !== false
+  const changedFiles = new Set()
+  const results = []
+  let sourceCount = 0
+  let finalResult = null
+
+  for (let index = 0; index < maxBatches; index += 1) {
+    const result = await updateProjectMemoryNow({
+      settings: effectiveSettings,
+      notes: effectiveRequest.runtime?.projectMemoryNotes || '',
+      reason: effectiveRequest.runtime?.projectMemoryUpdateReason || 'idle',
+      sessionId: effectiveRequest.logContext?.sessionId,
+      hooks,
+      runNestedAgent: nestedRequest =>
+        runAgent({
+          ...nestedRequest,
+          hooks: nestedRequest?.hooks || hooks,
+        }),
+    })
+    finalResult = result
+    results.push(result)
+    sourceCount += Number.isFinite(result?.sourceCount) ? result.sourceCount : 0
+    for (const file of Array.isArray(result?.changedFiles) ? result.changedFiles : []) {
+      changedFiles.add(file)
+    }
+    if (!drainPending || result?.reason === 'no_pending_project_memory_sources') {
+      break
+    }
+    if (result?.status !== 'updated' && result?.status !== 'skipped') {
+      break
+    }
+    if ((Number.isFinite(result?.sourceCount) ? result.sourceCount : 0) <= 0) {
+      break
+    }
+  }
+
+  return {
+    ...(finalResult || {}),
+    status: sourceCount > 0 ? 'updated' : finalResult?.status || 'skipped',
+    changedFiles: Array.from(changedFiles),
+    sourceCount,
+    batchCount: results.length,
+    lastResult: finalResult,
+  }
+}
+
 export async function runAgent(request) {
   const mode = resolveAgentExecutionMode(request?.settings)
   const runtimeLogger = createAgentRuntimeLogger({
@@ -3527,7 +3596,20 @@ export async function runAgent(request) {
   })
 
   try {
-    const result = await runDefaultAgent(effectiveRequest)
+    const result = effectiveRequest.runtime?.projectMemoryUpdate === true
+      ? {
+          status: 'completed',
+          message: stringifyProjectMemoryUpdateResult(await runProjectMemoryUpdateRuntime({
+            effectiveRequest,
+            effectiveSettings,
+            hooks,
+          })),
+          toolEvents: [],
+          reasoning: [],
+          taskTree: [],
+          completionState: 'executed_verified',
+        }
+      : await runDefaultAgent(effectiveRequest)
     if (result?.recovered === true || result?.retryInfo?.recovered === true) {
       runtimeLogger.emit('agent.recovery.event', {
         stage: 'completed',
@@ -3568,24 +3650,6 @@ export async function runAgent(request) {
       'agent.metrics.summary',
       buildMetricsSummaryDetails(result, runtimeLogger, result?.status || 'completed'),
     )
-    if (
-      effectiveRequest.runtime?.skipProjectMemoryIdleUpdate !== true &&
-      !['project_memory_retriever', 'project_memory_organizer'].includes(
-        String(effectiveRequest.runtime?.subagentRole || ''),
-      )
-    ) {
-      scheduleProjectMemoryIdleUpdate({
-        settings: effectiveSettings,
-        sessionId: effectiveRequest.logContext?.sessionId,
-        runId: runtimeLogger.runId,
-        hooks,
-        runNestedAgent: nestedRequest =>
-          runAgent({
-            ...nestedRequest,
-            hooks: nestedRequest?.hooks || hooks,
-          }),
-      })
-    }
     return result
   } catch (error) {
     runtimeLogger.emit(

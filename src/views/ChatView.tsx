@@ -158,6 +158,7 @@ type Props = {
   onSubmit: (draftOverride?: string) => void
   onOpenProviders: () => void
   onOpenProjectMemoryFolder: () => void
+  onRunProjectMemoryNow: () => Promise<void>
   onHandleApproval: (decision: ApprovalDecision) => void
   onOpenWorkspaceExplorer: () => void
   onChooseWorkspace: () => void
@@ -6802,6 +6803,7 @@ export function ChatView({
   onSubmit,
   onOpenProviders,
   onOpenProjectMemoryFolder,
+  onRunProjectMemoryNow,
   onHandleApproval,
   onOpenWorkspaceExplorer,
   onChooseWorkspace,
@@ -6855,6 +6857,8 @@ export function ChatView({
     last_project_memory_job_id?: string | null
   } | null>(null)
   const [projectMemoryStatusError, setProjectMemoryStatusError] = useState('')
+  const [projectMemoryUpdating, setProjectMemoryUpdating] = useState(false)
+  const [projectMemoryRefreshNonce, setProjectMemoryRefreshNonce] = useState(0)
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true)
   const [hasLocalDraftText, setHasLocalDraftText] = useState(() => draft.trim().length > 0)
 
@@ -7047,7 +7051,7 @@ export function ChatView({
     return () => {
       cancelled = true
     }
-  }, [projectMemoryOpen, settings.cwd, workspaceRootPath])
+  }, [projectMemoryOpen, projectMemoryRefreshNonce, settings.cwd, workspaceRootPath])
 
   const modelLabel =
     settings.model.split('/').filter(Boolean).at(-1) || settings.model || '选择模型'
@@ -7091,6 +7095,24 @@ export function ChatView({
   const canSubmitComposer = Boolean(hasLocalDraftText || draft.trim() || attachments.length > 0)
 
   const hasInspectorContent = true
+
+  async function handleRunProjectMemoryNow() {
+    if (projectMemoryUpdating || !projectMemoryEnabled || projectMemoryRunning) {
+      return
+    }
+    setProjectMemoryUpdating(true)
+    setProjectMemoryStatusError('')
+    try {
+      await onRunProjectMemoryNow()
+      setProjectMemoryRefreshNonce(current => current + 1)
+    } catch (caught) {
+      setProjectMemoryStatusError(
+        caught instanceof Error ? caught.message : '立即整理项目记忆失败。',
+      )
+    } finally {
+      setProjectMemoryUpdating(false)
+    }
+  }
 
   useEffect(() => {
     if (workspaceError || previewError || selectedFilePath) {
@@ -7322,9 +7344,14 @@ export function ChatView({
                 <div className="grid gap-2">
                   <div className="rounded-lg bg-black/[0.025] px-2.5 py-2">
                     <div className="text-10px font-800 uppercase text-black/35">记忆路径</div>
-                    <div className="mt-1 break-all font-mono text-11px text-[var(--text-secondary)]">
+                    <button
+                      className="mt-1 block w-full break-all bg-transparent p-0 text-left font-mono text-11px text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                      title="打开记忆目录"
+                      type="button"
+                      onClick={onOpenProjectMemoryFolder}
+                    >
                       {memoryPath}
-                    </div>
+                    </button>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div className="rounded-lg bg-black/[0.025] px-2.5 py-2">
@@ -7352,11 +7379,16 @@ export function ChatView({
                       </div>
                     </div>
                     <button
-                      className="shrink-0 rounded-md border border-black/10 px-2 py-1 text-11px font-700 text-[var(--text-secondary)] transition-colors hover:bg-black/[0.03]"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-black/10 px-2 py-1 text-11px font-700 text-[var(--text-secondary)] transition-colors hover:bg-black/[0.03] disabled:cursor-not-allowed disabled:opacity-45"
                       type="button"
-                      onClick={onOpenProjectMemoryFolder}
+                      disabled={!projectMemoryEnabled || projectMemoryRunning || projectMemoryUpdating}
+                      onClick={() => void handleRunProjectMemoryNow()}
                     >
-                      打开目录
+                      <RefreshCw
+                        className={projectMemoryUpdating || projectMemoryRunning ? 'animate-spin' : ''}
+                        size={12}
+                      />
+                      {projectMemoryUpdating || projectMemoryRunning ? '整理中...' : '立即整理'}
                     </button>
                   </div>
                 </div>

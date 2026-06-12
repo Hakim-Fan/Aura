@@ -3413,6 +3413,54 @@ fn project_memory_source_detail(
     }
 }
 
+fn project_memory_source_group_key(
+    connection: &Connection,
+    source_type: &str,
+    source_id: &str,
+) -> Result<String, String> {
+    let fallback = source_id.trim().to_string();
+    if fallback.is_empty() {
+        return Ok(String::new());
+    }
+    match source_type {
+        "message" | "message_version" => connection
+            .query_row(
+                "SELECT COALESCE(NULLIF(group_id, ''), id) FROM messages WHERE id = ?1",
+                params![source_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to resolve project memory message group: {error}"))
+            .map(|value| value.unwrap_or(fallback)),
+        "tool_event" => {
+            let message_id = source_id.split(':').next().unwrap_or(source_id);
+            connection
+                .query_row(
+                    "SELECT COALESCE(NULLIF(group_id, ''), id) FROM messages WHERE id = ?1",
+                    params![message_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| {
+                    format!("Failed to resolve project memory tool event group: {error}")
+                })
+                .map(|value| value.unwrap_or_else(|| message_id.to_string()))
+        }
+        "task_result" => connection
+            .query_row(
+                "SELECT COALESCE(NULLIF(message_group_id, ''), NULLIF(task_id, ''), NULLIF(assistant_message_id, ''), run_id)
+                 FROM agent_runs
+                 WHERE run_id = ?1",
+                params![source_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to resolve project memory task group: {error}"))
+            .map(|value| value.unwrap_or(fallback)),
+        _ => Ok(fallback),
+    }
+}
+
 fn start_project_memory_job<R: Runtime>(
     app: &tauri::AppHandle<R>,
     payload: &serde_json::Value,
@@ -3439,8 +3487,8 @@ fn start_project_memory_job<R: Runtime>(
     let limit = payload
         .get("limit")
         .and_then(|value| value.as_i64())
-        .unwrap_or(48)
-        .clamp(1, 120);
+        .unwrap_or(240)
+        .clamp(1, 240);
     let now = current_timestamp_ms() as i64;
     let connection = open_app_db(app)?;
     let _ = sync_project_memory_sources_for_workspace(&connection, &workspace_root, session_id)?;
@@ -3480,6 +3528,31 @@ fn start_project_memory_job<R: Runtime>(
         )
         .map_err(|error| format!("Failed to create project memory job: {error}"))?;
 
+    let seed_source: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT id, source_type, source_id
+             FROM project_memory_sources
+             WHERE workspace_root = ?1
+               AND memory_status IN ('pending', 'stale', 'deleted')
+             ORDER BY source_updated_at ASC
+             LIMIT 1",
+            params![&workspace_root],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("Failed to select project memory seed source: {error}"))?;
+    let group_key = if let Some((_, source_type, source_id)) = seed_source.as_ref() {
+        project_memory_source_group_key(&connection, source_type, source_id)?
+    } else {
+        String::new()
+    };
+
     let mut statement = connection
         .prepare(
             "SELECT id, workspace_root, session_id, source_type, source_id, source_version,
@@ -3487,12 +3560,11 @@ fn start_project_memory_job<R: Runtime>(
              FROM project_memory_sources
              WHERE workspace_root = ?1
                AND memory_status IN ('pending', 'stale', 'deleted')
-             ORDER BY source_updated_at ASC
-             LIMIT ?2",
+             ORDER BY source_updated_at ASC",
         )
         .map_err(|error| format!("Failed to prepare project memory source load: {error}"))?;
     let rows = statement
-        .query_map(params![&workspace_root, limit], |row| {
+        .query_map(params![&workspace_root], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "workspaceRoot": row.get::<_, String>(1)?,
@@ -3512,11 +3584,36 @@ fn start_project_memory_job<R: Runtime>(
     for row in rows {
         let mut source =
             row.map_err(|error| format!("Failed to decode project memory source: {error}"))?;
+        if !group_key.is_empty() {
+            let source_group_key = project_memory_source_group_key(
+                &connection,
+                source
+                    .get("sourceType")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+                source
+                    .get("sourceId")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+            )?;
+            if source_group_key != group_key {
+                continue;
+            }
+        }
         let detail = project_memory_source_detail(&connection, &source)?;
         if let Some(object) = source.as_object_mut() {
             object.insert("detail".into(), detail);
+            if !group_key.is_empty() {
+                object.insert(
+                    "groupKey".into(),
+                    serde_json::Value::String(group_key.clone()),
+                );
+            }
         }
         sources.push(source);
+        if sources.len() >= limit as usize {
+            break;
+        }
     }
 
     Ok(serde_json::json!({
@@ -3527,6 +3624,7 @@ fn start_project_memory_job<R: Runtime>(
             "reason": reason,
             "inputWatermark": input_watermark,
             "startedAt": now,
+            "groupKey": group_key,
         },
         "sources": sources,
     }))

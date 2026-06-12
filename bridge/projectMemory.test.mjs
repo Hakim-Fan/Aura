@@ -213,6 +213,79 @@ test('project_memory_organizer reads pending DB sources instead of transient mes
   assert.equal(finished.at(-1)?.sourceStatus, 'consolidated')
 })
 
+test('project_memory_organizer tolerates unescaped quotes in JSON-like drafts', async () => {
+  const cwd = await makeWorkspace()
+  const hooks = {
+    async appControl(action, payload) {
+      if (action === 'start_project_memory_job') {
+        return {
+          job: {
+            id: 'job-loose-json',
+            workspaceRoot: cwd,
+            status: 'running',
+            reason: payload.reason,
+            inputWatermark: 123,
+          },
+          sources: [
+            {
+              id: 'source-loose-json',
+              sourceType: 'message',
+              sourceId: 'message-loose-json',
+              sourceVersion: '0',
+              memoryStatus: 'pending',
+              detail: {
+                role: 'user',
+                content: '用户询问"为什么阿里巴巴股价下跌"。',
+              },
+            },
+          ],
+        }
+      }
+      if (action === 'finish_project_memory_job') {
+        return { status: payload.status, sourceStatus: payload.sourceStatus }
+      }
+      throw new Error(`unexpected appControl action: ${action}`)
+    },
+  }
+
+  const result = await updateProjectMemoryNow({
+    settings: settingsFor(cwd),
+    sessionId: 'session-loose-json',
+    hooks,
+    runNestedAgent: async () => ({
+      message: `{
+  "project": "",
+  "decisions": "",
+  "troubleshooting": "## 网络搜索不可用\\n\\n- 搜索提供商不可用。",
+  "preferences": "## 股票分析偏好\\n\\n- 用户关注中概股走势。",
+  "session_title": "阿里巴巴股价分析",
+  "session_summary": "用户询问"为什么阿里巴巴股价下跌"，助手做了结构化分析。"
+}`,
+    }),
+  })
+
+  assert.equal(result.status, 'updated')
+  const troubleshooting = await fs.readFile(
+    path.join(cwd, '.aura', 'memory', 'troubleshooting.md'),
+    'utf8',
+  )
+  const preferences = await fs.readFile(
+    path.join(cwd, '.aura', 'memory', 'preferences.md'),
+    'utf8',
+  )
+  const sessionSummary = await fs.readFile(
+    path.join(cwd, '.aura', 'memory', 'sessions', '2026-06-12-alibaba-stock-analysis.md'),
+    'utf8',
+  ).catch(async () => {
+    const files = await fs.readdir(path.join(cwd, '.aura', 'memory', 'sessions'))
+    return fs.readFile(path.join(cwd, '.aura', 'memory', 'sessions', files[0]), 'utf8')
+  })
+  assert.match(troubleshooting, /搜索提供商不可用/u)
+  assert.match(preferences, /用户关注中概股走势/u)
+  assert.match(sessionSummary, /为什么阿里巴巴股价下跌/u)
+  assert.doesNotMatch(sessionSummary, /"troubleshooting"/u)
+})
+
 test('project_memory_organizer scheduled updates dedupe identical pending work', async () => {
   const cwd = await makeWorkspace()
   const pending = new Promise(() => {})

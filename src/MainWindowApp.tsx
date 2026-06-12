@@ -15,6 +15,7 @@ import {
   getAgentTask,
   releaseAgentTask,
   respondToApproval,
+  runProjectMemoryIdleUpdate,
   startAgentTask,
 } from './lib/agent'
 import { ensureAuraHome, type AuraHomeState } from './lib/aura'
@@ -1187,6 +1188,7 @@ const REPLAN_ARCHIVE_ORDER_OFFSET = 10_000
 const AGENT_TASK_EVENT_SYNC_DEBOUNCE_MS = 180
 const AGENT_TASK_FALLBACK_CHECK_INTERVAL_MS = 5_000
 const AGENT_TASK_EVENT_STALE_MS = 15_000
+const PROJECT_MEMORY_IDLE_RECHECK_MS = 60_000
 const MAX_ARCHIVED_REASONING_ENTRIES = 2
 const MAX_ARCHIVED_REASONING_CHARS = 1_200
 const MAX_ARCHIVED_PHASE_OUTPUTS = 3
@@ -2102,14 +2104,141 @@ export function MainWindowApp() {
   const previousRunningTasksBySessionRef = useRef<Record<string, RunningTaskBinding>>({})
   const agentTaskLastEventAtRef = useRef<Record<string, number>>({})
   const abortingAgentTaskIdsRef = useRef<Set<string>>(new Set())
+  const settingsRef = useRef<AgentSettings>(settings)
   const sessionsRef = useRef<Session[]>(sessions)
+  const projectMemoryIdleTimersRef = useRef<Record<string, number>>({})
+  const projectMemoryIdleRunningRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     runningTasksBySessionRef.current = runningTasksBySession
   }, [runningTasksBySession])
   useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
+  useEffect(() => {
     sessionsRef.current = sessions
   }, [sessions])
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(projectMemoryIdleTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+      projectMemoryIdleTimersRef.current = {}
+      projectMemoryIdleRunningRef.current.clear()
+    }
+  }, [])
+
+  function resolveProjectMemoryTaskSettings(sessionId: string): AgentSettings | null {
+    const session = sessionsRef.current.find(entry => entry.id === sessionId) || null
+    if (!session) {
+      return null
+    }
+    const latestSettings = settingsRef.current
+    if (latestSettings.projectMemory?.enabled === false) {
+      return null
+    }
+    const workspaceRoot = normalizeProjectMemoryRoot(
+      session.workspacePath || session.workspaceRoot || latestSettings.cwd,
+    )
+    if (!workspaceRoot) {
+      return null
+    }
+    const disabledRoots = (latestSettings.projectMemory.disabledWorkspaceRoots || [])
+      .map(normalizeProjectMemoryRoot)
+      .filter(Boolean)
+    if (disabledRoots.includes(workspaceRoot)) {
+      return null
+    }
+    const profile = getSessionProviderProfile(latestSettings, session)
+    const model =
+      session.model ||
+      resolvePreferredModelId(profile, latestSettings.model) ||
+      latestSettings.model
+
+    return {
+      ...latestSettings,
+      activeProviderProfileId: profile?.id || latestSettings.activeProviderProfileId,
+      provider: profile?.provider || latestSettings.provider,
+      apiKey: profile?.apiKey || latestSettings.apiKey,
+      baseUrl: profile?.baseUrl || latestSettings.baseUrl,
+      model,
+      cwd: workspaceRoot,
+    }
+  }
+
+  function projectMemoryIdleDelayMs(settings: AgentSettings) {
+    const hours = Math.max(
+      1,
+      Math.min(72, Number(settings.projectMemory?.idleUpdateThresholdHours) || 4),
+    )
+    return hours * 60 * 60 * 1000
+  }
+
+  function clearProjectMemoryIdleTimer(workspaceRoot: string) {
+    const timer = projectMemoryIdleTimersRef.current[workspaceRoot]
+    if (typeof timer === 'number') {
+      window.clearTimeout(timer)
+      delete projectMemoryIdleTimersRef.current[workspaceRoot]
+    }
+  }
+
+  function hasRunningTaskInProject(workspaceRoot: string) {
+    return Object.keys(runningTasksBySessionRef.current).some(sessionId => {
+      const session = sessionsRef.current.find(entry => entry.id === sessionId)
+      if (!session) {
+        return false
+      }
+      const sessionRoot = normalizeProjectMemoryRoot(
+        session.workspacePath || session.workspaceRoot || settingsRef.current.cwd,
+      )
+      return sessionRoot === workspaceRoot
+    })
+  }
+
+  function scheduleProjectMemoryIdleUpdate(sessionId: string) {
+    const taskSettings = resolveProjectMemoryTaskSettings(sessionId)
+    if (!taskSettings?.cwd) {
+      return
+    }
+    const workspaceRoot = normalizeProjectMemoryRoot(taskSettings.cwd)
+    if (!workspaceRoot) {
+      return
+    }
+
+    clearProjectMemoryIdleTimer(workspaceRoot)
+    projectMemoryIdleTimersRef.current[workspaceRoot] = window.setTimeout(() => {
+      delete projectMemoryIdleTimersRef.current[workspaceRoot]
+      void runScheduledProjectMemoryUpdate(sessionId, workspaceRoot)
+    }, projectMemoryIdleDelayMs(taskSettings))
+  }
+
+  async function runScheduledProjectMemoryUpdate(sessionId: string, workspaceRoot: string) {
+    if (projectMemoryIdleRunningRef.current.has(workspaceRoot)) {
+      scheduleProjectMemoryIdleUpdate(sessionId)
+      return
+    }
+    if (hasRunningTaskInProject(workspaceRoot)) {
+      projectMemoryIdleTimersRef.current[workspaceRoot] = window.setTimeout(() => {
+        delete projectMemoryIdleTimersRef.current[workspaceRoot]
+        void runScheduledProjectMemoryUpdate(sessionId, workspaceRoot)
+      }, PROJECT_MEMORY_IDLE_RECHECK_MS)
+      return
+    }
+
+    const taskSettings = resolveProjectMemoryTaskSettings(sessionId)
+    if (!taskSettings || normalizeProjectMemoryRoot(taskSettings.cwd) !== workspaceRoot) {
+      return
+    }
+
+    projectMemoryIdleRunningRef.current.add(workspaceRoot)
+    try {
+      await runProjectMemoryIdleUpdate(taskSettings, sessionId)
+    } catch (caught) {
+      console.warn('Project memory idle update failed', caught)
+    } finally {
+      projectMemoryIdleRunningRef.current.delete(workspaceRoot)
+    }
+  }
   const [previewContent, setPreviewContent] = useState('')
   const [previewImage, setPreviewImage] = useState('')
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -2822,6 +2951,8 @@ export function MainWindowApp() {
               details,
             )
           }
+
+          scheduleProjectMemoryIdleUpdate(sessionId)
 
           setRunningTasksBySession(current => {
             const next = { ...current }
@@ -4545,6 +4676,36 @@ export function MainWindowApp() {
     showToast(enabled ? '已开启当前项目记忆。' : '已关闭当前项目记忆。')
   }
 
+  async function runCurrentProjectMemoryUpdateNow() {
+    if (!activeSession) {
+      throw new Error('当前没有活动会话，无法整理项目记忆。')
+    }
+    const taskSettings = resolveProjectMemoryTaskSettings(activeSession.id)
+    if (!taskSettings?.cwd) {
+      throw new Error('当前项目记忆未开启或缺少工作区。')
+    }
+    const workspaceRoot = normalizeProjectMemoryRoot(taskSettings.cwd)
+    if (!workspaceRoot) {
+      throw new Error('当前会话尚未设置工作区，无法整理项目记忆。')
+    }
+    if (projectMemoryIdleRunningRef.current.has(workspaceRoot)) {
+      return
+    }
+
+    clearProjectMemoryIdleTimer(workspaceRoot)
+    projectMemoryIdleRunningRef.current.add(workspaceRoot)
+    try {
+      await runProjectMemoryIdleUpdate(taskSettings, activeSession.id)
+      showToast('项目记忆已整理。')
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : '项目记忆整理失败。'
+      setError(message)
+      throw new Error(message)
+    } finally {
+      projectMemoryIdleRunningRef.current.delete(workspaceRoot)
+    }
+  }
+
   function setProjectCapabilityOverride(
     kind: 'skills' | 'plugins' | 'mcp',
     id: string,
@@ -4773,6 +4934,7 @@ export function MainWindowApp() {
                     setError(caught instanceof Error ? caught.message : '打开记忆目录失败。')
                   })
                 }}
+                onRunProjectMemoryNow={runCurrentProjectMemoryUpdateNow}
                 onHandleApproval={decision => void handleApproval(decision)}
                 onOpenWorkspaceExplorer={() => {
                   if (activeWorkspacePath.trim() && !workspaceTree && !workspaceLoading) {

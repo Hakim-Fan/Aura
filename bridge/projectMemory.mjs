@@ -738,17 +738,74 @@ function parseMemoryDraft(text = '') {
         const parsed = JSON.parse(match[0])
         return parsed && typeof parsed === 'object' ? parsed : null
       } catch {
-        return {
+        return parseLooseMemoryDraft(match[0]) || {
           session_title: 'memory update',
           session_summary: normalized,
         }
       }
     }
-    return {
+    return parseLooseMemoryDraft(normalized) || {
       session_title: 'memory update',
       session_summary: normalized,
     }
   }
+}
+
+function decodeLooseJsonString(raw = '') {
+  let value = safeString(raw).replace(/,\s*$/u, '').trim()
+  if (!value) {
+    return ''
+  }
+  try {
+    const parsed = JSON.parse(value)
+    return typeof parsed === 'string' ? parsed : safeString(parsed)
+  } catch {
+    // Continue with a tolerant string decode below.
+  }
+  if (value.startsWith('"')) {
+    value = value.slice(1)
+  }
+  if (value.endsWith('"')) {
+    value = value.slice(0, -1)
+  }
+  return value
+    .replace(/\\n/gu, '\n')
+    .replace(/\\r/gu, '\r')
+    .replace(/\\t/gu, '\t')
+    .replace(/\\"/gu, '"')
+    .replace(/\\\\/gu, '\\')
+    .trim()
+}
+
+function parseLooseMemoryDraft(text = '') {
+  const keys = [
+    'project',
+    'decisions',
+    'troubleshooting',
+    'preferences',
+    'session_title',
+    'session_summary',
+  ]
+  const normalized = safeString(text)
+  const positions = keys
+    .map(key => {
+      const match = new RegExp(`"${key}"\\s*:`, 'u').exec(normalized)
+      return match ? { key, start: match.index, valueStart: match.index + match[0].length } : null
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.start - right.start)
+  if (positions.length === 0) {
+    return null
+  }
+
+  const draft = {}
+  for (let index = 0; index < positions.length; index += 1) {
+    const current = positions[index]
+    const next = positions[index + 1]
+    const valueEnd = next ? next.start : normalized.lastIndexOf('}') >= 0 ? normalized.lastIndexOf('}') : normalized.length
+    draft[current.key] = decodeLooseJsonString(normalized.slice(current.valueStart, valueEnd))
+  }
+  return Object.values(draft).some(value => safeString(value)) ? draft : null
 }
 
 async function generateMemoryDraftWithAgent({
@@ -813,7 +870,7 @@ async function startProjectMemoryJob({ settings = {}, reason = 'manual', session
       workspaceRoot: cwd,
       sessionId: safeString(sessionId),
       reason,
-      limit: 48,
+      limit: 240,
     })
   } catch (error) {
     emitMemoryLog(hooks, 'project_memory.job_start_failed', {
