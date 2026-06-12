@@ -2083,6 +2083,7 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
               workspace_root TEXT NOT NULL,
               workspace_mode TEXT NOT NULL,
               context_compression_json TEXT,
+              capability_overrides_json TEXT,
               deleted_at INTEGER NOT NULL DEFAULT 0,
               updated_at INTEGER NOT NULL
             );
@@ -2297,6 +2298,18 @@ fn open_app_db<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Connection, Stri
         if !message.contains("duplicate column name") {
             return Err(format!(
                 "Failed to migrate SQLite sessions context_compression_json column: {error}"
+            ));
+        }
+    }
+
+    if let Err(error) = connection.execute(
+        "ALTER TABLE sessions ADD COLUMN capability_overrides_json TEXT",
+        [],
+    ) {
+        let message = error.to_string();
+        if !message.contains("duplicate column name") {
+            return Err(format!(
+                "Failed to migrate SQLite sessions capability_overrides_json column: {error}"
             ));
         }
     }
@@ -6226,7 +6239,7 @@ fn load_persisted_app_state<R: Runtime>(
 
     let mut sessions_statement = connection
         .prepare(
-            "SELECT s.id, s.title, s.provider_profile_id, s.provider, s.model, s.folder_id, s.workspace_path, s.workspace_root, s.workspace_mode, s.context_compression_json, s.updated_at,
+            "SELECT s.id, s.title, s.provider_profile_id, s.provider, s.model, s.folder_id, s.workspace_path, s.workspace_root, s.workspace_mode, s.context_compression_json, s.capability_overrides_json, s.updated_at,
                     COUNT(m.id) AS message_count
              FROM sessions s
              LEFT JOIN messages m ON m.session_id = s.id AND m.deleted_at = 0
@@ -6249,12 +6262,13 @@ fn load_persisted_app_state<R: Runtime>(
                 "workspaceRoot": row.get::<_, String>(7)?,
                 "workspaceMode": row.get::<_, String>(8)?,
                 "contextCompression": parse_json_object_column(row.get::<_, Option<String>>(9)?),
+                "capabilityOverrides": parse_json_object_column(row.get::<_, Option<String>>(10)?),
                 "messages": Vec::<serde_json::Value>::new(),
                 "messagesLoaded": false,
-                "messageCount": row.get::<_, i64>(11)?,
+                "messageCount": row.get::<_, i64>(12)?,
                 "toolEvents": Vec::<serde_json::Value>::new(),
                 "taskTree": Vec::<serde_json::Value>::new(),
-                "updatedAt": row.get::<_, i64>(10)?,
+                "updatedAt": row.get::<_, i64>(11)?,
             }))
         })
         .map_err(|error| format!("Failed to read sessions from SQLite: {error}"))?;
@@ -6746,11 +6760,17 @@ fn upsert_session_sqlite<R: Runtime>(
     } else {
         Some(context_compression.to_string())
     };
+    let capability_overrides = get_json_object_field(&session, "capabilityOverrides");
+    let capability_overrides_json = if capability_overrides.is_null() {
+        None
+    } else {
+        Some(capability_overrides.to_string())
+    };
     connection
         .execute(
             "INSERT INTO sessions (
-                id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, context_compression_json, deleted_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11)
+                id, title, provider_profile_id, provider, model, folder_id, workspace_path, workspace_root, workspace_mode, context_compression_json, capability_overrides_json, deleted_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 provider_profile_id = excluded.provider_profile_id,
@@ -6761,6 +6781,7 @@ fn upsert_session_sqlite<R: Runtime>(
                 workspace_root = excluded.workspace_root,
                 workspace_mode = excluded.workspace_mode,
                 context_compression_json = excluded.context_compression_json,
+                capability_overrides_json = excluded.capability_overrides_json,
                 deleted_at = 0,
                 updated_at = excluded.updated_at",
             params![
@@ -6774,6 +6795,7 @@ fn upsert_session_sqlite<R: Runtime>(
                 get_json_string_field(&session, "workspaceRoot", ""),
                 get_json_string_field(&session, "workspaceMode", "explicit"),
                 context_compression_json,
+                capability_overrides_json,
                 get_json_i64_field(&session, "updatedAt", 0),
             ],
         )
